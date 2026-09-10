@@ -1577,10 +1577,11 @@ fn pcb_emit_consumers_ignore_lane_fields() {
     };
     let with_lane = (
         member_emit(&out.deltas),
-        out.withdrawn_keys().collect::<Vec<_>>(),
-        out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        out.withdrawn_keys(|| {}).collect::<Vec<_>>(),
+        out.member_scoped_withdraws(MEMBER, || {})
+            .collect::<Vec<_>>(),
     );
-    out.build_shared_emit();
+    out.build_shared_emit(&mut |_| {});
     let shared_with_lane: Vec<(Prefix, IpAddr)> = out
         .shared_announce
         .iter()
@@ -1591,10 +1592,11 @@ fn pcb_emit_consumers_ignore_lane_fields() {
     out.lane_deltas.clear();
     let without_lane = (
         member_emit(&out.deltas),
-        out.withdrawn_keys().collect::<Vec<_>>(),
-        out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        out.withdrawn_keys(|| {}).collect::<Vec<_>>(),
+        out.member_scoped_withdraws(MEMBER, || {})
+            .collect::<Vec<_>>(),
     );
-    out.build_shared_emit();
+    out.build_shared_emit(&mut |_| {});
     let shared_without_lane: Vec<(Prefix, IpAddr)> = out
         .shared_announce
         .iter()
@@ -2245,7 +2247,7 @@ fn pcb_steady_state_emission_matrix_matches_adv() {
                     seed(&mut m, cand(p, src, matrix_lp(src)));
                 }
                 let mut out = stage_pcb(&mut m, &[p]);
-                out.build_shared_emit();
+                out.build_shared_emit(&mut |_| {});
                 let group = m.group_ribs.get(&PCB_GID).unwrap();
                 let mut emitted: HashMap<IpAddr, usize> = HashMap::new();
                 for &member in &members {
@@ -2339,7 +2341,7 @@ fn pcb_lane_only_transition_targets_winner_source_only() {
     // Content flip: the runner-up is replaced in place.
     seed(&mut m, cand(p, OTHER2, 250));
     let mut out = stage_pcb(&mut m, &[p]);
-    out.build_shared_emit();
+    out.build_shared_emit(&mut |_| {});
     assert!(
         out.deltas.is_empty(),
         "winner must stay equality-suppressed"
@@ -2366,7 +2368,7 @@ fn pcb_lane_only_transition_targets_winner_source_only() {
     // Retire: the runner-up disappears.
     unseed(&mut m, OTHER2, p);
     let mut out = stage_pcb(&mut m, &[p]);
-    out.build_shared_emit();
+    out.build_shared_emit(&mut |_| {});
     assert!(out.deltas.is_empty());
     assert_eq!(out.lane_deltas.len(), 1);
     assert!(out.lane_deltas[0].new.is_none());
@@ -2400,7 +2402,7 @@ fn pcb_all_gone_with_lane_withdraws_old_winner_source() {
     unseed(&mut m, OTHER1, p);
     unseed(&mut m, OTHER2, p);
     let mut out = stage_pcb(&mut m, &[p]);
-    out.build_shared_emit();
+    out.build_shared_emit(&mut |_| {});
     assert_eq!(out.deltas.len(), 1);
     assert!(out.deltas[0].new.is_none());
     assert_eq!(out.lane_deltas.len(), 1);
@@ -2626,8 +2628,8 @@ fn pcb_empty_lane_emits_like_plain_group() {
     let mut memo = super::super::distribution::ExportMemo::default();
     let mut pcb = m.stage_group_prefixes(PCB_GID, &prefixes, &mut memo);
     let mut plain = m.stage_group_prefixes(PLAIN_GID, &prefixes, &mut memo);
-    pcb.build_shared_emit();
-    plain.build_shared_emit();
+    pcb.build_shared_emit(&mut |_| {});
+    plain.build_shared_emit(&mut |_| {});
 
     assert!(pcb.lane_deltas.is_empty());
     let shape = |out: &GroupStageOutput| {
@@ -3193,22 +3195,24 @@ fn lane_retire_records_member_scoped_withdraw() {
         content_unchanged: false,
     });
     assert_eq!(
-        out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        out.member_scoped_withdraws(MEMBER, || {})
+            .collect::<Vec<_>>(),
         vec![(p1, 0)],
         "only the retire toward MEMBER is recorded"
     );
     assert!(
-        out.member_scoped_withdraws(OTHER1).next().is_none(),
+        out.member_scoped_withdraws(OTHER1, || {}).next().is_none(),
         "a lane announce leaves no residue"
     );
-    assert!(out.member_scoped_withdraws(OTHER2).next().is_none());
+    assert!(out.member_scoped_withdraws(OTHER2, || {}).next().is_none());
 
     let mut out = GroupStageOutput::default();
     let mut delta = announce_delta(p1, MEMBER, Some(OTHER1));
     delta.lane = Some(lane_entry(route(p1, OTHER1), MEMBER, "lane", None));
     out.deltas.push(delta);
     assert_eq!(
-        out.member_scoped_withdraws(MEMBER).collect::<Vec<_>>(),
+        out.member_scoped_withdraws(MEMBER, || {})
+            .collect::<Vec<_>>(),
         vec![(p1, 0)],
         "the source-flip arm records regardless of the lane"
     );
@@ -3227,23 +3231,24 @@ fn pcb_channel_full_lost_emission_converges_to_adv() {
     let p = prefix(1);
     // Mimic the fanout driver's channel-full arm for `victim`,
     // then run its dirty resync and fold onto `wire`.
-    let lose_and_resync =
-        |m: &mut RibManager, victim: IpAddr, wire: &mut HashMap<(Prefix, u32), Route>| {
-            let out = stage_pcb(m, &[p]);
-            let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
-            group.tombstones.extend(out.withdrawn_keys());
-            let extras: HashSet<(Prefix, u32)> = out.member_scoped_withdraws(victim).collect();
-            let group = m.group_ribs.get(&PCB_GID).unwrap();
-            let (announce, withdraw, _) = resync(group, victim, None, true, false, Some(&extras));
-            let announce_keys: HashSet<(Prefix, u32)> =
-                announce.iter().map(|r| (r.prefix, r.path_id)).collect();
-            assert!(
-                announce_keys.is_disjoint(&withdraw.iter().copied().collect()),
-                "announce+withdraw of one key escaped for {victim}"
-            );
-            fold_wire(wire, announce, &withdraw);
-            assert_wire_is_adv(group, victim, wire);
-        };
+    let lose_and_resync = |m: &mut RibManager,
+                           victim: IpAddr,
+                           wire: &mut HashMap<(Prefix, u32), Route>| {
+        let out = stage_pcb(m, &[p]);
+        let group = m.group_ribs.get_mut(&PCB_GID).unwrap();
+        group.tombstones.extend(out.withdrawn_keys(|| {}));
+        let extras: HashSet<(Prefix, u32)> = out.member_scoped_withdraws(victim, || {}).collect();
+        let group = m.group_ribs.get(&PCB_GID).unwrap();
+        let (announce, withdraw, _) = resync(group, victim, None, true, false, Some(&extras));
+        let announce_keys: HashSet<(Prefix, u32)> =
+            announce.iter().map(|r| (r.prefix, r.path_id)).collect();
+        assert!(
+            announce_keys.is_disjoint(&withdraw.iter().copied().collect()),
+            "announce+withdraw of one key escaped for {victim}"
+        );
+        fold_wire(wire, announce, &withdraw);
+        assert_wire_is_adv(group, victim, wire);
+    };
 
     // (a) Lane retire lost: OTHER1 sources the winner, its wire
     // holds the substitution, the runner-up disappears.
@@ -4213,10 +4218,10 @@ fn vpn_dirty_resync_rt_filter_dimension() {
 
     // Count recompute-from-table under Φ.
     assert_eq!(
-        group.vpn_member_counts_from_table(MEMBER, Some(&phi1)),
+        group.vpn_member_counts_from_table(MEMBER, Some(&phi1), &mut || {}),
         [1, 0]
     );
-    group.recompute_vpn_member_counts(MEMBER, Some(&phi1));
+    group.recompute_vpn_member_counts(MEMBER, Some(&phi1), &mut || {});
     assert_eq!(group.vpn_advertised_count_for(MEMBER), 1);
     assert_eq!(
         group.family_counts_for(MEMBER),
@@ -4324,7 +4329,7 @@ fn source_control_modifying_mode_preserves_historical_residue_and_transition() {
         &[CONTROL]
     );
     assert!(transition.source_attrs.is_none());
-    group.commit_rs_transitions(&[transition]);
+    group.commit_rs_transitions(&[transition], &mut || {});
     assert!(group.source_attrs.is_empty());
 
     group.apply_delta(&withdraw_delta(p, Some(OTHER1)));

@@ -36,7 +36,7 @@ pub(in crate::manager) struct GroupDelta {
     pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
     /// ADR-0126 Decision 5: the RECOMPUTED (post-pass) exception-lane
     /// entry for this delta's prefix, carried on per-client-best
-    /// announce deltas so [`emit_group_deltas_for_member`] stays a
+    /// announce deltas so [`emit_group_deltas_for_member_with_checkpoint`] stays a
     /// self-contained free fn. The `member == source(w_new)` arm reads
     /// it directly: a member becoming the winner's source receives the
     /// runner-up substitution (or a withdraw when the lane is empty)
@@ -102,7 +102,7 @@ pub(in crate::manager) struct AdvEntry<'a> {
 /// `(new, old_source)` shape as [`GroupDelta`]. Carried beside the
 /// winner deltas so the lane-only case (runner-up flips or retires
 /// while the winner is unchanged) has a first-class encoding, consumed
-/// per member by [`emit_lane_deltas_for_member`].
+/// per member by [`emit_lane_deltas_for_member_with_checkpoint`].
 #[derive(Debug, Clone)]
 pub(in crate::manager) struct LaneDelta {
     pub(in crate::manager) prefix: Prefix,
@@ -130,7 +130,7 @@ pub(in crate::manager) struct LaneDelta {
     /// The post-policy lane route is content-equal across the
     /// transition (`routes_equal`) — the transition was recorded only
     /// because the SOURCE control communities moved. The emit arm then
-    /// mirrors [`emit_rs_tag_transitions`]: nothing toward a non-rs
+    /// mirrors [`emit_rs_tag_transitions_with_checkpoint`]: nothing toward a non-rs
     /// target (its wire form is unchanged — the per-peer path would
     /// equality-suppress), withdraw/re-announce toward an rs-control
     /// target exactly when its suppress/prepend verdict flips.
@@ -221,6 +221,44 @@ pub(in crate::manager) struct CleanPolicyTransitionInventory {
     pub(in crate::manager) permit_by_source: HashMap<IpAddr, HashMap<Option<String>, u64>>,
 }
 
+impl CleanPolicyTransitionInventory {
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        retire_clean_policy_counts(
+            &mut self.permit_totals,
+            &mut self.permit_by_source,
+            checkpoint,
+        );
+        drop(std::mem::take(&mut self.announce));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.next_hop_override));
+        checkpoint(true);
+    }
+}
+
+fn retire_clean_policy_counts(
+    permit_totals: &mut HashMap<Option<String>, u64>,
+    permit_by_source: &mut HashMap<IpAddr, HashMap<Option<String>, u64>>,
+    checkpoint: &mut impl FnMut(bool),
+) {
+    for row in permit_totals.drain() {
+        drop(row);
+        checkpoint(false);
+    }
+    for (_, mut rows) in permit_by_source.drain() {
+        for row in rows.drain() {
+            drop(row);
+            checkpoint(false);
+        }
+        checkpoint(false);
+    }
+    checkpoint(true);
+    drop(std::mem::take(permit_totals));
+    checkpoint(true);
+    drop(std::mem::take(permit_by_source));
+    checkpoint(true);
+}
+
 /// Pre-emission inventory accumulated by the actor-owned clean transition.
 /// The builder is private to that transaction and never represents committed
 /// peer-visible state.
@@ -233,10 +271,29 @@ pub(in crate::manager) struct CleanPolicyTransitionInventoryBuilder {
 }
 
 impl CleanPolicyTransitionInventoryBuilder {
-    pub(in crate::manager) fn finish(self) -> CleanPolicyTransitionInventory {
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        crate::manager::retire_vec(&mut self.announce, &mut || checkpoint(false));
+        crate::manager::retire_vec(&mut self.next_hop_override, &mut || checkpoint(false));
+        retire_clean_policy_counts(
+            &mut self.permit_totals,
+            &mut self.permit_by_source,
+            checkpoint,
+        );
+    }
+
+    pub(in crate::manager) fn finish(
+        self,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> CleanPolicyTransitionInventory {
+        checkpoint(true);
+        let announce = self.announce.into();
+        checkpoint(true);
+        let next_hop_override = self.next_hop_override.into();
+        checkpoint(true);
         CleanPolicyTransitionInventory {
-            announce: self.announce.into(),
-            next_hop_override: self.next_hop_override.into(),
+            announce,
+            next_hop_override,
             permit_totals: self.permit_totals,
             permit_by_source: self.permit_by_source,
         }
@@ -282,7 +339,7 @@ pub(in crate::manager) struct GroupStageOutput {
     /// Deliberately outside `deltas` and the shared emission: exactly
     /// one member acts on a lane transition (its
     /// [`LaneDelta::emit_target`]), via
-    /// [`emit_lane_deltas_for_member`] in the per-member walk.
+    /// [`emit_lane_deltas_for_member_with_checkpoint`] in the per-member walk.
     pub(in crate::manager) lane_deltas: Vec<LaneDelta>,
     /// Members whose emission differs from the shared one: the new
     /// source of an announce delta (announce → substitution/withdraw),
@@ -303,10 +360,16 @@ pub(in crate::manager) struct GroupStageOutput {
 impl GroupStageOutput {
     /// Keys withdrawn by this pass — the tombstone contribution when a
     /// member is (or goes) dirty.
-    pub(in crate::manager) fn withdrawn_keys(&self) -> impl Iterator<Item = (Prefix, u32)> + '_ {
+    pub(in crate::manager) fn withdrawn_keys<'a>(
+        &'a self,
+        mut checkpoint: impl FnMut() + 'a,
+    ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
         self.deltas
             .iter()
-            .filter(|d| d.new.is_none())
+            .filter(move |d| {
+                checkpoint();
+                d.new.is_none()
+            })
             .map(|d| (d.prefix, d.path_id))
     }
 
@@ -345,13 +408,23 @@ impl GroupStageOutput {
     /// on EITHER side of policy: source tags drive suppress/prepend,
     /// post-policy tags need scrubbing; a tag-only transition counts on
     /// either side of the pass. Callers memoize per (group, `rs_asn`).
+    #[cfg(test)]
     pub(in crate::manager) fn has_tagged_route(&self, rs_asn: u32) -> bool {
+        self.has_tagged_route_with_checkpoint(rs_asn, &mut || {})
+    }
+
+    pub(in crate::manager) fn has_tagged_route_with_checkpoint(
+        &self,
+        rs_asn: u32,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
         let attrs_tagged = |attrs: Option<&Arc<Vec<PathAttribute>>>| {
             let (communities, large_communities) = source_control_input(attrs);
             rs_control_route_tagged(communities, large_communities, rs_asn)
         };
         self.deltas.iter().any(|delta| {
+            checkpoint();
             delta.new.as_ref().is_some_and(|(route, _)| {
                 attrs_tagged(delta.source_attrs.as_ref())
                     || rs_control_route_tagged(
@@ -361,9 +434,11 @@ impl GroupStageOutput {
                     )
             })
         }) || self.rs_transitions.iter().any(|transition| {
+            checkpoint();
             attrs_tagged(transition.prior_source_attrs.as_ref())
                 || attrs_tagged(transition.source_attrs.as_ref())
         }) || self.lane_deltas.iter().any(|delta| {
+            checkpoint();
             // ADR-0126: a tagged lane source must push `source(w)`
             // onto the per-member walk — the substituted announce
             // applies suppress/prepend/scrub from the LANE entry's
@@ -407,13 +482,15 @@ impl GroupStageOutput {
     /// Lost member-scoped ANNOUNCES (a lane flip or a substitution)
     /// leave no residue on purpose: announces are idempotent and the
     /// dirty resync re-derives them from `adv(m)`.
-    pub(in crate::manager) fn member_scoped_withdraws(
-        &self,
+    pub(in crate::manager) fn member_scoped_withdraws<'a>(
+        &'a self,
         member: IpAddr,
-    ) -> impl Iterator<Item = (Prefix, u32)> + '_ {
+        checkpoint: impl Fn() + Copy + 'a,
+    ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
         self.deltas
             .iter()
             .filter_map(move |delta| {
+                checkpoint();
                 (delta
                     .new
                     .as_ref()
@@ -422,6 +499,7 @@ impl GroupStageOutput {
                 .then_some((delta.prefix, delta.path_id))
             })
             .chain(self.lane_deltas.iter().filter_map(move |delta| {
+                checkpoint();
                 (delta.new.is_none() && delta.emit_target == Some(member))
                     .then_some((delta.prefix, 0))
             }))
@@ -429,10 +507,26 @@ impl GroupStageOutput {
 
     /// Build the shared emission from the committed deltas (one `Route`
     /// shell clone per delta, TOTAL — not per member).
-    pub(super) fn build_shared_emit(&mut self) {
-        let mut announce: Vec<Route> = Vec::new();
-        let mut nh: Vec<Option<NextHopAction>> = Vec::new();
+    pub(super) fn build_shared_emit(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        let announce_count = self
+            .deltas
+            .iter()
+            .filter(|delta| {
+                checkpoint(false);
+                delta.new.is_some()
+            })
+            .count();
+        checkpoint(true);
+        let mut announce: Vec<Route> = Vec::with_capacity(announce_count);
+        checkpoint(true);
+        let mut nh: Vec<Option<NextHopAction>> = Vec::with_capacity(announce_count);
+        checkpoint(true);
+        self.shared_withdraw
+            .reserve_exact(self.deltas.len() - announce_count);
+        checkpoint(true);
         for delta in &self.deltas {
+            checkpoint(false);
             if let Some((route, flag)) = &delta.new {
                 self.exceptions.insert(route.peer);
                 if delta.old_source.is_some() || delta.lane.is_some() {
@@ -457,13 +551,42 @@ impl GroupStageOutput {
         // (inserted above) or exactly served by the shared payload
         // (the flip-away arm announces `w'` to it).
         for delta in &self.lane_deltas {
+            checkpoint(false);
             if let Some(target) = delta.emit_target {
                 self.exceptions.insert(target);
                 self.source_exclusion_unsafe.insert(target);
             }
         }
+        checkpoint(true);
         self.shared_announce = announce.into();
+        checkpoint(true);
         self.shared_nh = nh.into();
+        checkpoint(true);
+    }
+
+    /// Retire discarded staging shells while the replacement fence is held.
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        crate::manager::retire_vec(&mut self.otc_blocked, &mut || checkpoint(false));
+        crate::manager::retire_vec(&mut self.rs_transitions, &mut || checkpoint(false));
+        crate::manager::retire_vec(&mut self.lane_deltas, &mut || checkpoint(false));
+        self.evals.retire_with(checkpoint);
+        crate::manager::retire_vec(&mut self.shared_withdraw, &mut || checkpoint(false));
+        crate::manager::retire_hash_set(&mut self.exceptions, &mut || checkpoint(false));
+        crate::manager::retire_hash_set(&mut self.source_exclusion_unsafe, &mut || {
+            checkpoint(false);
+        });
+        for _ in self.shared_source_counts.drain() {
+            checkpoint(false);
+        }
+        checkpoint(true);
+        drop(std::mem::take(&mut self.shared_source_counts));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.shared_announce));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.shared_nh));
+        checkpoint(true);
     }
 }
 
@@ -487,6 +610,27 @@ pub(in crate::manager) struct BatchedTransitionInventory {
     /// (announce) and the displaced/retired own-sourced slot (withdraw).
     pub(in crate::manager) supplements: FxHashMap<IpAddr, BatchedMemberSupplement>,
     pub(super) counters: BatchedTransitionCounters,
+}
+
+impl BatchedTransitionInventory {
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        crate::manager::retire_vec(&mut self.withdraw, &mut || checkpoint(false));
+        for (_, mut supplement) in self.supplements.drain() {
+            checkpoint(false);
+            crate::manager::retire_vec(&mut supplement.announce, &mut || checkpoint(false));
+            crate::manager::retire_vec(&mut supplement.withdraw, &mut || checkpoint(false));
+        }
+        checkpoint(true);
+        drop(std::mem::take(&mut self.supplements));
+        checkpoint(true);
+        self.counters.retire_with(checkpoint);
+        checkpoint(true);
+        drop(std::mem::take(&mut self.announce));
+        checkpoint(true);
+        drop(std::mem::take(&mut self.next_hop_override));
+        checkpoint(true);
+    }
 }
 
 /// One member's corrections beside the shared batched-transition payload.
@@ -514,6 +658,34 @@ pub(super) struct BatchedTransitionCounters {
 }
 
 impl BatchedTransitionCounters {
+    pub(super) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        for totals in [&mut self.permit_totals, &mut self.deny_totals] {
+            for row in totals.drain() {
+                drop(row);
+                checkpoint(false);
+            }
+            checkpoint(true);
+            drop(std::mem::take(totals));
+            checkpoint(true);
+        }
+        for by_source in [
+            &mut self.permit_by_source,
+            &mut self.lane_by_winner_source,
+            &mut self.deny_by_source,
+        ] {
+            for (_, mut rows) in by_source.drain() {
+                for row in rows.drain() {
+                    drop(row);
+                    checkpoint(false);
+                }
+                checkpoint(false);
+            }
+            checkpoint(true);
+            drop(std::mem::take(by_source));
+            checkpoint(true);
+        }
+    }
+
     pub(super) fn record_permit(&mut self, source: IpAddr, label: Option<PolicyLabel>) {
         *self
             .permit_by_source
@@ -548,18 +720,27 @@ impl BatchedTransitionCounters {
     /// [`RibManager::apply_group_join_counters`](super::RibManager::apply_group_join_counters)
     /// derives per member from
     /// a full table walk.
-    pub(super) fn rows_for(&self, peer: IpAddr) -> Vec<(Option<String>, PolicyAction, u64)> {
+    pub(super) fn rows_for(
+        &self,
+        peer: IpAddr,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<(Option<String>, PolicyAction, u64)> {
         let mut rows = Vec::new();
         let own_permits = self.permit_by_source.get(&peer);
         let lane = self.lane_by_winner_source.get(&peer);
-        let mut labels: Vec<&Option<PolicyLabel>> = self.permit_totals.keys().collect();
+        let mut labels: Vec<&Option<PolicyLabel>> = self
+            .permit_totals
+            .keys()
+            .inspect(|_| checkpoint())
+            .collect();
         if let Some(lane) = lane {
-            labels.extend(
-                lane.keys()
-                    .filter(|label| !self.permit_totals.contains_key(*label)),
-            );
+            labels.extend(lane.keys().filter(|label| {
+                checkpoint();
+                !self.permit_totals.contains_key(*label)
+            }));
         }
         for label in labels {
+            checkpoint();
             let total = self.permit_totals.get(label).copied().unwrap_or(0);
             let own = own_permits
                 .and_then(|counts| counts.get(label))
@@ -580,6 +761,7 @@ impl BatchedTransitionCounters {
         }
         let own_denies = self.deny_by_source.get(&peer);
         for (label, total) in &self.deny_totals {
+            checkpoint();
             let own = own_denies
                 .and_then(|counts| counts.get(label))
                 .copied()
@@ -636,10 +818,19 @@ pub(super) fn bump_counter_row(
     policy: Option<&PolicyLabel>,
     action: PolicyAction,
 ) {
-    if let Some((_, _, n)) = rows
-        .iter_mut()
-        .find(|(p, a, _)| *a == action && p.as_deref() == policy.map(AsRef::as_ref))
-    {
+    bump_counter_row_with_checkpoint(rows, policy, action, &mut || {});
+}
+
+pub(super) fn bump_counter_row_with_checkpoint(
+    rows: &mut Vec<(Option<String>, PolicyAction, u64)>,
+    policy: Option<&PolicyLabel>,
+    action: PolicyAction,
+    checkpoint: &mut impl FnMut(),
+) {
+    if let Some((_, _, n)) = rows.iter_mut().find(|(p, a, _)| {
+        checkpoint();
+        *a == action && p.as_deref() == policy.map(AsRef::as_ref)
+    }) {
         *n += 1;
     } else {
         rows.push((policy.map(ToString::to_string), action, 1));
@@ -647,6 +838,17 @@ pub(super) fn bump_counter_row(
 }
 
 impl GroupEvalAccumulator {
+    fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        crate::manager::retire_vec(&mut self.totals, &mut || checkpoint(false));
+        for (_, mut rows) in self.per_source.drain() {
+            checkpoint(false);
+            crate::manager::retire_vec(&mut rows, &mut || checkpoint(false));
+        }
+        checkpoint(true);
+        drop(std::mem::take(&mut self.per_source));
+        checkpoint(true);
+    }
+
     /// Record one chain evaluation for the route sourced by `source`.
     pub(in crate::manager) fn record(&mut self, evaluation: &PolicyEvaluation, source: IpAddr) {
         bump_eval_row(
@@ -685,7 +887,7 @@ impl GroupEvalAccumulator {
 /// the displaced other-sourced entry otherwise. A member that ALREADY
 /// was the source (`old_source` = member) holds the lane substitution,
 /// which transitions only with the lane — its emissions ride
-/// [`emit_lane_deltas_for_member`] (same for the retiring source of a
+/// [`emit_lane_deltas_for_member_with_checkpoint`] (same for the retiring source of a
 /// withdraw delta, whose lane-retire withdraw rides the same arm).
 /// For a plain group `lane` is always `None`, reducing every cell to
 /// the historical matrix above it.
@@ -703,6 +905,7 @@ impl GroupEvalAccumulator {
 /// route is rewritten per target — prepend decided on the source,
 /// scrub on the post-policy route. `None` — or an untagged source and
 /// route — is byte-identical to the shared emission.
+#[cfg(test)]
 pub(in crate::manager) fn emit_group_deltas_for_member(
     deltas: &[GroupDelta],
     member: IpAddr,
@@ -711,10 +914,31 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
     withdraw: &mut Vec<(Prefix, u32)>,
     nh_override_flags: &mut Vec<Option<NextHopAction>>,
 ) {
+    emit_group_deltas_for_member_with_checkpoint(
+        deltas,
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        &mut || {},
+    );
+}
+
+pub(in crate::manager) fn emit_group_deltas_for_member_with_checkpoint(
+    deltas: &[GroupDelta],
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+    checkpoint: &mut impl FnMut(),
+) {
     use crate::manager::distribution::rs_control::{
         rs_control_route_rewrite, rs_control_suppressed,
     };
     for delta in deltas {
+        checkpoint();
         match &delta.new {
             Some((route, nh)) => {
                 let (source_communities, source_large_communities) =
@@ -813,10 +1037,11 @@ pub(in crate::manager) fn emit_group_deltas_for_member(
 /// target's wire held (over-withdraw is the safe direction, as in the
 /// winner matrix), and a content-equal tag-only transition
 /// ([`LaneDelta::content_unchanged`]) mirrors
-/// [`emit_rs_tag_transitions`] — nothing toward a non-rs target,
+/// [`emit_rs_tag_transitions_with_checkpoint`] — nothing toward a non-rs target,
 /// withdraw/re-announce toward an rs target exactly on a
 /// suppress/prepend verdict flip. A no-op for every member other
 /// than the target, and for plain groups (no lane deltas exist).
+#[cfg(test)]
 pub(in crate::manager) fn emit_lane_deltas_for_member(
     lane_deltas: &[LaneDelta],
     member: IpAddr,
@@ -825,10 +1050,31 @@ pub(in crate::manager) fn emit_lane_deltas_for_member(
     withdraw: &mut Vec<(Prefix, u32)>,
     nh_override_flags: &mut Vec<Option<NextHopAction>>,
 ) {
+    emit_lane_deltas_for_member_with_checkpoint(
+        lane_deltas,
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        &mut || {},
+    );
+}
+
+pub(in crate::manager) fn emit_lane_deltas_for_member_with_checkpoint(
+    lane_deltas: &[LaneDelta],
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+    checkpoint: &mut impl FnMut(),
+) {
     use crate::manager::distribution::rs_control::{
         rs_control_prepend_count, rs_control_route_rewrite, rs_control_suppressed,
     };
     for delta in lane_deltas {
+        checkpoint();
         if delta.emit_target != Some(member) {
             continue;
         }
@@ -893,6 +1139,7 @@ pub(in crate::manager) fn emit_lane_deltas_for_member(
 /// restage + Adj-RIB-Out diff would emit. A no-op for members without
 /// `rs_control_communities`: their wire form is the unchanged staged
 /// route.
+#[cfg(test)]
 pub(in crate::manager) fn emit_rs_tag_transitions(
     transitions: &[RsTagTransition],
     member: IpAddr,
@@ -901,6 +1148,26 @@ pub(in crate::manager) fn emit_rs_tag_transitions(
     withdraw: &mut Vec<(Prefix, u32)>,
     nh_override_flags: &mut Vec<Option<NextHopAction>>,
 ) {
+    emit_rs_tag_transitions_with_checkpoint(
+        transitions,
+        member,
+        rs_control,
+        announce,
+        withdraw,
+        nh_override_flags,
+        &mut || {},
+    );
+}
+
+pub(in crate::manager) fn emit_rs_tag_transitions_with_checkpoint(
+    transitions: &[RsTagTransition],
+    member: IpAddr,
+    rs_control: Option<(u32, u32)>,
+    announce: &mut Vec<Route>,
+    withdraw: &mut Vec<(Prefix, u32)>,
+    nh_override_flags: &mut Vec<Option<NextHopAction>>,
+    checkpoint: &mut impl FnMut(),
+) {
     use crate::manager::distribution::rs_control::{
         rs_control_prepend_count, rs_control_route_rewrite, rs_control_suppressed,
     };
@@ -908,6 +1175,7 @@ pub(in crate::manager) fn emit_rs_tag_transitions(
         return;
     };
     for transition in transitions {
+        checkpoint();
         if transition.route.peer == member {
             continue;
         }
@@ -969,6 +1237,14 @@ pub(in crate::manager) struct VpnGroupStageOutput {
 }
 
 impl VpnGroupStageOutput {
+    /// Retire a table-build pass's unused route shells cooperatively.
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut(bool)) {
+        checkpoint(true);
+        crate::manager::retire_vec(&mut self.deltas, &mut || checkpoint(false));
+        self.evals.retire_with(checkpoint);
+        checkpoint(true);
+    }
+
     /// Member-scoped withdraw keys of this pass that the VPN tombstone
     /// feed (deltas with `new == None`) never records: `had ∧ ¬gets`
     /// entries whose delta still holds a staged route — a source flip
@@ -980,8 +1256,10 @@ impl VpnGroupStageOutput {
         &'a self,
         member: IpAddr,
         filter: Option<&'a RtcMembership>,
+        mut checkpoint: impl FnMut() + 'a,
     ) -> impl Iterator<Item = VpnRouteKey> + 'a {
         self.deltas.iter().filter_map(move |delta| {
+            checkpoint();
             let had = delta
                 .old
                 .as_ref()
@@ -1019,6 +1297,7 @@ pub(in crate::manager) fn rt_passes(filter: Option<&RtcMembership>, route: &VpnR
 /// `[vpnv4, vpnv6]` (`gets ∧ ¬had` = +1, `had ∧ ¬gets` = −1) — the
 /// incremental input for the per-member counters an RT filter makes
 /// non-derivable from the group's source counts (design §2.4).
+#[cfg(test)]
 pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
     deltas: &[VpnGroupDelta],
     member: IpAddr,
@@ -1026,8 +1305,27 @@ pub(in crate::manager) fn emit_vpn_group_deltas_for_member(
     vpn_announce: &mut Vec<VpnRibRoute>,
     vpn_withdraw: &mut Vec<VpnRibRouteKey>,
 ) -> [i64; 2] {
+    emit_vpn_group_deltas_for_member_with_checkpoint(
+        deltas,
+        member,
+        filter,
+        vpn_announce,
+        vpn_withdraw,
+        &mut || {},
+    )
+}
+
+pub(in crate::manager) fn emit_vpn_group_deltas_for_member_with_checkpoint(
+    deltas: &[VpnGroupDelta],
+    member: IpAddr,
+    filter: Option<&RtcMembership>,
+    vpn_announce: &mut Vec<VpnRibRoute>,
+    vpn_withdraw: &mut Vec<VpnRibRouteKey>,
+    checkpoint: &mut impl FnMut(),
+) -> [i64; 2] {
     let mut count_delta = [0i64; 2];
     for delta in deltas {
+        checkpoint();
         let had = delta
             .old
             .as_ref()

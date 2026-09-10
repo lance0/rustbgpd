@@ -55,6 +55,36 @@ struct MemoEntry {
 }
 
 impl ExportMemo {
+    #[cfg(feature = "bench-internals")]
+    pub(in crate::manager) fn record_replacement_capacities(&self, manager: &super::RibManager) {
+        manager.replacement_capacity(
+            "export_memo_entries",
+            self.entries.len(),
+            self.entries.capacity(),
+        );
+        for entry in self.entries.values() {
+            manager.replacement_checkpoint(false);
+            manager.replacement_capacity(
+                "export_memo_modified",
+                entry.modified.len(),
+                entry.modified.capacity(),
+            );
+        }
+    }
+
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        for (_, mut entry) in self.entries.drain() {
+            checkpoint();
+            while let Some(modified) = entry.modified.pop() {
+                drop(modified);
+                checkpoint();
+            }
+            drop(entry);
+            checkpoint();
+        }
+        crate::adj_rib_out::release_hash_map(&mut self.entries, checkpoint);
+    }
+
     fn entry(&mut self, attrs: &Arc<Vec<PathAttribute>>) -> &mut MemoEntry {
         self.entries
             .entry(Arc::as_ptr(attrs) as usize)

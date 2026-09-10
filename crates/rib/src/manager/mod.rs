@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
@@ -41,6 +41,34 @@ use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
+
+/// Release owned temporary elements while the actor still owns readiness.
+fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
+    checkpoint();
+    if std::mem::needs_drop::<T>() {
+        while let Some(value) = values.pop() {
+            drop(value);
+            checkpoint();
+        }
+    }
+    drop(std::mem::take(values));
+    checkpoint();
+}
+
+fn retire_hash_set<T, S: BuildHasher + Default>(
+    values: &mut HashSet<T, S>,
+    checkpoint: &mut impl FnMut(),
+) {
+    checkpoint();
+    if std::mem::needs_drop::<T>() {
+        for value in values.drain() {
+            drop(value);
+            checkpoint();
+        }
+    }
+    drop(std::mem::take(values));
+    checkpoint();
+}
 
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
@@ -785,6 +813,13 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Dedicated type-narrow lane used only by core readiness.
     readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
+    /// Only the readiness receiver and invariant count are shared across
+    /// synchronous replacement helpers. Canonical RIB state remains actor-owned.
+    replacement_readiness: Option<Arc<Mutex<ReplacementReadiness>>>,
+    #[cfg(test)]
+    replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    #[cfg(test)]
+    replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
     /// One explicit shared policy transition advanced by the actor itself.
@@ -908,6 +943,107 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 /// once ownership is far beyond any legitimate transition receipt.
 pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
     std::time::Duration::from_secs(30);
+
+struct ReplacementReadiness {
+    #[cfg(feature = "bench-internals")]
+    capacities: HashMap<&'static str, (usize, usize, usize)>,
+    #[cfg(test)]
+    observer: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
+    rx: Option<mpsc::Receiver<RibReadinessQuery>>,
+    count: usize,
+    started: tokio::time::Instant,
+    last_service: std::time::Instant,
+    budget: std::time::Duration,
+    #[cfg(any(test, feature = "bench-internals"))]
+    max_gap: std::time::Duration,
+    #[cfg(any(test, feature = "bench-internals"))]
+    serviced: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ReplacementReadinessReceipt {
+    count: usize,
+    elapsed: std::time::Duration,
+    max_gap: std::time::Duration,
+    serviced: usize,
+}
+
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint_at(
+    readiness: &Option<Arc<Mutex<ReplacementReadiness>>>,
+    stage: &'static str,
+    force: bool,
+) {
+    #[cfg(test)]
+    if let Some(context) = readiness {
+        let observer = context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observer
+            .clone();
+        if let Some(observer) = observer {
+            observer(stage);
+        }
+    }
+    #[cfg(not(test))]
+    let _ = stage;
+    replacement_readiness_checkpoint(readiness, force);
+}
+
+/// Call only on the actor while its synchronous replacement fence is held.
+/// The short mutex guard never spans a helper, callback, or canonical mutation.
+#[expect(
+    clippy::ref_option,
+    reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
+)]
+fn replacement_readiness_checkpoint(
+    readiness: &Option<Arc<Mutex<ReplacementReadiness>>>,
+    force: bool,
+) {
+    let Some(readiness) = readiness else {
+        return;
+    };
+    let mut readiness = readiness
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let gap = readiness.last_service.elapsed();
+    if !force && gap < readiness.budget {
+        return;
+    }
+    #[cfg(any(test, feature = "bench-internals"))]
+    {
+        readiness.max_gap = readiness.max_gap.max(gap);
+    }
+    readiness.last_service = std::time::Instant::now();
+    for _ in 0..QUERY_BUDGET_PER_CHUNK {
+        let query = match readiness.rx.as_mut() {
+            Some(rx) => match rx.try_recv() {
+                Ok(query) => query,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    readiness.rx = None;
+                    break;
+                }
+            },
+            None => break,
+        };
+        let RibReadinessQuery::LocRibCount { reply } = query;
+        let result = if readiness.started.elapsed() >= MAX_HEALTHY_POLICY_TRANSITION_AGE {
+            Err(RibReadinessError::PolicyTransitionStalled)
+        } else {
+            Ok(readiness.count)
+        };
+        let _ = reply.send(result);
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            readiness.serviced += 1;
+        }
+    }
+}
 
 fn collect_evpn_dataplane_routes<'a>(
     rows: impl Iterator<Item = &'a crate::route::EvpnRibRoute>,
@@ -1520,6 +1656,11 @@ impl RibManager {
             rx,
             query_rx,
             readiness_rx: None,
+            replacement_readiness: None,
+            #[cfg(test)]
+            replacement_readiness_test_hook: None,
+            #[cfg(test)]
+            replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
             pending_destination_prestage: None,
@@ -1573,6 +1714,144 @@ impl RibManager {
     ) -> Self {
         self.readiness_rx = Some(readiness_rx);
         self
+    }
+
+    /// Export replacement does not change Loc-RIB cardinality. Keep that exact
+    /// actor-owned invariant while only readiness acknowledgements interleave.
+    fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        let age = self.pending_clean_policy_transition.as_ref().map_or(
+            std::time::Duration::ZERO,
+            distribution::PendingCleanPolicyTransition::elapsed,
+        );
+        self.with_replacement_readiness_age(age, work)
+    }
+
+    fn with_replacement_readiness_age<T>(
+        &mut self,
+        age: std::time::Duration,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if self.replacement_readiness.is_some() {
+            return work(self);
+        }
+        let started = tokio::time::Instant::now() - age;
+        self.replacement_readiness = Some(Arc::new(Mutex::new(ReplacementReadiness {
+            #[cfg(feature = "bench-internals")]
+            capacities: HashMap::new(),
+            #[cfg(test)]
+            observer: self.replacement_readiness_test_hook.clone(),
+            rx: self.readiness_rx.take(),
+            count: self.loc_rib.len(),
+            started,
+            last_service: std::time::Instant::now(),
+            budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
+            #[cfg(any(test, feature = "bench-internals"))]
+            max_gap: std::time::Duration::ZERO,
+            #[cfg(any(test, feature = "bench-internals"))]
+            serviced: 0,
+        })));
+        self.replacement_checkpoint(true);
+        self.record_replacement_capacities();
+        let result = work(self);
+        self.record_replacement_capacities();
+        self.replacement_checkpoint_at("terminal_cleanup", true);
+        let context = self
+            .replacement_readiness
+            .take()
+            .expect("replacement scope retains its readiness context");
+        debug_assert_eq!(
+            Arc::strong_count(&context),
+            1,
+            "readiness callback escaped its command frame"
+        );
+        let mut readiness = context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert_eq!(readiness.count, self.loc_rib.len());
+        self.readiness_rx = readiness.rx.take();
+        #[cfg(all(feature = "bench-internals", not(test)))]
+        info!(target: "replacement_readiness", count = readiness.count,
+            elapsed_us = readiness.started.elapsed().as_micros(),
+            max_gap_us = readiness.max_gap.as_micros(), serviced = readiness.serviced,
+            "replacement readiness scope finished");
+        #[cfg(all(feature = "bench-internals", not(test)))]
+        for (name, (len, capacity, slots)) in &readiness.capacities {
+            info!(target: "replacement_capacity", name, max_len = len, max_capacity = capacity,
+                max_raw_slots = slots, "replacement capacity maximum");
+        }
+        #[cfg(test)]
+        {
+            self.replacement_readiness_receipts
+                .push(ReplacementReadinessReceipt {
+                    count: readiness.count,
+                    elapsed: readiness.started.elapsed(),
+                    max_gap: readiness.max_gap,
+                    serviced: readiness.serviced,
+                });
+        }
+        result
+    }
+
+    fn replacement_checkpoint_at(&self, stage: &'static str, force: bool) {
+        replacement_readiness_checkpoint_at(&self.replacement_readiness, stage, force);
+    }
+
+    fn replacement_checkpoint(&self, force: bool) {
+        replacement_readiness_checkpoint(&self.replacement_readiness, force);
+    }
+
+    /// Aggregate capacity evidence within the owning command, never per route.
+    fn replacement_capacity(&self, name: &'static str, len: usize, capacity: usize) {
+        self.replacement_storage_shape(name, len, capacity, 0);
+    }
+
+    fn replacement_storage_shape(
+        &self,
+        name: &'static str,
+        len: usize,
+        capacity: usize,
+        slots: usize,
+    ) {
+        #[cfg(feature = "bench-internals")]
+        if let Some(context) = &self.replacement_readiness {
+            let mut context = context
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let maximum = context.capacities.entry(name).or_default();
+            maximum.0 = maximum.0.max(len);
+            maximum.1 = maximum.1.max(capacity);
+            maximum.2 = maximum.2.max(slots);
+        }
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = (self, name, len, capacity, slots);
+    }
+
+    fn record_replacement_capacities(&self) {
+        #[cfg(not(feature = "bench-internals"))]
+        let _ = self;
+        #[cfg(feature = "bench-internals")]
+        if self.replacement_readiness.is_some() {
+            for group in self.group_ribs.values() {
+                let (len, slots, capacity) = group.table.bench_unicast_storage_shape();
+                self.replacement_storage_shape("group_unicast", len, capacity, slots);
+                let (len, capacity) = group.bench_otc_storage_shape();
+                self.replacement_capacity("group_otc", len, capacity);
+            }
+            for table in self.adj_ribs_out.values() {
+                let (len, slots, capacity) = table.bench_unicast_storage_shape();
+                self.replacement_storage_shape("private_unicast", len, capacity, slots);
+            }
+            for baseline in self.pending_regroup_baseline.values() {
+                self.replacement_capacity(
+                    "pending_baseline",
+                    baseline.unicast.len(),
+                    baseline.unicast.capacity(),
+                );
+            }
+            for pending in self.pending_otc_blocked.values() {
+                self.replacement_capacity("pending_otc", pending.len(), pending.capacity());
+            }
+        }
     }
 
     /// Test-only ADR-0078 fault injection: sleep before handling a
@@ -3155,31 +3434,38 @@ impl RibManager {
         prefixes: &HashSet<Prefix>,
         current: &HashSet<PolicyFilteredRouteKey>,
     ) {
+        let readiness = &self.replacement_readiness;
+        let checkpoint = || replacement_readiness_checkpoint(readiness, false);
         let peer_routes = self.policy_filtered_routes.entry(target_peer).or_default();
-        let previous = peer_routes
-            .iter()
-            .copied()
-            .filter(|key| prefixes.contains(&key.prefix))
-            .collect::<Vec<_>>();
-
-        for key in previous {
-            if !current.contains(&key) {
-                peer_routes.remove(&key);
+        peer_routes.retain(|key| {
+            checkpoint();
+            !prefixes.contains(&key.prefix) || current.contains(key)
+        });
+        let required = peer_routes.len().saturating_add(current.len());
+        if required > peer_routes.capacity() {
+            checkpoint();
+            let mut replacement = HashSet::with_capacity(required);
+            for key in peer_routes.drain() {
+                replacement.insert(key);
+                checkpoint();
             }
+            drop(std::mem::replace(peer_routes, replacement));
+            checkpoint();
         }
-
-        let mut newly_filtered = Vec::new();
+        let mut newly_filtered = Vec::with_capacity(current.len());
+        checkpoint();
         for key in current.iter().copied() {
+            checkpoint();
             if peer_routes.insert(key) {
                 newly_filtered.push(key);
             }
         }
-
         if peer_routes.is_empty() {
             self.policy_filtered_routes.remove(&target_peer);
         }
-
-        for key in newly_filtered {
+        let mut newly_filtered = newly_filtered.into_iter();
+        for key in newly_filtered.by_ref() {
+            self.replacement_checkpoint(false);
             self.publish_route_event(RouteEvent {
                 event_id: 0,
                 event_type: RouteEventType::PolicyFiltered,
@@ -3192,10 +3478,15 @@ impl RibManager {
                 reason: "policy_denied".to_string(),
             });
         }
+        self.replacement_checkpoint(true);
+        drop(newly_filtered);
+        self.replacement_checkpoint(true);
     }
 
     pub(super) fn clear_policy_filtered_routes_for_peer(&mut self, target_peer: IpAddr) {
-        self.policy_filtered_routes.remove(&target_peer);
+        if let Some(mut routes) = self.policy_filtered_routes.remove(&target_peer) {
+            retire_hash_set(&mut routes, &mut || self.replacement_checkpoint(false));
+        }
     }
 
     fn publish_evpn_route_event(&mut self, event: crate::event::EvpnRouteEvent) {
@@ -3763,31 +4054,38 @@ impl RibManager {
                 self.drain_readiness_queries(Some(pending.elapsed()));
                 let kind = pending.poll_kind();
                 let started = std::time::Instant::now();
-                let policy_transition_elapsed = match self.advance_clean_policy_transition(pending)
+                let mut terminal_reply = None;
+                let policy_transition_elapsed = self.with_replacement_readiness_age(pending.elapsed(), |manager| { match manager.advance_clean_policy_transition(pending)
                 {
                     distribution::CleanPolicyTransitionAdvance::Continue(mut next) => {
-                        self.record_policy_transition_poll(kind, started.elapsed());
+                        manager.record_policy_transition_poll(kind, started.elapsed());
                         let member_count = next.member_count();
                         Self::warn_if_policy_transition_slow(&mut next, member_count);
                         let elapsed = next.elapsed();
-                        self.pending_clean_policy_transition = Some(next);
+                        manager.pending_clean_policy_transition = Some(next);
                         Some(elapsed)
                     }
                     distribution::CleanPolicyTransitionAdvance::Committed(mut done) => {
-                        self.record_policy_transition_poll(kind, started.elapsed());
+                        manager.record_policy_transition_poll(kind, started.elapsed());
                         let member_count = done.member_count();
                         Self::warn_if_policy_transition_slow(&mut done, member_count);
-                        self.finish_policy_transition_observability(
+                        manager.finish_policy_transition_observability(
                             RibPolicyTransitionOutcome::Committed,
                             done.member_count(),
                             done.elapsed(),
                         );
+                        done.retire_inputs(manager);
+                        let reply = done.take_reply();
                         drop(done);
+                        manager.replacement_checkpoint(true);
+                        if let Some(reply) = reply {
+                            terminal_reply = Some((reply, Ok(crate::update::ExportPolicyCohortOutcome::Committed)));
+                        }
                         None
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
-                        let cleanup = failed.discard_uncommitted_transition(&mut self);
-                        self.record_policy_transition_poll(kind, started.elapsed());
+                        let cleanup = failed.discard_uncommitted_transition(manager);
+                        manager.record_policy_transition_poll(kind, started.elapsed());
                         let member_count = failed.member_count();
                         Self::warn_if_policy_transition_slow(&mut failed, member_count);
                         let outcome = if cleanup.is_ok() {
@@ -3795,20 +4093,26 @@ impl RibManager {
                         } else {
                             RibPolicyTransitionOutcome::FallbackCleanupError
                         };
-                        self.finish_policy_transition_observability(
+                        manager.finish_policy_transition_observability(
                             outcome,
                             member_count,
                             failed.elapsed(),
                         );
-                        if let Some(reply) = failed.take_reply() {
+                        let reply = failed.take_reply();
+                        drop(failed);
+                        manager.replacement_checkpoint(true);
+                        if let Some(reply) = reply {
                             let result = cleanup.map(|()| {
                                 crate::update::ExportPolicyCohortOutcome::RequiresAuthoritativePerPeerApply
                             });
-                            let _ = reply.send(result);
+                            terminal_reply = Some((reply, result));
                         }
                         None
                     }
-                };
+                } });
+                if let Some((reply, result)) = terminal_reply {
+                    let _ = reply.send(result);
+                }
                 self.drain_readiness_queries(policy_transition_elapsed);
                 tokio::task::yield_now().await;
                 continue;

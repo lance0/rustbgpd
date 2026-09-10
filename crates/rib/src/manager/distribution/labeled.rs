@@ -76,10 +76,6 @@ impl RibManager {
     /// the ORR vantage comparator when a vantage is resolved — and staged
     /// with outbound path IDs `1..=N`. Otherwise the single best is staged
     /// with `path_id = 0`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "labeled staging mirrors the VPN multipath/single-best distribution context for RR/export parity"
-    )]
     pub(in crate::manager) fn stage_labeled_routes(
         context: &crate::manager::VpnLabeledStagingContext<'_>,
         keys: &HashSet<Prefix>,
@@ -87,6 +83,29 @@ impl RibManager {
         labeled_announce: &mut Vec<LabeledRibRoute>,
         labeled_withdraw: &mut Vec<LabeledRibRouteKey>,
     ) {
+        Self::stage_labeled_routes_with_checkpoint(
+            context,
+            keys,
+            target,
+            labeled_announce,
+            labeled_withdraw,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "labeled staging mirrors the VPN multipath/single-best distribution context for RR/export parity"
+    )]
+    pub(in crate::manager) fn stage_labeled_routes_with_checkpoint(
+        context: &crate::manager::VpnLabeledStagingContext<'_>,
+        keys: &HashSet<Prefix>,
+        target: &mut super::ExportTarget<'_>,
+        labeled_announce: &mut Vec<LabeledRibRoute>,
+        labeled_withdraw: &mut Vec<LabeledRibRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let checkpoint = std::cell::RefCell::new(checkpoint);
         let &crate::manager::VpnLabeledStagingContext {
             loc_rib,
             ribs,
@@ -108,6 +127,7 @@ impl RibManager {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let split_horizon_peer = target.split_horizon_peer();
         for key in keys {
+            checkpoint.borrow_mut()();
             let family = labeled_afi_safi(key);
             // Path IDs currently advertised for this identity — the diff
             // baseline for every withdraw decision below.
@@ -115,6 +135,7 @@ impl RibManager {
             let withdraw_existing = |labeled_withdraw: &mut Vec<LabeledRibRouteKey>,
                                      existing: &[u32]| {
                 for &path_id in existing {
+                    checkpoint.borrow_mut()();
                     labeled_withdraw.push(LabeledRibRouteKey {
                         prefix: *key,
                         path_id,
@@ -170,8 +191,12 @@ impl RibManager {
                 // rank it, and stage the top N with path IDs 1..=N.
                 let mut candidates: Vec<&LabeledRibRoute> = ribs
                     .values()
-                    .flat_map(|rib| rib.iter_labeled_for_prefix(key))
+                    .flat_map(|rib| {
+                        checkpoint.borrow_mut()();
+                        rib.iter_labeled_for_prefix(key)
+                    })
                     .filter(|candidate| {
+                        checkpoint.borrow_mut()();
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &labeled_suppression_probe(candidate),
@@ -187,6 +212,7 @@ impl RibManager {
                 // cost to each candidate's next-hop (comparator swap only).
                 match orr_ctx {
                     Some((orr_topology, orr_spf)) => candidates.sort_by(|a, b| {
+                        checkpoint.borrow_mut()();
                         labeled_tiebreak_orr(
                             a,
                             b,
@@ -194,7 +220,10 @@ impl RibManager {
                             orr_spf.cost_to(orr_topology, b.next_hop),
                         )
                     }),
-                    None => candidates.sort_by(|a, b| crate::loc_rib::labeled_tiebreak(a, b)),
+                    None => candidates.sort_by(|a, b| {
+                        checkpoint.borrow_mut()();
+                        crate::loc_rib::labeled_tiebreak(a, b)
+                    }),
                 }
 
                 let mut next_rank: u32 = 1;
@@ -204,6 +233,7 @@ impl RibManager {
                     key_send_max as usize
                 };
                 for candidate in &candidates {
+                    checkpoint.borrow_mut()();
                     if (next_rank as usize) > limit {
                         break;
                     }
@@ -268,7 +298,9 @@ impl RibManager {
                         local_pref: candidate.local_pref_attr(),
                         med: candidate.med_attr(),
                     };
+                    checkpoint.borrow_mut()();
                     let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+                    checkpoint.borrow_mut()();
                     target.record_eval(&evaluation, candidate.peer);
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
                         continue;
@@ -276,6 +308,7 @@ impl RibManager {
 
                     let mut modified = (*candidate).clone();
                     if !result.modifications.is_empty() {
+                        checkpoint.borrow_mut()();
                         let nh = rustbgpd_policy::apply_modifications(
                             std::sync::Arc::make_mut(&mut modified.attributes),
                             &result.modifications,
@@ -283,6 +316,7 @@ impl RibManager {
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
+                        checkpoint.borrow_mut()();
                     }
                     if super::no_advertise_export_suppressed(modified.communities()) {
                         continue;
@@ -298,6 +332,7 @@ impl RibManager {
                             .get_labeled(&out_key)
                             .is_none_or(|existing| !labeled_routes_equal(existing, &modified))
                     {
+                        checkpoint.borrow_mut()();
                         labeled_announce.push(modified);
                     }
                     next_rank += 1;
@@ -306,6 +341,7 @@ impl RibManager {
                 // Withdraw previously advertised path IDs outside the new
                 // 1..next_rank set (including a stale single-best 0 entry).
                 for &path_id in existing_path_ids {
+                    checkpoint.borrow_mut()();
                     if path_id == 0 || path_id >= next_rank {
                         labeled_withdraw.push(LabeledRibRouteKey {
                             prefix: *key,
@@ -325,8 +361,12 @@ impl RibManager {
             let best = if let Some((orr_topology, orr_spf)) = orr_ctx {
                 let winner = ribs
                     .values()
-                    .flat_map(|rib| rib.iter_labeled_for_prefix(key))
+                    .flat_map(|rib| {
+                        checkpoint.borrow_mut()();
+                        rib.iter_labeled_for_prefix(key)
+                    })
                     .filter(|candidate| {
+                        checkpoint.borrow_mut()();
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &labeled_suppression_probe(candidate),
@@ -337,6 +377,7 @@ impl RibManager {
                             )
                     })
                     .min_by(|a, b| {
+                        checkpoint.borrow_mut()();
                         labeled_tiebreak_orr(
                             a,
                             b,
@@ -546,7 +587,9 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
+            checkpoint.borrow_mut()();
             let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+            checkpoint.borrow_mut()();
             target.record_eval(&evaluation, best.peer);
             if let Some(trace) = target.trace() {
                 trace.policy_label = export_pol.map(|chain| {
@@ -593,6 +636,7 @@ impl RibManager {
 
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
+                checkpoint.borrow_mut()();
                 let nh = rustbgpd_policy::apply_modifications(
                     std::sync::Arc::make_mut(&mut modified.attributes),
                     &result.modifications,
@@ -600,6 +644,7 @@ impl RibManager {
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
+                checkpoint.borrow_mut()();
             }
             if super::no_advertise_export_suppressed(modified.communities()) {
                 target.gate(
@@ -641,6 +686,7 @@ impl RibManager {
                         },
                     );
                 }
+                checkpoint.borrow_mut()();
                 labeled_announce.push(modified);
             } else if let Some(trace) = target.trace() {
                 trace.staged_next_hop = Some(modified.next_hop);
@@ -659,6 +705,7 @@ impl RibManager {
             // Clean up stale multi-path entries if this identity was
             // previously advertised via Add-Path and is now single-best.
             for &path_id in existing_path_ids {
+                checkpoint.borrow_mut()();
                 if path_id != 0 {
                     labeled_withdraw.push(LabeledRibRouteKey {
                         prefix: *key,

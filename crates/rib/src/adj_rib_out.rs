@@ -55,6 +55,64 @@ pub struct AdjRibOut {
     rtc_routes: HashMap<RtcRibRouteKey, RtcRibRoute>,
 }
 
+pub(crate) fn retire_hash_map<K, V, S>(
+    map: &mut std::collections::HashMap<K, V, S>,
+    checkpoint: &mut impl FnMut(),
+) {
+    let mut entries = map.drain();
+    for entry in entries.by_ref() {
+        checkpoint();
+        drop(entry);
+        checkpoint();
+    }
+    checkpoint();
+    drop(entries);
+    checkpoint();
+}
+
+pub(crate) fn release_hash_map<K, V, S: Default>(
+    map: &mut std::collections::HashMap<K, V, S>,
+    checkpoint: &mut impl FnMut(),
+) {
+    retire_hash_map(map, checkpoint);
+    let retired = std::mem::take(map);
+    checkpoint();
+    drop(retired);
+    checkpoint();
+}
+
+/// Rebuild a route-bearing map before a known batch of inserts so no commit
+/// insert triggers a rehash. Entries move one at a time, keeping ownership
+/// and the map's keys intact.
+pub(crate) fn reserve_hash_map<K: Eq + std::hash::Hash, V>(
+    map: &mut HashMap<K, V>,
+    additional: usize,
+    checkpoint: &mut impl FnMut(),
+) {
+    let required = map
+        .len()
+        .checked_add(additional)
+        .expect("Adj-RIB-Out map exceeds addressable capacity");
+    if map.capacity() >= required {
+        return;
+    }
+
+    let old = std::mem::take(map);
+    let mut replacement = HashMap::with_capacity_and_hasher(required, rustc_hash::FxBuildHasher);
+    let mut entries = old.into_iter();
+    for (key, value) in entries.by_ref() {
+        checkpoint();
+        let previous = replacement.insert(key, value);
+        debug_assert!(previous.is_none(), "moved map entry must be unique");
+        drop(previous);
+        checkpoint();
+    }
+    checkpoint();
+    drop(entries);
+    checkpoint();
+    *map = replacement;
+}
+
 impl AdjRibOut {
     /// Create a new empty Adj-RIB-Out for the given peer.
     #[must_use]
@@ -95,29 +153,74 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised route.
     pub fn insert(&mut self, route: Route) {
+        self.insert_with(route, &mut || {});
+    }
+
+    /// Insert or replace an advertised route with checkpoints around index
+    /// walks and possible allocation edges.
+    pub(crate) fn insert_with(&mut self, route: Route, checkpoint: &mut impl FnMut()) {
         let path_id = route.path_id;
+        checkpoint();
         let ids = self.prefix_path_ids.entry_or_default(route.prefix);
-        if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
-            self.routes.set(*handle, route);
+        checkpoint();
+        let handle = ids.iter().find_map(|(id, handle)| {
+            checkpoint();
+            (*id == path_id).then_some(*handle)
+        });
+        if let Some(handle) = handle {
+            checkpoint();
+            self.routes.set(handle, route);
+            checkpoint();
         } else {
+            checkpoint();
             let handle = self.routes.insert(route);
+            checkpoint();
             ids.push((path_id, handle));
+            checkpoint();
         }
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
-            return false;
+        self.withdraw_with(prefix, path_id, &mut || {})
+    }
+
+    /// Withdraw a route with checkpoints around index walks and retired values.
+    pub(crate) fn withdraw_with(
+        &mut self,
+        prefix: &Prefix,
+        path_id: u32,
+        checkpoint: &mut impl FnMut(),
+    ) -> bool {
+        let (handle, remove_prefix) = {
+            let Some(ids) = self.prefix_path_ids.get_mut(prefix) else {
+                return false;
+            };
+            let pos = ids.iter().position(|(id, _)| {
+                checkpoint();
+                *id == path_id
+            });
+            let Some(pos) = pos else {
+                return false;
+            };
+            checkpoint();
+            let (_, handle) = ids.swap_remove(pos);
+            checkpoint();
+            (handle, ids.is_empty())
         };
-        let Some(pos) = ids.iter().position(|(id, _)| *id == path_id) else {
-            return false;
-        };
-        let (_, handle) = ids.swap_remove(pos);
-        if ids.is_empty() {
-            self.prefix_path_ids.remove(prefix);
+        if remove_prefix {
+            checkpoint();
+            let retired = self.prefix_path_ids.remove(prefix);
+            debug_assert!(retired.is_some(), "withdrawn prefix must still be present");
+            drop(retired);
+            checkpoint();
         }
-        self.routes.remove(handle).is_some()
+        checkpoint();
+        let retired = self.routes.remove(handle);
+        let removed = retired.is_some();
+        drop(retired);
+        checkpoint();
+        removed
     }
 
     /// Look up a route by prefix and path ID.
@@ -209,6 +312,22 @@ impl AdjRibOut {
         self.prefix_path_ids = FamilyPrefixMap::default();
     }
 
+    /// Retire and release unicast state with checkpoints around every route,
+    /// index entry, and final backing allocation.
+    pub(crate) fn release_unicast_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.routes.release_with(checkpoint);
+        self.prefix_path_ids.release_with(checkpoint);
+    }
+
+    /// Reserve the unicast route slab for a known outbound batch.
+    pub(crate) fn reserve_unicast_with(
+        &mut self,
+        additional: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.routes.reserve_with(additional, checkpoint);
+    }
+
     /// Release unused unicast route-slab tail capacity while preserving
     /// logical slot indices, route handles, occupancy, the free list, the
     /// prefix index, and every non-unicast family.
@@ -232,6 +351,18 @@ impl AdjRibOut {
         self.vpn_key_path_ids = HashMap::default();
     }
 
+    /// Retire and release VPN state while leaving every other family intact.
+    pub(crate) fn release_vpn_with(&mut self, checkpoint: &mut impl FnMut()) {
+        release_hash_map(&mut self.vpn_routes, checkpoint);
+        release_hash_map(&mut self.vpn_key_path_ids, checkpoint);
+    }
+
+    /// Reserve both VPN advertised-route indexes for a known outbound batch.
+    pub(crate) fn reserve_vpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        reserve_hash_map(&mut self.vpn_routes, additional, checkpoint);
+        reserve_hash_map(&mut self.vpn_key_path_ids, additional, checkpoint);
+    }
+
     #[cfg(test)]
     pub(crate) fn bench_vpn_capacities(&self) -> (usize, usize) {
         (self.vpn_routes.capacity(), self.vpn_key_path_ids.capacity())
@@ -252,6 +383,20 @@ impl AdjRibOut {
         self.rtc_routes.clear();
     }
 
+    /// Retire every advertised family while retaining its backing allocations.
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.routes.retire_with(checkpoint);
+        self.prefix_path_ids.retire_with(checkpoint);
+        retire_hash_map(&mut self.flowspec_routes, checkpoint);
+        retire_hash_map(&mut self.evpn_routes, checkpoint);
+        retire_hash_map(&mut self.bgpls_routes, checkpoint);
+        retire_hash_map(&mut self.vpn_routes, checkpoint);
+        retire_hash_map(&mut self.vpn_key_path_ids, checkpoint);
+        retire_hash_map(&mut self.labeled_routes, checkpoint);
+        retire_hash_map(&mut self.labeled_key_path_ids, checkpoint);
+        retire_hash_map(&mut self.rtc_routes, checkpoint);
+    }
+
     /// Return the number of advertised routes.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -266,6 +411,18 @@ impl AdjRibOut {
     #[must_use]
     pub fn bench_route_capacity(&self) -> usize {
         self.routes.capacity()
+    }
+
+    /// Return live unicast routes, raw slab slots (including holes), and
+    /// slab capacity for replacement-shape instrumentation.
+    #[cfg(feature = "bench-internals")]
+    #[must_use]
+    pub(crate) fn bench_unicast_storage_shape(&self) -> (usize, usize, usize) {
+        (
+            self.routes.len(),
+            self.routes.slot_count(),
+            self.routes.capacity(),
+        )
     }
 
     /// Return the number of exact prefixes in the secondary unicast index.
@@ -290,6 +447,15 @@ impl AdjRibOut {
     }
 
     // --- FlowSpec methods ---
+
+    /// Reserve the `FlowSpec` advertised-route map for a known outbound batch.
+    pub(crate) fn reserve_flowspec_with(
+        &mut self,
+        additional: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        reserve_hash_map(&mut self.flowspec_routes, additional, checkpoint);
+    }
 
     /// Insert or replace an advertised `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
@@ -325,6 +491,11 @@ impl AdjRibOut {
 
     // --- EVPN methods (RFC 7432) ---
 
+    /// Reserve the EVPN advertised-route map for a known outbound batch.
+    pub(crate) fn reserve_evpn_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        reserve_hash_map(&mut self.evpn_routes, additional, checkpoint);
+    }
+
     /// Insert or replace an advertised EVPN route.
     pub fn insert_evpn(&mut self, route: EvpnRibRoute) {
         self.evpn_routes.insert(route.key(), route);
@@ -353,6 +524,11 @@ impl AdjRibOut {
     }
 
     // --- BGP-LS methods (ADR-0077 outbound reflection substrate) ---
+
+    /// Reserve the BGP-LS advertised-route map for a known outbound batch.
+    pub(crate) fn reserve_bgpls_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        reserve_hash_map(&mut self.bgpls_routes, additional, checkpoint);
+    }
 
     /// Insert or replace an advertised BGP-LS route.
     pub fn insert_bgpls(&mut self, route: BgpLsRibRoute) {
@@ -434,6 +610,16 @@ impl AdjRibOut {
 
     // --- Labeled-unicast methods (ADR-0077 outbound reflection substrate) ---
 
+    /// Reserve both labeled-unicast advertised-route indexes for a known batch.
+    pub(crate) fn reserve_labeled_with(
+        &mut self,
+        additional: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        reserve_hash_map(&mut self.labeled_routes, additional, checkpoint);
+        reserve_hash_map(&mut self.labeled_key_path_ids, additional, checkpoint);
+    }
+
     /// Insert or replace an advertised labeled route.
     pub fn insert_labeled(&mut self, route: LabeledRibRoute) {
         let key = route.key();
@@ -485,6 +671,11 @@ impl AdjRibOut {
     }
 
     // --- RT-Constrain methods (RFC 4684 outbound reflection substrate) ---
+
+    /// Reserve the RT-Constrain advertised-route map for a known outbound batch.
+    pub(crate) fn reserve_rtc_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        reserve_hash_map(&mut self.rtc_routes, additional, checkpoint);
+    }
 
     /// Insert or replace an advertised RTC route.
     pub fn insert_rtc(&mut self, route: RtcRibRoute) {
@@ -814,6 +1005,29 @@ mod tests {
     }
 
     #[test]
+    fn checkpointed_unicast_mutations_visit_path_ids() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let prefix = prefix_a();
+        let mut checkpoints = 0;
+
+        rib.insert_with(make_route(prefix, 1), &mut || checkpoints += 1);
+        rib.insert_with(make_route(prefix, 2), &mut || checkpoints += 1);
+
+        assert!(checkpoints >= 11);
+        assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [1, 2]);
+
+        checkpoints = 0;
+        assert!(rib.withdraw_with(&prefix, 2, &mut || checkpoints += 1));
+        assert!(checkpoints >= 6);
+        assert_eq!(rib.path_ids_for_prefix(&prefix).as_slice(), [1]);
+
+        checkpoints = 0;
+        assert!(rib.withdraw_with(&prefix, 1, &mut || checkpoints += 1));
+        assert!(checkpoints >= 7);
+        assert!(rib.path_ids_for_prefix(&prefix).is_empty());
+    }
+
+    #[test]
     fn index_handles_duplicate_insert() {
         let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let p = prefix_a();
@@ -891,6 +1105,24 @@ mod tests {
     }
 
     #[test]
+    fn release_unicast_with_checkpoints_keeps_other_families() {
+        let mut rib = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::LOCALHOST), 8);
+        rib.insert(make_route(prefix_a(), 1));
+        rib.insert(make_route(prefix_a(), 2));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(19), 1));
+        let mut checkpoints = 0;
+
+        rib.release_unicast_with(&mut || checkpoints += 1);
+
+        assert!(checkpoints > 0);
+        assert_eq!(rib.len(), 0);
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+        assert_eq!(rib.vpn_len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
     fn clear_vpn_keeps_capacity_and_other_families() {
         let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
         for octet in 1..=64 {
@@ -925,6 +1157,51 @@ mod tests {
         assert_eq!(rib.bench_vpn_capacities(), (0, 0));
         assert!(rib.get(&prefix_a(), 0).is_some());
         assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn release_vpn_with_checkpoints_keeps_other_families() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 2, 0], 24, 100), 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(20), 1));
+        let mut checkpoints = 0;
+
+        rib.release_vpn_with(&mut || checkpoints += 1);
+
+        assert!(checkpoints > 0);
+        assert_eq!(rib.vpn_len(), 0);
+        assert!(
+            rib.vpn_path_ids_for_key(&vpn_nlri([10, 0, 1, 0], 24, 100).key())
+                .is_empty()
+        );
+        assert_eq!(rib.len(), 1);
+        assert_eq!(rib.bgpls_len(), 1);
+    }
+
+    #[test]
+    fn retire_with_checkpoints_every_populated_family() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert_flowspec(crate::test_support::make_flowspec_route(Ipv4Addr::new(
+            10, 0, 0, 1,
+        )));
+        rib.insert_vpn(make_vpn_route(vpn_nlri([10, 0, 1, 0], 24, 100), 1));
+        rib.insert_labeled(make_labeled_route([10, 0, 2, 0], 24, 0, 1));
+        rib.insert_bgpls(make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(21), 1));
+        rib.insert_rtc(make_rtc_route(101, 1));
+        let mut checkpoints = 0;
+
+        rib.retire_with(&mut || checkpoints += 1);
+
+        assert!(checkpoints >= 34, "every populated family is checkpointed");
+        assert_eq!(rib.len(), 0);
+        assert_eq!(rib.flowspec_len(), 0);
+        assert_eq!(rib.vpn_len(), 0);
+        assert_eq!(rib.labeled_len(), 0);
+        assert_eq!(rib.bgpls_len(), 0);
+        assert_eq!(rib.rtc_len(), 0);
     }
 
     #[test]

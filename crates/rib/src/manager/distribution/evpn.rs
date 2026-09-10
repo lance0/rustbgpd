@@ -157,7 +157,6 @@ impl RibManager {
     #[expect(
         clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "EVPN staging mirrors unicast distribution context for policy parity"
     )]
     pub(in crate::manager) fn stage_evpn_routes(
@@ -177,12 +176,57 @@ impl RibManager {
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
     ) {
+        Self::stage_evpn_routes_with_checkpoint(
+            loc_rib,
+            rib_out,
+            peer_is_rr_client,
+            keys,
+            target,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            evpn_announce,
+            evpn_withdraw,
+            force,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "EVPN staging mirrors unicast distribution context for policy parity"
+    )]
+    pub(in crate::manager) fn stage_evpn_routes_with_checkpoint(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        target: &mut super::ExportTarget<'_>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
+        evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
+        force: bool,
+        checkpoint: &mut impl FnMut(),
+    ) {
         let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
 
         for key in keys {
+            checkpoint();
             if !peer_supports_evpn {
                 target.gate(
                     "family",
@@ -429,7 +473,9 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
+            checkpoint();
             let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+            checkpoint();
             target.record_eval(&evaluation, best.peer);
             if let Some(trace) = target.trace() {
                 trace.policy_label = export_pol.map(|chain| {
@@ -480,10 +526,12 @@ impl RibManager {
             // next-hop). Skip the deep attribute clone when nothing changes.
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
+                checkpoint();
                 let nh = rustbgpd_policy::apply_modifications(
                     std::sync::Arc::make_mut(&mut modified.attributes),
                     &result.modifications,
                 );
+                checkpoint();
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
@@ -533,7 +581,9 @@ impl RibManager {
             if identical {
                 continue;
             }
+            checkpoint();
             evpn_announce.push(modified);
+            checkpoint();
         }
     }
 

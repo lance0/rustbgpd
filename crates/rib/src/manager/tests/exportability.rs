@@ -88,10 +88,19 @@ impl ExactExportSnapshot for MockExactExportSnapshot {
         &self,
         candidates: &[ExactExportCandidate<'_>],
     ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        self.probe_announcements_with_checkpoint(candidates, &mut || {})
+    }
+
+    fn probe_announcements_with_checkpoint(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
         self.probe_batches.fetch_add(1, Ordering::Relaxed);
         candidates
             .iter()
             .copied()
+            .inspect(|_| checkpoint())
             .map(|candidate| self.probe_announcement(candidate))
             .collect()
     }
