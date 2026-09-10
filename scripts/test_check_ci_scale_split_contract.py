@@ -129,6 +129,11 @@ class ScaleSplitContractTests(unittest.TestCase):
                 "cargo build --locked -p rs-config-render",
                 "true",
             ),
+            (
+                WORKFLOW,
+                "cargo build --manifest-path bench/scale/Cargo.toml --locked -p reloadstall",
+                "true",
+            ),
         )
         for workflow, old, new in cases:
             with self.subTest(workflow=workflow, seam=old):

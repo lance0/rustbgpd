@@ -829,6 +829,9 @@ run_cell() {
     final_barrier="$run/final-evidence"
     [ ! -e "$final_barrier" ] || return 1
     local -a henv=(RELOADSTALL_EVIDENCE_DIR="$final_barrier")
+    if [ -z "$reload_cmd" ] && [ "$RELOADS" -gt 0 ]; then
+        henv+=(RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    fi
     [ -z "$dataset_stage_cmd" ] || henv+=(RELOADSTALL_STAGE_CMD="$dataset_stage_cmd")
     # The generator emits overlap.tsv only at OVERLAP_FRACTION > 0; every
     # cell's stubs must announce the same second-announcer allocation.

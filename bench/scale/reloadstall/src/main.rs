@@ -39,6 +39,11 @@
 //!   timestamp, run one `sh -c` staging command. The selected generation is
 //!   exported as `RELOADSTALL_STAGE_GENERATION=a|b`. A nonzero exit fails
 //!   before SIGHUP, so native trigger timing remains unchanged.
+//! - `RELOADSTALL_RELOAD_METRICS_ADDR`: loopback `SocketAddr` for the native
+//!   daemon's metrics endpoint (default `127.0.0.1:9179`). Native reloads require
+//!   one terminal successful SIGHUP outcome
+//!   as well as receiver completion before publishing a reload row or advancing
+//!   A/B. Rejected, partial, ignored, failed, or missing evidence fails the run.
 //! - `--flapstorm K` (anywhere in argv): alternative mode replacing the
 //!   reload loop. After convergence + the control window, close the first
 //!   K stub sockets simultaneously, timestamp every survivor's receipt of
@@ -47,7 +52,8 @@
 //!   3 rounds, per-round percentiles + `flapstorm_csv` lines.
 //!
 //! Soak extensions (route-server flagship soak) — all additive env vars;
-//! every one absent reproduces the frozen one-shot contract exactly:
+//! their defaults retain the one-shot shape; native reloads also require
+//! terminal daemon settlement:
 //! - `RELOADSTALL_CYCLE_QUIESCE_SECS`: inter-reload quiesce (default 20).
 //!   The 24 h soak sets this to its reload interval so the existing
 //!   reload loop self-paces for the whole window.
@@ -251,10 +257,7 @@ fn metric_value(body: &str, name: &str) -> Result<u64, String> {
     found.ok_or_else(|| format!("missing {name}"))
 }
 
-async fn fetch_notification_depth(
-    addr: SocketAddr,
-    deadline: Instant,
-) -> Result<NotificationDepth, String> {
+async fn fetch_metrics(addr: SocketAddr, deadline: Instant) -> Result<String, String> {
     let work = async {
         let mut stream = TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
         stream
@@ -301,16 +304,68 @@ async fn fetch_notification_depth(
         if length != Some(body.len()) {
             return Err("truncated or overlong metrics body".into());
         }
-        let current = metric_value(body, "bgp_session_notification_outstanding")?;
-        let high = metric_value(body, "bgp_session_notification_outstanding_high_watermark")?;
-        if current > high {
-            return Err("current exceeds high-water mark".into());
-        }
-        Ok(NotificationDepth { current, high })
+        Ok(body.to_owned())
     };
     tokio::time::timeout_at(deadline.into(), work)
         .await
         .map_err(|_| "metrics checkpoint exceeded 5 seconds".to_string())?
+}
+
+async fn fetch_notification_depth(
+    addr: SocketAddr,
+    deadline: Instant,
+) -> Result<NotificationDepth, String> {
+    let body = fetch_metrics(addr, deadline).await?;
+    let current = metric_value(&body, "bgp_session_notification_outstanding")?;
+    let high = metric_value(&body, "bgp_session_notification_outstanding_high_watermark")?;
+    if current > high {
+        return Err("current exceeds high-water mark".into());
+    }
+    Ok(NotificationDepth { current, high })
+}
+
+const RELOAD_OUTCOMES: [&str; 5] = [
+    "complete",
+    "known_partial",
+    "rejected_no_effect",
+    "ignored_in_flight",
+    "task_failed",
+];
+
+fn reload_outcomes(body: &str) -> Result<[u64; 5], String> {
+    let mut outcomes = [0; 5];
+    for (index, outcome) in RELOAD_OUTCOMES.iter().enumerate() {
+        outcomes[index] = metric_value(
+            body,
+            &format!("bgp_sighup_reload_outcomes_total{{outcome=\"{outcome}\"}}"),
+        )?;
+    }
+    Ok(outcomes)
+}
+
+fn reload_applied(before: [u64; 5], after: [u64; 5]) -> Result<bool, String> {
+    for (index, outcome) in RELOAD_OUTCOMES.iter().enumerate() {
+        let delta = after[index]
+            .checked_sub(before[index])
+            .ok_or_else(|| format!("SIGHUP outcome counter decreased: {outcome}"))?;
+        if index != 0 && delta != 0 {
+            return Err(format!("daemon SIGHUP outcome {outcome} (+{delta})"));
+        }
+        if index == 0 && delta > 1 {
+            return Err("multiple SIGHUP completions for one trigger".into());
+        }
+    }
+    Ok(after[0] > before[0])
+}
+
+async fn fetch_reload_outcomes(addr: SocketAddr, reload: u32) -> [u64; 5] {
+    let result = fetch_metrics(addr, Instant::now() + METRICS_DEADLINE)
+        .await
+        .and_then(|body| reload_outcomes(&body));
+    result.unwrap_or_else(|error| {
+        eprintln!("FAIL: reload {reload} daemon settlement evidence: {error}");
+        std::process::exit(1)
+    })
 }
 
 async fn notification_checkpoint(
@@ -2687,6 +2742,25 @@ fn main() {
     let overlap_file = std::env::var_os("RELOADSTALL_OVERLAP_FILE").map(PathBuf::from);
     let received_view_file = std::env::var_os("RELOADSTALL_RECEIVED_VIEW_FILE").map(PathBuf::from);
     let stage_cmd = std::env::var("RELOADSTALL_STAGE_CMD").ok();
+    let native_sighup =
+        reloads > 0 && reload_cmd.is_none() && flapstorm.is_none() && !convergence_only;
+    let reload_metrics_addr = std::env::var("RELOADSTALL_RELOAD_METRICS_ADDR")
+        .ok()
+        .or_else(|| native_sighup.then(|| "127.0.0.1:9179".to_owned()))
+        .map(|value| value.parse::<SocketAddr>())
+        .transpose()
+        .unwrap_or_else(|_| {
+            eprintln!(
+                "RELOADSTALL_RELOAD_METRICS_ADDR must be a loopback SocketAddr with nonzero port"
+            );
+            std::process::exit(2);
+        });
+    if reload_metrics_addr.is_some_and(|addr| !addr.ip().is_loopback() || addr.port() == 0)
+        || reload_metrics_addr.is_some() && !native_sighup
+    {
+        eprintln!("RELOADSTALL_RELOAD_METRICS_ADDR requires native SIGHUP reloads and a loopback SocketAddr with nonzero port");
+        std::process::exit(2);
+    }
     let notification_metrics_addr = std::env::var("RELOADSTALL_SESSION_NOTIFICATION_METRICS_ADDR")
         .ok()
         .map(|value| value.parse::<SocketAddr>())
@@ -3341,6 +3415,13 @@ fn main() {
 
         // --- Reload loop. ---
         for r in 1..=reloads {
+            // Snapshot before staging or timing the signal. Wire delivery may
+            // finish before an apply acknowledgement fails and compensation
+            // restores the prior generation; it is not a commit receipt.
+            let reload_before = match reload_metrics_addr {
+                Some(addr) => Some(fetch_reload_outcomes(addr, r).await),
+                None => None,
+            };
             let next = if r % 2 == 1 { &policy_b } else { &policy_a };
             let expected_community = if r % 2 == 1 {
                 COMMUNITY_GEN_B
@@ -3462,11 +3543,30 @@ fn main() {
             let mut last_unique = 0u64;
             let mut last_progress = Instant::now();
             let mut ticks = 0u32;
+            let mut applied = reload_before.is_none();
+            let mut delivery_reported = false;
+            let mut next_settlement_check = Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
+                if !applied && Instant::now() >= next_settlement_check {
+                    let after = fetch_reload_outcomes(reload_metrics_addr.unwrap(), r).await;
+                    applied = reload_applied(reload_before.unwrap(), after)
+                        .unwrap_or_else(|error| {
+                            eprintln!("FAIL: reload {r} {error}; see daemon log for rejection details");
+                            std::process::exit(1)
+                        });
+                    if applied {
+                        println!("reload {r} daemon_applied complete_before={} complete_after={}", reload_before.unwrap()[0], after[0]);
+                    }
+                    next_settlement_check = Instant::now() + Duration::from_secs(1);
+                }
                 let done =
                     (0..changed_peers as usize).all(|i| completion_us(&ctx, i).is_some());
-                if done {
+                if done && !applied && !delivery_reported {
+                    println!("reload {r} receiver_barriers_complete awaiting_daemon_settlement");
+                    delivery_reported = true;
+                }
+                if done && applied {
                     break;
                 }
                 ticks += 1;
@@ -3492,6 +3592,10 @@ fn main() {
                     last_unique = sum;
                     last_progress = Instant::now();
                 } else if last_progress.elapsed() > window {
+                    if done && !applied {
+                        eprintln!("FAIL: reload {r} receiver delivery completed but daemon SIGHUP settlement is missing");
+                        std::process::exit(1);
+                    }
                     println!(
                         "reload {r} STALLED: no re-advertisement progress for {}s",
                         window.as_secs()
@@ -4166,6 +4270,43 @@ mod tests {
         assert!(metric_value(&format!("{n} 1\n{n} 2\n"), n).is_err());
         for value in ["-1", "1.0", "1e2", "NaN", "1 2"] {
             assert!(metric_value(&format!("{n} {value}\n"), n).is_err());
+        }
+    }
+
+    #[test]
+    fn reload_settlement_requires_one_success_and_rejects_compensation() {
+        let before = [24, 0, 0, 0, 0];
+        // Receiver generation markers may already be complete here. Until
+        // the owning daemon operation finishes, completion remains false.
+        assert_eq!(reload_applied(before, before), Ok(false));
+        assert_eq!(reload_applied(before, [25, 0, 0, 0, 0]), Ok(true));
+        for index in 1..5 {
+            let mut after = before;
+            after[index] = 1;
+            let error = reload_applied(before, after).unwrap_err();
+            assert!(error.contains(RELOAD_OUTCOMES[index]), "{error}");
+            // An unexpected success cannot hide a rejection/partial result.
+            after[0] += 1;
+            assert!(reload_applied(before, after).is_err());
+        }
+        assert!(reload_applied(before, [23, 0, 0, 0, 0]).is_err());
+        assert!(reload_applied(before, [26, 0, 0, 0, 0]).is_err());
+        assert!(reload_applied([24, 1, 0, 0, 0], before).is_err());
+    }
+
+    #[test]
+    fn reload_outcome_evidence_rejects_missing_duplicate_and_invalid_samples() {
+        let body: String = RELOAD_OUTCOMES
+            .iter()
+            .map(|outcome| format!("bgp_sighup_reload_outcomes_total{{outcome=\"{outcome}\"}} 0\n"))
+            .collect();
+        assert_eq!(reload_outcomes(&body), Ok([0; 5]));
+        assert!(reload_outcomes("").is_err());
+        let first = body.lines().next().unwrap();
+        assert!(reload_outcomes(&body.replacen(first, "", 1)).is_err());
+        assert!(reload_outcomes(&format!("{body}{first}\n")).is_err());
+        for value in ["-1", "NaN", "0.5", "18446744073709551616", "1 123"] {
+            assert!(reload_outcomes(&body.replacen(" 0\n", &format!(" {value}\n"), 1)).is_err());
         }
     }
 

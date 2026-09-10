@@ -32,6 +32,23 @@ reload is rejected before its CSV row if any session is down, post-completion
 stable-marker evidence is missing, or a daemon UPDATE fails to decode. Each
 valid reload emits a `reloadstall_csv` record for durable raw receipts.
 
+Native SIGHUP reloads also require a terminal daemon success from
+`bgp_sighup_reload_outcomes_total`. Receiver delivery alone can precede a
+failed apply acknowledgement and rollback. The driver snapshots the counters
+before staging and timing each signal, then checks them while waiting for
+receiver completion. A rejected, partial, ignored, or failed outcome aborts
+that reload before its CSV row and before the next A/B policy copy. Missing,
+decreasing, duplicate, or malformed evidence also fails closed.
+
+The metrics address defaults to `127.0.0.1:9179`, matching the scenario
+generators; set `RELOADSTALL_RELOAD_METRICS_ADDR` for another loopback address.
+Scrapes have a five-second deadline and run at most once per second while
+settlement is pending. This is additional measurement load. Receiver timings
+retain their signal/UPDATE timestamps; the `daemon_applied` marker records the
+separate settlement check. Older daemons without these counters cannot supply
+this proof. Command-driven peer implementations keep their command exit-status
+and receiver checks; these are not rustbgpd SIGHUP settlement evidence.
+
 Reload, flapstorm, and `--convergence-only` runs gate initial convergence on
 exact unique-prefix bitmap coverage at every observer: the full table minus its
 own slice. Duplicate, own-slice, and out-of-range announcements cannot advance

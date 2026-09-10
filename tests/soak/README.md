@@ -984,13 +984,19 @@ the engine's steady churn running throughout. Two serialized injections:
 
 - a real SIGHUP policy-file reload every `RELOAD_INTERVAL_SEC`
   (default 1800 s), each verified by the engine's generation-marker
-  completion barriers;
+  completion barriers and terminal daemon SIGHUP outcome;
 - a max-prefix trip/timed-restart cycle every `TRIP_INTERVAL_SEC`
   (default 14 400 s) on the designated member (stub 0), with the
   runner asserting the daemon-side evidence chain per cycle:
   `bgp_max_prefix_exceeded_total` reaches exactly N → hold-down
   countdown visible in `rbgp neighbor -j` → re-Established within
   `max_prefix_restart_seconds` + 60 s → headroom sane.
+
+The reload engine checks `bgp_sighup_reload_outcomes_total` before recording
+completion or advancing its A/B alternation. A rejected generation fails the
+current cycle explicitly, even if receivers observed the candidate before the
+daemon restored the prior generation. Its bounded metrics checks run at most
+once per second while a reload is unsettled, in addition to the load below.
 
 After the engine's convergence barrier and before the measured window, the
 runner also starts an independent management-plane load process. It scrapes

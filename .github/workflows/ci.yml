@@ -433,6 +433,11 @@ jobs:
           # renderer, so make that prerequisite explicit on a clean runner.
           cargo build --locked -p rs-config-render
           cargo test --locked --test reloadstall_scenario_emitted_check
+          cargo build --manifest-path bench/scale/Cargo.toml --locked -p reloadstall
+          python3 bench/tests/test-reloadstall-settlement.py \
+            --daemon target/debug/rustbgpd \
+            --harness bench/scale/target/debug/reloadstall \
+            --artifact-dir "$RUNNER_TEMP/reloadstall-settlement"
           python3 bench/scale/irrreload/verify-receipt.py self-test
           python3 bench/scale/irrreload/verify-receipt.py authoritative-publication \
             --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08
@@ -512,6 +517,12 @@ jobs:
             cd docs/perf/artifacts/enhanced-route-refresh-2026-07
             sha256sum -c SHA256SUMS
           )
+      - name: Upload reload settlement regression logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reloadstall-settlement
+          path: ${{ runner.temp }}/reloadstall-settlement
   check:
     name: check
     runs-on: ubuntu-latest

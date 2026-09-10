@@ -434,7 +434,11 @@ run_cell() {
     [ -n "$FLAPSTORM" ] && hargs+=(--flapstorm "$FLAPSTORM")
 
     # Harness in the background so the RSS guard can abort the cell.
-    "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
+    local settlement_env=()
+    if [ "$cell" = rustbgpd ] && [ -z "$FLAPSTORM" ] && [ "$RELOADS" -gt 0 ]; then
+        settlement_env+=(RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
+    fi
+    env "${settlement_env[@]}" "$HARNESS" "${hargs[@]}" >"$cdir/reloadstall.log" 2>&1 &
     local hpid=$!
     local rc=""
     while kill -0 "$hpid" 2>/dev/null; do

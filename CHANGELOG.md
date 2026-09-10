@@ -253,6 +253,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cleanup. Ordinary queries remain fenced, and readiness replies retain the
   exact Loc-RIB count and the existing transition-age limit.
 
+- Native SIGHUP measurement and flagship soak runners now require terminal
+  daemon success as well as receiver delivery before recording a reload as
+  complete. Rejection or rollback fails that cycle before A/B alternation can
+  turn it into a misleading later re-advertisement stall.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed
