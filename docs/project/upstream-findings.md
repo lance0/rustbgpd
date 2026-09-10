@@ -186,8 +186,10 @@ VXLAN underlay.
   not exercised.
 - **Workaround:** `tests/interop/configs/frr-bgpd-m110-pe2.conf` carries
   `no advertise-pip`, which selects the IPv6 originator IP and avoids the path
-  entirely. This is the current workaround, to revisit when the image pin
-  moves past a release containing the fix.
+  entirely. It is retained while the pin is 10.7.1, where the defect
+  reproduces. Revisit when the pin advances to a release containing the fix,
+  and validate the default PIP path with the fast-peer reproduction and
+  unchanged M110 assertions before removing the line.
 - **Severity:** correctness — the wrong next hop is advertised to peers and
   latches, so a fabric can carry an unreachable next hop until the session or
   interface is bounced.
