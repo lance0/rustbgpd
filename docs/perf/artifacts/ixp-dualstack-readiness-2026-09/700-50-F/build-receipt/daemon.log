@@ -1,0 +1,6 @@
+   Compiling rustbgpd-rib v0.69.0 (/tmp/readiness-source/crates/rib)
+   Compiling rustbgpd-transport v0.69.0 (/tmp/readiness-source/crates/transport)
+   Compiling rustbgpd-mrt v0.69.0 (/tmp/readiness-source/crates/mrt)
+   Compiling rustbgpd-api v0.69.0 (/tmp/readiness-source/crates/api)
+   Compiling rustbgpd v0.69.0 (/tmp/readiness-source)
+    Finished `release` profile [optimized] target(s) in 4m 50s

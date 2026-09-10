@@ -1,0 +1,4048 @@
+{
+  "id": "diagnostic-700-50-F",
+  "measured_commit": "d6d8a9e0dc43b79384343163efa1d9891bc2c776",
+  "measured_tree": "8888f84f2097e6d3daf84b471e973a2016d3b9cc",
+  "merged_commit_with_identical_tree": "8585ce86adff37ca277a450fc77d4d01e82ccd4e",
+  "source_dirty": false,
+  "build_mode": "diagnostic",
+  "binaries_sha256": {
+    "target/release/rustbgpd": "e61231920623fffd61f55f13267d4f002dcf2c535cde590f77ebf6c2776330d8",
+    "target/release/rbgp": "668bb6da048bda3d87d652ba81e50927394e43433c5f4122fd4ab18cc7cf4a61",
+    "bench/scale/target/release/reloadstall": "67ed73d48c3f261b96872de1f67ebacdac488bdd74a5b4d123d72dc007ebf7dc"
+  },
+  "started_at": "2026-09-10T00:06:46Z",
+  "finished_at": "2026-09-10T00:14:34Z",
+  "inputs": {
+    "N_PEERS": "700",
+    "TOTAL_PREFIXES": "400400",
+    "PORT": "1790",
+    "RELOADS": "4",
+    "CONTROL_SECS": "30",
+    "CHANGED_PEERS": "600",
+    "FLAPSTORM": "",
+    "BIRD_THREADS": "8",
+    "PROBE_PREFIXES": "20.0.0.0/24 3001::/48",
+    "RELOADSTALL_FILTER_COUNT": "32",
+    "RELOADSTALL_DUALSTACK": "1",
+    "RELOADSTALL_IPV4_PREFIXES": "200200",
+    "GEN_DUALSTACK": "1",
+    "GEN_FILTER_COUNT": "32",
+    "RELOADSTALL_CYCLE_QUIESCE_SECS": "20"
+  },
+  "gate_sha256": "9ec25e91d1a2ed9a2a8c55d7a251cff4b3e31214e7e753a4ebf3940dcee16543",
+  "gate_version": 2,
+  "gate_pass": false,
+  "gate_errors": [
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed",
+    "unclassified/active WARN: writer: write/flush failed"
+  ],
+  "driver_exit": 0,
+  "gate_exit": 1,
+  "provenance_exit": 0,
+  "harness_status": "pass",
+  "daemon_wait_exit_recorded": false,
+  "health": {
+    "count": 2023,
+    "failures": 0,
+    "p95_wall_ms": 13.1,
+    "max_wall_ms": 1068.2,
+    "rib_200ms_timeout_messages": 0,
+    "sample_scope": "retained_csv_rows"
+  },
+  "rib_queries": {
+    "count": 912,
+    "failures": 0,
+    "p95_wall_ms": 18.2,
+    "max_wall_ms": 1131.7,
+    "sample_scope": "retained_csv_rows"
+  },
+  "receiver_reloads": [
+    {
+      "reload": 1,
+      "peers_total": 700,
+      "peers_changed": 600,
+      "prefixes_total": 400400,
+      "ipv4_prefixes": 200200,
+      "ipv6_prefixes": 200200,
+      "generation": "b",
+      "filter_count": 32,
+      "v4_completion_p50_s": 2.939576,
+      "v4_completion_p95_s": 3.335432,
+      "v4_completion_max_s": 3.353813,
+      "v6_completion_p50_s": 2.939592,
+      "v6_completion_p95_s": 3.335438,
+      "v6_completion_max_s": 3.353816,
+      "v4_maxgap_p50_ms": 1128.383,
+      "v4_maxgap_p95_ms": 1328.246,
+      "v4_maxgap_max_ms": 1517.251,
+      "v6_maxgap_p50_ms": 1126.311,
+      "v6_maxgap_p95_ms": 1326.123,
+      "v6_maxgap_max_ms": 1515.259,
+      "v4_first_generation_update_p50_ms": 2345.686,
+      "v4_first_generation_update_p95_ms": 2546.216,
+      "v4_first_generation_update_max_ms": 2734.636,
+      "v6_first_generation_update_p50_ms": 2345.702,
+      "v6_first_generation_update_p95_ms": 2546.225,
+      "v6_first_generation_update_max_ms": 2734.642,
+      "v4_filtered_withdrawn": 19168,
+      "v4_filtered_expected": 19168,
+      "v6_filtered_withdrawn": 19168,
+      "v6_filtered_expected": 19168,
+      "filtered_leaked": 0,
+      "bystander_withdrawn": 0,
+      "stable_withdrawn": 0,
+      "duplicate_withdrawn": 0,
+      "stable_marker_peers_v4": 100,
+      "stable_marker_peers_v6": 100,
+      "sessions_up": 700,
+      "parse_errors": 0
+    },
+    {
+      "reload": 2,
+      "peers_total": 700,
+      "peers_changed": 600,
+      "prefixes_total": 400400,
+      "ipv4_prefixes": 200200,
+      "ipv6_prefixes": 200200,
+      "generation": "a",
+      "filter_count": 32,
+      "v4_completion_p50_s": 3.125656,
+      "v4_completion_p95_s": 3.522616,
+      "v4_completion_max_s": 3.569287,
+      "v6_completion_p50_s": 3.125668,
+      "v6_completion_p95_s": 3.522621,
+      "v6_completion_max_s": 3.569292,
+      "v4_maxgap_p50_ms": 1151.4,
+      "v4_maxgap_p95_ms": 2011.089,
+      "v4_maxgap_max_ms": 2067.945,
+      "v6_maxgap_p50_ms": 1147.961,
+      "v6_maxgap_p95_ms": 2007.159,
+      "v6_maxgap_max_ms": 2064.296,
+      "v4_first_generation_update_p50_ms": 2613.903,
+      "v4_first_generation_update_p95_ms": 3471.809,
+      "v4_first_generation_update_max_ms": 3530.044,
+      "v6_first_generation_update_p50_ms": 2613.891,
+      "v6_first_generation_update_p95_ms": 3471.803,
+      "v6_first_generation_update_max_ms": 3530.036,
+      "v4_filtered_withdrawn": 0,
+      "v4_filtered_expected": 0,
+      "v6_filtered_withdrawn": 0,
+      "v6_filtered_expected": 0,
+      "filtered_leaked": 0,
+      "bystander_withdrawn": 0,
+      "stable_withdrawn": 0,
+      "duplicate_withdrawn": 0,
+      "stable_marker_peers_v4": 100,
+      "stable_marker_peers_v6": 100,
+      "sessions_up": 700,
+      "parse_errors": 0
+    },
+    {
+      "reload": 3,
+      "peers_total": 700,
+      "peers_changed": 600,
+      "prefixes_total": 400400,
+      "ipv4_prefixes": 200200,
+      "ipv6_prefixes": 200200,
+      "generation": "b",
+      "filter_count": 32,
+      "v4_completion_p50_s": 2.913797,
+      "v4_completion_p95_s": 3.309911,
+      "v4_completion_max_s": 3.365553,
+      "v6_completion_p50_s": 2.9138,
+      "v6_completion_p95_s": 3.309929,
+      "v6_completion_max_s": 3.365557,
+      "v4_maxgap_p50_ms": 1139.204,
+      "v4_maxgap_p95_ms": 1951.177,
+      "v4_maxgap_max_ms": 2098.547,
+      "v6_maxgap_p50_ms": 1136.311,
+      "v6_maxgap_p95_ms": 1948.233,
+      "v6_maxgap_max_ms": 2095.815,
+      "v4_first_generation_update_p50_ms": 2356.107,
+      "v4_first_generation_update_p95_ms": 3167.679,
+      "v4_first_generation_update_max_ms": 3316.424,
+      "v6_first_generation_update_p50_ms": 2356.117,
+      "v6_first_generation_update_p95_ms": 3167.688,
+      "v6_first_generation_update_max_ms": 3316.536,
+      "v4_filtered_withdrawn": 19168,
+      "v4_filtered_expected": 19168,
+      "v6_filtered_withdrawn": 19168,
+      "v6_filtered_expected": 19168,
+      "filtered_leaked": 0,
+      "bystander_withdrawn": 0,
+      "stable_withdrawn": 0,
+      "duplicate_withdrawn": 0,
+      "stable_marker_peers_v4": 100,
+      "stable_marker_peers_v6": 100,
+      "sessions_up": 700,
+      "parse_errors": 0
+    },
+    {
+      "reload": 4,
+      "peers_total": 700,
+      "peers_changed": 600,
+      "prefixes_total": 400400,
+      "ipv4_prefixes": 200200,
+      "ipv6_prefixes": 200200,
+      "generation": "a",
+      "filter_count": 32,
+      "v4_completion_p50_s": 3.137444,
+      "v4_completion_p95_s": 3.565897,
+      "v4_completion_max_s": 3.609556,
+      "v6_completion_p50_s": 3.137467,
+      "v6_completion_p95_s": 3.565919,
+      "v6_completion_max_s": 3.60956,
+      "v4_maxgap_p50_ms": 1139.061,
+      "v4_maxgap_p95_ms": 2037.605,
+      "v4_maxgap_max_ms": 2112.471,
+      "v6_maxgap_p50_ms": 1134.953,
+      "v6_maxgap_p95_ms": 2033.483,
+      "v6_maxgap_max_ms": 2108.462,
+      "v4_first_generation_update_p50_ms": 2606.262,
+      "v4_first_generation_update_p95_ms": 3504.615,
+      "v4_first_generation_update_max_ms": 3579.461,
+      "v6_first_generation_update_p50_ms": 2606.255,
+      "v6_first_generation_update_p95_ms": 3504.562,
+      "v6_first_generation_update_max_ms": 3579.453,
+      "v4_filtered_withdrawn": 0,
+      "v4_filtered_expected": 0,
+      "v6_filtered_withdrawn": 0,
+      "v6_filtered_expected": 0,
+      "filtered_leaked": 0,
+      "bystander_withdrawn": 0,
+      "stable_withdrawn": 0,
+      "duplicate_withdrawn": 0,
+      "stable_marker_peers_v4": 100,
+      "stable_marker_peers_v6": 100,
+      "sessions_up": 700,
+      "parse_errors": 0
+    }
+  ],
+  "churn_overlap": [
+    {
+      "reload": "1",
+      "trigger_us": "39425721",
+      "completion_us": "42779537",
+      "v4_writes": "199",
+      "v4_first_us": "Some(39441536)",
+      "v4_last_us": "Some(42775007)",
+      "v6_writes": "199",
+      "v6_first_us": "Some(39441547)",
+      "v6_last_us": "Some(42775014)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "2",
+      "trigger_us": "62999176",
+      "completion_us": "66568468",
+      "v4_writes": "178",
+      "v4_first_us": "Some(63013892)",
+      "v4_last_us": "Some(66517892)",
+      "v6_writes": "178",
+      "v6_first_us": "Some(63013901)",
+      "v6_last_us": "Some(66517909)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "3",
+      "trigger_us": "86684117",
+      "completion_us": "90049674",
+      "v4_writes": "188",
+      "v4_first_us": "Some(86731279)",
+      "v4_last_us": "Some(90042995)",
+      "v6_writes": "188",
+      "v6_first_us": "Some(86731289)",
+      "v6_last_us": "Some(90043003)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "4",
+      "trigger_us": "110212270",
+      "completion_us": "113821830",
+      "v4_writes": "191",
+      "v4_first_us": "Some(110220228)",
+      "v4_last_us": "Some(113794709)",
+      "v6_writes": "191",
+      "v6_first_us": "Some(110220237)",
+      "v6_last_us": "Some(113794719)",
+      "overlap_observed": "true"
+    }
+  ],
+  "full_generations": [
+    {
+      "timestamp": "2026-09-10T00:08:01.520972Z",
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 600,
+      "cohort_targets": 600,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": true,
+      "preflight_us": 83,
+      "cohort_selection_us": 5173,
+      "cohort_prestage_session_apply_us": 904473,
+      "cohort_rib_transition_us": 1376024,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 4,
+      "convergence_check_us": 103,
+      "total_us": 2286785,
+      "unattributed_us": 924
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.334271Z",
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 600,
+      "cohort_targets": 600,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": true,
+      "preflight_us": 136,
+      "cohort_selection_us": 3349,
+      "cohort_prestage_session_apply_us": 1145307,
+      "cohort_rib_transition_us": 1380475,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 4,
+      "convergence_check_us": 99,
+      "total_us": 2530135,
+      "unattributed_us": 764
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.790972Z",
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 600,
+      "cohort_targets": 600,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": true,
+      "preflight_us": 44,
+      "cohort_selection_us": 3349,
+      "cohort_prestage_session_apply_us": 929416,
+      "cohort_rib_transition_us": 1366642,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 4,
+      "convergence_check_us": 100,
+      "total_us": 2300273,
+      "unattributed_us": 717
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.551423Z",
+      "message": "reload generation phase timing",
+      "target": "reload_generation_phase",
+      "total_targets": 600,
+      "cohort_targets": 600,
+      "remainder_targets": 0,
+      "refresh_count": 0,
+      "outcome": "committed",
+      "authoritative_fallback": true,
+      "preflight_us": 183,
+      "cohort_selection_us": 3329,
+      "cohort_prestage_session_apply_us": 1070421,
+      "cohort_rib_transition_us": 1455323,
+      "authoritative_remainder_apply_us": 1,
+      "deferred_refresh_dispatch_us": 4,
+      "convergence_check_us": 86,
+      "total_us": 2530290,
+      "unattributed_us": 943
+    }
+  ],
+  "median_full_generation_ms": 2415.204,
+  "vmhwm_kib": 763188,
+  "peak_process_tree_sample_rss_kib": 647508,
+  "warning_phase_counts": {
+    "startup": 1,
+    "teardown": 79417
+  },
+  "readiness_diagnostics": [
+    {
+      "timestamp": "2026-09-10T00:07:59.306101Z",
+      "message": "replacement readiness scope finished",
+      "count": 400528,
+      "elapsed_us": 65706,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.369660Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25876,
+      "max_gap_us": 1626,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.411607Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25103,
+      "max_gap_us": 1366,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.453044Z",
+      "message": "replacement readiness scope finished",
+      "count": 400400,
+      "elapsed_us": 25058,
+      "max_gap_us": 1091,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.492463Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25245,
+      "max_gap_us": 1367,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.539788Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25354,
+      "max_gap_us": 1433,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.587762Z",
+      "message": "replacement readiness scope finished",
+      "count": 400656,
+      "elapsed_us": 26129,
+      "max_gap_us": 1521,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.632530Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 26052,
+      "max_gap_us": 1133,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.669615Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 26709,
+      "max_gap_us": 1594,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.714455Z",
+      "message": "replacement readiness scope finished",
+      "count": 400400,
+      "elapsed_us": 25544,
+      "max_gap_us": 1587,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.758931Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25381,
+      "max_gap_us": 952,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.803498Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25346,
+      "max_gap_us": 1282,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.850064Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25836,
+      "max_gap_us": 2738,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.898153Z",
+      "message": "replacement readiness scope finished",
+      "count": 400528,
+      "elapsed_us": 25314,
+      "max_gap_us": 1317,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.945614Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25139,
+      "max_gap_us": 1361,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.984683Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25891,
+      "max_gap_us": 3222,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.025255Z",
+      "message": "replacement readiness scope finished",
+      "count": 400528,
+      "elapsed_us": 25296,
+      "max_gap_us": 1243,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.062779Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25389,
+      "max_gap_us": 1543,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.104949Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25629,
+      "max_gap_us": 1505,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141029Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 24531,
+      "max_gap_us": 801,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.153314Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 53,
+      "max_gap_us": 53,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154290Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 989,
+      "max_gap_us": 939,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154333Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 1032,
+      "max_gap_us": 27,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.328381Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 175079,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.408740Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 65,
+      "max_gap_us": 24,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515330Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 1106560,
+      "max_gap_us": 25001,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.875137Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 66245,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.959533Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25084,
+      "max_gap_us": 1825,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.998627Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25222,
+      "max_gap_us": 1162,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.085064Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25714,
+      "max_gap_us": 1290,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.120841Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25922,
+      "max_gap_us": 1357,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.168983Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25405,
+      "max_gap_us": 1385,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.236309Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25441,
+      "max_gap_us": 1089,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.262010Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25644,
+      "max_gap_us": 1036,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.342788Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25666,
+      "max_gap_us": 1554,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.381088Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25700,
+      "max_gap_us": 1814,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.465311Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25696,
+      "max_gap_us": 1325,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.502217Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25550,
+      "max_gap_us": 1371,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.555357Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25538,
+      "max_gap_us": 2836,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.618260Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25512,
+      "max_gap_us": 1309,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.653474Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 26048,
+      "max_gap_us": 1026,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.729807Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 26307,
+      "max_gap_us": 1278,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.779820Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25875,
+      "max_gap_us": 1230,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.857660Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 26006,
+      "max_gap_us": 822,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.892332Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25173,
+      "max_gap_us": 658,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950384Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 939,
+      "max_gap_us": 466,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.953381Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 51,
+      "max_gap_us": 51,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954135Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 766,
+      "max_gap_us": 720,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954182Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 814,
+      "max_gap_us": 26,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.136254Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 182885,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.229142Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 59,
+      "max_gap_us": 23,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328860Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 1099686,
+      "max_gap_us": 26012,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.564363Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 64963,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.630068Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25447,
+      "max_gap_us": 1241,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.696530Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 26202,
+      "max_gap_us": 1384,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.740737Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25848,
+      "max_gap_us": 1332,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.766638Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25856,
+      "max_gap_us": 744,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.820707Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25376,
+      "max_gap_us": 1233,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.861145Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25193,
+      "max_gap_us": 1442,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.886420Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25207,
+      "max_gap_us": 631,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.944665Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25967,
+      "max_gap_us": 1710,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.970125Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25409,
+      "max_gap_us": 1490,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.012884Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25896,
+      "max_gap_us": 1000,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.076047Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25242,
+      "max_gap_us": 1158,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.113805Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25263,
+      "max_gap_us": 3019,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.139629Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 25761,
+      "max_gap_us": 650,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.198187Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25548,
+      "max_gap_us": 2674,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.235088Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25931,
+      "max_gap_us": 648,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.260655Z",
+      "message": "replacement readiness scope finished",
+      "count": 400432,
+      "elapsed_us": 25513,
+      "max_gap_us": 643,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.322683Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25327,
+      "max_gap_us": 660,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.381397Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 40276,
+      "max_gap_us": 25472,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421450Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 959,
+      "max_gap_us": 701,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.423953Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 59,
+      "max_gap_us": 59,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425015Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 1074,
+      "max_gap_us": 1033,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425054Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 1113,
+      "max_gap_us": 25,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.597698Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 173757,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.668360Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 98,
+      "max_gap_us": 57,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785495Z",
+      "message": "replacement readiness scope finished",
+      "count": 400624,
+      "elapsed_us": 1117112,
+      "max_gap_us": 25285,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.086768Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 61625,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.183326Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25591,
+      "max_gap_us": 2168,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.213316Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25122,
+      "max_gap_us": 1215,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.314089Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 26051,
+      "max_gap_us": 1503,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.339475Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25339,
+      "max_gap_us": 843,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.429254Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25730,
+      "max_gap_us": 1342,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.454761Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25432,
+      "max_gap_us": 630,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.489246Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25233,
+      "max_gap_us": 1561,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.580716Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25608,
+      "max_gap_us": 1566,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.662310Z",
+      "message": "replacement readiness scope finished",
+      "count": 400560,
+      "elapsed_us": 25231,
+      "max_gap_us": 1363,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.699201Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25548,
+      "max_gap_us": 1599,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.724453Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25189,
+      "max_gap_us": 711,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.809468Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25837,
+      "max_gap_us": 2970,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.836052Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25964,
+      "max_gap_us": 637,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.926678Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25980,
+      "max_gap_us": 2875,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.957024Z",
+      "message": "replacement readiness scope finished",
+      "count": 400592,
+      "elapsed_us": 25495,
+      "max_gap_us": 977,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.042127Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 25642,
+      "max_gap_us": 1340,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.076850Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 25947,
+      "max_gap_us": 957,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092839Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 15925,
+      "max_gap_us": 644,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.130100Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 61,
+      "max_gap_us": 61,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131014Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 925,
+      "max_gap_us": 874,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131052Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 964,
+      "max_gap_us": 25,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.307563Z",
+      "message": "replacement readiness scope finished",
+      "count": 400496,
+      "elapsed_us": 177475,
+      "max_gap_us": 25000,
+      "serviced": 1
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.448563Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 70,
+      "max_gap_us": 31,
+      "serviced": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545982Z",
+      "message": "replacement readiness scope finished",
+      "count": 400464,
+      "elapsed_us": 1097381,
+      "max_gap_us": 25004,
+      "serviced": 1
+    }
+  ],
+  "replacement_capacity_diagnostics": [
+    {
+      "timestamp": "2026-09-10T00:07:59.306123Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400528,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.306127Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.306129Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.369681Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.369684Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.369686Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.411631Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.411635Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.411638Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.453064Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400400,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.453068Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.453070Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.492476Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.492479Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.492482Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.539811Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.539814Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.539816Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.587782Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.587786Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.587788Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400656,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.632541Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.632544Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.632546Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.669629Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.669632Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.669634Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.714477Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.714480Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400400,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.714483Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.758953Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.758956Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.758959Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.803522Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.803525Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.803528Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.850089Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.850092Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.850095Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.898178Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400528,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.898182Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.898184Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.945629Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.945639Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.945642Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.984710Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.984714Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:07:59.984716Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.025279Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.025282Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.025284Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400528,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.062796Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.062800Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.062802Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.104974Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.104977Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.104979Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141044Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141047Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141049Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141051Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.141053Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.153324Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.153327Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.153329Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154296Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154298Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154300Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154335Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154337Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.154339Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.328384Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.328394Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.328396Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.408760Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.408763Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:00.408765Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515333Z",
+      "message": "replacement capacity maximum",
+      "name": "filtered_scope",
+      "max_len": 400624,
+      "max_capacity": 917504,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515336Z",
+      "message": "replacement capacity maximum",
+      "name": "group_before_shrink",
+      "max_len": 400560,
+      "max_capacity": 400624,
+      "max_raw_slots": 400560
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515338Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515340Z",
+      "message": "replacement capacity maximum",
+      "name": "supplement_withdraw",
+      "max_len": 64,
+      "max_capacity": 64,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515342Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515344Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515346Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515348Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515352Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_candidates",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:01.515354Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_results",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.875161Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.875165Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.875167Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.959557Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.959560Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.959562Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.998648Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.998651Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:22.998653Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.085088Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.085092Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.085094Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.120862Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.120865Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.120867Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.169002Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.169005Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.169008Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.236329Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.236332Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.236335Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.262025Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.262028Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.262030Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.342812Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.342815Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.342817Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.381114Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.381117Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.381120Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.465344Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.465347Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.465349Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.502237Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.502241Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.502243Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.555382Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.555385Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.555387Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.618287Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.618291Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.618303Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.653494Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.653497Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.653499Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.729823Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.729826Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.729828Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.779837Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.779840Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.779843Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.857681Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.857685Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.857687Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.892348Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.892351Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.892354Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950404Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950407Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950409Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950411Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.950413Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.953385Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.953388Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.953395Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954145Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954148Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954150Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954185Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954187Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:23.954189Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.136258Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.136261Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.136263Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.229164Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.229167Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:24.229170Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328863Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328866Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328868Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328870Z",
+      "message": "replacement capacity maximum",
+      "name": "group_before_shrink",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 400560
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328872Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328874Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_results",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328876Z",
+      "message": "replacement capacity maximum",
+      "name": "supplement_withdraw",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328878Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_candidates",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328880Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:25.328882Z",
+      "message": "replacement capacity maximum",
+      "name": "filtered_scope",
+      "max_len": 400560,
+      "max_capacity": 917504,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.564390Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.564393Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.564403Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.630087Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.630091Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.630093Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.696550Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.696554Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.696556Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.740760Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.740763Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.740765Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.766651Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.766654Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.766656Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.820731Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.820734Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.820736Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.861174Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.861178Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.861181Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.886430Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.886432Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.886434Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.944684Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.944687Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.944689Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.970136Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.970139Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:46.970141Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.012900Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.012903Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.012905Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.076067Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.076070Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.076072Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.113819Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.113822Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.113831Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.139638Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.139640Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.139642Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.198202Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.198205Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.198207Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.235099Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.235102Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.235104Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.260672Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.260674Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.260676Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400432,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.322695Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.322698Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.322700Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.381414Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.381417Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.381420Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421471Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421474Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421476Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421478Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.421480Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.423959Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.423961Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.423963Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425020Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425022Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425024Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425057Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425059Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.425061Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.597702Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.597704Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.597706Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.668372Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.668376Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:47.668378Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785499Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785502Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785504Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785505Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_candidates",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785507Z",
+      "message": "replacement capacity maximum",
+      "name": "supplement_withdraw",
+      "max_len": 64,
+      "max_capacity": 64,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785509Z",
+      "message": "replacement capacity maximum",
+      "name": "group_before_shrink",
+      "max_len": 400560,
+      "max_capacity": 400624,
+      "max_raw_slots": 400560
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785511Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785513Z",
+      "message": "replacement capacity maximum",
+      "name": "filtered_scope",
+      "max_len": 400624,
+      "max_capacity": 917504,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785515Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400624,
+      "max_capacity": 801120,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:08:48.785517Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_results",
+      "max_len": 400560,
+      "max_capacity": 400560,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.086801Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.086804Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.086806Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.183348Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.183352Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.183354Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.213327Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.213330Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.213332Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.314113Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.314116Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.314118Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.339487Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.339490Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.339492Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.429276Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.429286Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.429289Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.454773Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.454775Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.454777Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.489268Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.489272Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.489274Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.580739Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.580750Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.580753Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.662332Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400560,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.662335Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.662337Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.699224Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.699228Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.699230Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.724468Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.724479Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.724481Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.809494Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.809499Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.809502Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.836067Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.836069Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.836071Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.926701Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.926712Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.926714Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.957035Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400592,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.957038Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:10.957040Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.042150Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.042153Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.042155Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.076874Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.076877Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.076879Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092853Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092857Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092859Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092861Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.092863Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.130116Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 800928,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.130119Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.130121Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131019Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131021Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 800928,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131023Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131054Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 800928,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131056Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.131058Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.307574Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.307577Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.307579Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400496,
+      "max_capacity": 800928,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.448584Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.448588Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:11.448590Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545987Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_entries",
+      "max_len": 1400,
+      "max_capacity": 1792,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545990Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_results",
+      "max_len": 400464,
+      "max_capacity": 400464,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545993Z",
+      "message": "replacement capacity maximum",
+      "name": "supplement_withdraw",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545994Z",
+      "message": "replacement capacity maximum",
+      "name": "group_otc",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.545996Z",
+      "message": "replacement capacity maximum",
+      "name": "export_memo_modified",
+      "max_len": 1,
+      "max_capacity": 4,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.546006Z",
+      "message": "replacement capacity maximum",
+      "name": "filtered_scope",
+      "max_len": 400464,
+      "max_capacity": 917504,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.546009Z",
+      "message": "replacement capacity maximum",
+      "name": "group_unicast",
+      "max_len": 400464,
+      "max_capacity": 524288,
+      "max_raw_slots": 400656
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.546011Z",
+      "message": "replacement capacity maximum",
+      "name": "private_unicast",
+      "max_len": 0,
+      "max_capacity": 0,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.546012Z",
+      "message": "replacement capacity maximum",
+      "name": "exact_candidates",
+      "max_len": 400464,
+      "max_capacity": 400464,
+      "max_raw_slots": 0
+    },
+    {
+      "timestamp": "2026-09-10T00:09:12.546014Z",
+      "message": "replacement capacity maximum",
+      "name": "group_before_shrink",
+      "max_len": 400464,
+      "max_capacity": 400464,
+      "max_raw_slots": 400464
+    }
+  ],
+  "readiness_diagnostic_summary": {
+    "scope_count": 103,
+    "serviced_attempts_total": 18,
+    "scopes_over_25ms": 5,
+    "maximum_gap_us": 26012,
+    "capacity_record_count": 345,
+    "capacity_maxima": {
+      "exact_candidates": {
+        "max_len": 400560,
+        "max_capacity": 400560,
+        "max_raw_slots": 0
+      },
+      "exact_results": {
+        "max_len": 400560,
+        "max_capacity": 400560,
+        "max_raw_slots": 0
+      },
+      "export_memo_entries": {
+        "max_len": 1400,
+        "max_capacity": 1792,
+        "max_raw_slots": 0
+      },
+      "export_memo_modified": {
+        "max_len": 1,
+        "max_capacity": 4,
+        "max_raw_slots": 0
+      },
+      "filtered_scope": {
+        "max_len": 400624,
+        "max_capacity": 917504,
+        "max_raw_slots": 0
+      },
+      "group_before_shrink": {
+        "max_len": 400560,
+        "max_capacity": 400624,
+        "max_raw_slots": 400560
+      },
+      "group_otc": {
+        "max_len": 0,
+        "max_capacity": 0,
+        "max_raw_slots": 0
+      },
+      "group_unicast": {
+        "max_len": 400656,
+        "max_capacity": 801120,
+        "max_raw_slots": 400656
+      },
+      "private_unicast": {
+        "max_len": 0,
+        "max_capacity": 0,
+        "max_raw_slots": 0
+      },
+      "supplement_withdraw": {
+        "max_len": 64,
+        "max_capacity": 64,
+        "max_raw_slots": 0
+      }
+    }
+  },
+  "verification": {
+    "exported_files": 67,
+    "unchanged_gate_replay_matches_entire_result": true,
+    "source_identity_matches_build_before_after_and_run_before_after": true,
+    "binary_hashes_match_build_and_harness_provenance": true,
+    "health_and_query_metrics_recomputed_from_csv": true
+  },
+  "health_capture_audit": {
+    "method": "exact epoch_s string comparison between probe_start markers and CSV rows",
+    "started_invocations": 2023,
+    "completed_csv_rows": 2023,
+    "failed_csv_rows": 0,
+    "all_start_markers_have_csv_rows": true,
+    "all_csv_rows_have_start_markers": true,
+    "duplicate_start_keys": {},
+    "duplicate_csv_keys": {},
+    "unmatched_started_invocations": [],
+    "unmatched_csv_keys": {},
+    "invocations_with_stderr": [],
+    "unassociated_stderr": [],
+    "rib_query_invocation_start_markers_recorded": false
+  },
+  "campaign": "initial",
+  "runtime_merge": "8585ce86adff37ca277a450fc77d4d01e82ccd4e",
+  "daemon_wait_exit": null,
+  "native_driver_result": null,
+  "normal_binaries_identical_to_initial_normal": null
+}
