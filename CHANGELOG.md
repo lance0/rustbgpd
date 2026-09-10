@@ -116,6 +116,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The scale matrix now finishes and records each active management probe before
   shutting down the daemon, preventing orphaned CLI requests and missing final
   CSV rows. Cleanup waits for owned processes and retains the daemon exit status.
+  After final evidence capture, BGP stubs stop churn, send Cease, and drain
+  incoming output before exiting; task failures or a fleet timeout fail the cell.
 
 - IPv4-unicast reflection with an unchanged IPv6 next hop now suppresses
   export to peers without Extended Next Hop support, instead of emitting
