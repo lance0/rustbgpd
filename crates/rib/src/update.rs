@@ -34,6 +34,11 @@ pub enum RibReadinessQuery {
     LocRibCount {
         /// Response channel.
         reply: oneshot::Sender<Result<usize, RibReadinessError>>,
+        /// Monotonic stamp taken as the query is handed to the readiness
+        /// lane after channel admission. The actor observes the elapsed delta
+        /// when it serves the query. This excludes admission wait, prior
+        /// peer-manager work, and reply delivery.
+        enqueued: std::time::Instant,
     },
 }
 

@@ -13,6 +13,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
+  `bgp_rib_readiness_query_wait_seconds{seam}`. The first times route-chunk
+  construction and processing, coalesced outbound distribution, and subsequent
+  exact-export rejection retirement separately. The second measures admitted
+  readiness queries until actor service, including service after caller timeout,
+  through both ordinary drains and synchronous replacement checkpoints. These
+  support correlation rather than identifying every probe timeout: distribution
+  services readiness internally, and query waits exclude admission wait, prior
+  peer-manager work, and reply delivery. Both use the shared RIB actor latency
+  buckets, including an exact 200 ms boundary. Actor scheduling is unchanged.
+
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
   The new RPC is outside the narrow v1 contract. Ordinary `rbgp health`
