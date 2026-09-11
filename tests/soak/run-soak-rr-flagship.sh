@@ -186,10 +186,24 @@ prom_get() {
 
 # Append the current scrape body as one gzip member headed by a comment
 # line, so families the CSV never extracts (histograms, per-peer gauges)
-# reach the archive; `zcat` reads the members as a single stream.
+# reach the archive; `zcat` reads the members as a single stream. A failed
+# append is rolled back to the prior length so a partial member cannot break
+# every later read; a member cut short by a hard kill is not recovered.
 prom_snapshot() {
-    { printf '# snapshot %s elapsed_sec=%s\n' "$1" "$2"; cat "$PROM_TMP"; } |
-        gzip -c >>"$METRICS_SNAPSHOTS_GZ"
+    local before
+    before=$(stat -c %s "$METRICS_SNAPSHOTS_GZ" 2>/dev/null || echo 0)
+    # gzip is the writer and the last stage, so its status is the write
+    # status; pipefail (set above) also surfaces a producer failure.
+    if { printf '# snapshot %s elapsed_sec=%s\n' "$1" "$2"; cat "$PROM_TMP"; } |
+        gzip -c >>"$METRICS_SNAPSHOTS_GZ"; then
+        return 0
+    fi
+    if ((before == 0)); then
+        rm -f "$METRICS_SNAPSHOTS_GZ"
+    else
+        truncate -c -s "$before" "$METRICS_SNAPSHOTS_GZ"
+    fi
+    return 1
 }
 
 tree_rss_mb() {

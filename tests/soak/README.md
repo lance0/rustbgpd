@@ -1060,9 +1060,11 @@ runner appends the full `/metrics` body it already scraped for the sample
 every `METRICS_SNAPSHOT_EVERY` samples (default `10`, so every 5 minutes at
 the default 30 s sample interval; `0` disables retention), each headed by a
 `# snapshot <UTC> elapsed_sec=<n>` line; `zcat` reads the file as one
-stream. At the 1000-peer shape one body is about 4.4 MiB raw and about
-210 KiB gzipped, so a 24 h run keeps 288 snapshots in roughly 60 MB. Both
-flagship runners share this knob.
+stream. A failed append is rolled back so it cannot corrupt later snapshots;
+a member interrupted by a hard crash is not recovered. At the 1000-peer
+shape one body is about 4.4 MiB raw and about 210 KiB gzipped, so a 24 h
+run keeps 288 snapshots in roughly 60 MB. Both flagship runners share this
+knob.
 
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
