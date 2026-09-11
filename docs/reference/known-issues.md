@@ -20,15 +20,15 @@ resolved.
   investigation.
   See the [policy stats contract](api.md#policyservice).
 
-- **700-member dual-stack reload acceptance remains open.** The
-  [post-change filtering run](../perf/ixp-dualstack-policy-noops-2026-09.md#700-member-follow-through)
-  completed all four reloads but failed the health and warning checks. Its
-  passing 200-member cell and the older IPv4-only receipts do not establish
-  the full dual-stack operating shape. The
-  [earlier stopped campaign](../perf/ixp-dualstack-2026-09-08.md) retains its
-  separate incomplete-reload and health failures.
-
 ## Resolved
+
+- **700-member dual-stack reload acceptance completed (resolved).** All 13
+  cells in the [final campaign](../perf/ixp-dualstack-final-campaign-2026-09.md)
+  passed supplemental gate v3, including two complete 700-member campaigns
+  across both family mixes and policy shapes. Five cells retain their original
+  gate v2 failures for classified cleanup TCP-refusal warnings; the receipt
+  preserves those results and the earlier failed runs. This scoped acceptance
+  does not replace the separate qualifying 24-hour management-load soak.
 
 - **Add-Path export explain covers exact candidates (resolved).** For
   negotiated IPv4/IPv6 unicast Add-Path send, `ExplainAdvertisedRoute` and
