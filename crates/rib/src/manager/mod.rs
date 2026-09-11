@@ -950,6 +950,7 @@ struct ReplacementReadiness {
     #[cfg(test)]
     observer: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
     rx: Option<mpsc::Receiver<RibReadinessQuery>>,
+    metrics: BgpMetrics,
     count: usize,
     started: tokio::time::Instant,
     last_service: std::time::Instant,
@@ -1031,7 +1032,10 @@ fn replacement_readiness_checkpoint(
             },
             None => break,
         };
-        let RibReadinessQuery::LocRibCount { reply } = query;
+        let RibReadinessQuery::LocRibCount { reply, enqueued } = query;
+        readiness
+            .metrics
+            .observe_rib_readiness_query_wait("policy_transition_fence", enqueued.elapsed());
         let result = if readiness.started.elapsed() >= MAX_HEALTHY_POLICY_TRANSITION_AGE {
             Err(RibReadinessError::PolicyTransitionStalled)
         } else {
@@ -1741,6 +1745,7 @@ impl RibManager {
             #[cfg(test)]
             observer: self.replacement_readiness_test_hook.clone(),
             rx: self.readiness_rx.take(),
+            metrics: self.metrics.clone(),
             count: self.loc_rib.len(),
             started,
             last_service: std::time::Instant::now(),
@@ -2140,7 +2145,9 @@ impl RibManager {
         policy_transition_elapsed: Option<std::time::Duration>,
     ) {
         match query {
-            RibReadinessQuery::LocRibCount { reply } => {
+            RibReadinessQuery::LocRibCount { reply, enqueued } => {
+                self.metrics
+                    .observe_rib_readiness_query_wait("actor_loop", enqueued.elapsed());
                 let result = match policy_transition_elapsed {
                     Some(elapsed) if elapsed >= MAX_HEALTHY_POLICY_TRANSITION_AGE => {
                         Err(RibReadinessError::PolicyTransitionStalled)

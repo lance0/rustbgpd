@@ -13,6 +13,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
+  `bgp_rib_readiness_query_wait_seconds{seam}`. The first times one indivisible
+  unit of RIB actor ingest work — a bounded route chunk, the coalesced outbound
+  distribution a drained route batch performs across the whole peer set, and the
+  exact-export rejection retirement that follows it — so a unit that outlasts a
+  readiness probe deadline is attributable to a unit rather than inferred. The
+  second times the delay between a readiness query being enqueued on the
+  dedicated readiness lane and the actor serving it, partitioned by the ingest
+  loop and the export-policy transition fence. Both use the shared RIB actor
+  latency buckets, whose exact 200 ms boundary makes the over-deadline share
+  directly readable. Instrumentation only: actor control flow is unchanged.
+
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
   The new RPC is outside the narrow v1 contract. Ordinary `rbgp health`

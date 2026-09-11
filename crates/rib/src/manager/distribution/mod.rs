@@ -5099,6 +5099,10 @@ impl RibManager {
             return false;
         };
 
+        // One clock read per chunk (not per prefix): this unit covers up to
+        // ROUTES_RECEIVED_CHUNK_SIZE prefixes and the actor cannot serve the
+        // readiness lane until it returns.
+        let chunk_started = std::time::Instant::now();
         if matches!(
             &chunk,
             PendingRouteChunk::Withdrawn(_) | PendingRouteChunk::Announced(_)
@@ -5144,6 +5148,10 @@ impl RibManager {
             }
         }
 
+        // Measured before the drained-batch tail so ingest is attributable
+        // separately from the coalesced outbound pass it triggers.
+        let ingest = chunk_started.elapsed();
+
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
@@ -5151,8 +5159,12 @@ impl RibManager {
             // across all its chunks in one coalesced outbound pass.
             self.flush_pending_distribute();
             let withdrawn = std::mem::take(&mut self.pending_exact_export_withdrawals);
+            let retire_started = std::time::Instant::now();
             self.retire_exact_export_rejections(withdrawn);
+            self.metrics
+                .observe_rib_actor_work("exact_export_retire", retire_started.elapsed());
         }
+        self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
     }
 
@@ -5170,7 +5182,13 @@ impl RibManager {
         }
         let changed = std::mem::take(&mut self.pending_distribute_changed);
         let affected = std::mem::take(&mut self.pending_distribute_affected);
+        // One clock read per flush, not per changed prefix or per peer: the
+        // pass itself fans out over the whole peer set and is bounded by
+        // nothing, so its own wall time is the quantity of interest.
+        let started = std::time::Instant::now();
         self.distribute_ingest_changes(&changed, &affected);
+        self.metrics
+            .observe_rib_actor_work("distribute_flush", started.elapsed());
     }
 
     /// Register `peer` as a unicast announcer for `prefix` in the reverse

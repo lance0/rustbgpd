@@ -26,7 +26,14 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         added, removed = check.validate_release_notes(baseline, current, section)
 
         self.assertEqual(len(baseline), 213)
-        self.assertEqual(added, {"bgp_update_malformed_causes_total"})
+        self.assertEqual(
+            added,
+            {
+                "bgp_rib_actor_work_duration_seconds",
+                "bgp_rib_readiness_query_wait_seconds",
+                "bgp_update_malformed_causes_total",
+            },
+        )
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):

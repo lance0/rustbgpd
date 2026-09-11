@@ -194,7 +194,10 @@ impl crate::update::ExactExportSnapshot for IngestReadinessSnapshot {
             let (reply_tx, reply_rx) = oneshot::channel();
             self.probe
                 .readiness_tx
-                .try_send(crate::update::RibReadinessQuery::LocRibCount { reply: reply_tx })
+                .try_send(crate::update::RibReadinessQuery::LocRibCount {
+                    reply: reply_tx,
+                    enqueued: std::time::Instant::now(),
+                })
                 .unwrap();
             *reply = Some(reply_rx);
         } else if let Some(reply) = reply.as_mut()
@@ -2798,6 +2801,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     readiness_tx
         .send(crate::update::RibReadinessQuery::LocRibCount {
             reply: readiness_reply,
+            enqueued: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -2835,6 +2839,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     readiness_tx
         .send(crate::update::RibReadinessQuery::LocRibCount {
             reply: stalled_reply,
+            enqueued: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -2872,6 +2877,7 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     readiness_tx
         .send(crate::update::RibReadinessQuery::LocRibCount {
             reply: recovered_reply,
+            enqueued: std::time::Instant::now(),
         })
         .await
         .unwrap();
@@ -4927,7 +4933,10 @@ async fn readiness_answered_between_commit_flush_batches() {
     // The readiness lane is serviced at exactly this seam.
     let (reply, mut probe) = oneshot::channel();
     readiness_tx
-        .try_send(crate::update::RibReadinessQuery::LocRibCount { reply })
+        .try_send(crate::update::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: std::time::Instant::now(),
+        })
         .unwrap();
     manager.drain_readiness_queries(Some(elapsed));
     assert_eq!(
@@ -4936,6 +4945,15 @@ async fn readiness_answered_between_commit_flush_batches() {
             .expect("readiness answered mid-flush")
             .expect("healthy verdict while the flush is parked"),
         ROUTE_COUNT
+    );
+    assert_eq!(
+        histogram_sample_counts_by_label(
+            &manager.metrics,
+            "bgp_rib_readiness_query_wait_seconds",
+            "seam",
+        )["actor_loop"],
+        1,
+        "serving a readiness query must record its enqueue-to-service wait"
     );
     assert!(manager.pending_clean_policy_transition.is_some());
 
@@ -6851,8 +6869,11 @@ fn queue_replacement_readiness(
     tx: &mpsc::Sender<crate::update::RibReadinessQuery>,
 ) -> oneshot::Receiver<Result<usize, crate::update::RibReadinessError>> {
     let (reply, response) = oneshot::channel();
-    tx.try_send(crate::update::RibReadinessQuery::LocRibCount { reply })
-        .unwrap();
+    tx.try_send(crate::update::RibReadinessQuery::LocRibCount {
+        reply,
+        enqueued: std::time::Instant::now(),
+    })
+    .unwrap();
     response
 }
 
@@ -6910,6 +6931,21 @@ fn replacement_readiness_nested_rollback_keeps_original_age_and_restores_receive
     ));
     fleet.manager.drain_readiness_queries(None);
     assert_eq!(response.try_recv().unwrap(), Ok(4));
+
+    // Load-bearing break: both seams answer this lane, so both must record the
+    // enqueue-to-service wait. Instrumenting only one would read as a healthy
+    // lane exactly while the other seam was the one holding a probe.
+    assert_eq!(
+        histogram_sample_counts_by_label(
+            &fleet.manager.metrics,
+            "bgp_rib_readiness_query_wait_seconds",
+            "seam",
+        ),
+        BTreeMap::from([
+            ("actor_loop".to_owned(), 1),
+            ("policy_transition_fence".to_owned(), 2),
+        ])
+    );
 }
 
 #[test]
