@@ -18,7 +18,8 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - flap budget exact: session-flap delta == trips (one per teardown)
   - counter monotonicity: bgp_messages_sent_total never decreases
   - readyz availability: fewer than 3 consecutive samples that miss
-    200 within 250 ms; every breach is reported either way
+    200 within 250 ms; counts and first 20 breaches reported either way;
+    missing observations fail closed
   - management-plane load brackets the measured window, retains every
     operation, completes >= 90% of scheduled probes, misses no cadence,
     and records zero non-ok results or invalid ok results
@@ -58,13 +59,11 @@ RSS_PEAK_LIMIT_MB = 3072.0
 RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
-# Readiness probes are consumed with hysteresis: a Kubernetes readiness probe
-# defaults to failureThreshold 3, so a workload is withdrawn only after three
-# consecutive failed probes, not after one. The endpoint reports instantaneous
-# truth; the gate models the consumer. An isolated breach is still reported.
-# The count is borrowed, not the period: at this scenario's 30 s sampling
-# cadence three consecutive samples span at least 60 s, so the gate stays
-# stricter in elapsed time than the prober default it is calibrated against.
+# This scenario borrows Kubernetes readiness probes' failureThreshold default
+# of 3. Its 30 s sampling interval and 250 ms latency limit are separate soak
+# acceptance choices, not Kubernetes probe semantics. Three samples span at
+# least 60 s, permitting longer outages than the default 10 s probe interval.
+# The endpoint remains unchanged; isolated breaches are still reported.
 READYZ_CONSECUTIVE_LIMIT = 3
 REESTABLISH_GRACE_SEC = 60
 MANAGEMENT_OPERATIONS = (
@@ -463,12 +462,16 @@ def parse_cycles(lines: list[str]) -> dict:
     reload_complete: set[int] = set()
     trips: dict[int, dict] = {}
     aborts: list[str] = []
+    sample_scrape_failures = 0
     for raw in lines:
         m = CYCLE_RE.match(raw.strip())
         if not m:
             continue
         ts = parse_ts(m.group("ts"))
         body = m.group("body")
+        if body.startswith("sample scrape failed"):
+            sample_scrape_failures += 1
+            continue
         if body.startswith("ABORT:"):
             aborts.append(body)
             continue
@@ -515,6 +518,7 @@ def parse_cycles(lines: list[str]) -> dict:
         "reload_complete": reload_complete,
         "trips": trips,
         "aborts": aborts,
+        "sample_scrape_failures": sample_scrape_failures,
     }
 
 
@@ -606,8 +610,20 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
         1 for a, b in zip(msgs, msgs[1:]) if b < a
     )
     readyz_bad = []
+    # The sampler drops the entire row after a failed metrics scrape. Such
+    # probes are unknown, never healthy. A two-period gap also catches a
+    # missing row without treating ordinary one-second scheduling drift as
+    # lost evidence. Include the planned window edges.
+    sample_boundaries = [0.0, *elapsed, max(elapsed[-1], meta["soak_seconds"])]
+    observation_gaps = [
+        {"from_sec": a, "to_sec": b}
+        for a, b in zip(sample_boundaries, sample_boundaries[1:])
+        if b - a >= 2 * grace
+    ]
     readyz_longest_run = readyz_run = 0
     for index, (code, ms) in enumerate(zip(readyz_code, readyz_ms)):
+        if index and elapsed[index] - elapsed[index - 1] >= 2 * grace:
+            readyz_run = 0
         if code == 200 and ms <= READYZ_MS_LIMIT:
             readyz_run = 0
             continue
@@ -617,8 +633,8 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             "elapsed_sec": elapsed[index],
             "code": code,
             "latency_ms": ms,
-            # A non-200 is the endpoint declaring itself unready; a slow 200
-            # is a ready endpoint answering late. They are different faults.
+            # Status includes the sampler's 000 sentinel for curl failure;
+            # latency means an HTTP 200 response exceeded the limit.
             "kind": "status" if code != 200 else "latency",
         })
 
@@ -685,8 +701,13 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
                 "first": readyz_bad[:20],
                 "limit_ms": READYZ_MS_LIMIT,
                 "limit_consecutive": READYZ_CONSECUTIVE_LIMIT,
+                "sample_scrape_failures": cycles["sample_scrape_failures"],
+                "observation_gaps": observation_gaps[:20],
+                "observation_gap_count": len(observation_gaps),
             },
-            "pass": readyz_longest_run < READYZ_CONSECUTIVE_LIMIT,
+            "pass": (readyz_longest_run < READYZ_CONSECUTIVE_LIMIT
+                     and not cycles["sample_scrape_failures"]
+                     and not observation_gaps),
         },
         "rss_peak_mb": {
             "value": peak_rss if not math.isnan(peak_rss) else None,
@@ -773,6 +794,11 @@ def main() -> int:
             print(f"error: run.json missing integer {key}", file=sys.stderr)
             return 2
 
+    if (isinstance(meta["sample_interval_sec"], bool)
+            or meta["sample_interval_sec"] <= 0):
+        print("error: sample_interval_sec must be positive", file=sys.stderr)
+        return 2
+
     load_file = meta.get("management_load_file")
     if load_file != "management-plane-load.jsonl":
         print("error: run.json has invalid management_load_file", file=sys.stderr)
@@ -790,7 +816,8 @@ def main() -> int:
     for line, row in enumerate(rows, 2):
         for column in REQUIRED - {"timestamp"}:
             value = safe_float(row.get(column))
-            if value is None:
+            if (value is None
+                    or (column in {"elapsed_sec", "readyz_ms"} and value < 0)):
                 print(f"error: row {line}: invalid {column}", file=sys.stderr)
                 return 2
             if column in COUNTERS and (value < 0 or not value.is_integer()):
@@ -802,6 +829,10 @@ def main() -> int:
         except ValueError:
             print(f"error: row {line}: invalid timestamp", file=sys.stderr)
             return 2
+    if any(float(a["elapsed_sec"]) >= float(b["elapsed_sec"])
+           for a, b in zip(rows, rows[1:])):
+        print("error: sample elapsed times must strictly increase", file=sys.stderr)
+        return 2
 
     cycles = parse_cycles(cycle_lines)
     result = analyze(rows, cycles, meta, args.min_slope_seconds)

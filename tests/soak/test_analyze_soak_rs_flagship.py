@@ -388,8 +388,7 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertFalse(payload["gates"]["msgs_sent_monotone"]["pass"])
 
     def test_isolated_readyz_breaches_are_reported_and_pass(self):
-        # Health probes apply hysteresis; a single sample is below the
-        # resolution any prober acts on. The detail must still be there.
+        # Isolated breaches pass this gate but retain their diagnostic detail.
         rows = smoke_rows()
         rows[1]["readyz_code"] = "503"
         rows[1]["readyz_ms"] = "400.0"
@@ -412,18 +411,20 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
 
     def test_three_consecutive_readyz_breaches_fail(self):
-        rows = smoke_rows()
-        for index in (3, 4, 5):
-            rows[index]["readyz_ms"] = "400.0"
-        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
-        self.assertEqual(result.returncode, 1)
-        gate = payload["gates"]["readyz"]
-        self.assertFalse(gate["pass"])
-        self.assertEqual(gate["value"]["bad_samples"], 3)
-        self.assertEqual(gate["value"]["longest_consecutive"], 3)
-        self.assertEqual(gate["value"]["latency_failures"], 3)
-        self.assertEqual(gate["value"]["limit_consecutive"],
-                         analyzer.READYZ_CONSECUTIVE_LIMIT)
+        for start in (0, 3, 6):
+            with self.subTest(start=start):
+                rows = smoke_rows()
+                for index in range(start, start + 3):
+                    rows[index]["readyz_ms"] = "400.0"
+                result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["readyz"]
+                self.assertFalse(gate["pass"])
+                self.assertEqual(gate["value"]["bad_samples"], 3)
+                self.assertEqual(gate["value"]["longest_consecutive"], 3)
+                self.assertEqual(gate["value"]["latency_failures"], 3)
+                self.assertEqual(gate["value"]["limit_consecutive"],
+                                 analyzer.READYZ_CONSECUTIVE_LIMIT)
 
     def test_two_consecutive_readyz_breaches_pass_and_stay_visible(self):
         rows = smoke_rows()
@@ -437,6 +438,84 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(gate["value"]["status_failures"], 4)
         self.assertEqual(gate["value"]["latency_failures"], 0)
         self.assertEqual(gate["value"]["longest_consecutive"], 2)
+
+    def test_readyz_status_latency_boundary_and_evidence_cap(self):
+        rows = long_rows()
+        for row in rows:
+            row["readyz_ms"] = "250.1"
+        rows[0]["readyz_ms"] = "250.0"
+        rows[1].update(readyz_code="000", readyz_ms="0")
+        result, payload = run_analyzer(rows, long_cycles(), long_meta())
+        self.assertEqual(result.returncode, 1)
+        value = payload["gates"]["readyz"]["value"]
+        self.assertEqual(value["bad_samples"], 24)
+        self.assertEqual(value["longest_consecutive"], 24)
+        self.assertEqual(value["status_failures"], 1)
+        self.assertEqual(value["latency_failures"], 23)
+        self.assertEqual(len(value["first"]), 20)
+        self.assertEqual(value["first"][0]["kind"], "status")
+
+    def test_readyz_dropped_scrape_fails_even_at_window_edges(self):
+        for elapsed in (0, 120, 239):
+            with self.subTest(elapsed=elapsed):
+                cycles = smoke_cycles() + [
+                    cline(elapsed, "sample scrape failed (consecutive=1)")]
+                result, payload = run_analyzer(smoke_rows(), cycles, smoke_meta())
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["readyz"]
+                self.assertFalse(gate["pass"])
+                self.assertEqual(gate["value"]["sample_scrape_failures"], 1)
+
+    def test_readyz_observation_gap_fails_and_does_not_join_streaks(self):
+        rows = long_rows()
+        for index in (2, 3, 5):
+            rows[index]["readyz_ms"] = "400.0"
+        del rows[4]
+        result, payload = run_analyzer(rows, long_cycles(), long_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["min_samples"]["pass"])
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["longest_consecutive"], 2)
+        self.assertEqual(gate["value"]["observation_gap_count"], 1)
+
+    def test_readyz_observation_gap_at_window_edges_fails(self):
+        for rows in (long_rows()[2:], long_rows()[:-2]):
+            result, payload = run_analyzer(rows, long_cycles(), long_meta())
+            self.assertEqual(result.returncode, 1)
+            self.assertTrue(payload["gates"]["min_samples"]["pass"])
+            self.assertFalse(payload["gates"]["readyz"]["pass"])
+
+    def test_readyz_cadence_allows_one_second_scheduling_drift(self):
+        rows = smoke_rows()
+        for index, row in enumerate(rows):
+            row["elapsed_sec"] = str(index * 31)
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(payload["gates"]["readyz"]["pass"])
+
+    def test_readyz_missing_nonfinite_and_negative_inputs_are_errors(self):
+        for column in ("readyz_ms", "readyz_code"):
+            for invalid in ("", "NaN", "inf", "-inf", "-1"):
+                with self.subTest(column=column, invalid=invalid):
+                    rows = smoke_rows()
+                    rows[3][column] = invalid
+                    result, _ = run_analyzer(rows, smoke_cycles(), smoke_meta())
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(column, result.stderr)
+
+    def test_readyz_cadence_inputs_are_validated(self):
+        for interval in (0, -1, True):
+            result, _ = run_analyzer(smoke_rows(), smoke_cycles(),
+                                     smoke_meta(sample_interval_sec=interval))
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("sample_interval_sec", result.stderr)
+        for elapsed in ("60", "0"):
+            rows = smoke_rows()
+            rows[3]["elapsed_sec"] = elapsed
+            result, _ = run_analyzer(rows, smoke_cycles(), smoke_meta())
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("strictly increase", result.stderr)
 
     def test_rss_over_ceiling_fails(self):
         rows = smoke_rows()

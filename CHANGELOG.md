@@ -81,8 +81,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   three consecutive breached samples rather than on a single one, matching
   the readiness-probe `failureThreshold` default that health-probe consumers
   apply. The verdict reports the total breach count, the longest consecutive
-  run, and each offending sample, separating a non-200 status from a late
-  200, so isolated breaches stay visible when the gate passes.
+  run, and the first 20 offending samples, separating a non-200 status
+  (including a failed request) from a late 200. Missing observations fail
+  closed, so dropped metric scrapes cannot silently alter breach streaks.
 
 - The container healthcheck now uses `rbgp health --liveness`: it checks gRPC
   responsiveness rather than core-actor readiness. Override it with
