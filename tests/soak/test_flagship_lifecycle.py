@@ -443,8 +443,8 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                 self.assertEqual(snapshots(), 2)
 
                 self.assertNotEqual(append("2026-01-01T00:00:20Z", "20", fake_bin).returncode, 0)
-                self.assertEqual(archive.read_bytes(), intact)
                 self.assertEqual(snapshots(), 2)
+                self.assertEqual(archive.read_bytes(), intact)
 
                 self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
                 self.assertEqual(snapshots(), 3)
