@@ -62,6 +62,9 @@ READYZ_MS_LIMIT = 250.0
 # defaults to failureThreshold 3, so a workload is withdrawn only after three
 # consecutive failed probes, not after one. The endpoint reports instantaneous
 # truth; the gate models the consumer. An isolated breach is still reported.
+# The count is borrowed, not the period: at this scenario's 30 s sampling
+# cadence three consecutive samples span at least 60 s, so the gate stays
+# stricter in elapsed time than the prober default it is calibrated against.
 READYZ_CONSECUTIVE_LIMIT = 3
 REESTABLISH_GRACE_SEC = 60
 MANAGEMENT_OPERATIONS = (
