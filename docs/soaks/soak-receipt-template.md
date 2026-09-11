@@ -17,6 +17,9 @@ verdict: **FAIL** | **ABORTED**>
 image's SHA>)
 **Scenario config hash:** `<sha256 of run.json>` (pins duration,
 cadence, pool sizes, topology, and container names as executed)
+**Executable identities:** <daemon, CLI, and harness SHA-256 hashes>
+**Analyzer and gate revision:** <source SHA, including any separately recorded
+reanalysis revision; preserve the original verdict>
 **Date:** <start UTC> → <end UTC> (<actual duration>)
 
 ## Verdict
@@ -57,6 +60,16 @@ not be measured is a FAIL with the reason stated.
 
 <N> / <M> gates pass. Analyzer verdict: `<pass|fail>`
 (`verdict.json` / `report.json` archived below).
+
+For the route-server flagship, report readiness status failures, latency
+failures, longest consecutive streak, scrape failures and observation gaps,
+alongside the actual sample interval and both limits. Isolated breaches may
+coexist with a PASS under the
+[precommitted policy](soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
+Keep their diagnostic detail; do not reinterpret a passing run as zero breaches.
+Identify any separately retained timing-series evidence and its measurement
+limits. A revised analyzer's result is reanalysis, not a replacement original
+receipt or qualification of a different candidate.
 
 ## Abort record
 

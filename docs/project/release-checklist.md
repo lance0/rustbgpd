@@ -103,6 +103,33 @@ convention in `CONTRIBUTING.md`:
       either refresh the affected cells or disclose the newer release beside
       the dated historical result.
 
+## Flagship operating proof
+
+For v0.70, qualify the selected release candidate with the full 24-hour
+route-server management-load soak. Use the
+[runner procedure](../../tests/soak/README.md) and its
+[precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
+
+- [ ] Integrate the accepted runtime and harness changes, verify applicable
+      main checks, and exercise reloads and peer trips in a short shakedown
+      before committing to the 24-hour run. A smoke is not endurance proof.
+- [ ] Pin and retain the candidate source identity, executable hashes,
+      workload, sampling interval, analyzer revision, and gate thresholds.
+      Later runtime or dependency changes require candidate qualification
+      again; an older daemon's passing receipt does not transfer automatically.
+- [ ] Require a completed 24-hour run and every applicable gate to pass.
+      Isolated readiness breaches stay in the report but do not automatically
+      block release under the agreed consecutive-failure policy. Missing
+      observations still fail, and management correctness remains zero-failure.
+- [ ] Review readiness status/latency counts and any retained timing metrics
+      with their documented limits. A passing gate is not evidence that every
+      latency spike's cause was fixed; unresolved investigation can remain
+      tracked without imposing an undocumented zero-breach gate after the run.
+- [ ] Archive the original evidence and verdict with the
+      [receipt template](../soaks/soak-receipt-template.md). Record reanalysis
+      separately. Finish release dates and the applicable package/artifact
+      checks below only after qualification; a passing soak does not replace them.
+
 ## Narrow v1 RS/RR compatibility gate
 
 The project remains public alpha outside the explicit

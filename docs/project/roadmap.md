@@ -115,6 +115,13 @@ The next product milestone is operational trust for the route-server / route-
 reflector beachhead, not another breadth sprint. Work in this section outranks
 new AFI/SAFI and EVPN dataplane expansion.
 
+For v0.70, the [release checklist](release-checklist.md#flagship-operating-proof)
+requires a qualifying 24-hour management-load soak on the selected candidate.
+Earlier archived soaks do not automatically qualify later runtime changes.
+The [current route-server readiness policy](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+uses consecutive failures and rejects missing observations; isolated breaches
+remain visible without automatically blocking a release whose agreed gates pass.
+
 - **Maintain the narrow v1 role contract.** The shipped machine-checked
   inventory (#862; LAN-355) pins only the configuration and API used by
   IPv4/IPv6 route servers and route reflectors, `.rpol`, RPKI/ASPA, Roles/OTC,
