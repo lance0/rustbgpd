@@ -23,6 +23,23 @@ rather than committing.
 RIB compensation is one rollback-only exact batch with ordered receipts and
 the normal two-minute batch-reply bound.
 
+**Amended:** 2026-09-11 — operator reads are served during the cohort RIB
+transition instead of waiting for its commit. The forward reload owner
+admits its bounded operator-read lane (session snapshots, import-statistics
+collections, dataset status) while it awaits the batched RIB reply, on the
+same terms as the destination prestage: every cohort session already runs
+its new chains, so a read observes the same mixed per-session generation
+prestage admits, and the ordinary command receiver stays unpolled. The RIB
+run loop serves one bounded general-query budget between pre-commit
+transition polls from the primary state, which no pre-commit phase changes,
+so such a read returns exactly the pre-commit generation; the query lane
+carries only reads, mutations stay queued on the primary channel, and the
+`CommitMembers` batches keep the full fence. The terminal commit advances
+the advertised page generation so a route listing started before the commit
+cannot resume across it. Section 1's "only the readiness lane" wording and
+Section 5's "no general query is admitted" describe the design before this
+amendment. Rollback and standalone policy transactions are unchanged.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

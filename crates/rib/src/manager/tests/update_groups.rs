@@ -2685,10 +2685,14 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     handle.await.unwrap();
 }
 
+/// Dedicated readiness beats a saturated general-query lane while a
+/// transition is owned, general queries are served from the pre-commit
+/// state in bounded per-poll slices rather than parked behind the whole
+/// transition, and the terminal commit releases everything.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 #[expect(
     clippy::too_many_lines,
-    reason = "the scheduler regression pins dedicated readiness, general-query isolation, and terminal release in one transaction"
+    reason = "the scheduler regression pins dedicated readiness, bounded general-query service, and terminal release in one transaction"
 )]
 async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
     const ROUTE_COUNT: usize = 32;
@@ -2819,12 +2823,35 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         1.0,
         "transition remains owned while readiness overtakes the query flood",
     );
-    for reply in &mut general_replies {
-        assert!(matches!(
-            reply.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-    }
+    // The flood is served from the pre-commit state in bounded slices — at
+    // most one `QUERY_BUDGET_PER_CHUNK` budget per transition poll — so it
+    // can neither delay readiness nor be drained ahead of it. Every answer
+    // is the pre-commit table (identical for a count query).
+    let polls: u64 = histogram_sample_counts_by_label(
+        &metrics,
+        "bgp_rib_policy_transition_actor_poll_duration_seconds",
+        "poll_kind",
+    )
+    .values()
+    .sum();
+    let mut answered = 0_usize;
+    general_replies = general_replies
+        .into_iter()
+        .filter_map(|mut reply| match reply.try_recv() {
+            Ok(count) => {
+                assert_eq!(count, ROUTE_COUNT);
+                answered += 1;
+                None
+            }
+            Err(oneshot::error::TryRecvError::Empty) => Some(reply),
+            Err(oneshot::error::TryRecvError::Closed) => panic!("general query dropped"),
+        })
+        .collect();
+    assert!(
+        answered <= usize::try_from(polls).unwrap() * super::super::QUERY_BUDGET_PER_CHUNK,
+        "general queries are served in one bounded budget per transition poll \
+         (answered {answered} across {polls} polls)"
+    );
     assert!(
         receivers
             .iter_mut()
@@ -2866,12 +2893,6 @@ async fn clean_policy_transition_isolates_readiness_from_general_query_flood() {
         0.0,
         "commit clears transition ownership",
     );
-    for reply in &mut general_replies {
-        assert!(matches!(
-            reply.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        ));
-    }
 
     let (recovered_reply, recovered_response) = oneshot::channel();
     readiness_tx
@@ -3148,7 +3169,8 @@ async fn accepted_policy_transition_does_not_drain_prequeued_general_queries() {
 
     // This is the exact fairness seam used after a primary-channel receive.
     // The accepted transition must suppress it even though the query was
-    // already queued before ownership began.
+    // already queued before ownership began; the transition's own
+    // between-poll seam serves it from the pre-commit state instead.
     manager.drain_general_queries_if_unfenced();
     assert!(matches!(
         query_response.try_recv(),
@@ -5017,6 +5039,123 @@ async fn commit_flush_batches_are_bounded_and_drain_monotonically() {
         response.try_recv().unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
     );
+}
+
+/// One advertised page for `peer` through the general query lane, driven
+/// at the exact seam under test; `None` when the seam left it queued.
+fn advertised_page_at_transition_seam(
+    manager: &mut RibManager,
+    query_tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    between_polls: bool,
+) -> Option<crate::update::RoutePage> {
+    let (reply, mut response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryRoutesPage {
+            scope: RouteQueryScope::Advertised { peer },
+            filter: None,
+            after: None,
+            expected_version: None,
+            page_size: 16,
+            reply,
+        })
+        .unwrap();
+    if between_polls {
+        manager.drain_general_queries_between_transition_polls();
+    } else {
+        manager.drain_general_queries_if_unfenced();
+    }
+    response.try_recv().ok().map(|page| page.unwrap())
+}
+
+/// General queries arriving while the RIB owns a clean transition are
+/// answered between its pre-commit polls from the pre-commit state (an
+/// operator sees exactly what the read returned before the transition was
+/// accepted), stay queued through the commit batches, and see the switched
+/// state under a fresh advertised page generation once the transition is
+/// terminal. Removing the between-poll drain parks the first read behind
+/// the whole transition; serving during commit answers the second read from
+/// half-moved memberships; dropping the commit-time page advance lets the
+/// pre-commit continuation resume over the new state.
+#[tokio::test]
+async fn general_queries_served_between_precommit_polls_and_fenced_during_commit() {
+    const MEMBER_COUNT: usize = 2 * super::super::COMMIT_MEMBERS_PER_POLL + 1;
+    const ROUTE_COUNT: usize = 2;
+    const OLD_COMMUNITY: u32 = 0xFDE8_2101;
+    const NEXT_COMMUNITY: u32 = 0xFDE8_2108;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (mut manager, peers, _receivers) =
+        direct_clean_transition_manager(MEMBER_COUNT, ROUTE_COUNT, None);
+    manager.query_rx = query_rx;
+    let member = peers[MEMBER_COUNT - 1];
+    let source = manager.grouped_member_of(member).expect("grouped");
+    let next_policy = community_chain(NEXT_COMMUNITY);
+    let mut response = start_clean_transition(&mut manager, &peers, &next_policy);
+    let accepted_version = manager.route_page_advertised_version;
+
+    // Park after the first bounded pre-commit poll: nothing committed has
+    // moved, and the read must be answered right here.
+    let (kind, outcome) = step_parked_transition(&mut manager);
+    assert_eq!((kind, outcome), ("bounded", "continue"));
+    let page = advertised_page_at_transition_seam(&mut manager, &query_tx, member, true)
+        .expect("a general query is answered between pre-commit transition polls");
+    assert_eq!(page.routes.len(), ROUTE_COUNT);
+    assert!(
+        page.routes
+            .iter()
+            .all(|route| route.communities().contains(&OLD_COMMUNITY)),
+        "the pre-commit answer carries the installed (old) export policy"
+    );
+    assert_eq!(Some(page.version), accepted_version);
+    assert_eq!(manager.grouped_member_of(member), Some(source));
+    assert!(manager.pending_clean_policy_transition.is_some());
+
+    // Drive to the first parked commit batch: the last member is still in
+    // the source group while earlier members have moved, so the read must
+    // stay queued rather than observe the half-switched fleet.
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(outcome, "continue", "{kind} poll must park mid-transition");
+        if kind == "commit" {
+            break;
+        }
+    }
+    assert_ne!(manager.grouped_member_of(peers[0]), Some(source));
+    assert_eq!(manager.grouped_member_of(member), Some(source));
+    assert!(
+        advertised_page_at_transition_seam(&mut manager, &query_tx, member, true).is_none(),
+        "general queries stay fenced while commit batches move memberships"
+    );
+    assert_eq!(manager.route_page_advertised_version, accepted_version);
+
+    // Terminal commit: the queued read is released by the ordinary
+    // post-update drain, answers from the new generation, and the page
+    // version has moved so the pre-commit continuation cannot resume.
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_eq!(kind, "commit");
+        if outcome == "committed" {
+            break;
+        }
+    }
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    assert_ne!(
+        manager.route_page_advertised_version, accepted_version,
+        "the terminal commit advances the advertised page generation"
+    );
+    manager.drain_general_queries_if_unfenced();
+    let page = advertised_page_at_transition_seam(&mut manager, &query_tx, member, false)
+        .expect("general queries resume after the terminal commit");
+    assert!(
+        page.routes
+            .iter()
+            .all(|route| route.communities().contains(&NEXT_COMMUNITY)),
+        "the post-commit answer carries the committed (new) export policy"
+    );
+    assert_eq!(Some(page.version), manager.route_page_advertised_version);
 }
 
 /// With wall-clock budget in hand, the probe-and-prepare phase strides the

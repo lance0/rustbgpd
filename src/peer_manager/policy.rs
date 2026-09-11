@@ -1814,7 +1814,10 @@ impl PeerManager {
             .await;
         let cohort_result = match send_result {
             Err(_) => Err("RIB manager unavailable".to_string()),
-            Ok(()) => self.await_export_policy_cohort_rib_reply(reply_rx).await,
+            Ok(()) => {
+                self.await_export_policy_cohort_rib_reply(reply_rx, allow_operator_reads)
+                    .await
+            }
         };
         let rib_result = match cohort_result {
             Ok(ExportPolicyCohortOutcome::Committed) => Ok(()),
@@ -1828,8 +1831,11 @@ impl PeerManager {
                 if prestaged {
                     self.discard_prepared_export_destination(targets[0]).await;
                 }
-                self.apply_export_policy_replacements_authoritatively(&replacements)
-                    .await
+                self.apply_export_policy_replacements_authoritatively(
+                    &replacements,
+                    allow_operator_reads,
+                )
+                .await
             }
             Err(error) => Err(error),
         };
@@ -2010,17 +2016,25 @@ impl PeerManager {
             .await;
     }
 
-    /// Await the cohort RIB reply while admitting only the dedicated
-    /// read-only readiness lane. The ordinary command receiver stays owned by
-    /// the run loop and is not polled, so mutations remain strictly behind the
-    /// transaction. Dropping the transaction caller does not cancel a
-    /// partially applied policy: this actor still drives commit or rollback to
-    /// completion before returning to the normal lane.
+    /// Await the cohort RIB reply while admitting the dedicated read-only
+    /// readiness lane and, for the forward reload owner, the bounded
+    /// operator-read lane: the cohort sessions already run their new chains,
+    /// so an operator read here sees the same mixed generation prestage
+    /// admits, and the RIB answers its side from the pre-commit state. The
+    /// ordinary command receiver stays owned by the run loop and is not
+    /// polled, so mutations remain strictly behind the transaction. Dropping
+    /// the transaction caller does not cancel a partially applied policy:
+    /// this actor still drives commit or rollback to completion before
+    /// returning to the normal lane.
     async fn await_export_policy_cohort_rib_reply(
         &mut self,
         reply_rx: oneshot::Receiver<Result<ExportPolicyCohortOutcome, String>>,
+        allow_operator_reads: bool,
     ) -> Result<ExportPolicyCohortOutcome, String> {
-        match self.await_with_readiness(reply_rx).await {
+        match self
+            .await_with_readiness_and_operator_reads(reply_rx, allow_operator_reads)
+            .await
+        {
             Err(_) => Err("RIB manager dropped cohort reply".to_string()),
             Ok(result) => result,
         }
@@ -2035,20 +2049,23 @@ impl PeerManager {
     /// — instead of one full-table resync per member. Peers no longer
     /// registered in the RIB are skipped inside the batch (a reconnect
     /// installs the desired policy), matching the prior per-peer loop. The
-    /// dedicated readiness lane is admitted throughout the send/reply.
+    /// dedicated readiness lane is admitted throughout the send/reply, plus
+    /// the operator-read lane on the same terms as the clean transition.
     async fn apply_export_policy_replacements_authoritatively(
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
+        allow_operator_reads: bool,
     ) -> Result<(), String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
-            .await_with_readiness(rib_tx.send(
-                RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            .await_with_readiness_and_operator_reads(
+                rib_tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
                     replacements: replacements.to_vec(),
                     reply: reply_tx,
-                },
-            ))
+                }),
+                allow_operator_reads,
+            )
             .await
             .is_err()
         {
@@ -2056,7 +2073,7 @@ impl PeerManager {
         }
         let result = match tokio::time::timeout(
             super::RIB_BATCH_REPLY_TIMEOUT,
-            self.await_with_readiness(reply_rx),
+            self.await_with_readiness_and_operator_reads(reply_rx, allow_operator_reads),
         )
         .await
         {

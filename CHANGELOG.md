@@ -134,6 +134,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
+  with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched
+  export-policy transition is in progress. Both actors previously parked
+  operator reads behind the whole RIB transition, so a read arriving more than
+  about 0.8 s before the commit exhausted its two-second budget at 1000 peers.
+  The peer manager now keeps serving session snapshots and import-statistics
+  collections while it awaits the batched RIB reply, on the same terms as
+  during destination prestaging, and the RIB answers general queries from the
+  pre-commit state between its pre-commit transition polls. Reads that arrive
+  during the short commit batches still wait for the commit, which remains the
+  single switch point; a paged route listing started before the commit cannot
+  be continued across it. Budgets, the reload's atomic commit, and rollback
+  fencing are unchanged.
+
 - **Operator-visible:** a configuration reload could be rejected with no runtime
   effect when one peer's session-state query was slow during heavy RIB load.
   The slow peer was excluded from the batched export-policy cohort and fell to

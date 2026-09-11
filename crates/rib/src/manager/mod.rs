@@ -2099,9 +2099,13 @@ impl RibManager {
     fn advance_route_pages_for_update(&mut self, update: &RibUpdate) {
         match update {
             // `ReplacePeerExportPolicies` stages a multi-iteration clean
-            // transition whose `Finalize` flips group memberships and export
-            // overlays; general queries stay fenced out until it is terminal,
-            // so advancing here at acceptance covers the whole transaction.
+            // transition whose `CommitMembers` flips group memberships and
+            // export overlays. Advancing here at acceptance invalidates every
+            // continuation from before the transaction; the terminal commit
+            // advances again (`finish_clean_policy_transition_commit`) so a
+            // page started between pre-commit polls, where general queries
+            // are served from the pre-commit state, cannot continue across
+            // the switch.
             RibUpdate::ReplacePeerExportPolicy { .. }
             | RibUpdate::ReplacePeerExportPolicies { .. }
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
@@ -2135,6 +2139,32 @@ impl RibManager {
     /// queries until that transition is terminal.
     fn drain_general_queries_if_unfenced(&mut self) {
         if self.pending_clean_policy_transition.is_none() {
+            self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+        }
+    }
+
+    /// Serve one bounded general-query budget between two polls of an owned
+    /// clean policy transition. Every pre-commit poll leaves committed
+    /// membership, installed policy, counters, and wire state untouched, so
+    /// the primary state at this seam is exactly the pre-commit generation
+    /// and a read answered here is what the same read would have returned
+    /// just before the transition was accepted. The query lane carries only
+    /// reads by construction (mutations arrive on the primary channel, which
+    /// stays fenced), so nothing served here can invalidate the parked
+    /// phase. The commit phase keeps the fence: membership and counters
+    /// move per batch there, and its terminal poll advances the advertised
+    /// page generation before any read can observe the new state.
+    fn drain_general_queries_between_transition_polls(&mut self) {
+        let pre_commit = self
+            .pending_clean_policy_transition
+            .as_ref()
+            .is_some_and(|pending| {
+                !matches!(
+                    pending.poll_kind(),
+                    distribution::CleanPolicyTransitionPollKind::Commit
+                )
+            });
+        if pre_commit {
             self.drain_queries(QUERY_BUDGET_PER_CHUNK);
         }
     }
@@ -4052,10 +4082,12 @@ impl RibManager {
                 .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
-                // Only the type-narrow readiness lane may interleave here.
-                // General queries, primary updates, route chunks, timers, and
-                // resync work remain queued until terminal commit or the
-                // fail-closed fallback handoff.
+                // The type-narrow readiness lane interleaves at every poll,
+                // and a bounded general-query budget between pre-commit
+                // polls (see `drain_general_queries_between_transition_polls`).
+                // Primary updates, route chunks, timers, and resync work
+                // remain queued until terminal commit or the fail-closed
+                // fallback handoff.
                 let member_count = pending.member_count();
                 Self::warn_if_policy_transition_slow(&mut pending, member_count);
                 self.drain_readiness_queries(Some(pending.elapsed()));
@@ -4121,6 +4153,7 @@ impl RibManager {
                     let _ = reply.send(result);
                 }
                 self.drain_readiness_queries(policy_transition_elapsed);
+                self.drain_general_queries_between_transition_polls();
                 tokio::task::yield_now().await;
                 continue;
             }

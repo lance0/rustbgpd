@@ -909,6 +909,44 @@ impl PeerManager {
         }
     }
 
+    /// Like [`Self::await_with_readiness`], optionally admitting the bounded
+    /// operator-read lane as well. Only the forward reload owner passes
+    /// `true`, and only while it awaits the cohort's RIB transition: every
+    /// cohort session already runs its new chains at that point, so a read
+    /// admitted here observes the same mixed per-session generation the
+    /// destination prestage already admits, and the ordinary command
+    /// receiver stays unpolled so mutations remain strictly behind the
+    /// transaction. Each admitted read completes (through the readiness-only
+    /// helper, as during prestage) before the wait resumes.
+    async fn await_with_readiness_and_operator_reads<F>(
+        &mut self,
+        future: F,
+        allow_operator_reads: bool,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                query = Self::receive_readiness_query(&mut self.readiness_rx) => {
+                    match query {
+                        Some(query) => self.handle_readiness_query(query).await,
+                        None => self.readiness_rx = None,
+                    }
+                }
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if allow_operator_reads => {
+                    match query {
+                        Some(query) => self.handle_operator_query(query, true).await,
+                        None => self.operator_rx = None,
+                    }
+                }
+            }
+        }
+    }
+
     /// Like [`Self::await_with_readiness`], but bound the transaction step by
     /// a budget that accrues only while the step itself is being driven. Wall
     /// time spent servicing an interleaved readiness query is not charged: a
@@ -929,8 +967,10 @@ impl PeerManager {
             .await
     }
 
-    /// Only a forward reload's initial destination prestage may admit operator
-    /// snapshots. All other transaction waits keep this lane fenced.
+    /// Only a forward reload admits operator snapshots, during its initial
+    /// destination prestage here and while it awaits the cohort RIB
+    /// transition in [`Self::await_with_readiness_and_operator_reads`]. All
+    /// other transaction waits keep this lane fenced.
     async fn await_with_readiness_and_operator_budget<F>(
         &mut self,
         future: F,

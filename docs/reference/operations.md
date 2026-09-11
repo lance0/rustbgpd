@@ -608,10 +608,19 @@ The existing request deadlines still apply under sustained read load.
 During a forward generation's export-destination prestaging, neighbor inventory
 and policy-statistics reads can inspect the installed generation while the RIB
 prepares the candidate destination. These reads retain their existing deadlines.
-Once session policy application starts, operator reads wait for settlement;
-rollback and standalone policy transactions keep the same fence. Readiness
-queries remain available at their existing transaction seams. A congested backend
-or a later transaction stage can still exhaust an operator read's deadline.
+Once session policy application starts, operator reads wait for that
+per-session step to finish; while the daemon then awaits the batched RIB
+transition for the cohort, they are served again: the peer manager answers
+session snapshots and import-statistics collections (each cohort session
+already runs its new chains, so a per-session row may show either generation,
+exactly as during prestaging), and the RIB answers general queries between its
+pre-commit transition polls from the pre-commit state. Reads that arrive during
+the RIB's short commit batches wait for the commit, which remains the single
+switch point; a route listing started before the commit cannot be continued
+across it. Rollback and standalone policy transactions keep the full fence.
+Readiness queries remain available at their existing transaction seams. A
+congested backend or a later transaction stage can still exhaust an operator
+read's deadline.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves
@@ -1302,7 +1311,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
-| `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane remains responsive |
+| `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). Mutations remain fenced until the transition is terminal; general RIB queries are served from the pre-commit state between the pre-commit polls and wait only through the commit batches, while the dedicated core-readiness lane remains responsive throughout |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it |
