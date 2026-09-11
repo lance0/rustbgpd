@@ -1053,13 +1053,26 @@ Smokes may lengthen the probe schedules with
 in `run.json` and the terminal summary, and the analyzer requires them to
 match. The management-plane load itself is not optional.
 
+`samples.csv` extracts ten scalars per sample; every family the daemon
+exposes, including the RIB actor work and readiness-wait histograms that
+diagnose reload stalls, is retained by `metrics-snapshots.txt.gz`. The
+runner appends the full `/metrics` body it already scraped for the sample
+every `METRICS_SNAPSHOT_EVERY` samples (default `10`, so every 5 minutes at
+the default 30 s sample interval; `0` disables retention), each headed by a
+`# snapshot <UTC> elapsed_sec=<n>` line; `zcat` reads the file as one
+stream. A failed append is rolled back so it cannot corrupt later snapshots;
+a member interrupted by a hard crash is not recovered. At the 1000-peer
+shape one body is about 4.4 MiB raw and about 210 KiB gzipped, so a 24 h
+run keeps 288 snapshots in roughly 60 MB. Both flagship runners share this
+knob.
+
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
 file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`,
 `management-plane-load.jsonl`, `management-plane-load.log`,
-`doctor-bundle.tar.gz`, `run.json`,
+`doctor-bundle.tar.gz`, `metrics-snapshots.txt.gz`, `run.json`,
 `verdict.json`, `runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
@@ -1119,8 +1132,9 @@ Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
 file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rr-flagship-<UTC>/` (`samples.csv`,
-`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`, `verdict.json`,
-`runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rr-flagship.py` and the
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `metrics-snapshots.txt.gz`,
+`run.json`, `verdict.json`, `runner.identity`, `cleanup.complete`); the
+analyzer is `analyze-soak-rr-flagship.py` and the
 precommitted gates are scenario 11 in
 `docs/soaks/soak-acceptance-gates.md`. The same short-`/tmp`-scenario
 and fresh-per-run rules as the route-server flagship soak apply.

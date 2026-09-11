@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Subprocess contracts for flagship runner stop ownership."""
 
+import gzip
 import os
 import signal
 import socket
@@ -136,6 +137,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
             MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
             DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
+            METRICS_SNAPSHOTS_GZ="$RUN_DIR/metrics-snapshots.txt.gz"
             PROM_TMP="$RUN_DIR/.metrics.prom"
             require_fd_headroom() { RUSTBGPD_NOFILE_SOFT_JSON=65536; }
             if declare -F start_management_load >/dev/null; then
@@ -264,6 +266,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     identity = run_dir / "runner.identity"
                     wait_for(identity)
                     wait_for_children(run_dir / "children", 3 if runner.startswith("run-soak-rs") else 2)
+                    wait_for(run_dir / "metrics-snapshots.txt.gz")
                     actual_pid = int(identity.read_text().split()[0])
                     self.assertNotEqual(outer.pid, actual_pid)
                     outer.terminate()
@@ -291,6 +294,10 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     if runner.startswith("run-soak-rs"):
                         self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
                     self.assertFalse((run_dir / "verdict.json").exists())
+                    with gzip.open(run_dir / "metrics-snapshots.txt.gz", "rt", encoding="utf-8") as retained:
+                        snapshot = retained.read()
+                    self.assertRegex(snapshot, r"\A# snapshot \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ elapsed_sec=\d+\n")
+                    self.assertIn("\nbgp_peer_session_established 9\n", snapshot)
                     self.assertEqual(
                         (run_dir / "cleanup.complete").read_text().splitlines()[0],
                         "status=interrupted",
@@ -392,6 +399,57 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                 )
             finally:
                 terminate_group(process.pid, process)
+
+    def assert_failed_snapshot_append_rolls_back(self, runner, directory):
+        archive = directory / "metrics-snapshots.txt.gz"
+        body = directory / "metrics.prom"
+        body.write_text("bgp_peer_session_established 9\n")
+        fake_bin = directory / "bin"
+        fake_bin.mkdir()
+        # A gzip that emits a member header, then fails like a write error.
+        broken_gzip = fake_bin / "gzip"
+        broken_gzip.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            "printf '\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x03partial'\n"
+            "exit 1\n"
+        )
+        broken_gzip.chmod(0o755)
+
+        def append(timestamp, elapsed, path=None):
+            environment = os.environ.copy()
+            if path:
+                environment["PATH"] = f"{path}:{environment['PATH']}"
+            return subprocess.run(
+                ["bash", "-c",
+                 'source "$1"; METRICS_SNAPSHOTS_GZ=$2; PROM_TMP=$3; prom_snapshot "$4" "$5"',
+                 "snapshot", str(HERE / runner), str(archive), str(body), timestamp, elapsed],
+                text=True, capture_output=True, check=False, env=environment,
+            )
+
+        def snapshots():
+            self.assertEqual(subprocess.run(["gzip", "-t", str(archive)], check=False).returncode, 0)
+            with gzip.open(archive, "rt", encoding="utf-8") as retained:
+                return retained.read().count("# snapshot ")
+
+        self.assertNotEqual(append("2026-01-01T00:00:00Z", "0", fake_bin).returncode, 0)
+        self.assertFalse(archive.exists())
+        self.assertEqual(append("2026-01-01T00:00:00Z", "0").returncode, 0)
+        self.assertEqual(append("2026-01-01T00:00:10Z", "10").returncode, 0)
+        intact = archive.read_bytes()
+        self.assertEqual(snapshots(), 2)
+
+        self.assertNotEqual(append("2026-01-01T00:00:20Z", "20", fake_bin).returncode, 0)
+        self.assertEqual(snapshots(), 2)
+        self.assertEqual(archive.read_bytes(), intact)
+
+        self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
+        self.assertEqual(snapshots(), 3)
+
+    def test_failed_snapshot_append_leaves_the_archive_readable(self):
+        for runner in RUNNERS:
+            with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
+                self.assert_failed_snapshot_append_rolls_back(runner, Path(tmp))
 
     def test_stale_identity_refuses_to_signal_an_unrelated_process(self):
         with tempfile.TemporaryDirectory() as tmp:
