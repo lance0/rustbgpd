@@ -77,6 +77,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The route-server flagship soak analyzer now fails its `/readyz` gate on
+  three consecutive breached samples rather than on a single one, matching
+  the readiness-probe `failureThreshold` default that health-probe consumers
+  apply. The verdict reports the total breach count, the longest consecutive
+  run, and each offending sample, separating a non-200 status from a late
+  200, so isolated breaches stay visible when the gate passes.
+
 - The container healthcheck now uses `rbgp health --liveness`: it checks gRPC
   responsiveness rather than core-actor readiness. Override it with
   `--health-cmd='rbgp health'` to retain the previous probe. Successful `read`

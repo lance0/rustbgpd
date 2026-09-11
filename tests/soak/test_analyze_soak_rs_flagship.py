@@ -387,6 +387,57 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["msgs_sent_monotone"]["pass"])
 
+    def test_isolated_readyz_breaches_are_reported_and_pass(self):
+        # Health probes apply hysteresis; a single sample is below the
+        # resolution any prober acts on. The detail must still be there.
+        rows = smoke_rows()
+        rows[1]["readyz_code"] = "503"
+        rows[1]["readyz_ms"] = "400.0"
+        rows[3]["readyz_ms"] = "900.0"
+        rows[7]["readyz_code"] = "503"
+        rows[7]["readyz_ms"] = "300.0"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["readyz"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["bad_samples"], 3)
+        self.assertEqual(gate["value"]["status_failures"], 2)
+        self.assertEqual(gate["value"]["latency_failures"], 1)
+        self.assertEqual(gate["value"]["longest_consecutive"], 1)
+        self.assertEqual(gate["value"]["limit_ms"],
+                         analyzer.READYZ_MS_LIMIT)
+        self.assertEqual(
+            [(s["elapsed_sec"], s["kind"]) for s in gate["value"]["first"]],
+            [(30.0, "status"), (90.0, "latency"), (210.0, "status")],
+        )
+
+    def test_three_consecutive_readyz_breaches_fail(self):
+        rows = smoke_rows()
+        for index in (3, 4, 5):
+            rows[index]["readyz_ms"] = "400.0"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["bad_samples"], 3)
+        self.assertEqual(gate["value"]["longest_consecutive"], 3)
+        self.assertEqual(gate["value"]["latency_failures"], 3)
+        self.assertEqual(gate["value"]["limit_consecutive"],
+                         analyzer.READYZ_CONSECUTIVE_LIMIT)
+
+    def test_two_consecutive_readyz_breaches_pass_and_stay_visible(self):
+        rows = smoke_rows()
+        for index in (2, 3, 6, 7):
+            rows[index]["readyz_code"] = "503"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["readyz"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["bad_samples"], 4)
+        self.assertEqual(gate["value"]["status_failures"], 4)
+        self.assertEqual(gate["value"]["latency_failures"], 0)
+        self.assertEqual(gate["value"]["longest_consecutive"], 2)
+
     def test_rss_over_ceiling_fails(self):
         rows = smoke_rows()
         rows[4]["rss_mb"] = "4000.0"

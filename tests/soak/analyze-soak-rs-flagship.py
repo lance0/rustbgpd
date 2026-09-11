@@ -17,7 +17,8 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - exceeded-counter exact: final bgp_max_prefix_exceeded_total == trips
   - flap budget exact: session-flap delta == trips (one per teardown)
   - counter monotonicity: bgp_messages_sent_total never decreases
-  - readyz availability: 200 within 250 ms on every sample
+  - readyz availability: fewer than 3 consecutive samples that miss
+    200 within 250 ms; every breach is reported either way
   - management-plane load brackets the measured window, retains every
     operation, completes >= 90% of scheduled probes, misses no cadence,
     and records zero non-ok results or invalid ok results
@@ -57,6 +58,11 @@ RSS_PEAK_LIMIT_MB = 3072.0
 RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
+# Readiness probes are consumed with hysteresis: a Kubernetes readiness probe
+# defaults to failureThreshold 3, so a workload is withdrawn only after three
+# consecutive failed probes, not after one. The endpoint reports instantaneous
+# truth; the gate models the consumer. An isolated breach is still reported.
+READYZ_CONSECUTIVE_LIMIT = 3
 REESTABLISH_GRACE_SEC = 60
 MANAGEMENT_OPERATIONS = (
     "metrics", "neighbor", "policy_stats", "rib_prefix", "doctor",
@@ -596,10 +602,22 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
     monotone_breaks = sum(
         1 for a, b in zip(msgs, msgs[1:]) if b < a
     )
-    readyz_bad = sum(
-        1 for code, ms in zip(readyz_code, readyz_ms)
-        if code != 200 or ms > READYZ_MS_LIMIT
-    )
+    readyz_bad = []
+    readyz_longest_run = readyz_run = 0
+    for index, (code, ms) in enumerate(zip(readyz_code, readyz_ms)):
+        if code == 200 and ms <= READYZ_MS_LIMIT:
+            readyz_run = 0
+            continue
+        readyz_run += 1
+        readyz_longest_run = max(readyz_longest_run, readyz_run)
+        readyz_bad.append({
+            "elapsed_sec": elapsed[index],
+            "code": code,
+            "latency_ms": ms,
+            # A non-200 is the endpoint declaring itself unready; a slow 200
+            # is a ready endpoint answering late. They are different faults.
+            "kind": "status" if code != 200 else "latency",
+        })
 
     peak_rss = max(rss) if rss else float("nan")
 
@@ -654,9 +672,18 @@ def analyze(rows: list[dict[str, str]], cycles: dict, meta: dict,
             "pass": monotone_breaks == 0,
         },
         "readyz": {
-            "value": {"bad_samples": readyz_bad,
-                      "limit_ms": READYZ_MS_LIMIT},
-            "pass": readyz_bad == 0,
+            "value": {
+                "bad_samples": len(readyz_bad),
+                "status_failures": sum(
+                    1 for s in readyz_bad if s["kind"] == "status"),
+                "latency_failures": sum(
+                    1 for s in readyz_bad if s["kind"] == "latency"),
+                "longest_consecutive": readyz_longest_run,
+                "first": readyz_bad[:20],
+                "limit_ms": READYZ_MS_LIMIT,
+                "limit_consecutive": READYZ_CONSECUTIVE_LIMIT,
+            },
+            "pass": readyz_longest_run < READYZ_CONSECUTIVE_LIMIT,
         },
         "rss_peak_mb": {
             "value": peak_rss if not math.isnan(peak_rss) else None,
