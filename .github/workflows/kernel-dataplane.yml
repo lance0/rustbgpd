@@ -535,6 +535,7 @@ jobs:
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           shared-key: m43-tcp-ao-get-keys
 
       - name: Run overlapping-owner TCP-AO GET_KEYS kernel receipt
