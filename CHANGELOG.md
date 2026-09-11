@@ -261,6 +261,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cleanup. Ordinary queries remain fenced, and readiness replies retain the
   exact Loc-RIB count and the existing transition-age limit.
 
+- Native SIGHUP measurement and flagship soak runners now require terminal
+  daemon success as well as receiver delivery before recording a reload as
+  complete. Rejection or rollback fails that cycle before A/B alternation can
+  turn it into a misleading later re-advertisement stall.
+
 ### Upgrade notes
 
 - Embedders using the prepared wire 0.21, FSM 0.8, or RPKI 0.3 source

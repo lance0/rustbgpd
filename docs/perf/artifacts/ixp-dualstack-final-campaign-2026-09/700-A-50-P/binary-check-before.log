@@ -1,0 +1,3 @@
+target/release/rustbgpd: OK
+target/release/rbgp: OK
+bench/scale/target/release/reloadstall: OK

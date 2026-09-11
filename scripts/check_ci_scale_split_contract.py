@@ -41,6 +41,7 @@ EXPECTED_STANDALONE_COMMANDS = (
         WORKFLOWS[0],
         "cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked --all-targets -- -D warnings",
     ),
+    (WORKFLOWS[0], "cargo build --manifest-path bench/scale/Cargo.toml --locked -p reloadstall"),
 )
 CARGO_COMMAND = re.compile(r"(?<![\w-])cargo(?:\s+\+\S+)?\s+(build|check|test|clippy|doc|bench|run)\b")
 LOCKED_TOKEN = re.compile(r"(?<!\S)--locked(?=\s|$)")
