@@ -206,7 +206,11 @@ scale with the fleet and therefore bound nothing. A per-peer command is not a
 cheap inline operation: it performs its own full distribution pass, so a single
 reply can legitimately take seconds under load. The forward and rollback
 deadlines anchor independently, so a slow walk cannot consume the budget its
-own compensation needs.
+own compensation needs. The forward deadline starts at the first actual RIB
+command, after any session-only preflight, and covers both channel admission
+and the reply. Expiry cancels an unadmitted forward send; an admitted command
+remains ahead of its exact rollback in FIFO order. This bounds RIB waits, not
+all session and Route Refresh work in the transaction.
 
 ### 5. Readiness and observability
 

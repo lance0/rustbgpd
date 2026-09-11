@@ -103,9 +103,9 @@ const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 
-/// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
-/// actor for a genuinely single-peer inline operation (gRPC chain edit,
-/// per-peer outbound refresh). Bounded so a wedged RIB task cannot park the
+/// Hard deadline for RIB channel admission and reply on a single-peer policy
+/// edit. Also used by per-peer outbound refresh and other bounded RIB steps.
+/// Bounded so a wedged RIB task cannot park the
 /// peer-manager actor (and therefore SIGHUP reload / gRPC policy apply)
 /// forever.
 ///

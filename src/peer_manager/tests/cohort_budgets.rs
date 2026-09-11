@@ -410,7 +410,7 @@ async fn forward_walk_rib_reply_may_outlive_the_single_command_deadline() {
             panic!("expected the forward remainder command");
         };
         assert_eq!(target, peer);
-        tokio::time::advance(RIB_REPLY_TIMEOUT + Duration::from_secs(6)).await;
+        tokio::time::sleep(RIB_REPLY_TIMEOUT + Duration::from_secs(6)).await;
         reply.send(Ok(())).unwrap();
     };
     let (result, ()) = tokio::join!(apply, rib);
@@ -490,7 +490,7 @@ async fn forward_walk_rib_budget_is_shared_across_the_whole_walk() {
             match rib_rx.recv().await.unwrap() {
                 RibUpdate::ReplacePeerExportPolicy { reply, .. } => {
                     served += 1;
-                    tokio::time::advance(per_peer_delay).await;
+                    tokio::time::sleep(per_peer_delay).await;
                     let _ = reply.send(Ok(()));
                 }
                 RibUpdate::RestorePeerExportPoliciesAuthoritatively {
@@ -512,21 +512,228 @@ async fn forward_walk_rib_budget_is_shared_across_the_whole_walk() {
             }
         }
     };
-    let (result, served) = tokio::join!(apply, drive_rib);
+    let (result, served) = tokio::time::timeout(RIB_BATCH_REPLY_TIMEOUT * 3, async {
+        tokio::join!(apply, drive_rib)
+    })
+    .await
+    .expect("the walk must reject and complete its rollback within the bound");
     assert!(
         per_peer_delay < RIB_BATCH_REPLY_TIMEOUT,
         "every individual reply must fit inside a fresh budget, so only a \
          shared one can reject this walk"
     );
     assert_eq!(
-        served,
-        usize::from(PEER_COUNT),
-        "every peer's own command must be issued and answered within a fresh budget"
+        served, 2,
+        "the second reply exhausts the shared budget; the third command must not be issued"
     );
     assert!(
         result
             .as_ref()
             .is_err_and(|error| error.contains("shared policy-walk budget")),
         "a walk whose cumulative RIB time exceeds the budget must still be rejected: {result:?}"
+    );
+}
+
+/// Session work before the first RIB command cannot spend its lazy budget.
+#[tokio::test(start_paused = true)]
+async fn forward_walk_rib_budget_starts_after_session_apply() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 41, 2, 1));
+    let (mut manager, mut rib_rx) = rfc8212_status_manager();
+    let (session_tx, mut session_rx) = mpsc::channel(16);
+    let session = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer, SessionState::Established);
+                    state.negotiated_session = Some(test_negotiated_session(true));
+                    let _ = reply.send(state);
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateImportPolicy { reply, .. }
+                | PeerCommand::SendRouteRefresh { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        PeerHandle::from_parts(session_tx, session),
+        false,
+    );
+    manager.peers.get_mut(&key(peer)).unwrap().import_policy = Some(
+        crate::config::reserved_rfc8212_deny_chain(crate::config::RFC8212_MISSING_IMPORT_POLICY),
+    );
+    let apply = manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+        address: peer,
+        interface: None,
+        import_policy: Some(deny_policy_chain()),
+        export_policy: Some(deny_policy_chain()),
+    }]);
+    let rib = async {
+        let RibUpdate::ReplacePeerExportPolicy { reply, .. } = rib_rx.recv().await.unwrap() else {
+            panic!("expected forward export replacement");
+        };
+        tokio::time::sleep(
+            RIB_BATCH_REPLY_TIMEOUT
+                .checked_sub(Duration::from_millis(200))
+                .unwrap(),
+        )
+        .await;
+        reply
+            .send(Ok(()))
+            .expect("session work must not spend the RIB budget");
+    };
+    let (result, ()) = tokio::join!(apply, rib);
+    assert!(
+        result.is_ok(),
+        "first RIB use must get the whole budget: {result:?}"
+    );
+}
+
+/// Saturating the primary lane must bound both the read-only preflight and
+/// export admission. A canceled send must not become a late forward mutation.
+#[tokio::test(start_paused = true)]
+async fn forward_walk_rib_budget_bounds_full_channel_admission() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    for retained_proof in [false, true] {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 41, 3, 1));
+        let (mut manager, _) = rfc8212_status_manager();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (marker_reply, _marker_rx) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryPeerRetainedStale {
+                peer,
+                reply: marker_reply,
+            })
+            .await
+            .unwrap();
+        manager.rib_tx = rib_tx;
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            acking_policy_handle(
+                peer,
+                if retained_proof {
+                    SessionState::Idle
+                } else {
+                    SessionState::Established
+                },
+            ),
+            false,
+        );
+        if retained_proof {
+            manager.peers.get_mut(&key(peer)).unwrap().import_policy =
+                Some(crate::config::reserved_rfc8212_deny_chain(
+                    crate::config::RFC8212_MISSING_IMPORT_POLICY,
+                ));
+        }
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            RIB_BATCH_REPLY_TIMEOUT * 3,
+            manager.apply_resolved_policy_snapshot(vec![ResolvedPeerPolicy {
+                address: peer,
+                interface: None,
+                import_policy: retained_proof.then(deny_policy_chain),
+                export_policy: Some(deny_policy_chain()),
+            }]),
+        )
+        .await
+        .expect("full-channel admission must not park the snapshot forever");
+        assert!(result.is_err(), "an unserved RIB cannot commit");
+        assert_eq!(
+            started.elapsed(),
+            RIB_BATCH_REPLY_TIMEOUT * if retained_proof { 1 } else { 2 }
+        );
+        assert!(matches!(
+            rib_rx.recv().await.unwrap(),
+            RibUpdate::QueryPeerRetainedStale { .. }
+        ));
+        if retained_proof {
+            assert!(matches!(
+                rib_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        } else {
+            let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                reply,
+                replacements,
+            } = rib_rx.recv().await.unwrap()
+            else {
+                panic!("only the detached exact rollback may follow the canceled admission");
+            };
+            reply
+                .send(Ok(replacements
+                    .iter()
+                    .rev()
+                    .map(
+                        |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                            peer: replacement.peer,
+                        },
+                    )
+                    .collect()))
+                .unwrap();
+            assert!(manager.peers.get(&key(peer)).unwrap().pending_export_apply);
+        }
+    }
+}
+
+/// Preflight reports every rejection, so later peers still reach the proof
+/// helper after the first timeout. They must not enqueue already-expired work.
+#[tokio::test(start_paused = true)]
+async fn forward_walk_rib_budget_stops_expired_retained_proofs() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (mut manager, mut rib_rx) = rfc8212_status_manager();
+    let mut targets = Vec::new();
+    for last in 1..=3 {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 41, 4, last));
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            acking_policy_handle(peer, SessionState::Idle),
+            false,
+        );
+        manager.peers.get_mut(&key(peer)).unwrap().import_policy =
+            Some(crate::config::reserved_rfc8212_deny_chain(
+                crate::config::RFC8212_MISSING_IMPORT_POLICY,
+            ));
+        targets.push(ResolvedPeerPolicy {
+            address: peer,
+            interface: None,
+            import_policy: Some(deny_policy_chain()),
+            export_policy: None,
+        });
+    }
+    let rib = tokio::spawn(async move {
+        let mut served = 0;
+        while let Some(update) = rib_rx.recv().await {
+            let RibUpdate::QueryPeerRetainedStale { reply, .. } = update else {
+                panic!("preflight must reject without applying policies");
+            };
+            served += 1;
+            tokio::time::sleep(RIB_BATCH_REPLY_TIMEOUT * 2 / 3).await;
+            let _ = reply.send(0);
+        }
+        served
+    });
+    let started = tokio::time::Instant::now();
+    let result = manager.apply_resolved_policy_snapshot(targets).await;
+    assert!(result.is_err());
+    assert_eq!(started.elapsed(), RIB_BATCH_REPLY_TIMEOUT);
+    drop(manager);
+    assert_eq!(
+        rib.await.unwrap(),
+        2,
+        "the expired third proof must not be admitted"
     );
 }
