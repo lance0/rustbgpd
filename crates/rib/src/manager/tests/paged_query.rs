@@ -2243,10 +2243,12 @@ fn accepted_refresh_work_advances_each_route_page_version_once() {
 }
 
 /// A shared clean export-policy transition commits its group-membership and
-/// export-overlay flips in `Finalize`, which does not always reach the
-/// distribution-pass fence (no dirty or forced peers). General queries stay
-/// queued while the transition owns the actor, so fencing at command
-/// acceptance covers the whole transaction, including the fallback handoff.
+/// export-overlay flips in `CommitMembers`, which does not always reach the
+/// distribution-pass fence (no dirty or forced peers). Fencing at command
+/// acceptance invalidates every continuation from before the transaction,
+/// including on the fallback handoff; the terminal commit advances again
+/// because general queries are served between the pre-commit polls (see the
+/// update-group transition seam tests).
 #[test]
 fn accepting_a_shared_policy_transition_invalidates_advertised_continuations() {
     let (_tx, rx) = mpsc::channel(8);

@@ -737,3 +737,175 @@ async fn forward_walk_rib_budget_stops_expired_retained_proofs() {
         "the expired third proof must not be admitted"
     );
 }
+
+/// Established session for the cohort read test: hot-applies export policy
+/// immediately, answers state queries as Established, and answers the
+/// import-stats query so the fleet collection can complete.
+fn cohort_session_with_import_stats(addr: IpAddr, installs: Arc<AtomicUsize>) -> PeerHandle {
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    installs.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                }
+                PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    let _ = reply.send(Some(rustbgpd_transport::ImportPolicyTermHits {
+                        generation: 1,
+                        evals: 0,
+                        eval_errors: 0,
+                        last_error: None,
+                        terms: Vec::new(),
+                    }));
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
+/// Stub RIB that holds the cohort reply: signals `held` once the batched
+/// replacement arrives and answers `Committed` only after `release` fires.
+fn rib_holding_cohort_reply(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    held: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut held = Some(held);
+        let mut release = Some(release);
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    if let Some(held) = held.take() {
+                        let _ = held.send(());
+                    }
+                    let release = release.take();
+                    tokio::spawn(async move {
+                        if let Some(release) = release {
+                            let _ = release.await;
+                        }
+                        let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                    });
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// Operator reads admitted while the forward reload awaits the cohort RIB
+/// reply: with the RIB still owning the transition (its reply held here),
+/// a neighbor snapshot and the fleet import-stats collection both complete
+/// on the operator lane instead of waiting behind the transition. Awaiting
+/// the reply with the readiness-only helper parks both reads until the
+/// held reply is released and fails the bounded expectations below.
+#[tokio::test(start_paused = true)]
+async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
+    use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, ResolvedPeerPolicy};
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 38, 0, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 38, 0, 2));
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (held_tx, held_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let rib = rib_holding_cohort_reply(rib_rx, held_tx, release_rx);
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_operator_queries(operator_rx);
+    let installs = Arc::new(AtomicUsize::new(0));
+    for peer in [first, second] {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let targets = [first, second]
+        .into_iter()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(next.clone()),
+        })
+        .collect::<Vec<_>>();
+    let reload = tokio::spawn(async move {
+        let result = manager
+            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .await;
+        (manager, result)
+    });
+
+    // The RIB owns the transition: every cohort session already runs the
+    // new chain and the reply is held until released below.
+    held_rx.await.unwrap();
+    assert_eq!(installs.load(Ordering::SeqCst), 2);
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .await
+        .unwrap();
+    let infos = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("a neighbor snapshot is answered while the cohort RIB reply is awaited")
+        .unwrap();
+    assert_eq!(infos.len(), 2);
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+            peer: None,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+            reply,
+        })
+        .await
+        .unwrap();
+    let rows = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("the import-stats collection is answered while the cohort RIB reply is awaited")
+        .unwrap();
+    assert!(
+        matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 2),
+        "{rows:?}"
+    );
+    assert!(
+        !reload.is_finished(),
+        "the transaction stays parked on the held reply"
+    );
+
+    release_tx.send(()).unwrap();
+    let (mut manager, result) = reload.await.unwrap();
+    result.expect("the cohort commits once the held reply is released");
+    assert_eq!(
+        manager.peers.get(&key(first)).unwrap().export_policy,
+        Some(next)
+    );
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+    drop(manager);
+    rib.await.unwrap();
+}

@@ -503,9 +503,14 @@ impl RibManager {
     /// Publish cohort-wide gauges once after the synchronous membership commit.
     /// Refreshing them per member is both unobservable (queries cannot
     /// interleave in the commit section) and quadratic for large cohorts.
+    /// The advertised page generation advances here as well: general queries
+    /// are served from the pre-commit state between the earlier polls, so a
+    /// continuation started there must not resume over the switched
+    /// memberships.
     pub(in crate::manager) fn finish_clean_policy_transition_commit(&mut self) {
         self.refresh_update_group_gauges();
         self.refresh_group_residue_gauge();
+        self.advance_advertised_pages();
     }
 
     /// Build the shared old→new inventory for one batched authoritative

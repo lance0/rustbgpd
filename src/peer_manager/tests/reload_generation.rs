@@ -1120,18 +1120,32 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
             .await
             .unwrap();
         ping.await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut response)
+        let queued_response = if compensate {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut response)
+                    .await
+                    .is_err(),
+                "operator reads must stay fenced during rollback"
+            );
+            Some(response)
+        } else {
+            // The forward owner keeps admitting operator reads while the
+            // cohort RIB reply is held: the sessions already run their new
+            // chains, so the snapshot observes the same mixed generation
+            // prestage admits rather than waiting for the commit.
+            let infos = tokio::time::timeout(Duration::from_secs(1), &mut response)
                 .await
-                .is_err(),
-            "operator reads must stay fenced after session application and during rollback"
-        );
+                .expect("operator reads are served while the cohort RIB reply is held")
+                .unwrap();
+            assert_eq!(infos.len(), 3);
+            None
+        };
         assert!(matches!(
             mutation_response.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
         rib_tx.send(held).await.unwrap();
-        (response, mutation_response)
+        (queued_response, mutation_response)
     };
     let (outcome, (operator_response, mutation_response)) =
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1154,7 +1168,9 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
     }
     let manager = tokio::spawn(harness.mgr.run());
     tokio::time::timeout(Duration::from_secs(1), async {
-        assert_eq!(operator_response.await.unwrap().len(), 3);
+        if let Some(operator_response) = operator_response {
+            assert_eq!(operator_response.await.unwrap().len(), 3);
+        }
         let _ = mutation_response.await.unwrap();
         command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         manager.await.unwrap();
@@ -1168,7 +1184,7 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn forward_generation_services_operator_reads_only_during_prestage() {
+async fn forward_generation_services_operator_reads_through_the_cohort_transition() {
     assert_generation_operator_read_boundaries(false).await;
 }
 
