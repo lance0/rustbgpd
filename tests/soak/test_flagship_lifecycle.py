@@ -400,54 +400,56 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             finally:
                 terminate_group(process.pid, process)
 
+    def assert_failed_snapshot_append_rolls_back(self, runner, directory):
+        archive = directory / "metrics-snapshots.txt.gz"
+        body = directory / "metrics.prom"
+        body.write_text("bgp_peer_session_established 9\n")
+        fake_bin = directory / "bin"
+        fake_bin.mkdir()
+        # A gzip that emits a member header, then fails like a write error.
+        broken_gzip = fake_bin / "gzip"
+        broken_gzip.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat >/dev/null\n"
+            "printf '\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x03partial'\n"
+            "exit 1\n"
+        )
+        broken_gzip.chmod(0o755)
+
+        def append(timestamp, elapsed, path=None):
+            environment = os.environ.copy()
+            if path:
+                environment["PATH"] = f"{path}:{environment['PATH']}"
+            return subprocess.run(
+                ["bash", "-c",
+                 'source "$1"; METRICS_SNAPSHOTS_GZ=$2; PROM_TMP=$3; prom_snapshot "$4" "$5"',
+                 "snapshot", str(HERE / runner), str(archive), str(body), timestamp, elapsed],
+                text=True, capture_output=True, check=False, env=environment,
+            )
+
+        def snapshots():
+            self.assertEqual(subprocess.run(["gzip", "-t", str(archive)], check=False).returncode, 0)
+            with gzip.open(archive, "rt", encoding="utf-8") as retained:
+                return retained.read().count("# snapshot ")
+
+        self.assertNotEqual(append("2026-01-01T00:00:00Z", "0", fake_bin).returncode, 0)
+        self.assertFalse(archive.exists())
+        self.assertEqual(append("2026-01-01T00:00:00Z", "0").returncode, 0)
+        self.assertEqual(append("2026-01-01T00:00:10Z", "10").returncode, 0)
+        intact = archive.read_bytes()
+        self.assertEqual(snapshots(), 2)
+
+        self.assertNotEqual(append("2026-01-01T00:00:20Z", "20", fake_bin).returncode, 0)
+        self.assertEqual(snapshots(), 2)
+        self.assertEqual(archive.read_bytes(), intact)
+
+        self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
+        self.assertEqual(snapshots(), 3)
+
     def test_failed_snapshot_append_leaves_the_archive_readable(self):
         for runner in RUNNERS:
             with self.subTest(runner=runner), tempfile.TemporaryDirectory() as tmp:
-                directory = Path(tmp)
-                archive = directory / "metrics-snapshots.txt.gz"
-                body = directory / "metrics.prom"
-                body.write_text("bgp_peer_session_established 9\n")
-                fake_bin = directory / "bin"
-                fake_bin.mkdir()
-                # A gzip that emits a member header, then fails like a write error.
-                broken_gzip = fake_bin / "gzip"
-                broken_gzip.write_text(
-                    "#!/usr/bin/env bash\n"
-                    "cat >/dev/null\n"
-                    "printf '\\x1f\\x8b\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x03partial'\n"
-                    "exit 1\n"
-                )
-                broken_gzip.chmod(0o755)
-
-                def append(timestamp, elapsed, path=None):
-                    environment = os.environ.copy()
-                    if path:
-                        environment["PATH"] = f"{path}:{environment['PATH']}"
-                    return subprocess.run(
-                        ["bash", "-c",
-                         'source "$1"; METRICS_SNAPSHOTS_GZ=$2; PROM_TMP=$3; prom_snapshot "$4" "$5"',
-                         "snapshot", str(HERE / runner), str(archive), str(body), timestamp, elapsed],
-                        text=True, capture_output=True, check=False, env=environment,
-                    )
-
-                def snapshots():
-                    self.assertEqual(subprocess.run(["gzip", "-t", str(archive)], check=False).returncode, 0)
-                    with gzip.open(archive, "rt", encoding="utf-8") as retained:
-                        return retained.read().count("# snapshot ")
-
-                self.assertNotEqual(append("2026-01-01T00:00:00Z", "0", fake_bin).returncode, 0)
-                self.assertFalse(archive.exists())
-                self.assertEqual(append("2026-01-01T00:00:00Z", "0").returncode, 0)
-                self.assertEqual(append("2026-01-01T00:00:10Z", "10").returncode, 0)
-                intact = archive.read_bytes()
-                self.assertEqual(snapshots(), 2)
-
-                self.assertNotEqual(append("2026-01-01T00:00:20Z", "20", fake_bin).returncode, 0)
-                self.assertEqual(snapshots(), 2)
-                self.assertEqual(archive.read_bytes(), intact)
-
-                self.assertEqual(append("2026-01-01T00:00:30Z", "30").returncode, 0)
-                self.assertEqual(snapshots(), 3)
+                self.assert_failed_snapshot_append_rolls_back(runner, Path(tmp))
 
     def test_stale_identity_refuses_to_signal_an_unrelated_process(self):
         with tempfile.TemporaryDirectory() as tmp:
