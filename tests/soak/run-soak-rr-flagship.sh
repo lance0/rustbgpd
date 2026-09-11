@@ -28,6 +28,7 @@
 #   - cycles.log       hold/terminal event lines + abort records
 #   - rustbgpd.log     daemon JSON logs
 #   - reloadstall.log  engine stdout/stderr (rr_hold lines, receipt)
+#   - metrics-snapshots.txt.gz     full /metrics body every METRICS_SNAPSHOT_EVERY samples
 #   - run.json         run metadata (analyzer input)
 #   - verdict.json     analyzer verdict
 
@@ -49,6 +50,10 @@ LISTEN_PORT="${LISTEN_PORT:-1790}"
 IBGP_ASN="${IBGP_ASN:-64512}" # shared local AS; must be u16-representable
 # gen-scenario.py pins prometheus_addr to 127.0.0.1:9179.
 readonly METRICS_PORT=9179
+# Retain the full /metrics body every Nth sample (0 disables). One body is
+# about 4.4 MiB raw / 210 KiB gzipped at 1000 peers, so 10 keeps a 24 h run
+# at 30 s sampling to 288 snapshots (about 60 MB compressed).
+METRICS_SNAPSHOT_EVERY="${METRICS_SNAPSHOT_EVERY:-10}"
 
 # --- Derived ---
 TOTAL_PREFIXES=$((SOAK_PEERS * SOAK_ROUTES_PER_PEER))
@@ -66,6 +71,10 @@ if ((SOAK_SECONDS < 60)); then
     echo "SOAK_SECONDS must be at least 60 (one rr_hold status interval)" >&2
     exit 2
 fi
+if [[ ! $METRICS_SNAPSHOT_EVERY =~ ^[0-9]+$ ]]; then
+    echo "METRICS_SNAPSHOT_EVERY must be a non-negative integer (0 disables snapshots)" >&2
+    exit 2
+fi
 OVERALL_CAP_SEC="${OVERALL_CAP_SEC:-$((SOAK_SECONDS + TERMINAL_CAP_SEC + 3600))}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -76,6 +85,7 @@ CYCLES_LOG="$RUN_DIR/cycles.log"
 RUN_JSON="$RUN_DIR/run.json"
 RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 RELOADSTALL_LOG="$RUN_DIR/reloadstall.log"
+METRICS_SNAPSHOTS_GZ="$RUN_DIR/metrics-snapshots.txt.gz"
 PROM_TMP="$RUN_DIR/.metrics.prom"
 
 # shellcheck source=tests/soak/host-lock.sh
@@ -174,6 +184,14 @@ prom_get() {
         END { if (!found) print "nan" }' <"$PROM_TMP"
 }
 
+# Append the current scrape body as one gzip member headed by a comment
+# line, so families the CSV never extracts (histograms, per-peer gauges)
+# reach the archive; `zcat` reads the members as a single stream.
+prom_snapshot() {
+    { printf '# snapshot %s elapsed_sec=%s\n' "$1" "$2"; cat "$PROM_TMP"; } |
+        gzip -c >>"$METRICS_SNAPSHOTS_GZ"
+}
+
 tree_rss_mb() {
     ps -eo pid=,ppid=,rss= --no-headers | awk -v root="$DAEMON_PID" '
         {parent[$1]=$2; rss[$1]=$3} END {for (pid in parent) {p=pid
@@ -206,6 +224,7 @@ process_log() {
 }
 
 SCRAPE_FAILS=0
+SAMPLE_ROWS=0
 sample_row() {
     local elapsed=$1
     # Sessions are held open by the engine; once it exits (or if it exits
@@ -254,6 +273,10 @@ sample_row() {
         "$code" \
         "$ms" \
         >>"$SAMPLES_CSV"
+    if ((METRICS_SNAPSHOT_EVERY > 0 && SAMPLE_ROWS % METRICS_SNAPSHOT_EVERY == 0)); then
+        prom_snapshot "$timestamp" "$elapsed" || cycle_log "metrics snapshot append failed"
+    fi
+    SAMPLE_ROWS=$((SAMPLE_ROWS + 1))
     local avail_kib
     avail_kib=$(df -Pk "$RUN_DIR" | awk 'NR==2 {print $4}')
     if ((avail_kib < 5 * 1024 * 1024)); then

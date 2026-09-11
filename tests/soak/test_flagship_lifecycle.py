@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Subprocess contracts for flagship runner stop ownership."""
 
+import gzip
 import os
 import signal
 import socket
@@ -136,6 +137,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
             MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
             MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
             DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
+            METRICS_SNAPSHOTS_GZ="$RUN_DIR/metrics-snapshots.txt.gz"
             PROM_TMP="$RUN_DIR/.metrics.prom"
             require_fd_headroom() { RUSTBGPD_NOFILE_SOFT_JSON=65536; }
             if declare -F start_management_load >/dev/null; then
@@ -264,6 +266,7 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     identity = run_dir / "runner.identity"
                     wait_for(identity)
                     wait_for_children(run_dir / "children", 3 if runner.startswith("run-soak-rs") else 2)
+                    wait_for(run_dir / "metrics-snapshots.txt.gz")
                     actual_pid = int(identity.read_text().split()[0])
                     self.assertNotEqual(outer.pid, actual_pid)
                     outer.terminate()
@@ -291,6 +294,10 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     if runner.startswith("run-soak-rs"):
                         self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
                     self.assertFalse((run_dir / "verdict.json").exists())
+                    with gzip.open(run_dir / "metrics-snapshots.txt.gz", "rt", encoding="utf-8") as retained:
+                        snapshot = retained.read()
+                    self.assertRegex(snapshot, r"\A# snapshot \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ elapsed_sec=\d+\n")
+                    self.assertIn("\nbgp_peer_session_established 9\n", snapshot)
                     self.assertEqual(
                         (run_dir / "cleanup.complete").read_text().splitlines()[0],
                         "status=interrupted",
