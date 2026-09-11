@@ -197,6 +197,17 @@ pending flags and makes exact compensation unprovable. The bound does not cover
 sequential session commands, Route Refresh acknowledgements, or the RIB actor's
 detached late repair work.
 
+The authoritative forward walk follows the same discipline. Its per-peer RIB
+commands and the RFC 8212 presence proofs that precede them share one lazy
+absolute `RIB_BATCH_REPLY_TIMEOUT` for the whole transaction, so a transition
+that falls back to the serial walk is bounded by the same total RIB time the
+batched cohort promises rather than by a fresh deadline per peer, which would
+scale with the fleet and therefore bound nothing. A per-peer command is not a
+cheap inline operation: it performs its own full distribution pass, so a single
+reply can legitimately take seconds under load. The forward and rollback
+deadlines anchor independently, so a slow walk cannot consume the budget its
+own compensation needs.
+
 ### 5. Readiness and observability
 
 The read-only readiness lanes exist so a legitimate large transition does not

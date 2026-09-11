@@ -104,10 +104,19 @@ const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 
 /// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
-/// actor (export-policy swap, per-peer outbound refresh). Generous — the
-/// RIB answers these inline and never legitimately takes seconds — but
-/// bounded so a wedged RIB task cannot park the peer-manager actor (and
-/// therefore SIGHUP reload / gRPC policy apply) forever.
+/// actor for a genuinely single-peer inline operation (gRPC chain edit,
+/// per-peer outbound refresh). Bounded so a wedged RIB task cannot park the
+/// peer-manager actor (and therefore SIGHUP reload / gRPC policy apply)
+/// forever.
+///
+/// It is not a claim that the RIB answers quickly. These commands queue on
+/// the RIB manager's primary lane, which is not polled while route chunks
+/// pend, and an export-policy replacement then performs a full Loc-RIB
+/// distribution pass of its own — seconds at route-server scale under load.
+/// Five seconds is therefore only defensible for one command whose latency
+/// an operator is waiting on directly. Every `O(peers)` policy walk shares
+/// one [`RIB_BATCH_REPLY_TIMEOUT`] budget across all of its steps instead,
+/// so the walk is bounded in total rather than per peer.
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hard deadline for the batched authoritative export-policy apply

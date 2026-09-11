@@ -113,6 +113,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** a configuration reload could be rejected with no runtime
+  effect when one peer's session-state query was slow during heavy RIB load.
+  The slow peer was excluded from the batched export-policy cohort and fell to
+  the serial authoritative walk, where each per-peer RIB command was allowed
+  only five seconds — while that command performs a full Loc-RIB distribution
+  pass of its own and can legitimately take longer under load. The walk and the
+  RFC 8212 presence proofs that precede it now share one absolute two-minute
+  budget for the whole transaction, the same total the batched cohort already
+  promises for the equivalent work. Single-peer inline policy edits keep the
+  five-second deadline. Because the budget is now a total rather than a fresh
+  allowance per peer, a whole-fleet fallback that previously accumulated
+  unbounded time across peers is bounded and fails sooner; rollback is
+  unchanged and leaves no partial mutation. The graceful-shutdown and blackhole
+  knob fan-outs and the dataset dependent proofs carried the same per-peer
+  exposure and are bounded the same way.
+
 - The scale matrix now finishes and records each active management probe before
   shutting down the daemon, preventing orphaned CLI requests and missing final
   CSV rows. Cleanup waits for owned processes and retains the daemon exit status;
