@@ -1066,6 +1066,23 @@ precommitted gates are scenario 10 in
 directory under `/tmp` is required by the gRPC UDS `sun_path` cap; the
 scenario is regenerated fresh per run and copied into the run dir.
 
+The RS readiness gate requires HTTP 200 within 250 ms and fails on three
+consecutive breaches, with a default 30-second sampling interval. Missing
+observations also fail the gate. Isolated breaches remain reported findings,
+but do not automatically block a release when all agreed acceptance gates pass.
+This is soak acceptance hysteresis; `/readyz` itself reports each current
+probe result using its unchanged shared 200 ms core-actor deadline. See
+[readiness acceptance and Kubernetes probes](../../docs/soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+for the observation rules and the different Kubernetes defaults and RR gate.
+
+For readiness diagnosis, retain timestamped Prometheus series or snapshots
+from the measured daemon through existing monitoring. `samples.csv` does not
+include the RIB actor-work or readiness-wait histograms, and
+`management-plane-load.jsonl` records probe timings and response hashes, not
+Prometheus payloads. The runner overwrites `.metrics.prom` as scrape scratch;
+it is not a complete history. Those files alone cannot establish the histogram
+correlation described in the [operations guide](../../docs/reference/operations.md).
+
 ---
 
 # Route-reflector flagship soak (reflection correctness under churn)

@@ -89,12 +89,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - The route-server flagship soak analyzer now fails its `/readyz` gate on
-  three consecutive breached samples rather than on a single one, matching
-  the readiness-probe `failureThreshold` default that health-probe consumers
-  apply. The verdict reports the total breach count, the longest consecutive
+  three consecutive breached samples rather than on a single one. This follows
+  Kubernetes's default failure count; the soak's 30-second interval and 250 ms
+  response limit remain separate choices from Kubernetes's 10-second and
+  one-second defaults. It tolerates isolated breaches while rejecting missing
+  observations. The verdict reports the total breach count, the longest consecutive
   run, and the first 20 offending samples, separating a non-200 status
-  (including a failed request) from a late 200. Missing observations fail
-  closed, so dropped metric scrapes cannot silently alter breach streaks.
+  (including a failed request) from a late 200. See the
+  [readiness acceptance policy](docs/soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 
 - The container healthcheck now uses `rbgp health --liveness`: it checks gRPC
   responsiveness rather than core-actor readiness. Override it with

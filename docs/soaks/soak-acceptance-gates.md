@@ -299,6 +299,58 @@ never as silent green.
 | Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
 | No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
 
+#### Readiness acceptance and Kubernetes probes
+
+The daemon's [`/readyz` endpoint](../reference/operations.md#http-probes)
+reports the result of the current core probe. Its shared 200 ms deadline covers
+the peer-manager and RIB checks; it is not a promise that every HTTP request
+finishes within 200 ms. Scheduling delays and HTTP delivery also affect the
+latency observed by the sampler. The endpoint applies no consecutive-failure
+filter of its own.
+
+The route-server flagship soak applies hysteresis: it requires repeated failed
+observations before failing the readiness gate. This follows Kubernetes's
+default failure-count policy, with different sampling and latency settings:
+
+| Setting | Kubernetes readiness-probe default | Route-server flagship soak |
+|---|---|---|
+| Consecutive failures to fail the check | 3 | 3 |
+| Probe interval | 10 seconds | 30 seconds by default; actual interval recorded in `run.json` |
+| Response limit | 1 second | HTTP 200 within 250 ms |
+
+Kubernetes defaults and HTTP success semantics are documented in its
+[probe reference](https://kubernetes.io/docs/concepts/workloads/pods/probes/#configuration-fields).
+The soak has a stricter per-response latency limit, but samples less often:
+three failures at its default interval span at least 60 seconds. It therefore
+permits longer outages than the default 10-second cadence. These are sampled
+observations, not proof of continuous failure between probes. A 503 fails an
+individual Kubernetes HTTP probe even when it arrives within one second;
+three consecutive failures are what fail its overall readiness check. A
+30-second archive cannot establish what intervening 10-second probes would
+have observed.
+
+Missing evidence is not a healthy sample. Logged scrape failures or gaps of
+at least two sample intervals, including planned window edges, fail the soak
+readiness gate. A gap resets the breach streak. The verdict preserves complete
+breach counts and the longest streak, with detailed lists capped at 20.
+This acceptance policy tolerates isolated breaches and rejects missing
+observations; it is neither uniformly stricter nor uniformly looser than the
+previous zero-breach gate.
+
+An isolated breach remains visible and can guide latency investigation, but
+does not automatically block a release when all agreed soak gates pass.
+Samples during reloads and trips are still counted; there is no reload-window
+exemption. A passing readiness gate does not excuse failed management, session,
+reload, memory, or evidence gates. Preserve earlier verdicts under their
+original analyzer and record any reanalysis separately.
+
+The [RIB timing histograms](../reference/operations.md#routing)
+support investigation; component durations do not bound full probe latency,
+and admitted-query wait is not the entire HTTP response time. A passing soak
+does not by itself demonstrate that the source of every latency spike was fixed.
+The [fixed-shape route-server receipt](../../bench/scale/route-server-1000/README.md)
+and scenario 11 below retain their own, different readiness gates.
+
 ### 11. Route-reflector flagship (reflection correctness under churn) — `run-soak-rr-flagship.sh` (`analyze-soak-rr-flagship.py`)
 
 The documented RR flagship shape on a bare-host daemon: 1000 real iBGP

@@ -35,6 +35,14 @@ In particular:
 For operational boundaries and non-goals, see
 [`LIMITATIONS.md`](limitations.md).
 
+## Readiness and operating evidence
+
+Operational readiness and soak acceptance are separate from compatibility.
+The [`/readyz` contract](operations.md#http-probes) describes the current core
+probe; the [route-server soak policy](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+defines consecutive-failure and evidence requirements. Passing that scenario
+does not promise zero transient readiness failures or widen the stable inventory.
+
 ## Authorization is a different classification
 
 The [gRPC method inventory](grpc-method-inventory.md) assigns every method an

@@ -1148,6 +1148,22 @@ configured peers, zero Established peers, or zero routes can still be ready.
 Event-history, EVPN, FIB, and peer-count health are surfaced through their own
 metrics and status commands rather than as v1 readiness gates.
 
+Each `/readyz` response reports the current probe result; the endpoint has no
+internal failure-count hysteresis. The shared 200 ms core-actor deadline is
+not a bound on total HTTP wall-clock time: runtime scheduling and response
+delivery can take longer, and a successful probe observed after the deadline
+is rejected.
+
+Consumers choose their own failure policy. Kubernetes defaults to three failed
+probes, a 10-second interval, and a one-second timeout; an HTTP 503 still fails
+that probe even when it arrives within one second. The flagship RS soak instead
+requires HTTP 200 within 250 ms and fails on three consecutive breaches at its
+default 30-second sampling interval. Missing observations fail its gate.
+Isolated breaches remain visible findings but do not automatically block a
+release when all agreed acceptance gates pass. See the
+[readiness acceptance and Kubernetes comparison](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+for the precise observation rules and the separate RR gate.
+
 ### The `peer` label
 
 Every `peer`-labeled series — session, RIB, policy, max-prefix, BFD, BMP —
