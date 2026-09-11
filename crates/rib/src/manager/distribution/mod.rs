@@ -5092,6 +5092,9 @@ impl RibManager {
         };
 
         let peer = pending.peer();
+        // Include chunk construction as well as processing, separately from
+        // the drained-batch distribution and rejection retirement below.
+        let chunk_started = std::time::Instant::now();
         let Some(chunk) = pending.next_chunk() else {
             // Empty/exhausted batch — flush anything still accumulated
             // (defensive; normally the has_more() branch below flushes).
@@ -5099,10 +5102,6 @@ impl RibManager {
             return false;
         };
 
-        // One clock read per chunk (not per prefix): this unit covers up to
-        // ROUTES_RECEIVED_CHUNK_SIZE prefixes and the actor cannot serve the
-        // readiness lane until it returns.
-        let chunk_started = std::time::Instant::now();
         if matches!(
             &chunk,
             PendingRouteChunk::Withdrawn(_) | PendingRouteChunk::Announced(_)
@@ -5182,9 +5181,8 @@ impl RibManager {
         }
         let changed = std::mem::take(&mut self.pending_distribute_changed);
         let affected = std::mem::take(&mut self.pending_distribute_affected);
-        // One clock read per flush, not per changed prefix or per peer: the
-        // pass itself fans out over the whole peer set and is bounded by
-        // nothing, so its own wall time is the quantity of interest.
+        // Measure the whole coalesced pass, which also services readiness at
+        // peer boundaries. Its total duration is not an uninterrupted stall.
         let started = std::time::Instant::now();
         self.distribute_ingest_changes(&changed, &affected);
         self.metrics

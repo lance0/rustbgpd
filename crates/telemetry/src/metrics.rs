@@ -259,9 +259,8 @@ const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
-/// Closed work-unit labels for one indivisible slice of RIB actor ingest
-/// work. The actor serves the readiness lane only between these units, so a
-/// unit longer than a probe deadline is what a readiness timeout waits on.
+/// Closed labels for RIB ingest components. Distribution can serve readiness
+/// internally; these component durations do not bound readiness latency.
 const RIB_ACTOR_WORK_UNITS: [&str; 3] = ["route_chunk", "distribute_flush", "exact_export_retire"];
 
 /// Closed labels for the actor seam that served a readiness query.
@@ -1517,7 +1516,7 @@ impl BgpMetrics {
         let rib_actor_work_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_actor_work_duration_seconds",
-                "Wall-clock duration of one indivisible unit of RIB actor ingest work: `route_chunk` is a single bounded route chunk excluding its terminal distribution, `distribute_flush` is the coalesced outbound pass a drained route batch performs across the whole peer set, and `exact_export_retire` is the exact-export rejection retirement that follows it. The actor serves the readiness lane only between units, so the tail here bounds readiness latency.",
+                "Wall-clock duration of RIB actor ingest components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, and `exact_export_retire` covers the following rejection retirement. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["work_unit"],
@@ -1530,7 +1529,7 @@ impl BgpMetrics {
         let rib_readiness_query_wait_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_readiness_query_wait_seconds",
-                "Wall-clock delay between a readiness query being enqueued on the dedicated RIB readiness lane and the actor serving it, partitioned by the seam that served it: `actor_loop` is the ordinary ingest loop drain, `policy_transition_fence` is the checkpoint drain that keeps the lane live while an export-policy transition fences every other lane.",
+                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["seam"],
@@ -5330,11 +5329,11 @@ impl BgpMetrics {
             .observe(duration.as_secs_f64());
     }
 
-    /// Observe one indivisible unit of RIB actor ingest work.
+    /// Observe one RIB actor ingest component.
     ///
     /// `work_unit` is one of the bounded `route_chunk`, `distribute_flush`, or
-    /// `exact_export_retire` values. The actor serves the readiness lane only
-    /// between units, so this tail bounds readiness latency.
+    /// `exact_export_retire` labels. Components may service readiness internally
+    /// or run consecutively; their durations do not bound readiness latency.
     pub fn observe_rib_actor_work(&self, work_unit: &str, duration: std::time::Duration) {
         self.0
             .rib_actor_work_duration_seconds

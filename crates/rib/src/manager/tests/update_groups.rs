@@ -6878,6 +6878,54 @@ fn queue_replacement_readiness(
 }
 
 #[test]
+fn readiness_wait_records_elapsed_time_at_both_serving_seams() {
+    let (_tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let (tx, rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(rx);
+    for fenced in [false, true] {
+        let (reply, response) = oneshot::channel();
+        tx.try_send(crate::update::RibReadinessQuery::LocRibCount {
+            reply,
+            enqueued: std::time::Instant::now()
+                .checked_sub(Duration::from_millis(250))
+                .unwrap(),
+        })
+        .unwrap();
+        // Timed-out callers still contribute when their admitted query is served.
+        drop(response);
+        if fenced {
+            manager.with_replacement_readiness_age(Duration::ZERO, |_| {});
+        } else {
+            manager.drain_readiness_queries(None);
+        }
+    }
+    let family = metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_rib_readiness_query_wait_seconds")
+        .unwrap();
+    assert_eq!(family.metric.len(), 2);
+    for metric in &family.metric {
+        let histogram = metric.get_histogram();
+        assert_eq!(histogram.sample_count(), 1);
+        assert!(histogram.sample_sum() >= 0.250);
+        assert_eq!(
+            histogram
+                .get_bucket()
+                .iter()
+                .find(|bucket| bucket.upper_bound().to_bits() == 0.200_f64.to_bits())
+                .unwrap()
+                .cumulative_count(),
+            0,
+            "both seams must observe the queued age, not merely increment a count"
+        );
+    }
+}
+
+#[test]
 fn replacement_readiness_nested_rollback_keeps_original_age_and_restores_receiver() {
     let old = community_chain(0xFDE8_0001);
     let next = community_chain(0xFDE8_0002);
