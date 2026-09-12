@@ -827,9 +827,9 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
-    /// Attribution of the first general query served after a committed
+    /// Attribution of the first general query dispatched after a committed
     /// transition; armed by the terminal commit poll, finished by the next
-    /// general-query drain.
+    /// general-query dispatch on any delivery path.
     post_commit_query_trace: Option<PostCommitQueryTrace>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
@@ -948,13 +948,13 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
     std::time::Duration::from_secs(30);
 
-/// A general query served later than this after a committed transition is
-/// unrelated to the commit; the trace is dropped instead of reporting the
-/// idle gap as a wait.
+/// Limit the observation window after a committed transition. Queries
+/// arriving after it do not emit a record; the interval alone cannot
+/// establish whether a query was delayed by the commit.
 const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Actor work units accounted between a transition's terminal commit poll and
-/// the first general query served afterwards.
+/// the first general query dispatched afterwards.
 #[derive(Clone, Copy)]
 enum PostCommitWork {
     RouteChunk,
@@ -963,14 +963,16 @@ enum PostCommitWork {
 }
 
 /// What the actor ran between a committed clean policy transition's terminal
-/// poll and the first general query it served afterwards. One
+/// poll and the first general query it dispatches afterwards. One
 /// `post-commit first general query timing` record per committed transition
 /// that a general query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`]:
 /// `first_query_wait_us` is wall-clock from the end of the terminal poll,
-/// `busy_us` the actor work run in that span, and `unattributed_us` the
-/// remainder — time the actor task was parked or not scheduled. With
-/// `queued_general_queries > 0` the query was already waiting at commit, so
-/// the whole wait is the operator-visible post-commit tail.
+/// `busy_us` the elapsed wall time inside the three instrumented work
+/// classes, and `unattributed_us` the remainder, including uninstrumented
+/// actor work, idle time, and scheduling delays outside those classes.
+/// Dispatch is measured before the query handler runs, not at reply
+/// completion. With `queued_general_queries > 0`, a query was already
+/// waiting at commit; otherwise the interval also includes arrival delay.
 struct PostCommitQueryTrace {
     since: std::time::Instant,
     member_count: usize,
@@ -2211,7 +2213,7 @@ impl RibManager {
     /// Serve one item received from the general query lane. Every delivery
     /// path (the bounded drains and both event-loop select arms) goes
     /// through here so the post-commit query trace is consumed by the
-    /// first general query actually served, whichever path serves it.
+    /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
         if let Some(trace) = self.post_commit_query_trace.take() {
             trace.emit();
