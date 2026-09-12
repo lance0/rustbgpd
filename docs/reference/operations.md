@@ -645,6 +645,9 @@ preflight, cohort selection, post-application state probes (including their clea
 retry), retained-route proofs, and per-peer RIB export replacement. Each session
 policy acknowledgement remains fenced until the corresponding manager bookkeeping
 matches; a bounded batch of queued reads then runs before the next policy step.
+The SIGHUP `honor_graceful_shutdown` and `honor_blackhole` fan-outs use the same
+admission after each acknowledged import-chain update, while desired configuration
+publication and ordinary mutations retain their command ordering.
 Dataset generation settlement inherits its owner's admission through RIB capacity
 and reply waits; compensation serves them only after earlier restoration steps
 succeed. Legacy dataset refresh uses the same bounded RIB dispatch, preserving its

@@ -4326,9 +4326,9 @@ impl PeerManager {
                     None,
                     None,
                     Some(&mut rib_budget),
-                    OperatorReadAdmission::Fenced {
-                        reason: "honor-knob publication owns the desired configuration until its fan-out settles",
-                    },
+                    // Honor-only edits change implicit import tails, not the
+                    // transport metadata reported alongside live session state.
+                    OperatorReadAdmission::Served,
                 )
                 .await
             {
@@ -4423,9 +4423,9 @@ impl PeerManager {
                     None,
                     None,
                     Some(&mut rib_budget),
-                    OperatorReadAdmission::Fenced {
-                        reason: "honor-knob publication owns the desired configuration until its fan-out settles",
-                    },
+                    // Honor-only edits change implicit import tails, not the
+                    // transport metadata reported alongside live session state.
+                    OperatorReadAdmission::Served,
                 )
                 .await
             {

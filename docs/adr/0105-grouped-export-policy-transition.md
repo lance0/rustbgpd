@@ -88,6 +88,16 @@ read servicing. The existing operator deadlines, transaction ownership, and
 individual session acknowledgement limits are unchanged; an admitted read settles
 before an expired owner resumes, and an expired capacity wait cannot dispatch late.
 
+**Amended:** 2026-09-12 — the SIGHUP `honor_graceful_shutdown` and `honor_blackhole`
+fan-outs admit the same live operator reads at completed policy steps and state
+probes. These edits change implicit import tails without changing the transport
+metadata reported alongside session state or the RFC 8212 explicit-policy verdict.
+Desired honor flags are read through the ordinary command lane, which remains
+queued until publication. Their ownership alone therefore does not require a
+fleet-wide operator-read fence. Each session ACK and its matching manager
+bookkeeping remain fenced; inline runtime-setting restoration keeps its separate
+fence against inconsistent session and manager metadata.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

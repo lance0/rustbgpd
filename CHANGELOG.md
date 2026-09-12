@@ -368,8 +368,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Forward policy transactions admit bounded operator reads during read-only
   qualification and state probes, authoritative per-peer RIB waits, and between
-  acknowledged session policy steps. Dataset settlement carries explicit forward
-  or compensation admission through RIB capacity and reply waits; legacy dataset
+  acknowledged session policy steps, including SIGHUP honor-knob fan-outs.
+  Dataset settlement carries explicit forward or compensation admission through
+  RIB capacity and reply waits; legacy dataset
   refresh also bounds RIB capacity using the existing five-second allowance.
   Individual session acknowledgements keep their fences; clean generation
   compensation admits live reads, while earlier restoration failures retain the

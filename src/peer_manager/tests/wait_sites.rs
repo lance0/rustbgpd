@@ -89,6 +89,8 @@ enum Drive {
     /// Forward live-impact transaction and catalog-mutation entries.
     ApiPolicyImpact,
     CatalogPolicyRefresh,
+    HonorGracefulShutdown,
+    HonorBlackhole,
     /// API publication-failure compensation replays captured prior policies
     /// while admitted reads report the sources' current values.
     ApiPublicationCompensation,
@@ -630,6 +632,30 @@ const WAIT_SITES: &[WaitSite] = &[
         completion: Completion::ExportApplied,
     },
     WaitSite {
+        site: "policy.rs::apply_runtime_policies_for_peer_key",
+        awaits: "honor_graceful_shutdown fan-out post-ACK state query",
+        drive: Drive::HonorGracefulShutdown,
+        rib: RibHold::None,
+        session: hold_first_state,
+        pre_read: false,
+        additional_entry: Some("SIGHUP honor_graceful_shutdown fan-out"),
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::apply_runtime_policies_for_peer_key",
+        awaits: "honor_blackhole fan-out post-ACK state query",
+        drive: Drive::HonorBlackhole,
+        rib: RibHold::None,
+        session: hold_first_state,
+        pre_read: false,
+        additional_entry: Some("SIGHUP honor_blackhole fan-out"),
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
         site: "policy.rs::reevaluate_dataset_exports",
         awaits: "compensating dataset generation ReevaluatePeerExportPolicies reply",
         drive: Drive::DatasetGeneration { compensate: true },
@@ -1123,6 +1149,8 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             false,
         ),
         Drive::CatalogPolicyRefresh
+        | Drive::HonorGracefulShutdown
+        | Drive::HonorBlackhole
         | Drive::CompensatingReplay
         | Drive::ValidationRefresh
         | Drive::DatasetRefresh
@@ -1152,6 +1180,8 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .apply_policy_impact_snapshot(targets, Vec::new())
             .await
             .map(drop),
+        Drive::HonorGracefulShutdown => manager.set_honor_graceful_shutdown(true).await,
+        Drive::HonorBlackhole => manager.set_honor_blackhole(true).await,
         Drive::CatalogPolicyRefresh => {
             use rustbgpd_api::peer_types::{
                 ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
@@ -1344,6 +1374,7 @@ async fn run(row: &WaitSite) {
     }
     let (command_tx, command_rx) = mpsc::channel(16);
     let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
     let mut manager = PeerManager::new(
         command_rx,
         65001,
@@ -1354,7 +1385,8 @@ async fn run(row: &WaitSite) {
         rib_tx,
         None,
     )
-    .with_operator_queries(operator_rx);
+    .with_operator_queries(operator_rx)
+    .with_readiness_queries(readiness_rx);
 
     let first_established = !matches!(row.drive, Drive::Rfc8212Transition { established: false });
     let parked = matches!(row.drive, Drive::MaxPrefixRestart);
@@ -1448,6 +1480,8 @@ async fn run(row: &WaitSite) {
         | Drive::ForwardWalk { .. }
         | Drive::ApiPolicyImpact
         | Drive::CatalogPolicyRefresh
+        | Drive::HonorGracefulShutdown
+        | Drive::HonorBlackhole
         | Drive::ApiPublicationCompensation
         | Drive::CompensatingReplay
         | Drive::DatasetGeneration { .. }
@@ -1520,6 +1554,20 @@ async fn run(row: &WaitSite) {
     let mut rows = term_hits(&operator_tx).await;
     match row.contract {
         Contract::Served => {
+            if matches!(
+                row.drive,
+                Drive::HonorGracefulShutdown | Drive::HonorBlackhole
+            ) {
+                let (reply, response) = oneshot::channel();
+                readiness_tx
+                    .send(PeerManagerReadinessQuery::Ping { reply })
+                    .await
+                    .unwrap();
+                tokio::time::timeout_at(read_deadline, response)
+                    .await
+                    .expect("readiness is served during the held honor fan-out")
+                    .unwrap();
+            }
             let infos = tokio::time::timeout_at(read_deadline, &mut infos)
                 .await
                 .unwrap_or_else(|_| {
@@ -1725,7 +1773,12 @@ fn wait_site_table_covers_every_call_site() {
     clippy::too_many_lines,
     reason = "one receipt keeps healthy serial sessions, held acknowledgement, read completion, and owner settlement together"
 )]
-async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
+async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
+    let cohort = matches!(drive_kind, Drive::ForwardCohort { .. });
+    let honor = matches!(
+        drive_kind,
+        Drive::HonorGracefulShutdown | Drive::HonorBlackhole
+    );
     let count = if preflight { 32 } else { 8 };
     let gate = Gate::new();
     let (rib_tx, rib_rx) = mpsc::channel(16);
@@ -1781,7 +1834,7 @@ async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
             PeerHandle::from_parts(commands, task),
             false,
         );
-        if !preflight {
+        if !preflight && !honor {
             manager.current_config.global.ebgp_requires_policy = Some(true);
             let entry = manager.peers.get_mut(&key(address)).unwrap();
             entry.rfc8212_external = true;
@@ -1810,13 +1863,24 @@ async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
     }
     let started = tokio::time::Instant::now();
     let transaction = tokio::spawn(async move {
-        let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(
-                targets,
-                false,
-                OperatorReadAdmission::Served,
+        let result = if honor {
+            drive(
+                &mut manager,
+                drive_kind,
+                [targets[0].address, targets[1].address],
             )
-            .await;
+            .await
+        } else {
+            manager
+                .apply_resolved_policy_snapshot_with_prestage_reads(
+                    targets,
+                    false,
+                    OperatorReadAdmission::Served,
+                )
+                .await
+                .map(drop)
+                .map_err(|failure| failure.message)
+        };
         (manager, result)
     });
     gate.held().await;
@@ -1850,6 +1914,8 @@ async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
     assert!(infos.iter().all(|info| !info.stale));
     if !preflight {
         assert_eq!(installs.load(Ordering::SeqCst), 1);
+    }
+    if !preflight && !honor {
         assert_eq!(
             infos
                 .iter()
@@ -1878,6 +1944,20 @@ async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
         .unwrap()
         .unwrap();
     result.expect("every session and RIB step succeeds");
+    if honor {
+        assert_eq!(installs.load(Ordering::SeqCst), count);
+        assert!(if matches!(drive_kind, Drive::HonorBlackhole) {
+            manager.current_config.global.honor_blackhole
+        } else {
+            manager.current_config.global.honor_graceful_shutdown
+        });
+        assert!(
+            manager
+                .peers
+                .values()
+                .all(|peer| peer.import_policy.is_some())
+        );
+    }
     assert!(
         started.elapsed() > READER_DEADLINE,
         "walk must exceed an operator deadline"
@@ -1891,16 +1971,26 @@ async fn serial_policy_walk_serves_reads(cohort: bool, preflight: bool) {
 
 #[tokio::test(start_paused = true)]
 async fn successful_hot_apply_walk_serves_reads_between_acknowledged_peers() {
-    for cohort in [false, true] {
-        serial_policy_walk_serves_reads(cohort, false).await;
+    for drive in [Drive::ForwardWalk { clean: false }, FORWARD_COHORT] {
+        serial_policy_walk_serves_reads(drive, false).await;
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn successful_preflight_and_selection_walks_serve_reads_before_completion() {
-    for cohort in [false, true] {
-        serial_policy_walk_serves_reads(cohort, true).await;
+    for drive in [Drive::ForwardWalk { clean: false }, FORWARD_COHORT] {
+        serial_policy_walk_serves_reads(drive, true).await;
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn honor_graceful_shutdown_fanout_serves_reads_between_acknowledged_peers() {
+    serial_policy_walk_serves_reads(Drive::HonorGracefulShutdown, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn honor_blackhole_fanout_serves_reads_between_acknowledged_peers() {
+    serial_policy_walk_serves_reads(Drive::HonorBlackhole, false).await;
 }
 
 #[tokio::test(start_paused = true)]
