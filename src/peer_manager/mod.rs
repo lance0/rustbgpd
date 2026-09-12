@@ -728,8 +728,14 @@ impl PeerManager {
     async fn handle_operator_query(&mut self, query: EnqueuedOperatorQuery, during_prestage: bool) {
         let EnqueuedOperatorQuery { enqueued, query } = query;
         if during_prestage {
-            // Admitted inside a transaction wait: that wait is the seam.
-            self.observe_operator_query_wait(enqueued, self.operator_read_seam);
+            // A marked transaction wait owns the attribution. An unmarked
+            // admitting wait retains a completed policy seam that held this read.
+            let seam = if self.operator_read_seam == OperatorReadSeam::Unfenced {
+                self.seam_that_held(enqueued)
+            } else {
+                self.operator_read_seam
+            };
+            self.observe_operator_query_wait(enqueued, seam);
             // Finish the admitted snapshot before a prestage ACK can let
             // the reload advance any session's installed policy.
             if let Some(task) = self.answer_operator_query(query).await {
@@ -1820,11 +1826,8 @@ impl PeerManager {
                             let result = self.refresh_outbound(peer).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::ReplayOutbound { peer, mut reply } => {
-                            tokio::select! {
-                                result = self.replay_outbound(peer) => { let _ = reply.send(result); }
-                                () = reply.closed() => {}
-                            }
+                        PeerManagerCommand::ReplayOutbound { peer, reply } => {
+                            self.replay_outbound(peer, reply).await;
                         }
                         PeerManagerCommand::SoftResetImportValidationDependents {
                             dependency,

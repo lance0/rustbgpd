@@ -1109,6 +1109,12 @@ confirm writer drain or remote receipt.
 Unknown peers return `NOT_FOUND`; managed peers without an active outbound RIB
 registration return `FAILED_PRECONDITION`.
 
+RIB queue admission and acknowledgement share a five-second budget. Readiness
+and operator reads remain admitted during that wait. A read already in
+progress finishes under its own deadline before the scheduling call returns;
+later mutations stay queued until both settle. A timeout does not prove that
+an admitted refresh had no effect.
+
 This is an O(table) operation for the selected peer and can create a full-table
 UPDATE burst on a production session. Serialize operational use; the API
 intentionally has no all-peer or batch form.
@@ -1153,6 +1159,12 @@ processing. Terminal BMP EoRs mark replay completion only after the session
 writer completes the preceding replay bytes and terminal wire EoRs. A caller
 disconnecting after scheduling does not cancel traffic already admitted.
 
+While scheduling waits, readiness and operator reads remain admitted. If the
+five-second scheduling budget expires or its caller disconnects, an already
+admitted read finishes under its own deadline before the peer manager moves
+on to later mutations. These reads report live state; a session that cannot
+answer still has the read's normal timeout and failure behavior.
+
 Unknown peers return `NOT_FOUND`. Unavailable sessions, another active replay,
 an empty or mixed-family session, a duplicate managed peer IP address,
 no eligible connected `rib_out_post` collector,
@@ -1160,8 +1172,8 @@ or an export gate that prevents complete replay return `FAILED_PRECONDITION`.
 Dispatch, timeout, or lost acknowledgement failures return an error rather
 than a successful scheduling response. Later writer, peer, or collector
 generation failures suppress terminal BMP completion for affected streams.
-The operation is bounded to five seconds; absence of terminal BMP EoRs is
-incomplete evidence, even if scheduling succeeded.
+Absence of terminal BMP EoRs is incomplete evidence, even if scheduling
+succeeded.
 
 This operation reannounces the selected peer's table on its live BGP session.
 Serialize full-table use and collect the complete BMP stream through its
