@@ -830,9 +830,9 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
-    /// Attribution of the first general query dispatched after a committed
+    /// Attribution of the first general or summary query after a committed
     /// transition; armed by the terminal commit poll, finished by the next
-    /// general-query dispatch on any delivery path.
+    /// dispatch on any delivery path, including a frozen replacement view.
     post_commit_query_trace: Option<PostCommitQueryTrace>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
@@ -971,9 +971,11 @@ enum PostCommitWork {
 /// that a general or summary query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`].
 /// The historical event name is retained; `query_lane` identifies the receiver.
 /// `first_query_wait_us` is wall-clock from the end of the terminal poll,
-/// `busy_us` the elapsed wall time inside the three instrumented work
-/// classes, and `unattributed_us` the remainder, including uninstrumented
-/// actor work, idle time, and scheduling delays outside those classes.
+/// `busy_us` the elapsed wall time in completed units of the three instrumented
+/// work classes, and `unattributed_us` the remainder, including uninstrumented
+/// actor work, idle time, and scheduling delays outside those classes. A
+/// synchronous owner still running at a frozen-summary or retirement dispatch
+/// has not completed its work unit, so its elapsed time remains unattributed.
 /// Dispatch is measured before the query handler runs, not at reply
 /// completion. The two queued-query fields report lane depths at commit;
 /// neither identifies whether the dispatched request itself was queued then.

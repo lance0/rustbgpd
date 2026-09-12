@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 pub(super) struct ReplacementSummaries {
     pub(super) rx: mpsc::Receiver<RibSummaryQuery>,
+    post_commit_query_trace: Option<super::PostCommitQueryTrace>,
     view: SummaryProjection,
 }
 
@@ -30,6 +31,9 @@ impl ReplacementSummaries {
     pub(super) fn drain(&mut self) {
         for _ in 0..QUERY_BUDGET_PER_CHUNK {
             let Ok(query) = self.rx.try_recv() else { break };
+            if let Some(trace) = self.post_commit_query_trace.take() {
+                trace.emit("summary");
+            }
             match query {
                 RibSummaryQuery::ExportPolicyTermHits { peer, reply } => {
                     if reply.is_closed() {
@@ -173,6 +177,7 @@ impl RibManager {
                     .summary_rx
                     .take()
                     .expect("outer summary scope owns the receiver"),
+                post_commit_query_trace: manager.post_commit_query_trace.take(),
                 view,
             });
             manager.replacement_checkpoint_at("summary_capture", true);
@@ -185,6 +190,9 @@ impl RibManager {
                 .take()
                 .expect("outer summary scope retains its view");
             manager.summary_rx = Some(summaries.rx);
+            // A frozen dispatch consumes the pending trace. Otherwise return
+            // it before retirement's current-state dispatch can consume it.
+            manager.post_commit_query_trace = summaries.post_commit_query_trace;
             // Canonical state is complete now. Retire incrementally while fresh
             // summaries and readiness remain serviceable, without retaining a
             // second projection or exposing a partially destroyed old view.
@@ -326,6 +334,88 @@ mod tests {
     use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Afi, Safi};
     use tokio::sync::oneshot;
+
+    #[test]
+    fn replacement_summaries_transfer_post_commit_trace_once() {
+        use super::super::{PostCommitQueryTrace, PostCommitWork};
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (_general_tx, general_rx) = mpsc::channel(1);
+        let (tx, summary_rx) = mpsc::channel(2);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_summary_queries(summary_rx);
+        let since = std::time::Instant::now();
+        let fresh_trace = || PostCommitQueryTrace {
+            since,
+            member_count: 1,
+            terminal_poll: std::time::Duration::ZERO,
+            queued_general_queries: 0,
+            queued_summary_queries: 0,
+            ingest_backlog: 0,
+            busy: std::time::Duration::ZERO,
+            route_chunks: 0,
+            primary_updates: 0,
+            resync_ticks: 0,
+        };
+        let enqueue = || {
+            let (reply, response) = oneshot::channel();
+            tx.try_send(RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+                .unwrap();
+            response
+        };
+        let pending_in_scope = |manager: &RibManager| {
+            manager
+                .replacement_readiness
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .summaries
+                .as_ref()
+                .unwrap()
+                .post_commit_query_trace
+                .is_some()
+        };
+
+        manager.post_commit_query_trace = Some(fresh_trace());
+        manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
+            manager.with_replacement_summary_reads("restore", |manager| {
+                assert!(manager.post_commit_query_trace.is_none());
+                assert!(pending_in_scope(manager));
+            });
+        });
+        let trace = manager.post_commit_query_trace.as_ref().unwrap();
+        assert_eq!(trace.since, since, "a no-query scope preserves the trace");
+        assert_eq!(trace.primary_updates, 1, "completed owner work is counted");
+        let mut response = enqueue();
+        manager.drain_summary_queries();
+        assert!(response.try_recv().unwrap().is_empty());
+        assert!(manager.post_commit_query_trace.is_none());
+
+        // Exercise the first checkpoint after capture and an interior one.
+        for queued_before_capture in [true, false] {
+            manager.post_commit_query_trace = Some(fresh_trace());
+            let queued = queued_before_capture.then(enqueue);
+            manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                manager.with_replacement_summary_reads("restore", |manager| {
+                    assert!(manager.post_commit_query_trace.is_none());
+                    assert_eq!(pending_in_scope(manager), !queued_before_capture);
+                    let mut response = queued.unwrap_or_else(enqueue);
+                    manager.replacement_checkpoint(true);
+                    assert!(response.try_recv().unwrap().is_empty());
+                    assert!(!pending_in_scope(manager));
+                    let mut second = enqueue();
+                    manager.replacement_checkpoint(true);
+                    assert!(second.try_recv().unwrap().is_empty());
+                    assert!(!pending_in_scope(manager), "the trace stays consumed");
+                });
+            });
+            assert!(
+                manager.post_commit_query_trace.is_none(),
+                "the unfinished owner cannot rearm a consumed trace at completion"
+            );
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn replacement_summaries_preserve_fallback_unknown_roster_and_cancellation() {

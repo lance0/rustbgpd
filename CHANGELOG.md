@@ -17,10 +17,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   committed export-policy transition that an operator read follows within
   ten seconds: the terminal commit poll's duration, the general queries and
   primary updates queued at commit, the wall-clock wait from the end of that
-  poll to the first general or summary query dispatched, elapsed wall time inside
-  route-chunk, primary-update, and dirty-resync work in that span, and the
+  poll to the first general or summary query dispatched, elapsed wall time in
+  completed route-chunk, primary-update, and dirty-resync work units, and the
   unattributed remainder (including other actor work, idle time, and
-  scheduling delays). This describes the RIB side before query execution,
+  scheduling delays). A synchronous owner still running when a summary
+  dispatches from the frozen view or during retirement remains unattributed.
+  This describes the RIB side before query execution,
   not end-to-end operator latency. The historical event name is retained;
   `query_lane` identifies the dispatch lane and `queued_summary_queries` adds
   its queue depth at commit.
