@@ -457,8 +457,8 @@ pub struct PeerManager {
     /// commands remain on `rx` and therefore stay ordered behind a policy
     /// transaction until it either commits or rolls back.
     readiness_rx: Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
-    /// Operator snapshots are admitted only outside mutations or before a forward
-    /// reload has applied any session policy or published its candidate datasets.
+    /// Operator snapshots use the normal loop and explicitly served transaction
+    /// wait sites. Mutations remain ordered on the separate command lane.
     operator_rx: Option<mpsc::Receiver<EnqueuedOperatorQuery>>,
     /// Neighbor snapshots deferred while another normal snapshot services
     /// lightweight reads. Bounded by the operator channel's capacity.

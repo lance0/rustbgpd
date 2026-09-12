@@ -150,7 +150,7 @@ impl NeighborService {
         }
     }
 
-    /// Attach the operator query lane serviced before session policy application.
+    /// Attach the operator query lane served at explicit actor admission points.
     #[must_use]
     pub fn with_operator_queries(mut self, tx: mpsc::Sender<EnqueuedOperatorQuery>) -> Self {
         self.operator_tx = Some(tx);
