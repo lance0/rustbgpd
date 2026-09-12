@@ -162,6 +162,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Periodic BMP statistics no longer park peer-manager reads or shutdown
+  indefinitely on a full RIB mailbox. Loc-RIB sampling bounds queue admission and reply together;
+  session, peer-RIB, and Loc-RIB sample waits run concurrently instead of
+  accumulating three separate waits. Unavailable values are still omitted.
+
 - RIB backlog draining before timers, export-policy destination preparation,
   and deferred initial registrations now serves bounded reads and yields
   between route chunks and primary messages. Earlier route payloads still

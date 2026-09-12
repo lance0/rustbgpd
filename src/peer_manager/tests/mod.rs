@@ -1629,6 +1629,7 @@ fn spawn_rfc8212_rib_stub(
 }
 
 mod bfd;
+mod bmp_periodic;
 mod cohort_budgets;
 mod cohort_handoff;
 mod collision;
