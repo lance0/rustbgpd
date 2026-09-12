@@ -171,6 +171,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sources; session ACK/bookkeeping fences, other transaction stages, and RIB
   work can still exhaust caller deadlines.
 
+- RIB backlog draining before timers, export-policy destination preparation,
+  and deferred initial registrations now serves bounded reads and yields
+  between route chunks and primary messages. Earlier route payloads still
+  complete before later End-of-RIB messages or timer release; an aggregate
+  of short ingest work can no longer bypass the ordinary actor fairness seam.
+
 - **Operator-visible:** The peer manager now serves session snapshots,
   import-policy statistics, and dataset status while a rejected reload awaits
   enqueue or completion of its batched RIB restore. These reads report live
@@ -179,6 +185,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   synchronous restore still fences its queries, so `rbgp neighbor` and
   `rbgp policy stats --direction both` can still exhaust their deadlines.
   Mutations and the rollback's two-minute batch budget are unchanged.
+
+- Outbound refresh, GSHUT refresh, and live export-knob refresh share one
+  five-second budget for RIB queue admission and acknowledgement. Refresh
+  and replay scheduling serve readiness and operator reads while waiting;
+  hot-knob refresh keeps reads fenced until manager metadata catches up with
+  the session. An already-admitted read retains its own deadline if scheduling
+  expires or its caller disconnects. Later mutations remain queued until that
+  read and the scheduling step settle.
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched

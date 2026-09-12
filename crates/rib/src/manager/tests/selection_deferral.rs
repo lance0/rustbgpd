@@ -2038,6 +2038,7 @@ fn peer_teardown_discards_unconsumed_gr_context() {
 
 #[tokio::test(start_paused = true)]
 async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
+    const ROUTE_COUNT: usize = 3 * crate::manager::ROUTES_RECEIVED_CHUNK_SIZE;
     let source = peer(1);
     let observer = peer(2);
     let (tx, rx) = mpsc::channel(32);
@@ -2066,11 +2067,18 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
     tx.try_send(RibUpdate::RoutesReceived {
         peer: source,
         session_id: 1,
-        announced: vec![make_route_with_lp(
-            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
-            Ipv4Addr::new(10, 0, 0, 1),
-            100,
-        )],
+        announced: (0..ROUTE_COUNT)
+            .map(|index| {
+                make_route_with_lp(
+                    Ipv4Prefix::new(
+                        Ipv4Addr::from(0xC633_0000 + u32::try_from(index).unwrap()),
+                        32,
+                    ),
+                    Ipv4Addr::new(10, 0, 0, 1),
+                    100,
+                )
+            })
+            .collect(),
         withdrawn: Vec::new(),
         flowspec_announced: Vec::new(),
         flowspec_withdrawn: Vec::new(),
@@ -2090,8 +2098,19 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
     tokio::time::advance(Duration::from_secs(5)).await;
     let state = query_state(&tx, source).await;
     assert_eq!(state.selection_deferral[0].release_reason, "all_eor");
-    assert_eq!(query_best_routes(&tx).await.len(), 1);
-    assert_table_before_eor(&mut observer_rx).await;
+    assert_eq!(query_best_routes(&tx).await.len(), ROUTE_COUNT);
+    let mut announced = 0;
+    loop {
+        let update = observer_rx.recv().await.unwrap();
+        announced += update.announce.len();
+        if update.end_of_rib.contains(&FAMILY) {
+            break;
+        }
+    }
+    assert_eq!(
+        announced, ROUTE_COUNT,
+        "EoR overtook an earlier route chunk"
+    );
     assert_eq!(source_rx.recv().await.unwrap().end_of_rib, vec![FAMILY]);
 
     drop(tx);
