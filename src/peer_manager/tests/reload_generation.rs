@@ -16,6 +16,7 @@ struct GenerationSessionCounters {
     import_installs: AtomicU32,
     export_installs: AtomicU32,
     runtime_config_updates: AtomicU32,
+    runtime_remove_private_as: Mutex<Option<rustbgpd_transport::RemovePrivateAs>>,
     route_refreshes: AtomicU32,
     refresh_families: Mutex<Vec<(Afi, Safi)>>,
     refresh_failures: Mutex<std::collections::VecDeque<rustbgpd_transport::PeerCommandError>>,
@@ -44,7 +45,9 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     in_task.export_installs.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(Ok(()));
                 }
-                PeerCommand::UpdateRuntimeConfig { reply, .. } => {
+                PeerCommand::UpdateRuntimeConfig { config, reply } => {
+                    *in_task.runtime_remove_private_as.lock().unwrap() =
+                        Some(config.remove_private_as);
                     in_task
                         .runtime_config_updates
                         .fetch_add(1, Ordering::SeqCst);
@@ -60,6 +63,15 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                         .pop_front()
                         .map_or(Ok(()), Err);
                     let _ = reply.send(outcome);
+                }
+                PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    let _ = reply.send(Some(rustbgpd_transport::ImportPolicyTermHits {
+                        generation: 1,
+                        evals: 0,
+                        eval_errors: 0,
+                        last_error: None,
+                        terms: Vec::new(),
+                    }));
                 }
                 PeerCommand::QueryState { reply } => {
                     let query = in_task.state_queries.fetch_add(1, Ordering::SeqCst) + 1;
@@ -964,28 +976,52 @@ export_policy_chain = ["members-out"]
     clippy::too_many_lines,
     reason = "the held forward and rollback acknowledgements share one complete generation fixture"
 )]
-async fn assert_generation_operator_read_boundaries(compensate: bool) {
-    let fixture = RsFixture::new();
+async fn assert_generation_operator_read_boundaries(
+    compensate: bool,
+    failed_hot_restore: bool,
+    dataset: bool,
+) {
+    let fixture = if dataset {
+        dataset_generation_fixture()
+    } else {
+        RsFixture::new()
+    };
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
-    let candidate = if compensate {
+    let (mut candidate, prepared) = if dataset {
         harness
             .mgr
             .inject_reconfigure_failures
             .insert(key("10.0.0.2".parse().unwrap()), 0);
-        std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
-        // Leave two policy-only members to exercise the cohort in both
-        // directions; the sole replacement fails before any socket work.
-        fixture.write_toml(
-            &fixture
-                .base_toml()
-                .replace("remote_asn = 65002", "remote_asn = 65012"),
-        );
-        fixture.load()
+        let (mut candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+        candidate.neighbors[0].remote_asn = 65012;
+        (candidate, prepared)
     } else {
-        std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
-        fixture.load()
+        (
+            if compensate {
+                harness
+                    .mgr
+                    .inject_reconfigure_failures
+                    .insert(key("10.0.0.2".parse().unwrap()), 0);
+                std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+                // Leave two policy-only members to exercise the cohort in both
+                // directions; the sole replacement fails before any socket work.
+                fixture.write_toml(
+                    &fixture
+                        .base_toml()
+                        .replace("remote_asn = 65002", "remote_asn = 65012"),
+                );
+                fixture.load()
+            } else {
+                std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+                fixture.load()
+            },
+            PreparedDatasetGeneration::default(),
+        )
     };
+    if failed_hot_restore {
+        candidate.neighbors[2].remove_private_as = Some("all".to_string());
+    }
     let (command_tx, command_rx) = mpsc::channel(16);
     harness.mgr.rx = command_rx;
     let (internal_tx, internal_rx) = mpsc::channel(1);
@@ -1003,10 +1039,23 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
         let mut saw_replace = false;
         let mut held_prepare = false;
         let mut held_replace = false;
+        let mut refreshes = 0;
         while let Some(update) = proxy_rx.recv().await {
+            if failed_hot_restore && matches!(update, RibUpdate::RefreshPeerOutbound { .. }) {
+                refreshes += 1;
+                if refreshes == 2 {
+                    // The session restored its prior knobs, but this lost RIB
+                    // reply prevents manager transport bookkeeping advancing.
+                    drop(update);
+                    continue;
+                }
+            }
             let hold = match &update {
+                RibUpdate::ReevaluatePeerExportPolicies { .. } if dataset && refreshes == 2 => true,
                 RibUpdate::PrepareExportPolicyDestination { .. }
-                    if !held_prepare && (!compensate || saw_replace) =>
+                    if !held_prepare
+                        && ((!failed_hot_restore && (!compensate || saw_replace))
+                            || (failed_hot_restore && refreshes == 2)) =>
                 {
                     held_prepare = true;
                     true
@@ -1029,10 +1078,11 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
     let counters = harness.counters.clone();
     let driver = async {
         let prepare = held_rx.recv().await.expect("held destination prepare");
-        assert!(matches!(
-            prepare,
-            RibUpdate::PrepareExportPolicyDestination { .. }
-        ));
+        assert!(if dataset {
+            matches!(prepare, RibUpdate::ReevaluatePeerExportPolicies { .. })
+        } else {
+            matches!(prepare, RibUpdate::PrepareExportPolicyDestination { .. })
+        });
         let mut prepare = Some(prepare);
         let (mutation_reply, mut mutation_response) = oneshot::channel();
         command_tx
@@ -1105,7 +1155,13 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
                 .values()
                 .filter(|counter| counter.export_installs.load(Ordering::SeqCst) >= 1)
                 .count(),
-            if compensate { 2 } else { 3 },
+            if dataset {
+                0
+            } else if compensate {
+                2
+            } else {
+                3
+            },
         );
         if compensate {
             assert_eq!(
@@ -1126,28 +1182,25 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
             .await
             .unwrap();
         ping.await.unwrap();
-        let queued_response = if compensate {
-            // The held message here is the destination prestage of the
-            // generation-level compensation: the policy phase committed, the
-            // later peer replacement failed, and the generation replays the
-            // captured priors through the forward snapshot path with operator
-            // reads fenced (`apply_resolved_policy_snapshot`). That prestage
-            // is bounded by `RIB_REPLY_TIMEOUT` and admits nothing. The
-            // in-transaction rollback aggregate (a rejected cohort's
-            // `RestorePeerExportPoliciesAuthoritatively`) is a different wait
-            // and does admit reads; `cohort_budgets` covers it.
+        let queued_response = if failed_hot_restore {
+            assert_eq!(
+                *counters[&"10.0.0.9".parse::<IpAddr>().unwrap()]
+                    .runtime_remove_private_as
+                    .lock()
+                    .unwrap(),
+                Some(rustbgpd_transport::RemovePrivateAs::Disabled),
+                "the prior session knobs were acknowledged before the restoring RIB reply was lost"
+            );
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), &mut response)
                     .await
                     .is_err(),
-                "operator reads must stay fenced during the compensating replay's prestage"
+                "earlier failed restoration must fence the misleading manager metadata"
             );
             Some(response)
         } else {
-            // The forward owner keeps admitting operator reads while the
-            // cohort RIB reply is held: the sessions already run their new
-            // chains, so the snapshot observes the same mixed generation
-            // prestage admits rather than waiting for the commit.
+            // Forward and clean compensating owners admit live reads while
+            // their actual RIB reply is held; queued mutations remain owned.
             let infos = tokio::time::timeout(Duration::from_secs(1), &mut response)
                 .await
                 .expect("operator reads are served while the cohort RIB reply is held")
@@ -1164,13 +1217,25 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
     };
     let (outcome, (operator_response, mutation_response)) =
         tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(harness.apply(&candidate), driver)
+            let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+            tokio::join!(
+                Box::pin(
+                    harness
+                        .mgr
+                        .apply_reload_generation(candidate.clone(), actions, prepared)
+                ),
+                driver
+            )
         })
         .await
         .expect("generation and held-stage driver must finish");
     if compensate {
         assert!(
-            matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+            if failed_hot_restore {
+                matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_))
+            } else {
+                matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_))
+            },
             "{outcome:?}"
         );
         assert_eq!(harness.mgr.current_config, prior);
@@ -1180,6 +1245,45 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
             "{outcome:?}"
         );
         assert_eq!(harness.mgr.current_config, candidate);
+    }
+    if failed_hot_restore {
+        let managed = &harness.mgr.peers[&key("10.0.0.9".parse().unwrap())];
+        assert_eq!(
+            managed.transport_config.remove_private_as,
+            rustbgpd_transport::RemovePrivateAs::All,
+            "manager metadata still names candidate knobs although the session acknowledged its prior knobs"
+        );
+        let state = managed
+            .handle
+            .query_state_timeout(PEER_QUERY_TIMEOUT)
+            .await
+            .unwrap();
+        let snapshot = super::super::snapshot::build_peer_info(
+            &key("10.0.0.9".parse().unwrap()),
+            managed,
+            Some(&state),
+            true,
+        );
+        assert!(!snapshot.stale);
+        assert_ne!(
+            Some(snapshot.remove_private_as),
+            *counters[&"10.0.0.9".parse::<IpAddr>().unwrap()]
+                .runtime_remove_private_as
+                .lock()
+                .unwrap(),
+            "serving this fresh-looking neighbor snapshot would misreport installed session knobs"
+        );
+        drop(operator_response);
+        drop(mutation_response);
+        for (_, managed) in harness.mgr.peers.drain() {
+            let _ = managed.handle.shutdown().await;
+        }
+        drop(harness.mgr);
+        drop(internal_tx);
+        drop(rib_tx);
+        proxy.await.unwrap();
+        harness.rib.await.unwrap();
+        return;
     }
     let manager = tokio::spawn(harness.mgr.run());
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -1200,12 +1304,22 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
 
 #[tokio::test(start_paused = true)]
 async fn forward_generation_services_operator_reads_through_the_cohort_transition() {
-    assert_generation_operator_read_boundaries(false).await;
+    assert_generation_operator_read_boundaries(false, false, false).await;
 }
 
 #[tokio::test(start_paused = true)]
-async fn compensated_generation_fences_operator_reads_during_rollback_prestage() {
-    assert_generation_operator_read_boundaries(true).await;
+async fn clean_compensated_generation_serves_operator_reads_during_rollback_prestage() {
+    assert_generation_operator_read_boundaries(true, false, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_hot_restore_fences_inconsistent_metadata_during_policy_compensation() {
+    assert_generation_operator_read_boundaries(true, true, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_hot_restore_fences_inconsistent_metadata_during_dataset_compensation() {
+    assert_generation_operator_read_boundaries(true, true, true).await;
 }
 
 #[tokio::test]
@@ -2596,6 +2710,10 @@ async fn dataset_generation_lost_export_ack_fences_before_import_refresh() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one generation fixture proves the replacement handle and its queued reads while compensation is held"
+)]
 async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() {
     let fixture = dataset_generation_fixture();
     let prior = fixture.load();
@@ -2610,12 +2728,112 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
         .inject_reconfigure_failures
         .insert(key("2001:db8::3".parse().unwrap()), 0);
     let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
-    let outcome = Box::pin(
-        harness
-            .mgr
-            .apply_reload_generation(candidate, actions, prepared),
-    )
-    .await;
+    let old_commands = harness.mgr.peers[&key("10.0.0.2".parse().unwrap())]
+        .handle
+        .commands_sender();
+    let old_counters = harness.counters[&"10.0.0.2".parse::<IpAddr>().unwrap()].clone();
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    harness.mgr = harness.mgr.with_operator_queries(operator_rx);
+    let (command_tx, command_rx) = mpsc::channel(4);
+    harness.mgr.rx = command_rx;
+    let (proxy_tx, mut proxy_rx) = mpsc::channel(16);
+    let rib_tx = std::mem::replace(&mut harness.mgr.rib_tx, proxy_tx);
+    let forwarding = rib_tx.clone();
+    let restored = live.clone();
+    let (held_tx, mut held_rx) = mpsc::channel(1);
+    let proxy = tokio::spawn(async move {
+        let mut held = false;
+        while let Some(update) = proxy_rx.recv().await {
+            if !held
+                && restored.pin().generation == 3
+                && matches!(update, RibUpdate::ReevaluatePeerExportPolicies { .. })
+            {
+                held = true;
+                held_tx.send(update).await.unwrap();
+            } else {
+                forwarding.send(update).await.unwrap();
+            }
+        }
+    });
+    let driver = async {
+        let held = held_rx
+            .recv()
+            .await
+            .expect("hold the restored dataset's actual export acknowledgement");
+        assert!(
+            old_commands.is_closed(),
+            "the replaced session cannot serve the admitted read"
+        );
+        let old_queries = old_counters.state_queries.load(Ordering::SeqCst);
+        let (reply, mut mutation) = oneshot::channel();
+        command_tx
+            .send(PeerManagerCommand::EnablePeer {
+                peer: key("10.0.0.2".parse().unwrap()),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (reply, response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+            .await
+            .unwrap();
+        let infos = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(infos.len(), 3);
+        let rebuilt = infos
+            .iter()
+            .find(|info| info.address == "10.0.0.2".parse::<IpAddr>().unwrap())
+            .unwrap();
+        assert!(
+            !rebuilt.stale,
+            "read resolves the replacement's current handle"
+        );
+        assert_ne!(rebuilt.state, SessionState::Established);
+        assert_eq!(rebuilt.hold_time, Some(90));
+        assert_eq!(
+            old_counters.state_queries.load(Ordering::SeqCst),
+            old_queries
+        );
+        let (reply, response) = oneshot::channel();
+        operator_tx
+            .send(
+                PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                    peer: None,
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                    reply,
+                }
+                .into(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .unwrap()
+                .unwrap(),
+            SessionQueryOutcome::Reply(_)
+        ));
+        assert!(matches!(
+            mutation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        rib_tx.send(held).await.unwrap();
+    };
+    let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            Box::pin(
+                harness
+                    .mgr
+                    .apply_reload_generation(candidate, actions, prepared)
+            ),
+            driver
+        )
+    })
+    .await
+    .unwrap();
     assert!(
         matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
         "{outcome:?}"
@@ -2642,6 +2860,8 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
     assert_eq!(harness.mgr.current_config, prior);
     assert!(!harness.mgr.peers[&key("10.0.0.2".parse().unwrap())].pending_refresh);
     harness.shutdown().await;
+    drop(rib_tx);
+    proxy.await.unwrap();
 }
 
 #[tokio::test]

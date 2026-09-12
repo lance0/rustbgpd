@@ -61,6 +61,33 @@ path. Admitted reads remain live observations without a common generation across
 sessions or the RIB; caller budgets, mutation ordering, and individual session
 ACK/bookkeeping fences are unchanged.
 
+**Amended:** 2026-09-12 — forward policy transactions admit bounded live operator
+reads during read-only preflight, cohort selection, clean-state probes and retries, retained-route
+proofs, and authoritative per-peer RIB waits. Session policy acknowledgement
+remains fenced until the manager records the acknowledged chain. A bounded drain
+between completed policy steps prevents a serial fleet walk from accumulating
+one uninterrupted read fence.
+
+Generation unwind decides policy and dataset admission separately at their entry
+points. If every earlier restoration succeeded, compensation admits the same
+live reads, superseding the earlier full-fence claim for generation unwind.
+Any earlier restoration failure keeps those reads fenced. For example,
+a session can acknowledge its prior runtime settings before the restoring outbound
+RIB refresh fails; its manager metadata then still describes the candidate settings.
+A fresh session query combined with that metadata would misreport the installed
+settings without marking the row stale. This concrete inconsistency requires the
+conditional fence even though clean compensation does not require a generation pin.
+Reads use each peer's current managed handle, including a replacement created during
+compensation.
+
+Dataset generation reevaluation carries its owner's admission through both channel
+capacity and reply waits. Legacy dataset refresh uses that same bounded dispatch
+with the existing five-second capacity allowance, while retaining its five-second
+wall-clock reply deadline. Generation reply accounting still excludes admitted
+read servicing. The existing operator deadlines, transaction ownership, and
+individual session acknowledgement limits are unchanged; an admitted read settles
+before an expired owner resumes, and an expired capacity wait cannot dispatch late.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

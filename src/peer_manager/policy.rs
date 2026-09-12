@@ -183,7 +183,7 @@ struct CapturedResolvedPolicy {
 /// reconstruct afterwards: whether the failure happened at the Route Refresh
 /// step, and therefore whether any family's request may already have reached
 /// the peer.
-struct PolicyApplyFailure {
+pub(super) struct PolicyApplyFailure {
     code: RuntimeConfigPolicyFailureCode,
     message: String,
     /// True only for a failure raised at the Route Refresh step. Every earlier
@@ -325,7 +325,7 @@ impl PolicySnapshotFailure {
 /// per-peer deadline multiplies by the fleet size and therefore bounds
 /// nothing, which is the opposite of what an actor-liveness deadline is for.
 #[derive(Default)]
-struct LazyRibBudget(Option<tokio::time::Instant>);
+pub(super) struct LazyRibBudget(Option<tokio::time::Instant>);
 
 impl LazyRibBudget {
     fn deadline(&mut self) -> tokio::time::Instant {
@@ -346,9 +346,9 @@ struct PolicySnapshotContext {
     /// the compensation's budget.
     rollback: LazyRibBudget,
     clean_state_window: CleanStateQueryWindow,
-    /// Whether this transaction admits the bounded operator-read lane while
-    /// it awaits a RIB aggregate. Decided once where the transaction starts,
-    /// so a rollback admits exactly what its forward apply admitted. Reads
+    /// Whether this transaction admits the bounded operator-read lane at
+    /// read-only probes, RIB waits, and acknowledged policy-step boundaries.
+    /// Decided at entry, so rollback inherits its forward apply's admission. Reads
     /// report live state after session restoration was attempted; failed
     /// restores can leave sessions on different policies.
     operator_reads: OperatorReadAdmission,
@@ -542,6 +542,7 @@ impl PeerManager {
         &mut self,
         peer_key: &PeerKey,
         rib_budget: Option<&mut LazyRibBudget>,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<bool, PolicyApplyFailure> {
         let Some(managed) = self.peers.get(peer_key) else {
             return Ok(false);
@@ -553,12 +554,11 @@ impl PeerManager {
                     commands,
                     PEER_QUERY_TIMEOUT,
                 ),
-                OperatorReadAdmission::Fenced {
-                    reason: "100 ms state probe in the RFC 8212 preflight, before any peer is touched",
-                },
+                operator_reads,
             )
             .await;
         self.drain_readiness_queries().await;
+        self.drain_operator_queries(operator_reads).await;
 
         let state = match state {
             StateQueryOutcome::State(state) => state,
@@ -573,7 +573,7 @@ impl PeerManager {
             }
             StateQueryOutcome::SessionGone => {
                 let retained = self
-                    .query_peer_retained_stale(peer_key.address, rib_budget)
+                    .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
                     .await?;
                 if retained == 0 {
                     return Ok(false);
@@ -607,7 +607,7 @@ impl PeerManager {
         }
 
         let retained = self
-            .query_peer_retained_stale(peer_key.address, rib_budget)
+            .query_peer_retained_stale(peer_key.address, rib_budget, operator_reads)
             .await?;
         if retained > 0 {
             return Err(PolicyApplyFailure {
@@ -626,17 +626,18 @@ impl PeerManager {
     }
 
     /// One read-only RIB round trip for [`Self::qualify_rfc8212_import_transition`],
-    /// servicing the dedicated readiness lane throughout.
+    /// servicing readiness and the owning transaction's admitted reads throughout.
     ///
     /// This proof rides the RIB manager's primary lane, so it waits behind the
     /// same backlog an export replacement does and is bounded the same way:
     /// `rib_budget` is `Some` for a step of an `O(peers)` walk, whose steps
     /// all share one absolute admission-and-reply budget, and `None` for a
     /// single inline qualification, which keeps [`super::RIB_REPLY_TIMEOUT`].
-    async fn query_peer_retained_stale(
+    pub(super) async fn query_peer_retained_stale(
         &mut self,
         peer: IpAddr,
         rib_budget: Option<&mut LazyRibBudget>,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<usize, PolicyApplyFailure> {
         let allowance = if rib_budget.is_some() {
             super::RIB_BATCH_REPLY_TIMEOUT
@@ -682,14 +683,9 @@ impl PeerManager {
                 .await
                 .map_err(|_| failed("the RIB manager dropped the retained-stale reply"))
         };
-        tokio::time::timeout_at(
-            deadline,
-            self.await_with_readiness(
-                round_trip,
-                OperatorReadAdmission::Fenced {
-                    reason: "read-only RIB retained-stale proof on the primary lane, bounded by the walk budget",
-                },
-            ),
+        self.await_with_readiness(
+            tokio::time::timeout_at(deadline, round_trip),
+            operator_reads,
         )
         .await
         .map_err(|_| timed_out())?
@@ -707,6 +703,7 @@ impl PeerManager {
         &mut self,
         targets: &[ResolvedPeerPolicy],
         rib_budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), PolicyApplyFailure> {
         let transitioning: Vec<PeerKey> = targets
             .iter()
@@ -724,7 +721,7 @@ impl PeerManager {
         let mut rejections = Vec::new();
         for peer_key in &transitioning {
             if let Err(error) = self
-                .qualify_rfc8212_import_transition(peer_key, Some(&mut *rib_budget))
+                .qualify_rfc8212_import_transition(peer_key, Some(&mut *rib_budget), operator_reads)
                 .await
             {
                 rejections.push(error);
@@ -829,6 +826,9 @@ impl PeerManager {
             // A genuinely single-peer inline edit, not a walk step: keep the
             // ordinary per-command RIB deadline.
             None,
+            OperatorReadAdmission::Fenced {
+                reason: "inline hot updates also restore a rejected generation's session configuration",
+            },
         )
         .await
         .map_err(|failure| failure.message)
@@ -844,6 +844,7 @@ impl PeerManager {
     /// currently in `self.peers` (e.g. a dynamic peer that disconnected) are
     /// skipped and absent from the returned priors. Does NOT touch
     /// `current_config`; snapshot staging owns that.
+    #[cfg(test)]
     pub(super) async fn apply_resolved_policy_snapshot(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
@@ -853,6 +854,7 @@ impl PeerManager {
             .map_err(|failure| failure.message)
     }
 
+    #[cfg(test)]
     pub(super) async fn apply_resolved_policy_snapshot_classified(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
@@ -868,10 +870,11 @@ impl PeerManager {
         .await
     }
 
-    /// Forward SIGHUP and API applies, and API publication-failure compensation,
-    /// pass explicit admission at the destination prestage and aggregate waits.
-    /// The admission travels on the transaction context to every wait that
-    /// honours it, the rollback included. The default wrapper stays fenced.
+    /// Forward policy and API compensation owners admit reads from preflight on.
+    /// Generation compensation decides from earlier restoration results.
+    /// Admission travels on the context through probes, acknowledged step
+    /// boundaries, and RIB waits, including rollback. Unspecified owners use
+    /// the fenced test wrapper above.
     pub(super) async fn apply_resolved_policy_snapshot_with_prestage_reads(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
@@ -955,7 +958,11 @@ impl PeerManager {
             operator_reads,
         };
         let preflight = self
-            .preflight_rfc8212_import_transitions(&targets, &mut context.forward)
+            .preflight_rfc8212_import_transitions(
+                &targets,
+                &mut context.forward,
+                context.operator_reads,
+            )
             .await;
         phases.preflight_us = elapsed_us(preflight_started);
         preflight
@@ -986,7 +993,9 @@ impl PeerManager {
             return outcome;
         }
 
-        let cohort_mask = self.export_only_policy_cohort_mask(&targets).await;
+        let cohort_mask = self
+            .export_only_policy_cohort_mask(&targets, context.operator_reads)
+            .await;
         phases.cohort_selection_us = elapsed_us(cohort_selection_started);
         let cohort_targets = cohort_mask.iter().filter(|&&selected| selected).count();
         phases.cohort_targets = cohort_targets;
@@ -1170,6 +1179,7 @@ impl PeerManager {
     pub(super) async fn export_only_policy_cohort_mask(
         &mut self,
         targets: &[ResolvedPeerPolicy],
+        operator_reads: OperatorReadAdmission,
     ) -> Vec<bool> {
         let mut selected = vec![false; targets.len()];
         let mut groups: Vec<(usize, usize, PeerKey)> = Vec::new();
@@ -1236,12 +1246,11 @@ impl PeerManager {
                         commands,
                         PEER_QUERY_TIMEOUT,
                     ),
-                    OperatorReadAdmission::Fenced {
-                        reason: "100 ms state probe during cohort selection, before any peer is touched",
-                    },
+                    operator_reads,
                 )
                 .await;
             self.drain_readiness_queries().await;
+            self.drain_operator_queries(operator_reads).await;
             match outcome {
                 StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                     selected[index] = true;
@@ -1339,6 +1348,7 @@ impl PeerManager {
                     None,
                     require_clean_convergence.then_some(&mut context.clean_state_window),
                     Some(&mut context.forward),
+                    context.operator_reads,
                 )
                 .await
             {
@@ -1371,6 +1381,7 @@ impl PeerManager {
                 };
             }
             applied[applied_idx].adj_rib_in_may_have_moved = true;
+            self.drain_operator_queries(context.operator_reads).await;
         }
         Ok(applied)
     }
@@ -1414,6 +1425,7 @@ impl PeerManager {
         &mut self,
         commands: tokio::sync::mpsc::Sender<rustbgpd_transport::PeerCommand>,
         window: &mut CleanStateQueryWindow,
+        operator_reads: OperatorReadAdmission,
     ) -> StateQueryOutcome {
         let first = self
             .await_with_readiness(
@@ -1421,12 +1433,11 @@ impl PeerManager {
                     commands.clone(),
                     PEER_QUERY_TIMEOUT,
                 ),
-                OperatorReadAdmission::Fenced {
-                    reason: "100 ms clean-convergence state probe after session application",
-                },
+                operator_reads,
             )
             .await;
         self.drain_readiness_queries().await;
+        self.drain_operator_queries(operator_reads).await;
         if !matches!(first, StateQueryOutcome::TimedOut) {
             return first;
         }
@@ -1436,12 +1447,11 @@ impl PeerManager {
         let retried = self
             .await_with_readiness(
                 rustbgpd_transport::PeerHandle::query_state_outcome_with(commands, remaining),
-                OperatorReadAdmission::Fenced {
-                    reason: "single bounded retry of the clean-convergence state probe",
-                },
+                operator_reads,
             )
             .await;
         self.drain_readiness_queries().await;
+        self.drain_operator_queries(operator_reads).await;
         retried
     }
 
@@ -1632,6 +1642,7 @@ impl PeerManager {
                     .expect("cohort peer existed after import hot-apply")
                     .import_policy
                     .clone_from(&target.import_policy);
+                self.drain_operator_queries(context.operator_reads).await;
             }
             let commands = self
                 .peers
@@ -1799,6 +1810,7 @@ impl PeerManager {
                 .export_policy
                 .clone_from(&target.export_policy);
             captured.push(prior);
+            self.drain_operator_queries(context.operator_reads).await;
             if captured.len() % COHORT_SETUP_PROGRESS_INTERVAL == 0
                 || captured.len() == targets.len()
             {
@@ -1907,17 +1919,19 @@ impl PeerManager {
                 .handle
                 .commands_sender();
             let state = if require_clean_convergence {
-                self.query_clean_session_state(commands, &mut context.clean_state_window)
-                    .await
+                self.query_clean_session_state(
+                    commands,
+                    &mut context.clean_state_window,
+                    context.operator_reads,
+                )
+                .await
             } else {
                 self.await_with_readiness(
                     rustbgpd_transport::PeerHandle::query_state_outcome_with(
                         commands,
                         PEER_QUERY_TIMEOUT,
                     ),
-                    OperatorReadAdmission::Fenced {
-                        reason: "100 ms state probe before a deferred route refresh",
-                    },
+                    context.operator_reads,
                 )
                 .await
             };
@@ -2107,11 +2121,12 @@ impl PeerManager {
     /// `O(peers)` policy walk: every step of that walk shares the one absolute
     /// deadline so the walk is bounded in total. `None` is a genuinely
     /// single-peer inline operation and keeps [`super::RIB_REPLY_TIMEOUT`].
-    async fn replace_peer_export_policy_in_rib(
+    pub(super) async fn replace_peer_export_policy_in_rib(
         &mut self,
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
         rib_budget: Option<&mut LazyRibBudget>,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), RibCommandError> {
         let shared = rib_budget.is_some();
         let deadline = rib_budget.map_or_else(
@@ -2155,14 +2170,9 @@ impl PeerManager {
                 .await
                 .map_err(|_| RibCommandError::internal("RIB manager dropped reply"))?
         };
-        tokio::time::timeout_at(
-            deadline,
-            self.await_with_readiness(
-                round_trip,
-                OperatorReadAdmission::Fenced {
-                    reason: "per-peer RIB export replacement of an authoritative walk, bounded by the walk budget",
-                },
-            ),
+        self.await_with_readiness(
+            tokio::time::timeout_at(deadline, round_trip),
+            operator_reads,
         )
         .await
         .map_err(|_| timed_out())?
@@ -2481,6 +2491,7 @@ impl PeerManager {
                     // Rollback planning returns before the RIB step; the
                     // registered aggregate below carries the rollback budget.
                     None,
+                    context.operator_reads,
                 )
                 .await
             {
@@ -2827,9 +2838,7 @@ impl PeerManager {
                         commands,
                         PEER_QUERY_TIMEOUT,
                     ),
-                    OperatorReadAdmission::Fenced {
-                        reason: "100 ms state probe in a dataset refresh fan-out",
-                    },
+                    OperatorReadAdmission::Served,
                 )
                 .await;
             self.drain_readiness_queries().await;
@@ -2878,27 +2887,14 @@ impl PeerManager {
             refreshed += 1;
         }
         if !export_peers.is_empty() {
-            let (reply_tx, reply_rx) = oneshot::channel();
-            let outcome = if self
-                .rib_tx
-                .send(RibUpdate::ReevaluatePeerExportPolicies {
-                    peers: export_peers.clone(),
-                    reply: reply_tx,
-                })
-                .await
-                .is_err()
-            {
-                Err("RIB manager unavailable".to_string())
-            } else {
-                match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                    Ok(Ok(result)) => result.map_err(|error| error.to_string()),
-                    Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
-                    Err(_) => Err(format!(
-                        "RIB manager did not reply within {:?}",
-                        super::RIB_REPLY_TIMEOUT
-                    )),
-                }
-            };
+            let outcome = self
+                .reevaluate_dataset_exports(
+                    export_peers.clone(),
+                    false,
+                    OperatorReadAdmission::Served,
+                    true,
+                )
+                .await;
             if let Err(error) = outcome {
                 failures.extend(
                     export_peers
@@ -2993,8 +2989,13 @@ impl PeerManager {
         // primary lane one dependent at a time, so bound the fan-out in total.
         let mut rib_budget = LazyRibBudget::default();
         for dependent in &dependents {
-            self.qualify_dataset_dependent(dependent, &mut window, &mut rib_budget)
-                .await?;
+            self.qualify_dataset_dependent(
+                dependent,
+                &mut window,
+                &mut rib_budget,
+                OperatorReadAdmission::Served,
+            )
+            .await?;
         }
         Ok(dependents)
     }
@@ -3005,6 +3006,7 @@ impl PeerManager {
         dependent: &DatasetDependent,
         window: &mut CleanStateQueryWindow,
         rib_budget: &mut LazyRibBudget,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<bool, String> {
         let peer = &dependent.peer;
         let commands = self
@@ -3013,7 +3015,10 @@ impl PeerManager {
             .ok_or_else(|| format!("dataset dependent {peer} is no longer managed"))?
             .handle
             .commands_sender();
-        match self.query_clean_session_state(commands, window).await {
+        match self
+            .query_clean_session_state(commands, window, operator_reads)
+            .await
+        {
             StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                 if dependent.import
                     && !state
@@ -3030,7 +3035,7 @@ impl PeerManager {
                 // The existing RFC 8212 presence-change preflight uses the
                 // same RIB proof: actor-local emptiness alone misses GR/LLGR.
                 let retained = self
-                    .query_peer_retained_stale(peer.address, Some(&mut *rib_budget))
+                    .query_peer_retained_stale(peer.address, Some(&mut *rib_budget), operator_reads)
                     .await
                     .map_err(|error| error.message)?;
                 if retained != 0 {
@@ -3051,16 +3056,25 @@ impl PeerManager {
 
     /// The down-peer exception is only used for a singleton batch, so typed
     /// `NotFound` proves that exact peer has no old outbound object to retain.
-    async fn reevaluate_dataset_exports(
+    pub(super) async fn reevaluate_dataset_exports(
         &mut self,
         peers: Vec<IpAddr>,
         known_down: bool,
+        operator_reads: OperatorReadAdmission,
+        wall_reply_budget: bool,
     ) -> Result<(), DatasetRefreshFailure> {
         if peers.is_empty() {
             return Ok(());
         }
         let rib_tx = self.rib_tx.clone();
-        let permit = match tokio::time::timeout(RIB_REPLY_TIMEOUT, rib_tx.reserve()).await {
+        let capacity_deadline = tokio::time::Instant::now() + RIB_REPLY_TIMEOUT;
+        let permit = match self
+            .await_with_readiness(
+                tokio::time::timeout_at(capacity_deadline, rib_tx.reserve()),
+                operator_reads,
+            )
+            .await
+        {
             Ok(Ok(permit)) => permit,
             Ok(Err(_)) => {
                 return Err(DatasetRefreshFailure::Rejected(
@@ -3073,17 +3087,26 @@ impl PeerManager {
                 ));
             }
         };
+        if tokio::time::Instant::now() >= capacity_deadline {
+            return Err(DatasetRefreshFailure::Rejected(
+                "dataset export RIB capacity deadline before dispatch".to_string(),
+            ));
+        }
         let (reply, response) = oneshot::channel();
         permit.send(RibUpdate::ReevaluatePeerExportPolicies { peers, reply });
+        // Legacy refresh charged wall time; generation settlement excludes
+        // read servicing from its acknowledgement budget. Keep both contracts.
+        let response = async {
+            if wall_reply_budget {
+                tokio::time::timeout(RIB_REPLY_TIMEOUT, response).await.ok()
+            } else {
+                Some(response.await)
+            }
+        };
         match self
-            .await_with_readiness_budget(
-                response,
-                RIB_REPLY_TIMEOUT,
-                OperatorReadAdmission::Fenced {
-                    reason: "one batched dataset export re-evaluation, bounded by RIB_REPLY_TIMEOUT",
-                },
-            )
+            .await_with_readiness_budget(response, RIB_REPLY_TIMEOUT, operator_reads)
             .await
+            .flatten()
         {
             Some(Ok(Ok(()))) => Ok(()),
             Some(Ok(Err(RibCommandError::NotFound(_)))) if known_down => Ok(()),
@@ -3105,9 +3128,14 @@ impl PeerManager {
     /// Local command settlement only: import acknowledgements do not prove
     /// remote replay completion, and export acknowledgement is not wire receipt.
     /// Required pending markers remain armed on any uncertain outcome.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dataset settlement keeps qualification, export replay, import refresh, and cleanup in one ordered operation"
+    )]
     pub(super) async fn refresh_dataset_generation_dependents(
         &mut self,
         dependents: &[DatasetDependent],
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), DatasetRefreshFailure> {
         // Publication (or restoration) has already happened. Record the
         // refresh now owed before a state query itself can become ambiguous.
@@ -3129,9 +3157,14 @@ impl PeerManager {
         let mut established = Vec::with_capacity(dependents.len());
         for dependent in dependents {
             established.push(
-                self.qualify_dataset_dependent(dependent, &mut window, &mut rib_budget)
-                    .await
-                    .map_err(DatasetRefreshFailure::Ambiguous)?,
+                self.qualify_dataset_dependent(
+                    dependent,
+                    &mut window,
+                    &mut rib_budget,
+                    operator_reads,
+                )
+                .await
+                .map_err(DatasetRefreshFailure::Ambiguous)?,
             );
         }
         let mut exports = Vec::new();
@@ -3140,12 +3173,22 @@ impl PeerManager {
                 if *is_established {
                     exports.push(dependent.peer.address);
                 } else {
-                    self.reevaluate_dataset_exports(vec![dependent.peer.address], true)
-                        .await?;
+                    self.reevaluate_dataset_exports(
+                        vec![dependent.peer.address],
+                        true,
+                        operator_reads,
+                        false,
+                    )
+                    .await?;
                     // A missing outbound registration is safe only while this
                     // exact managed session still positively reports down.
                     if self
-                        .qualify_dataset_dependent(dependent, &mut window, &mut rib_budget)
+                        .qualify_dataset_dependent(
+                            dependent,
+                            &mut window,
+                            &mut rib_budget,
+                            operator_reads,
+                        )
                         .await
                         .map_err(DatasetRefreshFailure::Ambiguous)?
                     {
@@ -3157,7 +3200,8 @@ impl PeerManager {
                 }
             }
         }
-        self.reevaluate_dataset_exports(exports, false).await?;
+        self.reevaluate_dataset_exports(exports, false, operator_reads, false)
+            .await?;
         for (dependent, is_established) in dependents.iter().zip(&established) {
             if dependent.import
                 && *is_established
@@ -3178,7 +3222,7 @@ impl PeerManager {
         }
         for (dependent, was_established) in dependents.iter().zip(&established) {
             let now_established = self
-                .qualify_dataset_dependent(dependent, &mut window, &mut rib_budget)
+                .qualify_dataset_dependent(dependent, &mut window, &mut rib_budget, operator_reads)
                 .await
                 .map_err(DatasetRefreshFailure::Ambiguous)?;
             if !was_established && now_established {
@@ -3238,6 +3282,7 @@ impl PeerManager {
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         rib_budget: Option<&mut LazyRibBudget>,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), PolicyApplyFailure> {
         let result = self
             .apply_runtime_policies_for_peer_key(
@@ -3248,6 +3293,7 @@ impl PeerManager {
                 rollback_plan,
                 clean_state_window,
                 rib_budget,
+                operator_reads,
             )
             .await;
         self.refresh_rfc8212_policy_metrics(&peer_key);
@@ -3271,6 +3317,7 @@ impl PeerManager {
         rollback_plan: Option<&mut Option<PolicyRollbackPeerPlan>>,
         clean_state_window: Option<&mut CleanStateQueryWindow>,
         mut rib_budget: Option<&mut LazyRibBudget>,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), PolicyApplyFailure> {
         use std::fmt::Write as _;
         let address = peer_key.address;
@@ -3291,8 +3338,12 @@ impl PeerManager {
         // nothing retained owes no refresh, so the guard below must not fire
         // for it.
         let rfc8212_refresh_required = if rfc8212_fatal_transition {
-            self.qualify_rfc8212_import_transition(&peer_key, rib_budget.as_deref_mut())
-                .await?
+            self.qualify_rfc8212_import_transition(
+                &peer_key,
+                rib_budget.as_deref_mut(),
+                operator_reads,
+            )
+            .await?
         } else {
             false
         };
@@ -3383,6 +3434,14 @@ impl PeerManager {
             false
         };
 
+        if !import_apply_failed {
+            self.drain_operator_queries(operator_reads).await;
+        }
+        let managed = self
+            .peers
+            .get_mut(&peer_key)
+            .expect("the owned policy update retains its managed peer");
+
         // A failed forward export command is not proof that the session kept
         // its prior chain: the reply may be lost after a partial local apply.
         // During rollback, `managed.export_policy` deliberately still names the
@@ -3418,13 +3477,28 @@ impl PeerManager {
         };
 
         let commands = managed.handle.commands_sender();
+        let state_reads = if import_apply_failed || export_apply_failed {
+            OperatorReadAdmission::Fenced {
+                reason: "a failed session apply must retain its retry intent before reads resume",
+            }
+        } else {
+            operator_reads
+        };
+        self.drain_operator_queries(state_reads).await;
         let require_clean_state = clean_state_window.is_some()
             && matches!(refresh_failure, RefreshFailureHandling::Fatal);
         let session_state = if let Some(window) = clean_state_window {
-            self.query_clean_session_state(commands, window).await
-        } else {
-            rustbgpd_transport::PeerHandle::query_state_outcome_with(commands, PEER_QUERY_TIMEOUT)
+            self.query_clean_session_state(commands, window, state_reads)
                 .await
+        } else {
+            self.await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ),
+                state_reads,
+            )
+            .await
         };
         let is_established = matches!(
             session_state,
@@ -3601,7 +3675,12 @@ impl PeerManager {
             // state query remains ambiguous and therefore fail-closed, as do
             // forward applies and peers still reporting Established.
             let rib_outcome = self
-                .replace_peer_export_policy_in_rib(address, export_policy, rib_budget)
+                .replace_peer_export_policy_in_rib(
+                    address,
+                    export_policy,
+                    rib_budget,
+                    operator_reads,
+                )
                 .await;
             match rib_outcome {
                 Ok(()) => {}
@@ -4247,6 +4326,9 @@ impl PeerManager {
                     None,
                     None,
                     Some(&mut rib_budget),
+                    OperatorReadAdmission::Fenced {
+                        reason: "honor-knob publication owns the desired configuration until its fan-out settles",
+                    },
                 )
                 .await
             {
@@ -4341,6 +4423,9 @@ impl PeerManager {
                     None,
                     None,
                     Some(&mut rib_budget),
+                    OperatorReadAdmission::Fenced {
+                        reason: "honor-knob publication owns the desired configuration until its fan-out settles",
+                    },
                 )
                 .await
             {

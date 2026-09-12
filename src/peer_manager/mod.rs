@@ -967,6 +967,23 @@ impl PeerManager {
         }
     }
 
+    /// Service queued reads when session policies and manager bookkeeping
+    /// agree. Bound each seam so a read flood cannot
+    /// prevent the owning transaction from advancing to its next step.
+    async fn drain_operator_queries(&mut self, admission: OperatorReadAdmission) {
+        if !admission.admits() {
+            return;
+        }
+        for _ in 0..READINESS_QUERY_BUDGET_PER_POLICY_STEP {
+            let query = self
+                .deferred_operator_queries
+                .pop_front()
+                .or_else(|| self.operator_rx.as_mut().and_then(|rx| rx.try_recv().ok()));
+            let Some(query) = query else { break };
+            Box::pin(self.handle_operator_query(query, true)).await;
+        }
+    }
+
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {

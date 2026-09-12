@@ -848,7 +848,9 @@ async fn rfc8212_import_presence_transition_is_excluded_from_the_export_cohort()
             export_policy: Some(distinct_deny_policy_chain(3)),
         },
     ];
-    let mask = mgr.export_only_policy_cohort_mask(&targets).await;
+    let mask = mgr
+        .export_only_policy_cohort_mask(&targets, OperatorReadAdmission::Served)
+        .await;
     assert_eq!(
         mask,
         vec![false, false],

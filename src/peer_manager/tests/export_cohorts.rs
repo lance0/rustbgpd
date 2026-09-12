@@ -405,7 +405,9 @@ async fn export_only_snapshot_skips_probe_without_repeated_policy_pair() {
             export_policy: Some(validation_policy_chain(ImportValidationDependency::Rpki)),
         },
     ];
-    let selected = manager.export_only_policy_cohort_mask(&targets).await;
+    let selected = manager
+        .export_only_policy_cohort_mask(&targets, OperatorReadAdmission::Served)
+        .await;
 
     assert_eq!(selected, vec![false, false]);
     assert!(
@@ -591,7 +593,9 @@ async fn export_only_cohort_tie_break_is_stable_and_queries_only_winner() {
                 }),
             })
             .collect::<Vec<_>>();
-        let mask = manager.export_only_policy_cohort_mask(&targets).await;
+        let mask = manager
+            .export_only_policy_cohort_mask(&targets, OperatorReadAdmission::Served)
+            .await;
         let selected = order
             .iter()
             .zip(&mask)

@@ -568,9 +568,8 @@ async fn read_admitted_during_prestage_is_labelled_prestage() {
     rib.await.unwrap();
 }
 
-/// A single-target reload runs the authoritative per-peer walk, which keeps
-/// the operator lane fenced. A read that arrives while the walk's RIB reply
-/// is held is drained only after the transaction returns to the run loop;
+/// A fenced owner runs the authoritative per-peer walk. A read that arrives
+/// while its RIB reply is held is drained only after the run loop resumes;
 /// its wait covers the fenced time and is attributed to `commit_batches`.
 #[tokio::test(start_paused = true)]
 async fn read_fenced_by_the_authoritative_walk_is_timed_when_drained_after_release() {
@@ -605,16 +604,16 @@ async fn read_fenced_by_the_authoritative_walk_is_timed_when_drained_after_relea
         cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
         false,
     );
-    let actor = tokio::spawn(manager.run());
-
     let (reply, apply_response) = oneshot::channel();
-    command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: export_targets(&[peer], &deny_policy_chain()),
-            reply,
-        })
-        .await
-        .unwrap();
+    let targets = export_targets(&[peer], &deny_policy_chain());
+    let actor = tokio::spawn(async move {
+        // Forward owners admit reads here. Use the explicitly fenced default
+        // wrapper to retain this delayed-service telemetry regression.
+        let result = manager.apply_resolved_policy_snapshot(targets).await;
+        manager.finish_operator_seam();
+        let _ = reply.send(result);
+        Box::pin(manager.run()).await;
+    });
 
     // The walk's RIB reply is held; the operator lane is fenced.
     held_rx.await.unwrap();
