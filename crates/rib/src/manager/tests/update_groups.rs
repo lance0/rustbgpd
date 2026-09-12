@@ -3187,6 +3187,54 @@ async fn accepted_policy_transition_does_not_drain_prequeued_general_queries() {
     );
 }
 
+#[tokio::test]
+async fn destination_prestage_drain_yields_with_primary_backlog_and_read_reply() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 3, None);
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.rx = rx;
+    manager.query_rx = query_rx;
+    let next_policy = community_chain(0xFDE8_2102);
+    let (reply, mut prepared) = oneshot::channel();
+    manager.begin_destination_prestage(peers[0], Some(&next_policy), reply);
+    assert!(manager.pending_destination_prestage.is_some());
+    for index in 0..8 {
+        tx.try_send(RibUpdate::SetPeerPolicyContext {
+            peer: peers[0],
+            session_id: 0,
+            peer_group: Some(format!("context-{index}")),
+        })
+        .unwrap();
+    }
+    let (reply, mut query) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(query.try_recv().unwrap(), 3);
+    assert!(
+        tx.capacity() < tx.max_capacity(),
+        "prestage drained every primary mutation before yielding"
+    );
+    assert!(matches!(
+        prepared.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let handle = tokio::spawn(actor);
+    prepared.await.unwrap().unwrap();
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     let (tx, rx) = mpsc::channel(32);

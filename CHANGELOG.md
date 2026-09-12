@@ -177,6 +177,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Projection capture must finish before this service begins; capture and
   retirement timings are available in diagnostic builds.
 
+- RIB backlog draining before timers, export-policy destination preparation,
+  and deferred initial registrations now serves bounded reads and yields
+  between route chunks and primary messages. Earlier route payloads still
+  complete before later End-of-RIB messages or timer release; an aggregate
+  of short ingest work can no longer bypass the ordinary actor fairness seam.
+
 - **Operator-visible:** The peer manager now serves session snapshots,
   import-policy statistics, and dataset status while a rejected reload awaits
   enqueue or completion of its batched RIB restore. These reads report live
