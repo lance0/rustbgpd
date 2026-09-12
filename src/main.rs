@@ -5702,12 +5702,13 @@ async fn run<T>(
     // the daemon: each target retries independently with capped backoff.
     let gnmi_dialout_manager = Arc::new(tokio::sync::Mutex::new(
         rustbgpd_api::gnmi_dialout::DialoutManager::new(
-            rustbgpd_api::gnmi_dialout::GnmiService::new(
+            rustbgpd_api::gnmi_dialout::GnmiService::new_with_operator_queries(
                 config.global.asn,
                 config.global.router_id.clone(),
                 // Dial-out only renders Subscribe snapshots; it never serves Set.
                 rustbgpd_api::server::AccessMode::ReadOnly,
                 peer_mgr_tx.clone(),
+                Some(peer_mgr_operator_tx.clone()),
             )
             .with_event_history(event_history_handle.clone()),
             metrics.clone(),
