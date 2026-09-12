@@ -346,3 +346,193 @@ async fn read_fenced_by_rollback_is_timed_when_drained_after_release() {
         .unwrap();
     rib.await.unwrap();
 }
+
+/// A read admitted while the forward reload owner awaits a held destination
+/// prestage reply is served inside that wait and attributed to `prestage`.
+#[tokio::test(start_paused = true)]
+async fn read_admitted_during_prestage_is_labelled_prestage() {
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 41, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 41, 0, 2)),
+    ];
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (held_tx, held_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let rib = tokio::spawn(async move {
+        let mut held = Some(held_tx);
+        let mut release = Some(release_rx);
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    if let Some(held) = held.take() {
+                        let _ = held.send(());
+                    }
+                    let release = release.take();
+                    tokio::spawn(async move {
+                        if let Some(release) = release {
+                            let _ = release.await;
+                        }
+                        let _ = reply.send(Ok(()));
+                    });
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
+                }
+                _ => {}
+            }
+        }
+    });
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (mut manager, metrics) = manager_with_operator_lane(command_rx, operator_rx, rib_tx);
+    let installs = Arc::new(AtomicUsize::new(0));
+    for peer in peers {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            false,
+        );
+    }
+    let targets = export_targets(&peers, &deny_policy_chain());
+    let reload = tokio::spawn(async move {
+        let result = manager
+            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .await;
+        (manager, result)
+    });
+
+    // The prestage reply is held: no session has a new chain yet.
+    held_rx.await.unwrap();
+    assert_eq!(installs.load(Ordering::SeqCst), 0);
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
+    let infos = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("the read is admitted while the prestage reply is held")
+        .unwrap();
+    assert_eq!(infos.len(), 2);
+
+    let (count, _, buckets) = wait_series(&metrics, "prestage");
+    assert_eq!(
+        count, 1,
+        "the admitted read is attributed to the prestage wait"
+    );
+    assert_eq!(
+        within_two_seconds(&buckets),
+        1,
+        "served within the caller budget"
+    );
+    assert_eq!(wait_series(&metrics, "unfenced").0, 0);
+    assert_eq!(wait_series(&metrics, "forward_transition").0, 0);
+
+    release_tx.send(()).unwrap();
+    let (mut manager, result) = reload.await.unwrap();
+    result.expect("the cohort commits once the prestage reply is released");
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+    drop(manager);
+    rib.await.unwrap();
+}
+
+/// A single-target reload runs the authoritative per-peer walk, which keeps
+/// the operator lane fenced. A read that arrives while the walk's RIB reply
+/// is held is drained only after the transaction returns to the run loop;
+/// its wait covers the fenced time and is attributed to `commit_batches`.
+#[tokio::test(start_paused = true)]
+async fn read_fenced_by_the_authoritative_walk_is_timed_when_drained_after_release() {
+    const FENCED_FOR: Duration = Duration::from_secs(3);
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 42, 0, 1));
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (held_tx, held_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let rib = tokio::spawn(async move {
+        let mut held = Some(held_tx);
+        let mut release = Some(release_rx);
+        while let Some(update) = rib_rx.recv().await {
+            if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                if let Some(held) = held.take() {
+                    let _ = held.send(());
+                }
+                if let Some(release) = release.take() {
+                    let _ = release.await;
+                }
+                let _ = reply.send(Ok(()));
+            }
+        }
+    });
+    let (command_tx, command_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (mut manager, metrics) = manager_with_operator_lane(command_rx, operator_rx, rib_tx);
+    let installs = Arc::new(AtomicUsize::new(0));
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+        false,
+    );
+    let actor = tokio::spawn(manager.run());
+
+    let (reply, apply_response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+            targets: export_targets(&[peer], &deny_policy_chain()),
+            reply,
+        })
+        .await
+        .unwrap();
+
+    // The walk's RIB reply is held; the operator lane is fenced.
+    held_rx.await.unwrap();
+    assert_eq!(installs.load(Ordering::SeqCst), 1);
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
+    tokio::time::sleep(FENCED_FOR).await;
+    assert!(
+        wait_series(&metrics, "commit_batches").0 == 0 && wait_series(&metrics, "unfenced").0 == 0,
+        "nothing is observed while the read is still fenced"
+    );
+    release_tx.send(()).unwrap();
+
+    let infos = tokio::time::timeout(Duration::from_secs(30), response)
+        .await
+        .expect("the fenced read is drained once the walk releases the actor")
+        .unwrap();
+    assert_eq!(infos.len(), 1);
+    apply_response
+        .await
+        .unwrap()
+        .expect("the single-target walk commits once released");
+
+    let (count, sum, buckets) = wait_series(&metrics, "commit_batches");
+    assert_eq!(
+        count, 1,
+        "the drained read is attributed to the walk that held it"
+    );
+    assert!(
+        sum >= FENCED_FOR.as_secs_f64(),
+        "wait covers the fenced time, got {sum}s"
+    );
+    assert_eq!(
+        within_two_seconds(&buckets),
+        0,
+        "the sample is over the 2 s budget edge"
+    );
+    assert_eq!(wait_series(&metrics, "unfenced").0, 0);
+    assert_eq!(wait_series(&metrics, "forward_transition").0, 0);
+
+    drop(command_tx);
+    tokio::time::timeout(Duration::from_secs(5), actor)
+        .await
+        .expect("the actor exits once the command lane closes")
+        .unwrap();
+    rib.await.unwrap();
+}

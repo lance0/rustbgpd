@@ -34,7 +34,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contribute no sample; the wait excludes prior peer-manager work and reply
   delivery. Buckets are the shared RIB actor latency set plus an exact 2 s
   edge, so with 100 ms and 500 ms every operator-read caller budget is a
-  bucket boundary and the over-budget share is a subtraction.
+  bucket boundary and the over-budget share is a subtraction. Phases that do
+  not drain reads mid-phase (`commit_batches`, `rollback`, and `prestage`
+  outside a forward reload) only produce a sample when a read outlives the
+  whole phase, so per-seam counts there measure arrival skew, not load.
 
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
