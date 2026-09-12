@@ -29,10 +29,10 @@ resolved.
   retrying the read. Typed admission reduces specific actor waits; the
   [operator-read design](../adr/0132-operator-read-path.md) adds temporary RIB
   summaries for synchronous policy replacement and dataset reevaluation,
-  plus read service between queued RIB work units. Runtime integration and
-  final qualification are still in progress. General RIB queries
-  retain their consistency fences, incomplete restoration can fence live
-  peer-manager reads, and import collection still depends on session tasks.
+  plus read service between queued RIB work units. Final phase coverage and
+  qualifying soak remain outstanding. General RIB queries retain their
+  consistency fences, incomplete restoration can fence live peer-manager
+  reads, and import collection still depends on session tasks.
   The paired native rollback cell passes on both baseline and candidate; it
   does not establish a general deadline guarantee. This issue stays open
   until the final phase coverage and qualifying soak pass on the final runtime

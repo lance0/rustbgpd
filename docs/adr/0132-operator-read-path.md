@@ -1,13 +1,13 @@
 # ADR-0132: Operator Reads During Configuration Transactions
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-12
 
 This record selects typed admission for live operator reads, cooperative
 RIB backlog draining, and temporary summaries during synchronous policy
-replacement. Runtime integration and qualification are still in progress.
-Persistent publication remains conditional; read deadlines and live
-readiness requirements remain unchanged.
+replacement. The implementation is integrated; final phase coverage and
+qualifying soak remain outstanding. Persistent publication remains conditional;
+read deadlines and live readiness requirements remain unchanged.
 
 ## Context
 
@@ -309,9 +309,9 @@ No separate read owner, per-checkpoint task, or new dependency is introduced.
 
 ## Surface classification
 
-This inventory includes the selected changes above; integration status is
-recorded under validation below. It is not a count of RPCs or a
-promise that every actor-owned table should be copied. **Actor-owned** means
+This inventory describes the implemented design; supporting evidence is
+recorded under validation below. It is not a count of RPCs or a promise that
+every actor-owned table should be copied. **Actor-owned** means
 the relevant owner has the state from which a summary could be produced.
 **Session-derived** requires a session observation under the current design.
 **Mixed** joins these sources. Readiness checks also require live progress.
@@ -458,7 +458,8 @@ composition-tested with RIB summaries in
 and honor-only admission are in [#2467](https://github.com/lance0/rustbgpd/pull/2467),
 gNMI snapshots in [#2468](https://github.com/lance0/rustbgpd/pull/2468), and
 periodic BMP collection in [#2469](https://github.com/lance0/rustbgpd/pull/2469).
-These changes are still being integrated; qualification remains separate.
+These changes are merged; final phase coverage and qualifying soak remain
+separate acceptance requirements.
 
 Focused local RIB tests exercise frozen values inside real apply, restore,
 and export-only reevaluation work. A complete neighbor/export-stat API-to-RIB
@@ -547,7 +548,7 @@ fields. A seqlock is not equivalent for this purpose:
 [sequence-counter readers can retry while a writer is preempted](https://docs.kernel.org/locking/seqlock.html),
 so it does not provide the same independence from a long-running writer.
 
-## Decision (integration pending)
+## Decision
 
 Use typed admission and the exercised wait-site matrix for live peer-manager
 reads. Cooperatively drain primary work through the existing read and yield

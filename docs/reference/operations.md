@@ -630,14 +630,11 @@ restore. These are live reads: a failed session restore can leave different
 sessions on different policies, and peer-manager and RIB reads do not share
 a generation pin.
 
-The extension described by [ADR-0132](../adr/0132-operator-read-path.md) is being
-integrated. Forward API policy transactions and policy-only publication
-compensation admit reads at safe waits. `TestPolicy` uses the operator lane
-for its live peer context; route pages retain their version fence without a
-shared generation pin across context and routes. Bounded operator service
-also runs between completed serial steps. Individual session acknowledgements
-remain fenced until corresponding manager bookkeeping is complete. SIGHUP
-compensation remains fenced after an earlier ambiguous restoration, such as
+The [operator-read design](../adr/0132-operator-read-path.md) also serves
+bounded batches between completed serial steps. Individual session
+acknowledgements remain fenced until corresponding manager bookkeeping is
+complete. SIGHUP compensation remains fenced after an earlier ambiguous
+restoration, such as
 session knobs restored before a failed RIB refresh leaves manager metadata
 unchanged. Successful earlier steps permit live reads during later policy and
 dataset restoration; compensation alone does not imply a full fence. During
@@ -649,15 +646,15 @@ setters outside policy/dataset generation unwind; hot-knob restoration keeps
 its existing fences. Desired configuration publication and ordinary mutations
 retain their command ordering.
 
-Forward preflight, cohort selection, post-application state probes and their
-clean-state retries, retained-route proofs and per-peer RIB export replacement
-admit bounded reads. Dataset settlement inherits its owner's admission through
+Forward RFC 8212 preflight, cohort selection, post-application state probes
+and their clean-state retries, retained-route proofs and per-peer RIB export
+replacement admit bounded reads. Dataset settlement inherits its owner's admission through
 capacity and reply waits. Legacy dataset refresh retains its absolute
 five-second reply deadline; generation settlement retains its existing reply
 budget that excludes read servicing.
 
 For synchronous RIB policy replacement and export-only dataset reevaluation,
-the design captures numeric export statistics and neighbor RIB summaries once
+the daemon captures numeric export statistics and neighbor RIB summaries once
 before mutation. Bounded checkpoints serve those frozen values while ordinary
 RIB queries and mutations stay fenced. The RIB uses one outer executor
 handoff on the daemon's multi-thread runtime so independent RPC tasks can
