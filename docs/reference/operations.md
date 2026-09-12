@@ -617,12 +617,20 @@ exactly as during prestaging), and the RIB answers general queries between its
 pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
-across it. Rollback and standalone policy transactions keep the full fence.
-Readiness queries remain available at their existing transaction seams. A
+across it. When a reload's export-policy transition is rejected and rolled
+back, the peer manager serves session snapshots, import-statistics collections,
+and dataset status while it awaits enqueue or completion of the batched RIB
+restore. These are live reads: a failed session restore can leave different
+sessions on different policies, and peer-manager and RIB reads do not share
+a generation pin. The RIB's synchronous restore still fences general queries,
+so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
+there. Standalone policy transactions and a reload's later compensating replay
+keep the full fence. Readiness queries remain available at their existing
+transaction seams. A
 congested backend or a later transaction stage can still exhaust an operator
-read's deadline. Whether reads should keep entering the owning actor at all,
-or be answered from a published generation, is the open question in
-[ADR-0132](../adr/0132-operator-read-path.md).
+read's deadline. [ADR-0132](../adr/0132-operator-read-path.md) proposes typed
+admission as the baseline and records the conditions for any later published
+summary design; it does not change read deadlines or readiness semantics.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves

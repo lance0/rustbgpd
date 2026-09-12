@@ -1,557 +1,300 @@
-# ADR-0132: Where Operator Reads Live — Admission at Each Wait Site Versus a Published Read Generation
+# ADR-0132: Operator Reads During Configuration Transactions
 
 **Status:** Proposed
 **Date:** 2026-09-12
 
-Status is Proposed: the option analysis and the surface classification are
-verified against the source tree at the date above; the decision below is
-open until this record is accepted.
+This record recommends typed read admission and the wait-site test matrix as
+our baseline. Published summaries remain a conditional follow-up design;
+this ADR does not adopt a new read-consistency contract or change deadlines.
 
 ## Context
 
-### The structure
+The peer manager ([ADR-0017](0017-peer-manager-channel-based-ownership.md))
+and RIB manager ([ADR-0013](0013-single-task-rib-manager.md)) own much of the
+state used by operator reads. Neighbor snapshots, policy statistics, route
+queries, and core readiness send messages to these actors. Other surfaces,
+such as FIB-route and blackhole-discard status snapshots, already bypass
+them; this record concerns the reads that still depend on these owners.
 
-Two single-task actors own the daemon's operator-visible state: the peer
-manager ([ADR-0017](0017-peer-manager-channel-based-ownership.md)) and the
-RIB manager ([ADR-0013](0013-single-task-rib-manager.md)). Every operator
-read — `rbgp neighbor`, `rbgp policy stats`, a route listing, the readiness
-probe — is a message into one or both of those actors, answered from the
-actor's own turn.
+An actor can own a configuration operation longer than a read's deadline.
+A read queued behind that operation can time out even though the daemon is
+making progress. Admitting reads during safe waits removes that particular
+queueing delay. It does not remove session-task collection, synchronous RIB
+work, or contention for the runtime workers.
 
-A long operation that the actor owns (a policy reload, a cohort export-policy
-transition, a rollback of a rejected reload) holds the actor's turn for
-seconds. A short read that arrives during that window queues behind it. The
-read's own deadline is shorter than the owner's, so the deadline kills the
-read before the owner finishes. This is priority inversion: the low-latency
-request waits on the high-latency one, and the only observable outcome is
-`DEADLINE_EXCEEDED` on a healthy daemon.
+### Budget boundaries
 
-### The budget asymmetry
+The relevant constants live in `src/peer_manager/mod.rs` and the API
+service modules listed below. A budget is meaningful only with its scope:
 
-The generator is two budget classes that were never reconciled. Each is
-individually reasoned in its doc comment; nothing relates them.
+| Constant | Value | Scope |
+|---|---:|---|
+| `PEER_QUERY_TIMEOUT` | 100 ms | one bounded session-state query; also used for specific BMP query stages |
+| `EXPLAIN_QUERY_TIMEOUT` | 500 ms | a session's import-explain reply |
+| `PEER_MANAGER_READ_TIMEOUT` | 2 s | send and reply in the bounded `actor_read` peer-manager helpers |
+| `POLICY_STATS_AGGREGATE_TIMEOUT` | 2 s | one absolute deadline shared by every backend stage of `GetPolicyStats` |
+| `RIB_SNAPSHOT_TIMEOUT` | 2 s | the neighbor service's separate RIB snapshot stage |
+| `CORE_READINESS_DEADLINE` | 200 ms | peer-manager `Ping` followed by RIB `LocRibCount` for the core check; the health snapshot substitutes readiness `ListPeers` for `Ping` |
+| `PEER_POLICY_UPDATE_TIMEOUT` | 500 ms | one per-session policy mutation, not a read budget |
+| `RIB_REPLY_TIMEOUT` | 5 s | one single-peer RIB policy step |
+| `RIB_BATCH_REPLY_TIMEOUT` | 2 min | batched authoritative export-policy apply and the rollback aggregate |
+| `MAX_HEALTHY_POLICY_TRANSITION_AGE` | 30 s | transition age after which RIB readiness reports a stall, not a cancellation deadline |
+| `MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP` | 60 s | pre-commit ownership before fail-closed handoff |
+| `OWNED_NEIGHBOR_ACTOR_TIMEOUT`, `OWNED_POLICY_ACTOR_TIMEOUT`, `OWNED_PEER_GROUP_ACTOR_TIMEOUT`, `PEER_MANAGER_MUTATION_TIMEOUT` | 10 min | the corresponding owned API mutation |
+| `OWNED_SETTLEMENT_BUDGET` | 30 min | persisted runtime-config settlement |
+| `CONFIG_OPERATION_TIMEOUT` | 30 min | config-service diff, plan, and effective-config requests; mutations use settlement callbacks |
 
-Read budgets, verified in source:
+The two-minute aggregate and thirty-minute settlement budgets are 60 and
+900 times the two-second read budget. A justified long owner budget is not
+a reason to restart the read budget after admission or extend it through a
+reload. Neighbor responses have separate peer-manager and RIB stages; the
+policy-stats RPC instead shares one absolute deadline across its stages.
 
-| Constant | Value | Where | Bounds |
-|---|---:|---|---|
-| `PEER_QUERY_TIMEOUT` | 100 ms | `src/peer_manager/mod.rs` | one per-session `query_state` round trip inside a peer-manager read |
-| `EXPLAIN_QUERY_TIMEOUT` | 500 ms | `src/peer_manager/mod.rs` | one `ExplainImportPolicy` session round trip |
-| `PEER_POLICY_UPDATE_TIMEOUT` | 500 ms | `src/peer_manager/mod.rs` | one per-session policy hot-apply |
-| `ORF_RIB_REPLY_TIMEOUT` | 500 ms | `crates/transport/src/session/io.rs` | a session's ORF reply from the RIB |
-| `POLICY_STATS_AGGREGATE_TIMEOUT` | 2 s | `crates/api/src/policy_service.rs` | every backend stage of one `GetPolicyStats`, shared absolute deadline |
-| `PEER_MANAGER_READ_TIMEOUT` | 2 s | `crates/api/src/actor_read.rs` | admission plus reply of every peer-manager read |
-| `RIB_SNAPSHOT_TIMEOUT` | 2 s | `crates/api/src/neighbor_service.rs` | the neighbor service's RIB snapshot stage |
-| `CORE_READINESS_DEADLINE` | 200 ms | `crates/api/src/health_probe.rs` | the readiness probe's two actor pings together |
+`rib_manager_read` is deliberately unbounded in `crates/api/src/actor_read.rs`;
+callers such as neighbor snapshots and policy statistics add their own
+bounds. RIB-manager-backed listing and explain calls without such a wrapper
+rely on caller cancellation. The CLI's `READ_RPC_TIMEOUT` bounds its unary
+read calls to 30 seconds; arbitrary API clients need not use that bound.
+This existing choice is an input to the design, not a newly discovered bug
+or permission to add a blanket server timeout.
 
-Owner budgets, verified in source:
+### What the reload investigations established
 
-| Constant | Value | Where | Bounds |
-|---|---:|---|---|
-| `RIB_REPLY_TIMEOUT` | 5 s | `src/peer_manager/mod.rs` | one single-peer RIB policy step |
-| `RIB_BATCH_REPLY_TIMEOUT` | 2 min | `src/peer_manager/mod.rs` | the batched authoritative export-policy apply, and the whole rollback aggregate |
-| `MAX_HEALTHY_POLICY_TRANSITION_AGE` | 30 s | `crates/rib/src/manager/mod.rs` | how long a clean policy transition may own the RIB before readiness reports it stalled |
-| `MAX_PRECOMMIT_POLICY_TRANSITION_OWNERSHIP` | 60 s (2× the above) | `crates/rib/src/manager/mod.rs` | pre-commit ownership before the fail-closed handoff |
-| `OWNED_NEIGHBOR_ACTOR_TIMEOUT` | 10 min | `crates/api/src/neighbor_service.rs` | an owned neighbor mutation |
-| `OWNED_POLICY_ACTOR_TIMEOUT` | 10 min | `crates/api/src/policy_service.rs` | an owned policy mutation |
-| `OWNED_PEER_GROUP_ACTOR_TIMEOUT` | 10 min | `crates/api/src/peer_group_service.rs` | an owned peer-group mutation |
-| `PEER_MANAGER_MUTATION_TIMEOUT` | 10 min | `crates/api/src/server.rs` | a generic peer-manager mutation |
-| `OWNED_SETTLEMENT_BUDGET` | 30 min | `crates/api/src/runtime_config_settlement.rs` | settlement of a persisted runtime-config change |
-| `CONFIG_OPERATION_TIMEOUT` | 30 min | `crates/api/src/config_service.rs` | config-service reads and writes alike |
+- Forward reloads originally held reads behind per-session policy work and
+  destination preparation. Admission at safe waits reduced that delay.
+- The cohort export-policy transition also fenced reads before its commit
+  batches. [PR #2456](https://github.com/lance0/rustbgpd/pull/2456) admitted
+  the peer-manager operator lane during the forward cohort wait and RIB
+  general queries between pre-commit polls. RIB commit batches retain their
+  consistency fence.
+- Residual post-commit latency requires separate attribution. In the local
+  driven-probe experiment, co-pinning the load engine with the daemon
+  inflated latency; separating their cores put the measured probes inside
+  budget. Session collection during re-advertisement remained a substantial
+  part of the delay. [PR #2459](https://github.com/lance0/rustbgpd/pull/2459)
+  instruments RIB dispatch and does not change scheduling. Its elapsed-work
+  and unattributed intervals are not CPU-time measurements or complete RPC
+  latency, and they establish no general latency bound.
+- Code review found rollback waits that unnecessarily fenced peer-manager
+  reads. [PR #2460](https://github.com/lance0/rustbgpd/pull/2460) narrows that
+  peer-manager admission problem. RIB restoration remains synchronous and
+  fenced; a failed session restoration can leave mixed installed policies.
+  The bounded admission improvement does not establish rollback-wide read
+  availability or complete recovery of every session.
 
-The ratio between the two classes is between 60× (2 s against 2 min) and
-900× (2 s against 30 min). A read budgeted at 2 s can only succeed during an
-owner operation if the actor deliberately admits it mid-operation. Nothing
-in the type system or the actor loop says whether it does.
-
-The client side adds a third figure that is not a real bound: `rbgp`'s
-`READ_RPC_TIMEOUT` is 30 s (`crates/cli/src/connection.rs`), and
-`rib_manager_read` in `crates/api/src/actor_read.rs` is deliberately
-unbounded server-side. Every `RibService` listing and explain RPC therefore
-waits on the client deadline alone; a wedged RIB actor hangs those RPCs for
-30 s rather than returning `DEADLINE_EXCEEDED`.
-
-### Four instances in four weeks
-
-Described by mechanism. Each was found only when a read happened to land in
-the window, and each fix was local to the site that failed.
-
-1. **A reload stalled 2 s reads for about 3.1 s.** A forward policy reload
-   held the peer manager through its per-session hot-apply steps; neighbor
-   and policy-stats reads queued behind them. Raising the read budget did
-   not clear the failure: the owner's step is bounded per session
-   (`PEER_POLICY_UPDATE_TIMEOUT`) but the walk is O(peers), so the stall
-   grows with the fleet, not with any constant a read could be raised to.
-   The fix admitted reads at the seams between steps (the readiness lane,
-   then the operator lane during destination prestaging).
-2. **The cohort RIB transition fenced reads until commit.** After every
-   cohort session already ran its new chains, the peer manager awaited the
-   cohort's batched RIB reply with only the readiness lane admitted, and the
-   RIB served no general query while a clean policy transition was owned.
-   At 1,000 peers the transition runs about 0.7–2 s, so a read arriving more
-   than about 0.8 s before the commit exhausted its 2 s budget. The commit
-   "serve operator reads during the cohort rib transition" (`50d161bbe`)
-   admits the operator-read lane while the forward reload owner awaits that
-   reply, and lets the RIB serve one general-query budget between its
-   pre-commit transition polls from the pre-commit state.
-3. **Reads arriving during the commit batches pay a post-commit tail.** The
-   RIB's commit batches keep their fence — the commit is the single switch
-   point. A read that lands inside them waits for the commit and then for
-   the backlog the commit accumulated; the observed tail is about 1 s at
-   the flagship shape. A fix is in preparation.
-4. **A rejected reload's rollback awaits its RIB aggregate with reads
-   fenced.** Found by code read, not by a probe: `restore_resolved_policies`
-   and `register_policy_rollback_rib` (`src/peer_manager/policy.rs`) await
-   `RestorePeerExportPoliciesAuthoritatively` under a rollback budget
-   anchored at `RIB_BATCH_REPLY_TIMEOUT` (2 min) using the readiness-only
-   helper. The generation-level unwind replays the prior policies through a
-   path that hardcodes operator reads off. A rejected reload is exactly when
-   an operator is most likely to be looking. A fix is in preparation.
-
-### The current approach: admission at each wait site
-
-The peer-manager actor has four wait helpers in `src/peer_manager/mod.rs`,
-all `biased` toward the owned future so a probe flood cannot delay a
-completed step, and none of which polls the ordinary command channel, so
-mutations stay strictly behind the transaction:
-
-- `await_with_readiness` — admits the readiness lane
-  (`PeerManagerReadinessQuery::{Ping, ListPeers}`) only.
-- `await_with_readiness_and_operator_reads(_, allow)` — also admits the
-  operator lane (`PeerManagerOperatorQuery::*`) when `allow` is true.
-- `await_with_readiness_budget` — readiness only, with a budget charged only
-  while genuinely waiting on the step, not while servicing a query.
-- `await_with_readiness_and_operator_budget(_, _, allow)` — the budgeted
-  form with conditional operator admission.
-
-Verified inventory of non-test call sites at this date: **21**. Seventeen
-admit the readiness lane only (thirteen in `src/peer_manager/policy.rs`,
-one in `src/peer_manager/mod.rs`, one in `src/peer_manager/lifecycle.rs`,
-plus the two budgeted readiness-only waits around per-peer hot-apply and
-dataset export re-evaluation). Four admit operator reads, all in
-`src/peer_manager/policy.rs`: destination prestaging, the cohort RIB reply
-wait, and the send and reply of the batched authoritative apply. All four
-are conditional on a flag that is `true` on exactly one path — the forward
-SIGHUP generation in `src/peer_manager/generation.rs`. Every other entry
-point, including the gRPC transaction executor and every rollback, passes
-`false` or has no flag at all.
-
-On the RIB side, `crates/rib/src/manager/mod.rs` serves general queries
-between pre-commit transition polls (`QUERY_BUDGET_PER_CHUNK` = 8 per
-chunk; the poll itself strides until `FLUSH_POLL_BUDGET` = 25 ms elapses)
-and fences them during the commit batches.
-
-Each of these rules is individually correct and individually documented.
-What is missing is an invariant: there is no statement of *which* waits must
-admit reads, so a new wait defaults to the fenced form, and the next fence
-that matters is found the same way the last four were — by a read arriving
-in the window. The operator lane itself is narrow (five variants) and only
-two services are wired to it (`NeighborService`, `PolicyService`, via
-`with_operator_queries` in `crates/api/src/server.rs`); `PolicyService.TestPolicy`
-uses the plain command lane for the same `ListPeers` class of read that
-`GetPolicyStats` sends through the operator lane, so `rbgp policy test` can
-be fenced behind a reload that `rbgp policy stats` passes through. That is
-not a bug in either site; it is what per-site admission produces.
-
-### Prior art
-
-The three daemons this project is routinely compared against all removed the
-reader's dependency on the owner structurally, in three different ways. None
-manages it with per-site admission.
-
-**OpenBGPD** splits the daemon into three processes. The manual page states
-it plainly: "The session engine of bgpd is responsible for maintaining the
-TCP session with each neighbor. Updates are passed to the Route Decision
-Engine (RDE) where the paths are filtered and used to compute a Routing
-Information Base (RIB). The parent process is responsible for keeping the
-RIB in sync with the kernel routing table"
-([bgpd(8)](https://man.openbsd.org/bgpd)). The 2009 design paper describes
-the `imsg` framework over socketpairs between the processes, that
-"Keepalives are directly generated by the session engine to ensure that
-even high load on the RDE does not result in a session drop", and that
-"The control messages issued by bgpctl use a second pipe so that large
-backlogs are not holding these messages up for too long"
-([AsiaBSDCon 2009](https://www.openbsd.org/papers/asiabsdcon2009-bgpd.pdf)).
-The same paper is candid that separation alone does not remove the
-inversion for RIB-owned state: because the RDE was allowed to block for a
-long time, that "blocks almost all bgpctl commands as well and so affects
-the responsiveness of bgpctl. This is one of the hot topics that I try to
-solve in the near feature." Session-state reads are answered by the session
-engine independently of RDE load; RIB reads still cross into the RDE. Later
-bgpd releases added explicit flow-control messages between the engines;
-that is not verified against source and not relied on.
-
-**BIRD 3.x** keeps the control plane on the main thread and moves protocol
-work to worker thread groups. The user's guide: "There is one main thread,
-taking care about startup, shutdown, (re)configuration, CLI and several
-protocols which have not yet been updated to run in other threads", and
-"Default thread group is `worker`. This group runs (by default) BGP, BMP,
-MRT, Pipe and RPKI. Also the routing table maintenance routines run in
-these threads" ([BIRD user's guide](https://bird.nic.cz/doc/latest/),
-thread setup). The CLI never waits on a BGP session's turn because it does
-not share one.
-
-**FRR** runs one event loop per daemon and adds concurrency by giving each
-pthread its own loop: "The fundamental pattern used in FRR daemons is an
-event loop", and it is "safe to schedule events on a `threadmaster`
-belonging both to the calling thread as well as *any other pthread*"
-([process architecture](https://docs.frrouting.org/projects/dev-guide/en/latest/process-architecture.html)).
-Its keepalive thread deliberately bypasses the scheduler because the
-scheduler's overhead is significant relative to the task. For read-heavy
-shared state FRR uses RCU, where "data structures are always consistent for
-reading" and "reading never blocks / takes a lock"; writers copy, publish
-with a release store, and defer freeing until no reader can still hold the
-old version ([RCU](https://docs.frrouting.org/projects/dev-guide/en/latest/rcu.html)).
-The page notes the limits that apply here too: it is "designed for
-read-heavy workloads where objects are updated relatively rarely", and the
-old object stays resident during the grace period.
-
-**In Rust**, the published-generation shape is what
-[`arc-swap`](https://docs.rs/arc-swap) provides: "a container for an `Arc`
-that can be changed atomically", for data that is "often read and seldom
-updated"; `load()` is lock-free and never waits on a `store()`. The crate
-documentation directs readers to its own limitations and performance
-sections before adopting it. `left-right` (two copies, readers on one,
-writer on the other, swapped on publish) and a seqlock (readers retry when
-a write raced them) are the alternatives; both trade write cost or reader
-retries for the same property — a reader never waits on the owner.
+The wait-site matrix records exercised admitting and fenced waits. Typed
+`OperatorReadAdmission` makes admission a deliberate call-site choice;
+`Fenced { reason, .. }` requires an explanation. Neither a nonempty reason
+nor a matrix entry proves that a long fence meets an operator deadline.
+The remaining fences and the session-collection tail still need evidence.
 
 ## Options
 
-### A — Status quo: admission at each wait site
+### A — Continue fixing individual admission sites
 
-Keep the four helpers and the flag. Add operator admission to a wait when a
-read is found to fail behind it.
+This preserves current read semantics and keeps each patch small, but a new
+wait can repeat the same omission. It is not the recommended baseline.
 
-- **Cost.** None up front. Each instance costs a reproduction, a fix, and a
-  regression test, and the instance is found by a soak or an operator, not
-  by review.
-- **What it buys.** Exact control: every admission is a deliberate,
-  documented decision about which mixed state a read may observe.
-- **What it does not.** An invariant. The set of admitting sites is the set
-  of sites that have already failed. Nothing prevents the twenty-second
-  wait from defaulting to fenced, and nothing tells a reviewer that it
-  should not.
+### B — Typed admission with an exercised wait-site matrix
 
-### B — Keep admission, add the invariant and enforce it
+Every transaction wait states whether it admits operator reads. Prefer
+admission when the read can report defined state without exposing an
+incomplete mutation. A fence identifies the state that cannot safely be
+read and the transition that releases it. Existing helpers continue to
+prioritize a completed owner future and do not poll the ordinary mutation
+channel mid-transaction.
 
-State the rule: **a transaction wait admits operator reads unless it has a
-per-session mutation in flight against the state a read would report.** The
-readiness-only wait becomes the variant that must justify itself. Each
-readiness-only site carries a one-line reason adjacent to the call — the
-repository already enforces exactly this shape for lint allowances
-(`scripts/check-clippy-reasons.py` requires `reason =` on every ratcheted
-`allow`/`expect`), so the checker is a sibling of an existing one, not a new
-kind of gate. The wait-site test matrix in preparation is the other half:
-one test per wait site that parks the owner, sends a read, and asserts
-either that it is served or that the site's stated reason names why not.
+Use `OperatorReadAdmission` and the existing matrix. The enum already
+requires a reason for a fence; an additional reason-checking script would
+add little. The matrix must exercise the production wait and distinguish
+readiness, operator reads, and mutations. A test proving that a read stays
+fenced is a consistency regression, not proof of acceptable availability.
 
-- **Cost.** A checker script with companion tests, reasons on seventeen
-  sites, the matrix. No runtime change to the read path.
-- **What it buys.** Turns the current seventeen-and-four into a rule with a
-  ratchet. Instance 4 (rollback) would have failed the matrix on the day it
-  was written, because the rollback aggregate has no per-session mutation
-  in flight — the sessions already run the restored chains. Instance 2
-  would have failed for the same reason.
-- **What it does not.** Change the fact that a read still enters the
-  actor's turn. The post-commit backlog (instance 3) is not an admission
-  question: the read is admitted and waits anyway, because commit batches
-  are the switch point. B cannot express "this read does not need the
-  actor at all."
+B is the recommended present baseline. It preserves deadlines and current
+read semantics while making the remaining dependency visible. It cannot
+solve synchronous actor work or session fan-out contention by itself.
 
-### C — A published snapshot for the read surfaces
+### C — Published summaries for selected reads
 
-The actor publishes a generation of the read-facing state on an
-`arc-swap`-style handle at defined points (commit, settle, rollback
-complete, periodic). Reads that can be answered from a generation never
-enter the actor. This is the RCU shape from FRR, in Rust, scoped to the
-surfaces classified below as snapshot-able.
+A publisher exposes immutable observations through a shared handle. A read
+loads one observation and avoids the owner queue for the fields it covers.
+Configuration rows, RIB-owned counters, and small RIB summaries are initial
+candidates. Full route tables and session-derived observations require
+separate cost and consistency decisions.
 
-- **Cost.** A copy per generation of whatever the generation carries; the
-  cost question is worked in "The cost of C" below. A new definition of
-  what a read observes during a transition (below, "The semantics
-  question"). Per-session counters cannot be published by the actor at all
-  because the actor does not own them — sessions would have to publish
-  their own rows, or those surfaces stay live.
-- **What it buys.** For the snapshot-able surfaces, the inversion becomes
-  structurally impossible: there is no wait to admit. Instance 3 (the
-  post-commit tail) disappears for those surfaces because a read never
-  queues behind the commit. The read budgets stop being the wrong class of
-  number, because they no longer race an owner.
-- **What it does not.** Cover the live surfaces — `policy stats
-  --direction import`, `policy explain --direction import`, `rib received
-  --rejected`, the readiness `Ping` (which is by definition a question
-  about the actor's liveness). It also does not make a generation cheap for
-  the full route tables; see the cost section.
+An atomic pointer swap makes one published object consistent for readers;
+it does not make separately sampled session replies or independently
+published peer-manager and RIB objects one atomic fleet snapshot. A
+collector could cache session replies, or sessions could publish their own
+observations. Both need an explicit acquisition, identity, freshness, and
+failure contract before they can replace today's live collection.
 
-### D — A separate read path or task with its own view
+C remains conditional. It does not automatically remove the observed import
+collection delay, and it does not make complete neighbor responses
+actor-independent while their session fields are still queried live.
 
-A dedicated read task owns a view that the actors feed with deltas or with
-generations; RPC handlers talk only to the view. This is the BIRD/FRR shape
-(control-plane thread that never runs on the protocol's loop).
+### D — A separate read task
 
-- **Cost.** C's cost plus a task, a feed protocol, and a second consistency
-  contract (the view lags the actor by the feed's latency). If the feed is
-  deltas, the view re-implements the actor's bookkeeping for every surface;
-  if the feed is generations, D is C with a task in front of it.
-- **What it buys.** A single place to reason about read consistency and
-  read budgets, and a natural home for surfaces that combine both actors
-  (`rbgp neighbor` joins peer-manager rows with RIB outbound rows today in
-  two 2 s stages).
-- **What it does not.** Remove the need for C underneath: a view task with
-  no published generation behind it is just a third actor with the same
-  queue. D is worth its cost only after C exists and the joined surfaces
-  measurably need it.
+A read task could own a view fed by snapshots or deltas. It adds ownership,
+feed ordering, lag, and recovery rules. It is not required to read an
+immutable shared summary, and moving a queue into another task does not
+itself remove contention. Defer it until a measured requirement cannot be
+met by a direct published view.
 
-### E — Process separation, OpenBGPD style
+### E — Process separation
 
-Split session engine, RIB engine, and control into processes with message
-passing between them.
-
-- **Cost.** A rewrite of every boundary in this daemon, a serialization
-  format for every message that crosses one, and — as OpenBGPD's own paper
-  records — the RIB-side inversion survives the split, because RIB reads
-  still cross into the RIB engine.
-- **What it buys.** Privilege separation and crash isolation, neither of
-  which is the problem this record is about.
-- **What it does not.** Fit a solo project or this daemon's design lineage
-  (ADR-0013, ADR-0017: single-task actors over channels). Listed so it is
-  declined on the record rather than left unconsidered. **Declined.**
+Separating session, RIB, and control work gives stronger fault and privilege
+isolation, with substantial boundary and serialization changes. It does
+not by itself make RIB-owned reads independent of RIB work. It is outside
+this proposal; no process split is recommended for the read-latency issue.
 
 ## Surface classification
 
-Every operator read surface that enters the peer-manager or RIB actor, from
-the gRPC services in `crates/api/src/` and the internal periodic readers.
-Query types are `PeerManagerOperatorQuery::*` and `PeerManagerCommand::*`
-(`crates/api/src/peer_types.rs`), `PeerManagerReadinessQuery::*`, and
-`RibUpdate::*` / `RibReadinessQuery::*` (`crates/rib/src/update.rs`).
+This is an inventory of actor-backed surfaces, not a count of RPCs or a
+promise that every actor-owned table should be copied. **Actor-owned** means
+the relevant owner has the state from which a summary could be produced.
+**Session-derived** requires a session observation under the current design.
+**Mixed** joins these sources. Readiness checks also require live progress.
 
-Classification:
+| Surface | Current path and budget | State and publication boundary |
+|---|---|---|
+| `neighbor` / `ListNeighbors`, `GetNeighborState` | operator `ListPeers` / `GetPeerState`, then RIB `QueryNeighborRibSnapshots`; separate 2 s stages | mixed: peer configuration, bounded session-state collection, and RIB outbound summaries; complete responses still need session observations |
+| `dynamic-neighbor list` / `ListDynamicNeighbors` | peer-manager `ListDynamicRanges`; 2 s | actor-owned configured ranges |
+| `policy stats --direction export` | RIB `QueryExportPolicyTermHits`; shared 2 s RPC deadline | actor-owned export-chain term counters; publication cadence and counter-reset semantics need definition |
+| `policy stats --direction import` | operator `QueryImportPolicyTermHits`, concurrent session collection under the remainder of the same deadline | session-derived import-chain term counters |
+| policy-stats peer validation and datasets | operator `HasPeerAddress`, `QueryPolicyDatasets`; same deadline | actor-owned peer membership and dataset bindings |
+| `policy explain --direction import` | peer manager to one session; 2 s outer, 500 ms inner | session-local decision cache |
+| `rib received PEER --rejected` | peer manager to one session; 2 s outer, 500 ms inner | session-local reject retention |
+| `doctor` validation posture | `GetValidationPolicyPosture`; 2 s | actor-owned resolved policies and dynamic ranges |
+| policy, neighbor-set, policy-chain, and peer-group catalog reads | peer-manager catalog queries; 2 s | actor-owned configuration |
+| `policy test` / `TestPolicy` | plain-lane `ListPeers`, then RIB route pages; 2 s peer-manager stage, no fixed RIB helper deadline | mixed: policy context uses effective remote ASN, which prefers session-negotiated ASN, plus configured group and RIB routes; config-only rows are not equivalent |
+| session and policy event history | peer-manager bounded-ring queries; 2 s | actor-owned retained event rings |
+| config diff, plan, effective config | config-service request helper; 30 min | actor-owned configuration; planning also resolves policies and datasets |
+| gNMI neighbor tree | plain-lane `ListPeers`; 2 s per poll | mixed peer-manager and session observations |
+| `health` / `GetHealth` | readiness `ListPeers`, then RIB `LocRibCount`; one 200 ms deadline | mixed session snapshot and live actor response; a cached inventory cannot replace the live-readiness requirement |
+| `/readyz`, core watchdog check | readiness `Ping`, then RIB `LocRibCount`; one 200 ms deadline | live actor progress and RIB transition-age check |
+| received, best, advertised unicast listings | RIB `QueryRoutesPage`; version-fenced pages, no fixed helper deadline | actor-owned tables; remain actor-served in the proposed summary scope |
+| best-path explain and lookup | RIB explain/lookup; no fixed helper deadline | actor-owned best routes and candidates; remain actor-served |
+| advertised/export explain | RIB `ExplainAdvertisedRoute`; no fixed helper deadline | classification depends on carrying all dry-run inputs, including installed export chain and advertised state; excluded from the initial summary scope |
+| EVPN, FlowSpec, BGP-LS, VPN, labeled, RTC, topology and ORR reads | family-specific RIB queries; no fixed helper deadline | actor-owned tables or cached topology state; assess each surface separately |
+| route and EVPN event history | RIB bounded-ring queries; no fixed helper deadline | actor-owned retained event rings |
+| `WatchEvents` | actor subscription messages; bounded admission | receiver acquisition, not a state snapshot; existing broadcast behavior remains |
+| periodic BMP statistics | session queries and RIB statistics | mixed; per-peer RIB query bounds send plus reply to 100 ms, while Loc-RIB statistics currently bound the reply only and await send without that timeout |
+| BMP/MRT dumps and warm checkpoint capture | RIB snapshot queries and explicit capture paths | actor-owned tables; warm capture also needs session generations, so the combined surface is mixed |
 
-- **Snapshot-able** — answerable from a published generation of state the
-  actor owns, with the generation's staleness as the only semantic change.
-- **Live** — must reach a session task, or asks about the actor itself.
-  State the actor does not own cannot appear in a generation the actor
-  publishes.
-- **Mixed** — one RPC that joins both.
+The source paths are `crates/api/src/*_service.rs`,
+`crates/api/src/health_probe.rs`, `src/peer_manager/snapshot.rs`,
+`crates/api/src/peer_types.rs`, and `crates/rib/src/update.rs`.
+`GetPolicyStats` has up to four sequential backend stages: validation,
+export, import, and datasets. Its shared absolute deadline must remain
+shared even if an individual stage moves to a published view.
 
-| Surface (CLI / RPC) | Actor | Query | Budget | State read | Class |
-|---|---|---|---|---|---|
-| `rbgp neighbor` / `NeighborService.ListNeighbors` | both | operator `ListPeers`; RIB `QueryNeighborRibSnapshots` | 2 s + 2 s | peer table and config; per-session `query_state` fan-out (100 ms each) for counters and negotiated state; RIB per-peer advertised counts, update-group state, outbound limits | mixed |
-| `rbgp neighbor ADDR` / `GetNeighborState` | both | operator `GetPeerState`; RIB `QueryNeighborRibSnapshots` | 2 s + 2 s | as above, one peer | mixed |
-| `rbgp dynamic-neighbor list` / `ListDynamicNeighbors` | peer manager | `ListDynamicRanges` | 2 s | configured ranges | snapshot-able |
-| `rbgp policy stats --direction export` / `GetPolicyStats` export stage | RIB | `QueryExportPolicyTermHits` | shared 2 s | export-chain term counters, **owned by the RIB actor** | snapshot-able |
-| `rbgp policy stats --direction import` / `GetPolicyStats` import stage | peer manager → sessions | operator `QueryImportPolicyTermHits` (spawned collector, `buffer_unordered` fan-out of `PeerCommand::QueryImportPolicyTermHits`) | remainder of the same 2 s | import-chain term counters, **owned by each session task** | live |
-| `GetPolicyStats` peer validation and datasets stages | peer manager | operator `HasPeerAddress`, `QueryPolicyDatasets` | remainder of the same 2 s | peer key map; dataset bindings | snapshot-able |
-| `rbgp policy explain --direction import` / `ExplainImportPolicy` | peer manager → one session | `ExplainImportPolicy` (awaited inline in the actor loop) | 2 s outer, `EXPLAIN_QUERY_TIMEOUT` 500 ms inner | session-local import-decision cache | live |
-| `rbgp rib received ADDR --rejected` / `ListRejectedRoutes` | peer manager → one session | `ListRejectedRoutes` (inline) | 2 s outer, 500 ms inner | session-local reject-retention store | live |
-| `rbgp doctor` posture / `GetValidationPolicyPosture` | peer manager | `GetValidationPolicyPosture` | 2 s | resolved policies and ranges | snapshot-able |
-| `rbgp policy list\|get`, `neighbor-set list\|get`, `policy chain show`, `peer-group list\|get` (seven RPCs) | peer manager | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ListPeerGroups`/`GetPeerGroup` | 2 s | the catalog in the current config | snapshot-able |
-| `rbgp policy test` / `TestPolicy` | both | `ListPeers` (plain lane, fans out `query_state`); RIB `QueryRoutesPage` | 2 s; RIB unbounded (client 30 s) | peer ASN and group context; Adj-RIB-In or Loc-RIB pages | snapshot-able (the fan-out serves only ASN/group context, which the config owns) |
-| `rbgp events sessions\|policy` / `ListSessionEvents`, `ListPolicyEvents` | peer manager | `QuerySessionEventHistory`, `QueryPolicyEventHistory` | 2 s | actor-owned bounded rings | snapshot-able |
-| `rbgp config diff\|plan\|effective` / `DiffRuntimeConfig`, `PlanConfigTransaction`, `GetEffectiveConfig` | peer manager | `DiffRuntimeConfig`, `PlanConfigTransaction`, `EffectiveRuntimeConfig` | `CONFIG_OPERATION_TIMEOUT` 30 min | current config snapshot (plan also resolves policy and datasets) | snapshot-able; already budgeted in the owner class, so not part of the inversion |
-| gNMI `Get`/`Subscribe` OpenConfig neighbor tree | peer manager | `ListPeers` (plain lane, fans out) | 2 s per poll | as `ListNeighbors`, peer-manager half | mixed |
-| `rbgp health` / `GetHealth`, `/readyz`, systemd watchdog | both | readiness `Ping` or `ListPeers`; `RibReadinessQuery::LocRibCount` | `CORE_READINESS_DEADLINE` 200 ms for both halves | actor liveness; Loc-RIB count | live (`Ping` asks whether the actor is alive; a generation cannot answer that) |
-| `rbgp rib received\|best\|advertised` / `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes` | RIB | `QueryRoutesPage` (1,000 rows per page, version-fenced) | unbounded (client 30 s) | Adj-RIB-In, Loc-RIB, Adj-RIB-Out | snapshot-able |
-| `rbgp rib best PFX --explain`, `rbgp rib lookup` / `ExplainBestPath`, `LookupBestPath` | RIB | `ExplainBestPath`, `LookupBestPath` | unbounded | Loc-RIB best and candidates | snapshot-able |
-| `rbgp rib advertised … --explain`, `rbgp policy explain --direction export` / `ExplainAdvertisedRoute` | RIB | `ExplainAdvertisedRoute` | unbounded | Loc-RIB best, the installed export chain, Adj-RIB-Out for one peer; a dry run of the live staging body | snapshot-able only if the generation carries the installed chain the dry run evaluates; otherwise live |
-| `rbgp evpn …`, `rbgp flowspec list`, `rbgp rib bgpls\|vpn\|labeled\|rtc`, `rbgp topology`, `rbgp orr` (eleven RPCs) | RIB | `QueryEvpnRoutes`, `QueryEvpnRoutesPage`, `ExplainEvpnRoute`, `QueryFlowSpecRoutes`, `QueryBgpLsRoutes`, `QueryVpnRoutes`, `QueryLabeledRoutes`, `QueryRtcRoutes`, `QueryOrrTopology`, `QueryOrrStatus` | unbounded | family tables, BGP-LS Adj-RIB-In union, cached ORR state | snapshot-able |
-| `rbgp events` route and EVPN history / `ListRouteEvents`, `ListEvpnEvents` | RIB | `QueryRouteEventHistory`, `QueryEvpnRouteEventHistory` | unbounded | actor-owned event rings | snapshot-able |
-| `rbgp watch` / `WatchEvents` | both | `Subscribe*Events` | 2 s admission only | returns broadcast receivers | neither (admission only) |
-| Periodic BMP stats tick (60 s) | both, from inside the peer manager | `query_state` fan-out; `QueryBmpPeerStats`, `QueryBmpLocRibStats` | 100 ms each | per-session counts; RIB per-peer and per-family counts | mixed |
-| BMP Loc-RIB dump, MRT dump, shutdown warm checkpoint | both | `QueryBmpLocRibDump`, `QueryMrtSnapshot`, `QueryWarmMrtSnapshot`, `QueryWarmCheckpointCapture` | chunked or explicit budgets | full tables; per-session generations | snapshot-able for the tables (they *are* snapshots), live for the session generations |
+Daemon-internal FIB, blackhole, and EVPN reconciliation is outside this
+operator-read decision. Its existing ownership and generation rules are
+not changed by classifying the public read surfaces.
 
-Counts over the rows above, taking `GetPolicyStats` as its three stages and
-each joined surface once: **12 snapshot-able, 4 live, 5 mixed**, one
-admission-only row, and one row left unclassified. The
-`ExplainAdvertisedRoute` row is the one that cannot be classified from the
-types alone: the export dry run is pure given its
-inputs ([ADR-0103](0103-rpol-execution-model.md)), so it is snapshot-able
-if the generation carries the installed chain, and live if it does not.
-`PlanConfigTransaction` is listed as snapshot-able but does real resolution
-work; it is already budgeted in the owner class, so it is not part of the
-inversion either way. The daemon-internal consumers of RIB queries (FIB
-reconciler, blackhole limiter, EVPN dataplane) are deliberately out of
-scope: they are not operator reads and carry their own generation tokens.
+## Conditions before adopting published summaries
 
-**`policy stats`, end to end.** `GetPolicyStats` in
-`crates/api/src/policy_service.rs` runs up to four sequential stages under
-one absolute 2 s deadline: peer validation (operator `HasPeerAddress`),
-export (`rib_manager_read` of `RibUpdate::QueryExportPolicyTermHits`),
-import (operator `QueryImportPolicyTermHits`, whose `deadline` field is the
-same instant, so the session fan-out inherits whatever remains rather than a
-fresh 2 s), and datasets (operator `QueryPolicyDatasets`). The **export half
-is RIB-owned and snapshot-able**: the counters are incremented in the RIB
-actor's own export evaluation. The **import half is live**: each session
-task evaluates its own import chain and owns its own `ImportPolicyTermHits`;
-the peer manager only collects. A generation published by either actor
-cannot contain the import counters. If the import half is ever to be
-snapshot-able, sessions must publish their own rows — a different design
-from "the actor publishes."
+A follow-up proposal must name the exact fields and consumers it moves and
+settle these contracts before implementation:
 
-### The semantics question
+1. **Observation semantics.** Distinguish committed configuration from
+   observed session state and counters. Define publication triggers, maximum
+   age, stale/missing data, and what happens if the publisher stops. A row
+   published only at configuration commit can be arbitrarily old during a
+   long period without configuration changes. Existing `stale` behavior
+   must not silently turn into cached success.
+2. **Generation and joins.** Identify the actual switch point. Independent
+   peer-manager and RIB loads can straddle a commit; either publish a joined
+   object, match generation identifiers with bounded behavior on mismatch,
+   or explicitly preserve a mixed observation contract. A reader pins one
+   object for the fields whose consistency it relies on.
+3. **Failure and lifecycle.** Define startup, peer replacement/removal,
+   successful rollback, partial rollback failure, and fail-closed behavior.
+   A failed restore must not publish a complete prior generation as if all
+   sessions installed it. Session observations need incarnation identity so
+   late replies cannot revive an old connection's state.
+4. **Bounded work and retention.** Define publication cadence, reader
+   lifetime, retained-generation cost, and where final destruction runs.
+   Readers can retain several different old generations across repeated
+   publications; current-plus-previous is not a general bound. Publication
+   or final reference release must not introduce a new long actor turn.
+5. **Unchanged live gates.** Core readiness still checks actor progress and
+   stalled transitions. Read deadlines start at their existing boundaries;
+   no admission-time reset, retry-based success, or reload exemption is
+   introduced by caching. A successful summary read cannot establish that
+   its owner or session is currently responsive.
 
-Today a read admitted during prestage or during the cohort transition
-observes a **mixed per-session generation**: each session's row reports the
-chain that session runs at that instant, so a fleet listing can show both
-generations in one response. This is documented operator-visible behavior
-(`docs/reference/operations.md`, configuration reload section) and it is
-true, row by row.
+Today's live collection can observe different session policy generations
+within a response. C could instead report committed configuration alongside
+explicitly aged session observations. Neither this record nor an atomic
+swap chooses that product contract automatically.
 
-Each option implies a direction:
+## Cost and verification
 
-- **A and B** keep mixed. Every row is individually current; the fleet is
-  not consistent until commit.
-- **C** defines the mixture away toward the **last committed generation**:
-  a read during the transition reports the pre-commit state for every
-  session, including sessions already running the new chain, until the
-  actor publishes the post-commit generation. The alternative — publishing
-  at transition start — would report the new generation before it is true
-  for anyone, which is worse. C therefore means "consistent and up to one
-  transition stale"; the live surfaces (import counters) would still show
-  the mixture, so `policy stats --direction both` under C reports a
-  consistent export half and a mixed import half. That is a documented
-  difference, not a hidden one.
-- **D** inherits C's direction.
-- **E** reports whatever the RIB engine has, mixed, from another process.
+At the retained [1,000-peer route-server shape](../perf/route-server-1000-2026-07.md),
+a compact peer-summary generation is plausibly on the order of a few MiB.
+That is a sizing hypothesis, not a measurement of a selected representation.
+Heap strings, family/limit vectors, session blocks, indexes, and retained
+old generations all contribute. Copying 400,000 Loc-RIB routes is a different
+cost class; materializing every peer's full advertised table loses the
+benefit of shared update-group state. Neither table copy is required for
+initial summary publication, and both remain outside the recommendation.
 
-Which direction is correct is a product decision to record explicitly
-rather than inherit from an implementation.
+Use the [memory attribution protocol](../perf/memory-attribution-2026-08.md)
+for an A/B at the actual target shape: repeated runs, cgroup peak memory,
+swap disabled, and matched workload and CPU allocation. Establish variance
+at that shape instead of transferring an older campaign's noise floor.
+Measure retained generations, allocation/reclamation work, and publication
+latency as well as peak bytes. Compare reload and read latency distributions;
+an unchanged median alone cannot clear a long-tail regression.
 
-## The cost of C
+Keep the existing readiness and management acceptance gates. Drive reads
+across prestaging, session apply, pre-commit polls, commit, post-commit
+re-advertisement, successful rollback, and failed rollback. Anchor probes to
+phase markers or systematically vary their offsets; a fixed polling cadence
+can repeatedly miss the unsafe interval. Include slow or replaced sessions
+and readers that retain observations across several publications.
 
-Not measured; stated from the types, at
-the flagship shape of 1,000 route-server clients × 400 routes each (400,000
-unique prefixes), the shape of the retained
-[1,000-peer route-server receipt](../perf/route-server-1000-2026-07.md) and
-of the flagship soak.
+## Prior art and its limits
 
-**Peer generation.** `PeerInfo` (`crates/api/src/peer_types.rs`) is about
-seventy-five fields: fixed-width counters and flags, six `String`s
-(description, action, last error, authentication, and two optionals), five
-`Vec`s (families, required families, inbound limits, paths limits, Add-Path
-limits), an `Arc<[u8]>`, an optional negotiated-session block, and an
-optional TCP-AO snapshot. Order of one kilobyte per peer including heap;
-**about 1 MiB per generation** at 1,000 peers. The size is not the issue.
-The cadence is: the counters in those rows change on every UPDATE, so a
-generation published only at commit points reports counters as of the last
-commit. A generation published periodically (the BMP stats tick already
-walks the fleet every 60 s) reports counters up to one period stale. Either
-is a defined staleness; today's is "whatever the fan-out returned within 100
-ms, or `stale = true`."
+[OpenBGPD's design paper](https://www.openbsd.org/papers/asiabsdcon2009-bgpd.pdf)
+describes session/RDE process separation and a separate control pipe. It also
+reports that long RDE table dumps blocked control commands. It supports
+isolation of some work, not a universal read-availability guarantee.
 
-**Loc-RIB generation.** `Route` (`crates/rib/src/route.rs`) carries the
-prefix, next hop, optional link-local next hop, boxed scope, source peer,
-an `Arc<Vec<PathAttribute>>`, a receive timestamp, origin, router ID, and
-flags — roughly 100–130 bytes inline, attributes shared by `Arc` and not
-deep-copied. A flat copy of 400,000 best routes is **about 50 MiB per
-generation** before any index; the previous generation stays resident until
-its last reader drops it, so the steady-state cost is up to two
-generations. That is inside the ±30–50 MiB run-to-run noise floor the
-[memory attribution campaign](../perf/memory-attribution-2026-08.md)
-established at 100 peers × 1,000 routes, which means a single run cannot
-see it and a median-of-five A/B can.
+The [BIRD 3.3.2 guide](https://bird.nic.cz/doc/bird-3.3.2.html) assigns CLI and
+reconfiguration to the main thread and BGP plus table maintenance to worker
+groups. Thread placement alone does not establish the synchronization or
+latency contract of every CLI query.
 
-**Adj-RIB-Out.** 1,000 peers × 400,000 advertised prefixes is 4 × 10⁸
-entries. It exists today only because update groups
-([ADR-0098](0098-update-groups.md), [ADR-0109](0109-update-group-shared-encode.md))
-share one staged table per group. A per-generation copy of Adj-RIB-Out is
-not a cost to measure; it is a design C cannot have. Advertised-route
-listings under C would have to be answered from the published Loc-RIB
-generation plus the published group membership and export chain — i.e. the
-`ExplainAdvertisedRoute` dry run per row — or stay actor-served with the
-existing version-fenced paging.
+[FRR's process-architecture guide](https://docs.frrouting.org/projects/dev-guide/en/latest/process-architecture.html)
+describes per-thread event loops and a dedicated keepalive thread. Its
+example still runs control-socket and BGP processing callbacks on the main
+thread. The [FRR RCU guide](https://docs.frrouting.org/projects/dev-guide/en/latest/rcu.html)
+is a useful precedent for immutable publication and deferred reclamation,
+not evidence that all BGP operator reads already use that design.
 
-**What follows.** C is cheap for the summary surfaces (peer rows, policy
-term counters, counts, catalog, event rings, ORR state) and expensive or
-impossible for the full tables. A C that copies the tables per generation
-is the wrong C; a C that publishes summaries at commit and leaves the paged
-listings on the actor is the right one, and it is the one every instance
-above would have been served by — all four failures were `rbgp neighbor`
-and `rbgp policy stats`, not route listings.
-
-**The measurement that would settle it.** An A/B at the 1,000 × 400 shape
-under the attribution campaign's protocol — cgroup `memory.peak` median of
-at least five runs per arm, with `memory.swap.max=0` — comparing the
-summary-only generation against current source, together with reload
-completion p50 from the flagship soak's reload cadence and the soak's
-management-plane read-latency gate as the effect measure. The receipt
-passes if peak memory moves less than the established noise floor, reload
-p50 is unchanged, and the read-latency gate records zero deadline failures
-across every reload phase, including rollback.
-
-## What would settle this
-
-1. **The wait-site test matrix** (in preparation): one test per wait site
-   that parks the owner and sends a read. It settles B's invariant
-   immediately — every site either serves the read or names a per-session
-   mutation in flight. Any site that can do neither is a defect regardless
-   of which option is chosen.
-2. **The rollback fix** (in preparation, instance 4): if it is expressible
-   as "flip the flag" the invariant in B is the right abstraction; if it
-   needs a new helper or a new lane, per-site admission has run out of
-   vocabulary and C is due sooner.
-3. **The post-commit tail** (in preparation, instance 3): if it can be
-   removed inside the actor, B holds a while longer; if it can only be
-   hidden by not entering the actor, that is C's first surface.
-4. **The A/B above** for C's memory and reload cost at the flagship shape.
-5. **The product decision** on the semantics question: mixed rows, or
-   consistent-and-stale.
+[`arc-swap`](https://docs.rs/arc-swap/1.9.2/arc_swap/struct.ArcSwapAny.html)
+is one Rust mechanism for atomic publication of reference-counted objects;
+no dependency is selected here. Its consistency guidance recommends loading
+once for related fields. A seqlock is not equivalent for this purpose:
+[sequence-counter readers can retry while a writer is preempted](https://docs.kernel.org/locking/seqlock.html),
+so it does not provide the same independence from a long-running writer.
 
 ## Decision (proposed)
 
-**B now; C for the named summary surfaces once the matrix and the two
-in-preparation fixes have landed.**
+Use B as the baseline: typed admission with reasons, the existing wait-site
+matrix, and measured follow-through on remaining fences. Preserve the atomic
+RIB commit, live readiness checks, ordinary mutation ordering, and current
+read deadlines.
 
-B first, for two reasons. It is the smallest change that converts the
-current practice into a rule with a ratchet, and the ratchet is the part
-that has been missing: instances 2 and 4 are both sites that had no
-per-session mutation in flight and still fenced reads, which a stated
-invariant would have caught on the day the site was written, and a checker
-mirroring `scripts/check-clippy-reasons.py` keeps it caught. And B does not
-prejudge C: every reason recorded on a readiness-only site is also the
-inventory of what C would have to publish to make that site irrelevant.
+Develop C only for explicitly selected summary fields after the contracts
+and measurements above are satisfied. Complete neighbor responses and import
+policy statistics are not declared solved by publishing actor-owned fields.
+Paged tables and explain surfaces remain actor-served. D is deferred and E
+is outside the proposed scope.
 
-C second and scoped, for the surfaces the classification marks
-snapshot-able and the cost section marks cheap: the peer rows
-`ListNeighbors`/`GetNeighborState` read from the peer manager, the export
-half of `GetPolicyStats`, the RIB per-peer snapshot behind `rbgp neighbor`,
-and the readiness `ListPeers`. Those are the four surfaces the four
-instances were about. C is **not** adopted for the paged route listings,
-the explain surfaces, or anything that reaches a session task, and it is
-not adopted before the semantics question is decided, because C is the
-option that changes what an operator sees during a transition. D is
-deferred until a joined surface measurably needs it. E is declined.
-
-If A is chosen instead, the classification and constants tables remain the
-reference for the next instance. If C is chosen outright, the cost section
-says which C.
-
-## Consequences
-
-If accepted as proposed:
-
-- **Positive.** The readiness-only wait becomes the exception that
-  explains itself; a reviewer can see, at the call, why a read is fenced.
-  The next fenced wait fails a checker and a matrix test instead of a
-  soak. For the summary surfaces, a later C removes the read's dependency
-  on the owner altogether, and the read budgets can be what they look like
-  — bounds on the read — rather than a race against a 2-minute owner.
-- **Negative.** Seventeen reasons to write and keep true; one more checker
-  with companion tests; and for C, a defined staleness on the summary
-  surfaces where today's behavior is "current or `stale = true`". Operators
-  reading `rbgp neighbor` during a reload would see the last commit rather
-  than the live mixture. The documentation that currently describes the
-  mixture would change with it.
-- **Neutral.** The live surfaces (`policy stats --direction import`,
-  `policy explain --direction import`, `rib received --rejected`,
-  readiness `Ping`) stay on the actor under every option; their budgets
-  remain read-class budgets against an owner-class actor, mitigated by
-  admission and by the per-session bounds that already exist. A future
-  "sessions publish their own rows" design would move the import counters
-  into C's scope; it is not part of this record.
-- **Unchanged.** `RIB_BATCH_REPLY_TIMEOUT` and the owner budgets are not
-  in question; they bound real work. The atomic commit remains the single
-  switch point, and the ordinary command channel remains unpolled during
-  every transaction wait, so mutations are never admitted mid-transaction
-  by any option here.
+This recommendation makes the read dependency reviewable without promising
+that admission alone fixes every wait. It also keeps a later publication
+change small enough to evaluate against the actual remaining latency.
