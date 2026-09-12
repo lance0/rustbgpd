@@ -1647,7 +1647,7 @@ async fn replay_outbound_uses_exact_managed_handle_and_classifies_refusals() {
     let address = "fe80::2".parse().unwrap();
     let peer = scoped_key(address, "eth1");
     assert!(matches!(
-        mgr.replay_outbound(peer.clone()).await,
+        replay_outbound_result(&mut mgr, peer.clone()).await,
         Err(OutboundRefreshError::PeerNotFound(ref target)) if target == &peer
     ));
     let (commands, mut command_rx) = mpsc::channel(4);
@@ -1674,18 +1674,20 @@ async fn replay_outbound_uses_exact_managed_handle_and_classifies_refusals() {
         PeerHandle::from_parts(commands, task),
         false,
     );
-    mgr.replay_outbound(peer.clone()).await.unwrap();
+    replay_outbound_result(&mut mgr, peer.clone())
+        .await
+        .unwrap();
     assert!(matches!(
-        mgr.replay_outbound(peer.clone()).await,
+        replay_outbound_result(&mut mgr, peer.clone()).await,
         Err(OutboundRefreshError::PeerUnavailable(ref target)) if target == &peer
     ));
     assert!(matches!(
-        mgr.replay_outbound(peer.clone()).await,
+        replay_outbound_result(&mut mgr, peer.clone()).await,
         Err(OutboundRefreshError::ReplayUnavailable(message))
             if message == "outbound replay already running"
     ));
     assert!(matches!(
-        mgr.replay_outbound(peer).await,
+        replay_outbound_result(&mut mgr, peer).await,
         Err(OutboundRefreshError::Internal(message)) if message.contains("writer unavailable")
     ));
     assert!(
@@ -1710,7 +1712,9 @@ async fn replay_outbound_scheduling_reply_is_bounded() {
     );
     let address = "192.0.2.1".parse().unwrap();
     insert_test_managed_peer(&mut mgr, address, stalled_policy_query_handle(), false);
-    let error = mgr.replay_outbound(key(address)).await.unwrap_err();
+    let error = replay_outbound_result(&mut mgr, key(address))
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("timed out"), "{error}");
 }
 
@@ -1805,8 +1809,7 @@ async fn replay_outbound_rejects_duplicate_addresses_before_session_dispatch() {
             false,
         );
     }
-    let error = mgr
-        .replay_outbound(scoped_key(address, "eth1"))
+    let error = replay_outbound_result(&mut mgr, scoped_key(address, "eth1"))
         .await
         .unwrap_err();
     assert!(
