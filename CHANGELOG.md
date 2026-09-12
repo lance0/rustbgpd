@@ -162,6 +162,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** Forward API policy transactions and policy-only
+  publication-failure compensation now admit session
+  snapshots, import-policy statistics, and dataset status at the same
+  peer-manager waits as SIGHUP applies. `TestPolicy` uses that operator lane
+  for its live peer context while retaining the route-page version fence.
+  Reads report live observations without a shared generation across their
+  sources; session ACK/bookkeeping fences, other transaction stages, and RIB
+  work can still exhaust caller deadlines.
+
 - **Operator-visible:** The peer manager now serves session snapshots,
   import-policy statistics, and dataset status while a rejected reload awaits
   enqueue or completion of its batched RIB restore. These reads report live

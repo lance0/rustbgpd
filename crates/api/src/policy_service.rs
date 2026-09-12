@@ -1346,8 +1346,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // Peer context (ASN / peer-group) so guards on peer.* fields
         // see real values.
         let peer_context: std::collections::HashMap<IpAddr, (u32, Option<String>)> =
-            peer_manager_read(&self.peer_mgr_tx, |reply| PeerManagerCommand::ListPeers {
-                reply,
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::ListPeers { reply }
             })
             .await?
             .into_iter()
@@ -3345,6 +3345,69 @@ policy customer-in(peer_lp: u32) {
 
     fn test_policy_service(routes: Vec<rustbgpd_rib::Route>) -> PolicyService {
         test_policy_service_with(routes, None).0
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_policy_uses_operator_peer_context_while_plain_commands_are_parked() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let service = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_operator_queries(operator_tx)
+            .with_rib_query(rib_tx);
+        let rib = tokio::spawn(async move {
+            let rustbgpd_rib::RibUpdate::QueryRoutesPage { reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("the dry run starts its versioned route snapshot first");
+            };
+            reply
+                .send(Ok(rustbgpd_rib::RoutePage {
+                    routes: vec![test_route("10.10.1.0", 24)],
+                    total: 1,
+                    ..Default::default()
+                }))
+                .unwrap();
+        });
+        let operator = tokio::spawn(async move {
+            let PeerManagerOperatorQuery::ListPeers { reply } =
+                operator_rx.recv().await.unwrap().query
+            else {
+                panic!("peer context must use the operator lane");
+            };
+            let mut info = crate::test_support::peer_info("10.0.0.9".parse().unwrap());
+            info.remote_asn = 65042;
+            info.peer_group = Some("customers".to_string());
+            reply.send(vec![info]).unwrap();
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            PolicyServiceRpc::test_policy(
+                &service,
+                Request::new(proto::TestPolicyRequest {
+                    rpol_source: r#"policy candidate {
+                        term member {
+                            if peer.asn == 65042 && peer.group == "customers" { accept }
+                        }
+                        term other { reject }
+                    }"#
+                    .to_string(),
+                    policy: "candidate".to_string(),
+                    ..test_policy_request()
+                }),
+            ),
+        )
+        .await
+        .expect("the peer-context read does not wait for ordinary commands")
+        .unwrap()
+        .into_inner();
+        assert_eq!((response.routes_evaluated, response.accepted), (1, 1));
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        operator.await.unwrap();
+        rib.await.unwrap();
     }
 
     #[tokio::test]

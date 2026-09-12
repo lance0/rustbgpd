@@ -370,7 +370,7 @@ async fn read_admitted_during_the_cohort_transition_is_labelled_forward_transiti
     rib.await.unwrap();
 }
 
-/// A read that arrives while a rejected reload's rollback fences the lane is
+/// A read that arrives while an explicitly fenced owner's rollback holds the lane is
 /// drained only after the transaction returns to the run loop. Its wait is
 /// still measured from the send, attributed to `rollback`, and lands above
 /// the 2 s caller-budget edge, so the over-budget share is a bucket
@@ -404,16 +404,16 @@ async fn read_fenced_by_rollback_is_timed_when_drained_after_release() {
             false,
         );
     }
-    let actor = tokio::spawn(manager.run());
-
     let (reply, apply_response) = oneshot::channel();
-    command_tx
-        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
-            targets: export_targets(&peers, &deny_policy_chain()),
-            reply,
-        })
-        .await
-        .unwrap();
+    let targets = export_targets(&peers, &deny_policy_chain());
+    let actor = tokio::spawn(async move {
+        // The production API command serves live reads. Keep this telemetry
+        // case on an explicitly fenced owner to exercise the delayed drain.
+        let result = manager.apply_resolved_policy_snapshot(targets).await;
+        manager.finish_operator_seam();
+        let _ = reply.send(result);
+        Box::pin(manager.run()).await;
+    });
 
     // The rollback batch is now held in the RIB; the operator lane is fenced.
     held_rx.await.unwrap();

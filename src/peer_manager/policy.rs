@@ -862,17 +862,16 @@ impl PeerManager {
             targets,
             require_clean_convergence,
             OperatorReadAdmission::Fenced {
-                reason: "standalone policy transactions and a reload's compensating replay keep their fence",
+                reason: "the default snapshot wrapper has no owner admission decision",
             },
         )
         .await
     }
 
-    /// The forward reload owner passes `Served`, admitting reads from its
-    /// first destination prestage on; standalone policy operations and a
-    /// reload's compensating replay use the fenced wrapper above. The
-    /// admission travels on the transaction context to every wait that
-    /// honours it, the rollback included.
+    /// Forward SIGHUP and API applies, and API publication-failure compensation,
+    /// pass explicit admission at the destination prestage and aggregate waits.
+    /// The admission travels on the transaction context to every wait that
+    /// honours it, the rollback included. The default wrapper stays fenced.
     pub(super) async fn apply_resolved_policy_snapshot_with_prestage_reads(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
@@ -2031,7 +2030,7 @@ impl PeerManager {
     }
 
     /// Await the cohort RIB reply while admitting the dedicated read-only
-    /// readiness lane and, for the forward reload owner, the bounded
+    /// readiness lane and, when the owner selects `Served`, the bounded
     /// operator-read lane: the cohort sessions already run their new chains,
     /// so an operator read here sees the same mixed generation prestage
     /// admits, and the RIB answers its side from the pre-commit state. The
@@ -2181,7 +2180,13 @@ impl PeerManager {
     ) -> Result<Vec<ResolvedPeerPolicy>, String> {
         let mut dynamic_targets = self.resolve_dynamic_policy_targets(&dynamic_ranges)?;
         static_targets.append(&mut dynamic_targets);
-        self.apply_resolved_policy_snapshot(static_targets).await
+        self.apply_resolved_policy_snapshot_with_prestage_reads(
+            static_targets,
+            false,
+            OperatorReadAdmission::Served,
+        )
+        .await
+        .map_err(|failure| failure.message)
     }
 
     fn resolve_dynamic_policy_targets(
@@ -4059,7 +4064,11 @@ impl PeerManager {
             "resolved live peer policy chains"
         );
         let applied = self
-            .apply_resolved_policy_snapshot_classified(targets, require_clean_convergence)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                require_clean_convergence,
+                OperatorReadAdmission::Served,
+            )
             .await?;
 
         // ADR-0110 freshness: adopting `next_config` is the accept moment

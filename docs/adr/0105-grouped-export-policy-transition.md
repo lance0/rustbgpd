@@ -51,6 +51,16 @@ export-policy statistics within their deadlines. The ordinary command receiver
 stays unpolled and the two-minute batch-reply bound is unchanged. Standalone
 policy transactions and a reload's later compensating replay keep the full fence.
 
+**Amended:** 2026-09-12 — forward API live-impact transactions and catalog
+refreshes use the same peer-manager operator-read admission as forward SIGHUP
+applies. API publication-failure compensation also admits these reads: policy
+chains restore before the staged configuration, and reads report each source's
+current values. This supersedes the API fence described in the earlier
+amendments. It does not choose admission for SIGHUP's separate generation-unwind
+path. Admitted reads remain live observations without a common generation across
+sessions or the RIB; caller budgets, mutation ordering, and individual session
+ACK/bookkeeping fences are unchanged.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
