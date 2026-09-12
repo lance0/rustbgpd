@@ -617,16 +617,24 @@ exactly as during prestaging), and the RIB answers general queries between its
 pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
-across it. When a reload's export-policy transition is rejected and rolled
-back, the peer manager serves session snapshots, import-statistics collections,
+across it. Forward API policy transactions and their policy-only
+publication-failure compensation use these same admission points.
+`TestPolicy` also uses the operator lane for its live peer context; its route
+pages retain their version fence, without a shared generation pin across
+peer context and routes.
+
+When a reload's export-policy transition is rejected and rolled back, the peer
+manager serves session snapshots, import-statistics collections,
 and dataset status while it awaits enqueue or completion of the batched RIB
 restore. These are live reads: a failed session restore can leave different
 sessions on different policies, and peer-manager and RIB reads do not share
 a generation pin. The RIB's synchronous restore still fences general queries,
 so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
-there. Standalone policy transactions and a reload's later compensating replay
-keep the full fence. Readiness queries remain available at their existing
-transaction seams. A congested backend or a later transaction stage can still
+there. During API publication-failure compensation, chains restore before the
+staged configuration: admitted reads report their sources' current values
+without claiming an atomic prior-generation snapshot. Session ACK/bookkeeping
+fences remain in place. Readiness queries remain available at their existing
+transaction seams. A congested backend or another transaction stage can still
 exhaust an operator read's deadline.
 
 For a dataset content generation, every file must load successfully before

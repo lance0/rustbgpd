@@ -84,10 +84,12 @@ enum Drive {
     Rfc8212Transition {
         established: bool,
     },
-    /// The same cohort through `apply_resolved_policy_snapshot`, the entry
-    /// `PeerManagerCommand::ApplyResolvedPolicySnapshot` and the config
-    /// transaction rollback use: not the reload owner, admission off.
-    StandalonePolicySnapshot,
+    /// Forward live-impact transaction and catalog-mutation entries.
+    ApiPolicyImpact,
+    CatalogPolicyRefresh,
+    /// API publication-failure compensation replays captured prior policies
+    /// while admitted reads report the sources' current values.
+    ApiPublicationCompensation,
     /// A reload generation whose session replace is rejected after its
     /// policy cohort committed, so the unwind replays the prior chains
     /// through `apply_resolved_policy_snapshot` with admission off.
@@ -405,34 +407,48 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
-    // Non-owner entry through an admitting site. Expected to be decided
-    // deliberately: the fence is the current default for every transaction
-    // that is not the reload owner, and whether these entries should admit
-    // reads is decided separately.
+    // Forward API entries share the SIGHUP owner's read admission.
     WaitSite {
         site: "policy.rs::await_export_policy_cohort_rib_reply",
         awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
-        drive: Drive::StandalonePolicySnapshot,
+        drive: Drive::ApiPolicyImpact,
+        rib: RibHold::Reply(is_cohort_replace),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("apply_policy_impact_snapshot forward API transaction"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::await_export_policy_cohort_rib_reply",
+        awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
+        drive: Drive::CatalogPolicyRefresh,
+        rib: RibHold::Reply(is_cohort_replace),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("apply_policy_change_owned forward catalog refresh"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    // This entry restores captured priors after API publication failed.
+    // It is not the forward API transaction entry.
+    WaitSite {
+        site: "policy.rs::await_export_policy_cohort_rib_reply",
+        awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
+        drive: Drive::ApiPublicationCompensation,
         rib: RibHold::Reply(is_cohort_replace),
         session: answer_all,
         pre_read: false,
         additional_entry: Some(
-            "PeerManagerCommand::ApplyResolvedPolicySnapshot (apply_resolved_policy_snapshot, \
-             admission off)",
+            "PeerManagerCommand::ApplyResolvedPolicySnapshot publication-failure compensation",
         ),
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "current default for a transaction that is not the reload owner: \
-                     apply_resolved_policy_snapshot enters the cohort with admission off, so \
-                     the same wait the SIGHUP owner serves stays fenced here, bounded by the \
-                     RIB's transition ownership; whether standalone policy transactions should \
-                     admit reads is decided separately",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
-    // Non-owner entry through an admitting site, from the reload's own
-    // compensating replay. Expected to be decided deliberately alongside
-    // the standalone row above.
+    // SIGHUP compensation chooses admission separately from the API command.
     WaitSite {
         site: "policy.rs::try_apply_export_only_policy_cohort",
         awaits: "RibUpdate::PrepareExportPolicyDestination reply (destination prestage)",
@@ -978,6 +994,10 @@ fn target(address: IpAddr, import: bool, export: bool) -> ResolvedPeerPolicy {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the matrix keeps every real entry point and its outcome mapping in one driver"
+)]
 async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> Result<(), String> {
     let (targets, clean) = match drive {
         Drive::ForwardCohort { import_delta, .. } => (
@@ -989,14 +1009,15 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         ),
         Drive::ForwardWalk { clean } => (vec![target(peers[0], false, true)], clean),
         Drive::Rfc8212Transition { .. } => (vec![target(peers[0], true, false)], false),
-        Drive::StandalonePolicySnapshot => (
+        Drive::ApiPolicyImpact | Drive::ApiPublicationCompensation => (
             peers
                 .iter()
                 .map(|&peer| target(peer, false, true))
                 .collect(),
             false,
         ),
-        Drive::CompensatingReplay
+        Drive::CatalogPolicyRefresh
+        | Drive::CompensatingReplay
         | Drive::ValidationRefresh
         | Drive::DatasetRefresh
         | Drive::OutboundRefresh
@@ -1017,10 +1038,50 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .await
             .map(drop)
             .map_err(|failure| failure.message),
-        Drive::StandalonePolicySnapshot => manager
-            .apply_resolved_policy_snapshot(targets)
+        Drive::ApiPolicyImpact => manager
+            .apply_policy_impact_snapshot(targets, Vec::new())
             .await
             .map(drop),
+        Drive::CatalogPolicyRefresh => {
+            use rustbgpd_api::peer_types::{
+                ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+            };
+
+            manager.current_config.neighbors = peers
+                .into_iter()
+                .map(|peer| {
+                    let mut neighbor = config_neighbor(peer, 65002);
+                    neighbor.export_policy_chain = vec!["edge-export".to_string()];
+                    neighbor
+                })
+                .collect();
+            match manager
+                .apply_policy_change_owned(
+                    ConfigEvent::SetPolicy {
+                        name: "edge-export".to_string(),
+                        definition: NamedPolicyDefinition {
+                            default_action: "deny".to_string(),
+                            statements: Vec::new(),
+                        },
+                        ack: None,
+                    },
+                    None,
+                )
+                .await
+            {
+                OwnedCatalogMutationOutcome::Success => Ok(()),
+                outcome => Err(format!("catalog mutation failed: {outcome:?}")),
+            }
+        }
+        Drive::ApiPublicationCompensation => manager
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
+            .await
+            .map(drop)
+            .map_err(|failure| failure.message),
         Drive::CompensatingReplay => {
             let candidate = replay_fixture(&manager.current_config);
             let actions = plan_reload_peer_actions(&manager.current_config, &candidate)
@@ -1206,7 +1267,9 @@ async fn run(row: &WaitSite) {
         }
         Drive::ForwardCohort { .. }
         | Drive::ForwardWalk { .. }
-        | Drive::StandalonePolicySnapshot
+        | Drive::ApiPolicyImpact
+        | Drive::CatalogPolicyRefresh
+        | Drive::ApiPublicationCompensation
         | Drive::OutboundRefresh
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
@@ -1327,7 +1390,11 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
             assert!(result.is_ok(), "{site}: {result:?}");
             assert_eq!(
                 first_peer.export_policy,
-                Some(deny_policy_chain()),
+                Some(if matches!(row.drive, Drive::CatalogPolicyRefresh) {
+                    named_deny_policy_chain(&[Some("edge-export")])
+                } else {
+                    deny_policy_chain()
+                }),
                 "{site}"
             );
         }

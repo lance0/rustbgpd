@@ -166,6 +166,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** Forward API policy transactions and policy-only
+  publication-failure compensation now admit session
+  snapshots, import-policy statistics, and dataset status at the same
+  peer-manager waits as SIGHUP applies. `TestPolicy` uses that operator lane
+  for its live peer context while retaining the route-page version fence.
+  Reads report live observations without a shared generation across their
+  sources; session ACK/bookkeeping fences, other transaction stages, and RIB
+  work can still exhaust caller deadlines.
+
 - Export-policy counters and the RIB portion of neighbor status can be read
   during synchronous export replacement, rollback, and dataset reevaluation.
   A separate bounded summary lane serves values captured before the operation.
