@@ -2,6 +2,7 @@
 """Subprocess contracts for flagship runner stop ownership."""
 
 import gzip
+import json
 import os
 import signal
 import socket
@@ -62,6 +63,132 @@ def terminate_group(group, process):
 
 
 class FlagshipLifecycleContracts(unittest.TestCase):
+    def test_engine_exit_before_finish_barrier_aborts_and_reaps_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            script, run_dir, _port, environment = self.write_actual_main_stub(
+                directory, "run-soak-rs-flagship.sh",
+            )
+            engine = directory / "repo/bench/scale/target/release/reloadstall"
+            engine.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$$" >>"$STUB_RUN_DIR/children"\n'
+                'printf "converged (stub)\\n"\nsleep 2\nexit 1\n'
+            )
+            process = subprocess.Popen(
+                ["bash", str(script), str(HERE / "run-soak-rs-flagship.sh"),
+                 str(directory / "repo"), str(run_dir)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=environment, start_new_session=True,
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=12)
+                self.assertEqual(process.returncode, 1, stdout + stderr)
+                self.assertIn("engine exited before final evidence acknowledgement", stdout)
+                self.assertFalse((run_dir / "verdict.json").exists())
+                self.assertFalse((run_dir / "engine-finish/ack").exists())
+                self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
+                self.assertEqual((run_dir / "cleanup.complete").read_text().splitlines()[0], "status=failed")
+                children = [int(pid) for pid in (run_dir / "children").read_text().split()]
+                self.assertTrue(all(not process_alive(pid) for pid in children))
+            finally:
+                terminate_group(process.pid, process)
+
+    def test_natural_finish_holds_sessions_until_last_management_probe_drains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            script, run_dir, _port, environment = self.write_actual_main_stub(
+                directory, "run-soak-rs-flagship.sh",
+            )
+            engine = directory / "repo/bench/scale/target/release/reloadstall"
+            engine.write_text(textwrap.dedent("""\
+                #!/usr/bin/env python3
+                import os
+                from pathlib import Path
+                import time
+                root = Path(os.environ["STUB_RUN_DIR"])
+                with (root / "children").open("a") as output:
+                    output.write(f"{os.getpid()}\\n")
+                print("converged (stub)", flush=True)
+                while not (root / "probe-held").exists():
+                    time.sleep(0.01)
+                finish = Path(os.environ.get("RELOADSTALL_EVIDENCE_DIR", root / "engine-finish"))
+                finish.mkdir()
+                (finish / "ready").write_text("ready\\n")
+                deadline = time.monotonic() + 12
+                while not (finish / "ack").exists():
+                    if time.monotonic() > deadline:
+                        raise SystemExit(1)
+                    time.sleep(0.01)
+                (root / "engine-withdraw").write_text(str(time.monotonic()))
+                """))
+            management = directory / "held-management.py"
+            management.write_text(textwrap.dedent("""\
+                import os
+                from pathlib import Path
+                import signal
+                import sys
+                import time
+                root = Path(os.environ["STUB_RUN_DIR"])
+                with (root / "children").open("a") as output:
+                    output.write(f"{os.getpid()}\\n")
+                def stop(_signum, _frame):
+                    (root / "stop-requested").write_text(str(time.monotonic()))
+                signal.signal(signal.SIGTERM, stop)
+                (root / "probe-held").touch()
+                while not (root / "release-probe").exists():
+                    time.sleep(0.01)
+                (root / "management-drained").write_text(str(time.monotonic()))
+                Path(sys.argv[1]).write_text('{"result":"clean_sigterm"}\\n')
+                """))
+            original = script.read_text()
+            # Keep the actual runner main and cleanup; replace only external
+            # processes and the unrelated full-window analyzer fixture.
+            script.write_text(original.rsplit("main\n", 1)[0] + textwrap.dedent("""\
+                start_management_load() {
+                    command python3 "$STUB_MANAGEMENT" "$MANAGEMENT_LOAD_JSONL" &
+                    MANAGEMENT_LOAD_PID=$!
+                }
+                python3() {
+                    if [[ $1 == */analyze-soak-rs-flagship.py ]]; then
+                        printf '{}' >"$RUN_DIR/verdict.json"
+                    else
+                        command python3 "$@"
+                    fi
+                }
+                main
+                """))
+            environment["STUB_MANAGEMENT"] = str(management)
+            process = subprocess.Popen(
+                ["bash", str(script), str(HERE / "run-soak-rs-flagship.sh"),
+                 str(directory / "repo"), str(run_dir)],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=environment, start_new_session=True,
+            )
+            try:
+                wait_for(run_dir / "stop-requested")
+                self.assertTrue((run_dir / "engine-finish/ready").exists())
+                self.assertFalse((run_dir / "engine-withdraw").exists())
+                self.assertFalse((run_dir / "engine-finish/ack").exists())
+                (run_dir / "release-probe").touch()
+                stdout, stderr = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
+                meta = json.loads((run_dir / "run.json").read_text())
+                ordered = [
+                    meta["measured_end_monotonic"],
+                    float((run_dir / "stop-requested").read_text()),
+                    float((run_dir / "management-drained").read_text()),
+                    meta["engine_finish_release_monotonic"],
+                    float((run_dir / "engine-withdraw").read_text()),
+                ]
+                self.assertEqual(ordered, sorted(ordered))
+                self.assertEqual((run_dir / "cleanup.complete").read_text().splitlines()[0], "status=normal")
+                children = [int(pid) for pid in (run_dir / "children").read_text().split()]
+                self.assertTrue(all(not process_alive(pid) for pid in children))
+            finally:
+                (run_dir / "release-probe").touch()
+                terminate_group(process.pid, process)
+
     def write_actual_main_stub(self, directory, runner):
         root = directory / "repo"
         fake_bin = directory / "bin"

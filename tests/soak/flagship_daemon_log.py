@@ -39,6 +39,7 @@ def analyze_daemon_log(run_dir):
     examples = []
     banner = []
     banner_seen = False
+    first_administrative_shutdown = None
 
     def defect(message):
         nonlocal defects
@@ -89,6 +90,12 @@ def analyze_daemon_log(run_dir):
                     defect(f"line {number}: invalid daemon record: {exc}")
                     continue
                 records += 1
+                if (fields["message"] == "BGP NOTIFICATION"
+                        and fields.get("direction") == "received"
+                        and fields.get("code") == 6 and fields.get("subcode") == 2):
+                    observed = stamp.timestamp()
+                    if first_administrative_shutdown is None or observed < first_administrative_shutdown:
+                        first_administrative_shutdown = observed
                 if level == "WARN":
                     warnings[fields["message"]] += 1
                 elif level == "ERROR":
@@ -105,6 +112,7 @@ def analyze_daemon_log(run_dir):
     return {
         "value": {"records": records, "errors": errors, "defects": defects,
                   "warnings_by_message": dict(sorted(warnings.items())),
+                  "first_administrative_shutdown_unix": first_administrative_shutdown,
                   "examples": examples},
         "pass": records > 0 and errors == 0 and defects == 0,
     }

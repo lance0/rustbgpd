@@ -58,6 +58,7 @@ def smoke_meta(**over):
         "measured_end_monotonic",
         meta["measured_start_monotonic"] + meta["soak_seconds"],
     )
+    meta.setdefault("engine_finish_release_monotonic", meta["measured_end_monotonic"] + 0.2)
     return meta
 
 
@@ -204,6 +205,7 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
             "record": "summary", "started_monotonic": start,
             "stop_requested_monotonic": end - 0.05,
             "completed_monotonic": end, "operation": "summary",
+            "completed_unix": T0.timestamp() + end,
             "duration_ms": (end - start) * 1000, "exit": 0,
             "result": "clean_sigterm", "bytes": 0,
             "sha256": hashlib.sha256(b"").hexdigest(),
@@ -221,14 +223,16 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
     return raw + (b'{"record":' if truncated else b"")
 
 
-def daemon_record(level="INFO", message="daemon ready", **fields):
+def daemon_record(level="INFO", message="daemon ready", *, elapsed=70, **fields):
     return (json.dumps({
-        "timestamp": ts(70), "level": level, "target": "rustbgpd",
+        "timestamp": ts(elapsed), "level": level, "target": "rustbgpd",
         "fields": {"message": message, **fields},
     }) + "\n").encode()
 
 
-CLEAN_DAEMON = daemon_record()
+FINAL_SHUTDOWN = daemon_record(message="BGP NOTIFICATION", elapsed=200000,
+                               direction="received", code=6, subcode=2)
+CLEAN_DAEMON = daemon_record() + FINAL_SHUTDOWN
 DAEMON_BANNER = (
     b"\n  rustbgpd 0.69.0 | AS 65000 | router-id 10.0.0.1\n"
     b"  |- 12 peers (12 eBGP)\n"
@@ -238,7 +242,8 @@ DAEMON_BANNER = (
 )
 
 
-def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEAN_DAEMON):
+def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEAN_DAEMON,
+                 shutdown_elapsed=None):
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
         with (run_dir / "samples.csv").open("w", newline="") as stream:
@@ -251,6 +256,9 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEA
         evidence = management_jsonl(meta) if management is None else management
         (run_dir / "management-plane-load.jsonl").write_bytes(evidence)
         if daemon is not None:
+            if shutdown_elapsed is not None:
+                daemon += daemon_record(message="BGP NOTIFICATION", elapsed=shutdown_elapsed,
+                                        direction="received", code=6, subcode=2)
             (run_dir / "rustbgpd.log").write_bytes(daemon)
         result = subprocess.run(
             ["python3", str(ANALYZER), str(run_dir)],
@@ -296,13 +304,14 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
     def test_daemon_banner_and_warnings_are_reported_without_failure(self):
         raw = (daemon_record() + DAEMON_BANNER
                + daemon_record("WARN", "max prefix exceeded", peer="127.1.0.1")
-               + daemon_record("WARN", "peer lagged, requesting resync") * 2)
+               + daemon_record("WARN", "peer lagged, requesting resync") * 2
+               + FINAL_SHUTDOWN)
         result, payload = run_analyzer(smoke_rows(), smoke_cycles(), smoke_meta(),
                                        daemon=raw)
         self.assertEqual(result.returncode, 0, result.stderr)
         gate = payload["gates"]["daemon_log"]
         self.assertTrue(gate["pass"])
-        self.assertEqual(gate["value"]["records"], 4)
+        self.assertEqual(gate["value"]["records"], 5)
         self.assertEqual(gate["value"]["warnings_by_message"], {
             "max prefix exceeded": 1, "peer lagged, requesting resync": 2,
         })
@@ -670,6 +679,53 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_probe_after_engine_shutdown_fails_lifetime_even_when_result_is_ok(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            shutdown_elapsed=meta["measured_end_monotonic"] - 1,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+        self.assertTrue(payload["gates"]["management_failures"]["pass"])
+
+    def test_finish_ordering_evidence_is_required(self):
+        for missing in ("release", "load_wall_time", "shutdown"):
+            with self.subTest(missing=missing):
+                meta = smoke_meta()
+                records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+                daemon = CLEAN_DAEMON
+                if missing == "release":
+                    del meta["engine_finish_release_monotonic"]
+                elif missing == "load_wall_time":
+                    del records[-1]["completed_unix"]
+                else:
+                    daemon = daemon_record()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta, daemon=daemon,
+                    management=b"".join((json.dumps(r) + "\n").encode() for r in records),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_finish_release_cannot_precede_management_drain(self):
+        meta = smoke_meta()
+        meta["engine_finish_release_monotonic"] = meta["measured_end_monotonic"]
+        result, payload = run_analyzer(smoke_rows(), smoke_cycles(), meta)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_teardown_does_not_hide_a_failed_management_result(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            shutdown_elapsed=meta["measured_end_monotonic"] - 1,
+            management=management_jsonl(meta, failure=("rib_prefix", "route")),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+        self.assertFalse(payload["gates"]["management_failures"]["pass"])
 
     def test_management_load_missed_cadence_fails(self):
         meta = smoke_meta()

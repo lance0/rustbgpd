@@ -1009,8 +1009,20 @@ stub 0's deliberate max-prefix trip cannot create a false load failure. Each
 surface has its own monotonic schedule and a five-second timeout with no retry.
 The retained JSONL contains only timing, disposition, byte count, and SHA-256
 fields—not the potentially large responses. The load must outlive the complete
-measured window and finish with its atomic SIGTERM summary before analysis
-begins.
+measured window. At natural completion the engine holds its sessions at the
+existing final evidence barrier (`engine-finish/ready`). The runner ends the
+measured window, SIGTERMs the load and waits for every in-flight probe and its
+atomic summary before writing `engine-finish/ack`. Only then may the engine
+send its final Administrative Shutdown notifications. The existing 15-second
+engine evidence deadline and per-probe timeout remain in effect; an incomplete
+drain fails the run.
+
+`management_lifetime` requires the monotonic load/window/release ordering and
+checks the load summary's `completed_unix` against the first received
+Administrative Shutdown in the daemon log. Missing or reversed finish evidence
+fails closed, including when all probe results report success. Every operation
+still counts toward the management gates; teardown is no failure exemption.
+Older archived verdicts retain their original analyzer revision and result.
 
 A fifth schedule runs `rbgp doctor` every `MANAGEMENT_DOCTOR_INTERVAL_SEC`
 (default 600 s). This one is an assertion, not load: `doctor` is the shipped

@@ -372,6 +372,7 @@ class ManagementPlaneLoad:
             self.sink.close()
             return 1
         completed_monotonic = time.monotonic()
+        completed_unix = time.time()
         if self.stop_requested_monotonic is None:
             self.sink.close()
             return 1
@@ -383,6 +384,7 @@ class ManagementPlaneLoad:
             "started_monotonic": round(self.started_monotonic, 6),
             "stop_requested_monotonic": round(self.stop_requested_monotonic, 6),
             "completed_monotonic": round(completed_monotonic, 6),
+            "completed_unix": completed_unix,
             "operation": "summary",
             "duration_ms": round(
                 (completed_monotonic - self.started_monotonic) * 1000, 3
