@@ -26,8 +26,8 @@ pub enum RibReadinessError {
 /// query lane.
 ///
 /// Keeping this channel separate lets the actor prove liveness while an
-/// atomic policy transition deliberately fences every ordinary query and
-/// mutation behind its terminal commit or fail-closed fallback handoff.
+/// atomic policy transition deliberately fences route queries and mutations
+/// behind its terminal commit or fail-closed fallback handoff.
 #[derive(Debug)]
 pub enum RibReadinessQuery {
     /// Return the current Loc-RIB best-path count.
@@ -40,6 +40,47 @@ pub enum RibReadinessQuery {
         /// peer-manager work, and reply delivery.
         enqueued: std::time::Instant,
     },
+}
+
+/// Operator summaries that can be answered from a frozen pre-replacement view.
+/// Route queries and mutations deliberately cannot enter this lane.
+#[derive(Debug)]
+pub enum RibSummaryQuery {
+    /// Snapshot installed export-policy counters.
+    ExportPolicyTermHits {
+        /// Filter by peer, or include all installed chains and the global fallback.
+        peer: Option<IpAddr>,
+        /// Response channel.
+        reply: oneshot::Sender<Vec<ExportPolicyTermHits>>,
+    },
+    /// Snapshot the RIB-owned portion of neighbor state.
+    NeighborRibSnapshots {
+        /// Requested peers in response order.
+        peers: Vec<IpAddr>,
+        /// Optional update-group comparison.
+        comparison: Option<(IpAddr, IpAddr)>,
+        /// Response channel.
+        reply: oneshot::Sender<NeighborRibSnapshotResponse>,
+    },
+}
+
+impl From<RibSummaryQuery> for RibUpdate {
+    fn from(query: RibSummaryQuery) -> Self {
+        match query {
+            RibSummaryQuery::ExportPolicyTermHits { peer, reply } => {
+                Self::QueryExportPolicyTermHits { peer, reply }
+            }
+            RibSummaryQuery::NeighborRibSnapshots {
+                peers,
+                comparison,
+                reply,
+            } => Self::QueryNeighborRibSnapshots {
+                peers,
+                comparison,
+                reply,
+            },
+        }
+    }
 }
 
 /// Canonical, side-effect-free input to update-group eligibility.

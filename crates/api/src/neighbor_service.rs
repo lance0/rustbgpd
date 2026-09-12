@@ -9,7 +9,7 @@ use rustbgpd_wire::{Afi, BgpRole, CONFIGURED_FAMILIES, Safi, family_label, parse
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
+use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_summary_read};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     ConfigEvent, DynamicRangeError, EnqueuedOperatorQuery, NeighborCreateAddPath,
@@ -28,9 +28,9 @@ use crate::server::{
     stage_runtime_config_event_typed,
 };
 use rustbgpd_rib::{
-    EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
-    UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
-    UpdateGroupPeerComparison,
+    EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibSummaryQuery,
+    RibUpdate, UpdateGroupComparisonDifference, UpdateGroupComparisonMembership,
+    UpdateGroupComparisonVerdict, UpdateGroupPeerComparison,
 };
 
 const OWNED_NEIGHBOR_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
@@ -94,6 +94,7 @@ pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_summary_tx: Option<mpsc::Sender<RibSummaryQuery>>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -142,6 +143,7 @@ impl NeighborService {
             peer_mgr_tx,
             operator_tx: None,
             rib_tx,
+            rib_summary_tx: None,
             config_tx,
             runtime_config_lock,
             config_mutation_gate,
@@ -154,6 +156,13 @@ impl NeighborService {
     #[must_use]
     pub fn with_operator_queries(mut self, tx: mpsc::Sender<EnqueuedOperatorQuery>) -> Self {
         self.operator_tx = Some(tx);
+        self
+    }
+
+    /// Attach the summary lane served from frozen values during RIB replacement.
+    #[must_use]
+    pub fn with_rib_summary_queries(mut self, tx: mpsc::Sender<RibSummaryQuery>) -> Self {
+        self.rib_summary_tx = Some(tx);
         self
     }
 
@@ -382,15 +391,18 @@ where
 
 async fn query_neighbor_rib_snapshots(
     rib_tx: &mpsc::Sender<RibUpdate>,
+    summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
 ) -> Result<NeighborRibSnapshotResponse, Status> {
     tokio::time::timeout(
         RIB_SNAPSHOT_TIMEOUT,
-        rib_manager_read(rib_tx, |reply| RibUpdate::QueryNeighborRibSnapshots {
-            peers,
-            comparison,
-            reply,
+        rib_summary_read(rib_tx, summary_tx, |reply| {
+            RibSummaryQuery::NeighborRibSnapshots {
+                peers,
+                comparison,
+                reply,
+            }
         }),
     )
     .await
@@ -1255,6 +1267,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         let snapshots = query_neighbor_rib_snapshots(
             &self.rib_tx,
+            self.rib_summary_tx.as_ref(),
             infos.iter().map(|info| info.address).collect(),
             None,
         )
@@ -1323,8 +1336,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let comparison_pair = compare_peer
             .as_ref()
             .map(|compare_peer| (info.address, compare_peer.address));
-        let snapshots =
-            query_neighbor_rib_snapshots(&self.rib_tx, vec![info.address], comparison_pair).await?;
+        let snapshots = query_neighbor_rib_snapshots(
+            &self.rib_tx,
+            self.rib_summary_tx.as_ref(),
+            vec![info.address],
+            comparison_pair,
+        )
+        .await?;
         if snapshots.snapshots.len() != 1 {
             return Err(Status::internal(
                 "RIB snapshot did not include exactly the requested neighbor",
@@ -1951,6 +1969,107 @@ mod tests {
             NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None),
             actor,
         )
+    }
+
+    #[tokio::test]
+    async fn neighbor_summary_reads_bypass_blocked_general_lane() {
+        for rpc in [
+            NeighborRibReadRpc::ListNeighbors,
+            NeighborRibReadRpc::GetNeighborState,
+        ] {
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let (summary_tx, mut summary_rx) = mpsc::channel(1);
+            let (svc, peer) = neighbor_rib_read_service(rpc, rib_tx);
+            let svc = svc.with_rib_summary_queries(summary_tx);
+            let rib = tokio::spawn(async move {
+                let RibSummaryQuery::NeighborRibSnapshots {
+                    peers,
+                    comparison,
+                    reply,
+                } = summary_rx.recv().await.unwrap()
+                else {
+                    panic!("expected neighbor summaries");
+                };
+                assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
+                assert!(comparison.is_none());
+                reply
+                    .send(NeighborRibSnapshotResponse {
+                        snapshots: vec![NeighborRibSnapshot {
+                            peer: peers[0],
+                            advertised_count: 7,
+                            policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                            outbound: rustbgpd_rib::PeerOutboundState {
+                                update_group: String::new(),
+                                effective_distribution_mode: EffectiveDistributionMode::SingleBest,
+                                selection_deferral: Vec::new(),
+                                outbound_prefix_limits: Vec::new(),
+                            },
+                        }],
+                        comparison: None,
+                    })
+                    .unwrap();
+            });
+            let state = match rpc {
+                NeighborRibReadRpc::ListNeighbors => svc
+                    .list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .neighbors
+                    .remove(0),
+                NeighborRibReadRpc::GetNeighborState => svc
+                    .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                        address: "192.0.2.1".into(),
+                        ..Default::default()
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner(),
+            };
+            assert_eq!(state.prefixes_sent, 7);
+            peer.await.unwrap();
+            rib.await.unwrap();
+            assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn neighbor_summary_reads_keep_admission_and_reply_deadline() {
+        for rpc in [
+            NeighborRibReadRpc::ListNeighbors,
+            NeighborRibReadRpc::GetNeighborState,
+        ] {
+            for full in [false, true] {
+                let (rib_tx, mut rib_rx) = mpsc::channel(1);
+                let (summary_tx, mut summary_rx) = mpsc::channel(1);
+                let (reply, _response) = oneshot::channel();
+                if full {
+                    summary_tx
+                        .send(RibSummaryQuery::NeighborRibSnapshots {
+                            peers: Vec::new(),
+                            comparison: None,
+                            reply,
+                        })
+                        .await
+                        .unwrap();
+                }
+                let (svc, peer) = neighbor_rib_read_service(rpc, rib_tx);
+                let svc = svc.with_rib_summary_queries(summary_tx);
+                let started = tokio::time::Instant::now();
+                let error = invoke_neighbor_rib_read(&svc, rpc).await.unwrap_err();
+                assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+                assert_eq!(started.elapsed(), RIB_SNAPSHOT_TIMEOUT);
+                peer.await.unwrap();
+                let RibSummaryQuery::NeighborRibSnapshots { reply, .. } =
+                    summary_rx.try_recv().unwrap()
+                else {
+                    panic!("expected neighbor summaries");
+                };
+                assert_eq!(reply.is_closed(), !full);
+                assert!(summary_rx.try_recv().is_err());
+                assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
+            }
+        }
     }
 
     /// Load-bearing: restoring either RIB send mapping to `INTERNAL` makes

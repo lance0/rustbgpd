@@ -10,6 +10,22 @@ Single-task ownership — `RibManager` runs as one tokio task with no
 `Arc<RwLock>`. All RIB mutations flow through an `mpsc` channel as
 `RibUpdate` messages.
 
+The daemon also installs a bounded `RibSummaryQuery` lane for export-policy
+counters and the RIB portion of neighbor status. Synchronous policy replacement,
+rollback, and dataset reevaluation answer this lane from one temporary projection
+captured before their outbound-state mutations. Nested helpers reuse the same
+values; after completion, reads use current actor state. On the daemon's
+multi-thread runtime, one `block_in_place` scope hands the executor to sibling
+tasks so completed replies can run while synchronous RIB work continues.
+Current-thread embedders retain synchronous execution. Route queries and
+mutations remain fenced. The projection owns numeric counters and small status
+rows, not route tables or shared policy counters.
+
+Capture completes before summary service starts, and exact-export rejection
+counts can require route-overlay scans. This mechanism does not by itself prove
+a latency bound at every scale. Peer-manager/session fields in the same RPC are
+independent observations; no fleet-wide atomic snapshot is implied.
+
 ## Features
 
 - **Adj-RIB-In** — per-peer inbound route storage with stale marking

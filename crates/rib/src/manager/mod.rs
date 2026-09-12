@@ -13,6 +13,7 @@ mod helpers;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
+mod replacement_summaries;
 use peer_lifecycle::SessionTeardownDisposition;
 mod route_refresh;
 mod selection_deferral;
@@ -76,8 +77,8 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportEncoder, ExactExportKey, NeighborPolicyStats, OutboundRouteUpdate,
-    RibReadinessError, RibReadinessQuery, RibUpdate, RoutePageError, RoutePageVersion,
-    RouteQueryScope,
+    RibReadinessError, RibReadinessQuery, RibSummaryQuery, RibUpdate, RoutePageError,
+    RoutePageVersion, RouteQueryScope,
 };
 
 #[cfg(test)]
@@ -813,8 +814,10 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Dedicated type-narrow lane used only by core readiness.
     readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
-    /// Only the readiness receiver and invariant count are shared across
-    /// synchronous replacement helpers. Canonical RIB state remains actor-owned.
+    /// Dedicated lane for summaries with frozen replacement projections.
+    summary_rx: Option<mpsc::Receiver<RibSummaryQuery>>,
+    /// Readiness and frozen values are shared across synchronous replacement
+    /// helpers. Canonical RIB state remains actor-owned.
     replacement_readiness: Option<Arc<Mutex<ReplacementReadiness>>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
@@ -827,9 +830,9 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
-    /// Attribution of the first general query dispatched after a committed
+    /// Attribution of the first general or summary query after a committed
     /// transition; armed by the terminal commit poll, finished by the next
-    /// general-query dispatch on any delivery path.
+    /// dispatch on any delivery path, including a frozen replacement view.
     post_commit_query_trace: Option<PostCommitQueryTrace>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
@@ -954,7 +957,7 @@ pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Durat
 const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Actor work units accounted between a transition's terminal commit poll and
-/// the first general query dispatched afterwards.
+/// the first general or summary query dispatched afterwards.
 #[derive(Clone, Copy)]
 enum PostCommitWork {
     RouteChunk,
@@ -963,21 +966,25 @@ enum PostCommitWork {
 }
 
 /// What the actor ran between a committed clean policy transition's terminal
-/// poll and the first general query it dispatches afterwards. One
+/// poll and the first general or summary query it dispatches afterwards. One
 /// `post-commit first general query timing` record per committed transition
-/// that a general query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`]:
+/// that a general or summary query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`].
+/// The historical event name is retained; `query_lane` identifies the receiver.
 /// `first_query_wait_us` is wall-clock from the end of the terminal poll,
-/// `busy_us` the elapsed wall time inside the three instrumented work
-/// classes, and `unattributed_us` the remainder, including uninstrumented
-/// actor work, idle time, and scheduling delays outside those classes.
+/// `busy_us` the elapsed wall time in completed units of the three instrumented
+/// work classes, and `unattributed_us` the remainder, including uninstrumented
+/// actor work, idle time, and scheduling delays outside those classes. A
+/// synchronous owner still running at a frozen-summary or retirement dispatch
+/// has not completed its work unit, so its elapsed time remains unattributed.
 /// Dispatch is measured before the query handler runs, not at reply
-/// completion. With `queued_general_queries > 0`, a query was already
-/// waiting at commit; otherwise the interval also includes arrival delay.
+/// completion. The two queued-query fields report lane depths at commit;
+/// neither identifies whether the dispatched request itself was queued then.
 struct PostCommitQueryTrace {
     since: std::time::Instant,
     member_count: usize,
     terminal_poll: std::time::Duration,
     queued_general_queries: usize,
+    queued_summary_queries: usize,
     ingest_backlog: usize,
     busy: std::time::Duration,
     route_chunks: u32,
@@ -996,7 +1003,7 @@ impl PostCommitQueryTrace {
         *counter = counter.saturating_add(1);
     }
 
-    fn emit(self) {
+    fn emit(self, query_lane: &'static str) {
         let wait = self.since.elapsed();
         if wait > POST_COMMIT_QUERY_TRACE_WINDOW {
             return;
@@ -1007,6 +1014,8 @@ impl PostCommitQueryTrace {
             member_count = self.member_count,
             terminal_poll_us = micros(self.terminal_poll),
             queued_general_queries = self.queued_general_queries,
+            queued_summary_queries = self.queued_summary_queries,
+            query_lane,
             ingest_backlog_at_commit = self.ingest_backlog,
             first_query_wait_us = micros(wait),
             busy_us = micros(self.busy),
@@ -1020,6 +1029,7 @@ impl PostCommitQueryTrace {
 }
 
 struct ReplacementReadiness {
+    summaries: Option<replacement_summaries::ReplacementSummaries>,
     #[cfg(feature = "bench-internals")]
     capacities: HashMap<&'static str, (usize, usize, usize)>,
     #[cfg(test)]
@@ -1071,7 +1081,8 @@ fn replacement_readiness_checkpoint_at(
 }
 
 /// Call only on the actor while its synchronous replacement fence is held.
-/// The short mutex guard never spans a helper, callback, or canonical mutation.
+/// The shared handle exposes readiness and frozen values; canonical RIB
+/// state remains exclusively owned by the actor.
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
@@ -1121,6 +1132,9 @@ fn replacement_readiness_checkpoint(
         {
             readiness.serviced += 1;
         }
+    }
+    if let Some(summaries) = readiness.summaries.as_mut() {
+        summaries.drain();
     }
 }
 
@@ -1735,6 +1749,7 @@ impl RibManager {
             rx,
             query_rx,
             readiness_rx: None,
+            summary_rx: None,
             replacement_readiness: None,
             #[cfg(test)]
             replacement_readiness_test_hook: None,
@@ -1797,7 +1812,8 @@ impl RibManager {
     }
 
     /// Export replacement does not change Loc-RIB cardinality. Keep that exact
-    /// actor-owned invariant while only readiness acknowledgements interleave.
+    /// actor-owned invariant while readiness acknowledgements and optional
+    /// frozen operator summaries interleave.
     fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
         let age = self.pending_clean_policy_transition.as_ref().map_or(
             std::time::Duration::ZERO,
@@ -1816,6 +1832,7 @@ impl RibManager {
         }
         let started = tokio::time::Instant::now() - age;
         self.replacement_readiness = Some(Arc::new(Mutex::new(ReplacementReadiness {
+            summaries: None,
             #[cfg(feature = "bench-internals")]
             capacities: HashMap::new(),
             #[cfg(test)]
@@ -2202,6 +2219,7 @@ impl RibManager {
 
     /// Drain a bounded number of pending queries from the priority channel.
     fn drain_queries(&mut self, limit: usize) {
+        self.drain_summary_queries();
         for _ in 0..limit {
             let Ok(query) = self.query_rx.try_recv() else {
                 break;
@@ -2216,7 +2234,7 @@ impl RibManager {
     /// first general query dispatched, whichever path delivers it.
     fn serve_general_query(&mut self, query: RibUpdate) {
         if let Some(trace) = self.post_commit_query_trace.take() {
-            trace.emit();
+            trace.emit("general");
         }
         self.handle_update(query);
     }
@@ -4245,6 +4263,7 @@ impl RibManager {
                             member_count,
                             terminal_poll: started.elapsed(),
                             queued_general_queries: manager.query_rx.len(),
+                            queued_summary_queries: manager.summary_rx.as_ref().map_or(0, mpsc::Receiver::len),
                             ingest_backlog: manager.rx.len(),
                             busy: std::time::Duration::ZERO,
                             route_chunks: 0,
@@ -4446,6 +4465,12 @@ impl RibManager {
                             None => self.readiness_rx = None,
                         }
                     }
+                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                        match summary {
+                            Some(query) => self.serve_summary_query(query),
+                            None => self.summary_rx = None,
+                        }
+                    }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
                             Some(q) => self.serve_general_query(q),
@@ -4530,6 +4555,12 @@ impl RibManager {
                         match readiness {
                             Some(query) => self.handle_readiness_query(query, None),
                             None => self.readiness_rx = None,
+                        }
+                    }
+                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                        match summary {
+                            Some(query) => self.serve_summary_query(query),
+                            None => self.summary_rx = None,
                         }
                     }
                     query = self.query_rx.recv(), if query_rx_open => {

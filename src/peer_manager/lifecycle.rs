@@ -1201,31 +1201,21 @@ impl PeerManager {
         // prove restoration; owned callers must fence this uncertainty.
         if export_knobs_changed {
             let addr = peer.address;
-            let (reply_tx, reply_rx) = oneshot::channel();
-            self.rib_tx
-                .send(RibUpdate::RefreshPeerOutbound {
-                    peer: addr,
-                    reply: reply_tx,
-                })
+            match self
+                .refresh_peer_outbound_in_rib(
+                    addr,
+                    OperatorReadAdmission::Fenced {
+                        reason: "session knobs changed but manager metadata awaits refresh acknowledgement",
+                    },
+                )
                 .await
-                .map_err(|error| {
-                    PeerLifecycleError::Internal(format!(
-                        "failed to send RIB refresh after hot-applying export knobs to {peer}: {error}"
-                    ))
-                })?;
-            match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                Err(_) => {
+            {
+                Err(error) => {
                     return Err(PeerLifecycleError::Internal(format!(
-                        "RIB did not reply to export-knob refresh for {peer} within {:?}",
-                        super::RIB_REPLY_TIMEOUT
+                        "failed to refresh outbound routes after hot-applying export knobs to {peer}: {error}"
                     )));
                 }
-                Ok(Err(_)) => {
-                    return Err(PeerLifecycleError::Internal(format!(
-                        "RIB dropped reply for export-knob refresh for {peer}"
-                    )));
-                }
-                Ok(Ok(Err(error))) => {
+                Ok(Err(error)) => {
                     // "not registered for outbound updates" is expected for a
                     // peer not yet Established — the next PeerUp emits from
                     // the updated config.
@@ -1234,7 +1224,7 @@ impl PeerManager {
                         "RIB declined export-knob refresh (peer likely not yet Established)"
                     );
                 }
-                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(())) => {}
             }
         }
 
@@ -2093,34 +2083,15 @@ impl PeerManager {
             // an unrelated RIB event. RIB ignores peers not yet
             // registered for outbound (newly added, not Established
             // yet) — that's fine, the next PeerUp will emit fresh.
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if let Err(e) = self
-                .rib_tx
-                .send(RibUpdate::RefreshPeerOutbound {
-                    peer: addr,
-                    reply: reply_tx,
-                })
+            match self
+                .refresh_peer_outbound_in_rib(addr, OperatorReadAdmission::Served)
                 .await
             {
-                warn!(%addr, error = %e, "failed to send RIB refresh after gshut toggle");
-                failures.push(format!("{addr}: rib send: {e}"));
-                continue;
-            }
-            // Bounded: a wedged RIB task must not park the peer-manager
-            // actor (and the SIGHUP reload driving this toggle) forever.
-            match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                Err(_) => {
-                    warn!(%addr, "RIB did not reply to gshut refresh within deadline");
-                    failures.push(format!(
-                        "{addr}: rib reply timed out after {:?}",
-                        super::RIB_REPLY_TIMEOUT
-                    ));
+                Err(error) => {
+                    warn!(%addr, %error, "RIB refresh failed after gshut toggle");
+                    failures.push(format!("{addr}: {error}"));
                 }
-                Ok(Err(_)) => {
-                    warn!(%addr, "RIB dropped reply for gshut refresh");
-                    failures.push(format!("{addr}: rib reply dropped"));
-                }
-                Ok(Ok(Err(e))) => {
+                Ok(Err(e)) => {
                     // "peer X not registered for outbound updates" is
                     // expected for peers not yet Established — log at
                     // debug, not as a failure.
@@ -2130,7 +2101,7 @@ impl PeerManager {
                          desired state stored, will apply on next PeerUp"
                     );
                 }
-                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(())) => {}
             }
         }
 
@@ -2161,54 +2132,85 @@ impl PeerManager {
             .map_err(|failure| failure.error)
     }
 
+    /// Refresh admission and acknowledgement share one absolute deadline.
+    /// Finish an already-admitted read before returning, even if that deadline
+    /// expires meanwhile. Keep transport failures separate from the RIB's
+    /// result: callers retain their existing partial-effect semantics.
+    async fn refresh_peer_outbound_in_rib(
+        &mut self,
+        peer: std::net::IpAddr,
+        admission: OperatorReadAdmission,
+    ) -> Result<Result<(), RibCommandError>, String> {
+        let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
+        let timed_out = || {
+            format!(
+                "outbound refresh for peer {peer} timed out after {:?}",
+                super::RIB_REPLY_TIMEOUT
+            )
+        };
+        let rib_tx = self.rib_tx.clone();
+        let round_trip = async {
+            let permit = rib_tx.reserve().await.map_err(|_| {
+                format!("RIB channel closed before outbound refresh for peer {peer}")
+            })?;
+            // Never admit after the absolute deadline when capacity returns
+            // during read servicing.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(timed_out());
+            }
+            let (reply, response) = oneshot::channel();
+            permit.send(RibUpdate::RefreshPeerOutbound { peer, reply });
+            response
+                .await
+                .map_err(|_| format!("RIB dropped reply for outbound refresh of peer {peer}"))
+        };
+        let bounded = async {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => Err(timed_out()),
+                result = round_trip => result,
+            }
+        };
+        self.await_with_readiness(bounded, admission).await
+    }
+
     /// Re-emit the current exportable outbound inventory for one managed peer.
     ///
     /// The RIB owns the authoritative outbound registration. A managed peer
     /// that is down or has not completed `PeerUp` is therefore reported
     /// separately from an unknown peer.
-    pub(super) async fn refresh_outbound(&self, peer: PeerKey) -> Result<(), OutboundRefreshError> {
+    pub(super) async fn refresh_outbound(
+        &mut self,
+        peer: PeerKey,
+    ) -> Result<(), OutboundRefreshError> {
         if !self.peers.contains_key(&peer) {
             return Err(OutboundRefreshError::PeerNotFound(peer));
         }
 
-        let address = peer.address;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.rib_tx
-            .send(RibUpdate::RefreshPeerOutbound {
-                peer: address,
-                reply: reply_tx,
-            })
+        match self
+            .refresh_peer_outbound_in_rib(peer.address, OperatorReadAdmission::Served)
             .await
-            .map_err(|error| {
-                OutboundRefreshError::Internal(format!(
-                    "failed to request outbound refresh for peer {peer}: {error}"
-                ))
-            })?;
-
-        match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-            Err(_) => Err(OutboundRefreshError::Internal(format!(
-                "outbound refresh for peer {peer} timed out after {:?}",
-                super::RIB_REPLY_TIMEOUT
-            ))),
-            Ok(Err(_)) => Err(OutboundRefreshError::Internal(format!(
-                "RIB dropped outbound refresh reply for peer {peer}"
-            ))),
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(RibCommandError::NotFound(_)))) => {
-                Err(OutboundRefreshError::PeerUnavailable(peer))
-            }
-            Ok(Ok(Err(RibCommandError::Internal(message)))) => {
-                Err(OutboundRefreshError::Internal(message))
-            }
+            .map_err(OutboundRefreshError::Internal)?
+        {
+            Ok(()) => Ok(()),
+            Err(RibCommandError::NotFound(_)) => Err(OutboundRefreshError::PeerUnavailable(peer)),
+            Err(RibCommandError::Internal(message)) => Err(OutboundRefreshError::Internal(message)),
         }
     }
 
     /// Schedule replay on the exact managed session, including scoped identity.
-    pub(super) async fn replay_outbound(&self, peer: PeerKey) -> Result<(), OutboundRefreshError> {
-        let managed = self
-            .peers
-            .get(&peer)
-            .ok_or_else(|| OutboundRefreshError::PeerNotFound(peer.clone()))?;
+    pub(super) async fn replay_outbound(
+        &mut self,
+        peer: PeerKey,
+        mut reply: oneshot::Sender<Result<(), OutboundRefreshError>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let Some(managed) = self.peers.get(&peer) else {
+            let _ = reply.send(Err(OutboundRefreshError::PeerNotFound(peer)));
+            return;
+        };
         // BMP's peer cache is keyed by IP address. Refuse ambiguity before
         // dispatch, so enrollment cannot reset another scoped peer's view.
         if self
@@ -2216,15 +2218,32 @@ impl PeerManager {
             .keys()
             .any(|other| other.address == peer.address && other != &peer)
         {
-            return Err(OutboundRefreshError::ReplayUnavailable(
+            let _ = reply.send(Err(OutboundRefreshError::ReplayUnavailable(
                 "outbound replay requires a unique peer IP address among managed peers".into(),
-            ));
+            )));
+            return;
         }
-        managed
-            .handle
-            .replay_outbound_timeout(super::RIB_REPLY_TIMEOUT)
+        let commands = managed.handle.commands_sender();
+        let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
+        // Cancellation and expiry belong to the step, not the read-admitting
+        // helper: a consumed read retains its own reply and deadline. When it
+        // finishes, cancellation/expiry wins over newly writable capacity.
+        let scheduling = async {
+            tokio::select! {
+                biased;
+                () = reply.closed() => None,
+                () = tokio::time::sleep_until(deadline) => Some(Err(PeerCommandError::TimedOut {
+                    operation: "replay_outbound",
+                    deadline: super::RIB_REPLY_TIMEOUT,
+                })),
+                result = PeerHandle::replay_outbound_via(commands) => Some(result),
+            }
+        };
+        if let Some(result) = self
+            .await_with_readiness(scheduling, OperatorReadAdmission::Served)
             .await
-            .map_err(|error| match error {
+        {
+            let result = result.map_err(|error| match error {
                 PeerCommandError::NotEstablished | PeerCommandError::SessionExited => {
                     OutboundRefreshError::PeerUnavailable(peer)
                 }
@@ -2234,7 +2253,9 @@ impl PeerManager {
                 error => OutboundRefreshError::Internal(format!(
                     "failed to schedule outbound replay for peer {peer}: {error}"
                 )),
-            })
+            });
+            let _ = reply.send(result);
+        }
     }
 
     /// [`Self::soft_reset_in`], additionally reporting whether the peer's
