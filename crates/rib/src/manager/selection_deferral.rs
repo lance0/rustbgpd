@@ -473,15 +473,38 @@ impl SelectionDeferral {
         &self,
         peer: IpAddr,
     ) -> Vec<crate::update::SelectionDeferralPeerFamilyState> {
+        self.peer_snapshot_for(Some(peer))
+    }
+
+    pub(super) fn snapshot_peers(&self) -> impl Iterator<Item = IpAddr> + '_ {
+        self.active
+            .values()
+            .flat_map(|gate| gate.waiters.keys().copied())
+            .chain(
+                self.released
+                    .values()
+                    .flat_map(|family| family.waiters.keys().copied()),
+            )
+    }
+
+    pub(super) fn unknown_peer_snapshot(
+        &self,
+    ) -> Vec<crate::update::SelectionDeferralPeerFamilyState> {
+        self.peer_snapshot_for(None)
+    }
+
+    fn peer_snapshot_for(
+        &self,
+        peer: Option<IpAddr>,
+    ) -> Vec<crate::update::SelectionDeferralPeerFamilyState> {
         let now = tokio::time::Instant::now();
         let remaining_millis =
             u64::try_from(self.deadline.saturating_duration_since(now).as_millis())
                 .unwrap_or(u64::MAX);
         let mut rows = Vec::with_capacity(self.active.len() + self.released.len());
         for (&(afi, safi), gate) in &self.active {
-            let (waiter_state, waiter_session_id) = gate
-                .waiters
-                .get(&peer)
+            let (waiter_state, waiter_session_id) = peer
+                .and_then(|peer| gate.waiters.get(&peer))
                 .copied()
                 .map_or(("not_in_roster", None), WaiterState::snapshot);
             rows.push(crate::update::SelectionDeferralPeerFamilyState {
@@ -496,9 +519,8 @@ impl SelectionDeferral {
             });
         }
         for (&(afi, safi), released) in &self.released {
-            let (waiter_state, waiter_session_id) = released
-                .waiters
-                .get(&peer)
+            let (waiter_state, waiter_session_id) = peer
+                .and_then(|peer| released.waiters.get(&peer))
                 .copied()
                 .map_or(("not_in_roster", None), WaiterState::snapshot);
             rows.push(crate::update::SelectionDeferralPeerFamilyState {

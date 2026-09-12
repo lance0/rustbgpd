@@ -5220,17 +5220,19 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
     assert!(!manager.traced_route_chunk());
     assert!(manager.post_commit_query_trace.is_none());
 
-    manager.post_commit_query_trace = Some(PostCommitQueryTrace {
+    let fresh_trace = || PostCommitQueryTrace {
         since: std::time::Instant::now(),
         member_count: 2,
         terminal_poll: std::time::Duration::from_millis(1),
         queued_general_queries: 0,
+        queued_summary_queries: 0,
         ingest_backlog: 0,
         busy: std::time::Duration::ZERO,
         route_chunks: 0,
         primary_updates: 0,
         resync_ticks: 0,
-    });
+    };
+    manager.post_commit_query_trace = Some(fresh_trace());
     let announced = vec![crate::test_support::make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
         Ipv4Addr::new(192, 0, 2, 42),
@@ -5280,6 +5282,19 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
     manager.drain_general_queries_if_unfenced();
     assert!(response.try_recv().is_ok());
     assert!(manager.post_commit_query_trace.is_none());
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    manager.summary_rx = Some(summary_rx);
+    manager.post_commit_query_trace = Some(fresh_trace());
+    let (reply, mut response) = oneshot::channel();
+    summary_tx
+        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(response.try_recv().is_ok());
+    assert!(
+        manager.post_commit_query_trace.is_none(),
+        "the first summary query also consumes the trace"
+    );
 }
 
 /// A committed transition arms the post-commit query trace and the first
@@ -5345,6 +5360,25 @@ async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
     // The run loop is spawned on this current-thread runtime, so the
     // thread's default subscriber sees the actor's records.
     let _subscriber = tracing::subscriber::set_default(Capture(StdArc::clone(&captured)));
+
+    // Sibling tests may register this process-wide callsite without a
+    // subscriber. Warm it inside this scope, then refresh its cached interest
+    // before measuring the real transition (the same pattern as other RIB logs).
+    super::super::PostCommitQueryTrace {
+        since: std::time::Instant::now(),
+        member_count: 0,
+        terminal_poll: std::time::Duration::ZERO,
+        queued_general_queries: 0,
+        queued_summary_queries: 0,
+        ingest_backlog: 0,
+        busy: std::time::Duration::ZERO,
+        route_chunks: 0,
+        primary_updates: 0,
+        resync_ticks: 0,
+    }
+    .emit("general");
+    tracing::callsite::rebuild_interest_cache();
+    captured.lock().unwrap().clear();
 
     let (tx, rx) = mpsc::channel(32);
     let (query_tx, query_rx) = mpsc::channel(8);
@@ -9432,4 +9466,217 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
     assert!(fleet.receivers[3].try_recv().is_err());
     assert!(!fleet.manager.dirty_peers.contains(&lagging));
     assert!(!fleet.manager.pending_extra_withdraws.contains_key(&lagging));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression holds real replacement interiors and checks frozen replies plus owner and ordinary-channel fences"
+)]
+fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
+    use crate::update::RibSummaryQuery;
+
+    for operation in ["apply", "restore", "reevaluate"] {
+        let cases = if operation == "reevaluate" {
+            vec![("dataset_staging", community_chain(0xFDE8_0001))]
+        } else {
+            vec![
+                ("shared_inventory", community_chain(0xFDE8_0002)),
+                ("fallback_baseline", peer_context_chain()),
+            ]
+        };
+        for (stage, next) in cases {
+            let old = community_chain(0xFDE8_0001);
+            let mut fleet = replacement_readiness_fleet(&old);
+            let expected_rows: Vec<_> = fleet
+                .members
+                .iter()
+                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer))
+                .collect();
+            let expected_comparison = fleet
+                .manager
+                .update_group_comparison(fleet.members[0], fleet.members[1]);
+            let expected_terms = format!("{:?}", fleet.manager.export_policy_term_hits(None));
+            let (summary_tx, summary_rx) = mpsc::channel(8);
+            fleet.manager.summary_rx = Some(summary_rx);
+            let (query_tx, query_rx) = mpsc::channel(1);
+            fleet.manager.query_rx = query_rx;
+            let (general_reply, general_response) = oneshot::channel();
+            query_tx
+                .try_send(RibUpdate::QueryLocRibCount {
+                    reply: general_reply,
+                })
+                .unwrap();
+            let general_response = Arc::new(Mutex::new(general_response));
+            let (mutation_tx, mutation_rx) = mpsc::channel(1);
+            fleet.manager.rx = mutation_rx;
+            let (mutation_reply, _mutation_response) = oneshot::channel();
+            mutation_tx
+                .try_send(RibUpdate::QueryLocRibCount {
+                    reply: mutation_reply,
+                })
+                .unwrap();
+            let (neighbors_reply, neighbors_response) = oneshot::channel();
+            let neighbors_response = Arc::new(Mutex::new(neighbors_response));
+            let (terms_reply, terms_response) = oneshot::channel();
+            let terms_response = Arc::new(Mutex::new(terms_response));
+            let queries = Mutex::new(Some((neighbors_reply, terms_reply)));
+            let visits = Arc::new(AtomicUsize::new(0));
+            let captures = Arc::new(AtomicUsize::new(0));
+            let peers = fleet.members.clone();
+            fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+                let visits = visits.clone();
+                let captures = captures.clone();
+                let neighbors_response = neighbors_response.clone();
+                let terms_response = terms_response.clone();
+                let general_response = general_response.clone();
+                move |observed| {
+                    if observed == "summary_capture" {
+                        captures.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if observed != stage {
+                        return;
+                    }
+                    assert!(matches!(
+                        general_response.lock().unwrap().try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ));
+                    assert_eq!(
+                        mutation_tx.capacity(),
+                        0,
+                        "primary queue must stay untouched"
+                    );
+                    match visits.fetch_add(1, Ordering::Relaxed) {
+                        0 => {
+                            let (neighbors_reply, terms_reply) =
+                                queries.lock().unwrap().take().unwrap();
+                            summary_tx
+                                .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                                    peers: peers.clone(),
+                                    comparison: Some((peers[0], peers[1])),
+                                    reply: neighbors_reply,
+                                })
+                                .unwrap();
+                            summary_tx
+                                .try_send(RibSummaryQuery::ExportPolicyTermHits {
+                                    peer: None,
+                                    reply: terms_reply,
+                                })
+                                .unwrap();
+                        }
+                        1 => {
+                            let reply = neighbors_response
+                                .lock()
+                                .unwrap()
+                                .try_recv()
+                                .expect("neighbor summary served inside replacement");
+                            assert_eq!(reply.snapshots, expected_rows);
+                            assert_eq!(reply.comparison, Some(expected_comparison.clone()));
+                            assert_eq!(
+                                format!(
+                                    "{:?}",
+                                    terms_response
+                                        .lock()
+                                        .unwrap()
+                                        .try_recv()
+                                        .expect("term summary served inside replacement")
+                                ),
+                                expected_terms
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }));
+            if operation == "restore" {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        reply,
+                    });
+                assert!(response.try_recv().unwrap().is_ok());
+            } else if operation == "reevaluate" {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+                        peers: fleet.members.clone(),
+                        reply,
+                    });
+                assert_eq!(response.try_recv().unwrap(), Ok(()));
+            } else {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        reply,
+                    });
+                assert_eq!(response.try_recv().unwrap(), Ok(()));
+            }
+            assert!(
+                visits.load(Ordering::Relaxed) >= 2,
+                "{stage}: interior not exercised"
+            );
+            assert_eq!(
+                captures.load(Ordering::Relaxed),
+                1,
+                "nested apply must retain the outer snapshot"
+            );
+            assert!(fleet.manager.replacement_readiness.is_none());
+            assert!(fleet.manager.summary_rx.is_some());
+            assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+            fleet.manager.replacement_readiness_test_hook = None;
+            assert!(
+                fleet
+                    .members
+                    .iter()
+                    .all(|peer| fleet.manager.peer_export_policies.get(peer)
+                        == Some(&Some(next.clone())))
+            );
+            fleet.manager.drain_queries(1);
+            assert_eq!(general_response.lock().unwrap().try_recv().unwrap(), 4);
+        }
+    }
+}
+
+#[test]
+fn replacement_summaries_keep_abandoned_apply_and_restore_ownership_rules() {
+    let old = community_chain(0xFDE8_0001);
+    let next = community_chain(0xFDE8_0002);
+    let mut fleet = replacement_readiness_fleet(&old);
+    let (_summary_tx, summary_rx) = mpsc::channel(8);
+    fleet.manager.summary_rx = Some(summary_rx);
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next),
+            reply,
+        });
+    assert!(
+        fleet
+            .members
+            .iter()
+            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(old.clone())))
+    );
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    fleet
+        .manager
+        .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next),
+            reply,
+        });
+    assert!(
+        fleet
+            .members
+            .iter()
+            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(next.clone())))
+    );
+    assert!(fleet.manager.replacement_readiness.is_none());
+    assert!(fleet.manager.summary_rx.is_some());
 }
