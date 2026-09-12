@@ -67,7 +67,7 @@ use crate::runtime_config_settlement::{
     OwnedRuntimeConfigRequestContext, OwnedRuntimeConfigResponseAttachment,
     RuntimeConfigFenceReason, RuntimeConfigSettlementWatchdog,
 };
-use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
+use rustbgpd_rib::{RibReadinessQuery, RibSummaryQuery, RibUpdate};
 use rustbgpd_rpki::CacheQueryHandle;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_telemetry::reason_labels::GrpcTlsHandshakeFailureReason;
@@ -1103,6 +1103,8 @@ pub struct ServeConfig {
     pub peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    /// Bounded RIB summary lane served during synchronous policy replacement.
+    pub rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
     /// Narrow synchronous reader for the latest authoritative VRP table.
     /// The closure clones the table Arc and releases its watch borrow before
     /// returning; `None` means no first authoritative snapshot has arrived.
@@ -1697,6 +1699,7 @@ async fn run_listener(
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
     let peer_mgr_operator_tx = config.peer_mgr_operator_tx;
     let rib_readiness_tx = config.rib_readiness_tx;
+    let rib_summary_tx = config.rib_summary_tx;
     let vrp_snapshot = config.vrp_snapshot;
     let rpki_cache_queries = config.rpki_cache_queries;
     let mrt_trigger_tx = config.mrt_trigger_tx;
@@ -1759,6 +1762,7 @@ async fn run_listener(
                 rib_tx,
                 rib_query_tx,
                 rib_readiness_tx,
+                rib_summary_tx,
                 vrp_snapshot.clone(),
                 rpki_cache_queries.clone(),
                 peer_mgr_tx,
@@ -1826,6 +1830,7 @@ async fn run_listener(
                 rib_tx,
                 rib_query_tx,
                 rib_readiness_tx,
+                rib_summary_tx,
                 vrp_snapshot,
                 rpki_cache_queries,
                 peer_mgr_tx,
@@ -1900,6 +1905,7 @@ async fn run_tcp_listener(
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
     vrp_snapshot: VrpSnapshotFn,
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -2055,6 +2061,7 @@ async fn run_tcp_listener(
             config_mutation_gate.clone(),
         )
         .with_operator_queries(peer_mgr_operator_tx.clone())
+        .with_rib_summary_queries(rib_summary_tx.clone())
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
@@ -2079,6 +2086,7 @@ async fn run_tcp_listener(
         )
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_operator_queries(peer_mgr_operator_tx.clone())
+        .with_rib_summary_queries(rib_summary_tx.clone())
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
@@ -2171,6 +2179,7 @@ async fn run_uds_listener(
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
     vrp_snapshot: VrpSnapshotFn,
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -2302,6 +2311,7 @@ async fn run_uds_listener(
             config_mutation_gate.clone(),
         )
         .with_operator_queries(peer_mgr_operator_tx.clone())
+        .with_rib_summary_queries(rib_summary_tx.clone())
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
@@ -2326,6 +2336,7 @@ async fn run_uds_listener(
         )
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_operator_queries(peer_mgr_operator_tx.clone())
+        .with_rib_summary_queries(rib_summary_tx.clone())
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));

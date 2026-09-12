@@ -17,11 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   committed export-policy transition that an operator read follows within
   ten seconds: the terminal commit poll's duration, the general queries and
   primary updates queued at commit, the wall-clock wait from the end of that
-  poll to the first general query dispatched, elapsed wall time inside
+  poll to the first general or summary query dispatched, elapsed wall time inside
   route-chunk, primary-update, and dirty-resync work in that span, and the
   unattributed remainder (including other actor work, idle time, and
   scheduling delays). This describes the RIB side before query execution,
-  not end-to-end operator latency; actor scheduling is unchanged.
+  not end-to-end operator latency. The historical event name is retained;
+  `query_lane` identifies the dispatch lane and `queued_summary_queries` adds
+  its queue depth at commit.
 
 - Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
   `bgp_rib_readiness_query_wait_seconds{seam}`. The first times route-chunk
@@ -143,6 +145,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   updates no longer require editing contract tests.
 
 ### Fixed
+
+- Export-policy counters and the RIB portion of neighbor status can be read
+  during synchronous export replacement, rollback, and dataset reevaluation.
+  A separate bounded summary lane serves values captured before the operation.
+  The daemon hands the executor to sibling tasks during this synchronous scope,
+  allowing the RPCs woken by those replies to run; general route queries and
+  mutations retain their fences. Reads return current
+  RIB values after completion. Existing RPC deadlines remain unchanged, and
+  peer-manager/session observations in the same response remain independent.
+  Projection capture must finish before this service begins; capture and
+  retirement timings are available in diagnostic builds.
+
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched

@@ -408,7 +408,7 @@ impl UpdateGroupRegistry {
         self.members.get(&peer)
     }
 
-    fn group_key(&self, id: usize) -> Option<&GroupKey> {
+    pub(super) fn group_key(&self, id: usize) -> Option<&GroupKey> {
         self.groups.get(id)
     }
 
@@ -1623,61 +1623,126 @@ impl RibManager {
         peers: &[IpAddr],
         reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     ) {
+        let result = self.with_replacement_summary_reads("reevaluate", |manager| {
+            manager.reevaluate_peer_export_policies_synchronously(peers)
+        });
+        let _ = reply.send(result);
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the export-only dataset staging, checkpointed retirement, and trailing distribution in one operation"
+    )]
+    fn reevaluate_peer_export_policies_synchronously(
+        &mut self,
+        peers: &[IpAddr],
+    ) -> Result<(), RibCommandError> {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         if let Some(peer) = peers
             .iter()
+            .inspect(|_| checkpoint())
             .find(|peer| !self.outbound_peers.contains_key(peer))
         {
-            let _ = reply.send(Err(RibCommandError::not_found(format!(
+            return Err(RibCommandError::not_found(format!(
                 "peer {peer} not registered for outbound updates"
-            ))));
-            return;
+            )));
         }
         let groups: HashSet<usize> = peers
             .iter()
+            .inspect(|_| checkpoint())
             .filter_map(|peer| self.grouped_member_of(*peer))
             .collect();
-        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
+        let mut targets: HashSet<IpAddr> =
+            peers.iter().inspect(|_| checkpoint()).copied().collect();
         for gid in &groups {
             if let Some(group) = self.group_ribs.get(gid) {
-                targets.extend(group.members.iter().copied());
+                targets.extend(group.members.iter().inspect(|_| checkpoint()).copied());
             }
         }
         for peer in targets {
+            checkpoint();
             self.mark_outbound_dirty(peer);
         }
         if !groups.is_empty() {
-            let mut prefixes: HashSet<Prefix> =
-                self.unicast_prefix_peers.prefixes.keys().copied().collect();
-            prefixes.extend(self.loc_rib.iter().map(|route| route.prefix));
-            let mut vpn_keys: HashSet<_> = self.loc_rib.iter_vpn().map(VpnRibRoute::key).collect();
+            let mut prefixes: HashSet<Prefix> = self
+                .unicast_prefix_peers
+                .prefixes
+                .keys()
+                .inspect(|_| checkpoint())
+                .copied()
+                .collect();
+            prefixes.extend(
+                self.loc_rib
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .map(|route| route.prefix),
+            );
+            let mut vpn_keys: HashSet<_> = self
+                .loc_rib
+                .iter_vpn()
+                .inspect(|_| checkpoint())
+                .map(VpnRibRoute::key)
+                .collect();
             for gid in &groups {
                 if let Some(group) = self.group_ribs.get(gid) {
-                    prefixes.extend(group.table.iter().map(|route| route.prefix));
-                    vpn_keys.extend(group.table.iter_vpn().map(VpnRibRoute::key));
+                    prefixes.extend(
+                        group
+                            .table
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .map(|route| route.prefix),
+                    );
+                    vpn_keys.extend(
+                        group
+                            .table
+                            .iter_vpn()
+                            .inspect(|_| checkpoint())
+                            .map(VpnRibRoute::key),
+                    );
                 }
             }
             self.record_deferred_unicast(&prefixes);
-            prefixes.retain(|prefix| !self.selection_deferred(prefix_family(prefix)));
+            prefixes.retain(|prefix| {
+                checkpoint();
+                !self.selection_deferred(prefix_family(prefix))
+            });
             self.record_deferred_vpn(&vpn_keys);
-            vpn_keys.retain(|key| !self.selection_deferred(key.afi_safi()));
-            let vpn_keys: HashSet<_> = vpn_keys.into_iter().map(|key| key.nlri_key).collect();
+            vpn_keys.retain(|key| {
+                checkpoint();
+                !self.selection_deferred(key.afi_safi())
+            });
+            let vpn_keys: HashSet<_> = vpn_keys
+                .into_iter()
+                .inspect(|_| checkpoint())
+                .map(|key| key.nlri_key)
+                .collect();
             let mut memo = super::distribution::ExportMemo::default();
             // Staging commits the tables and retains withdrawal residue for
             // dirty members; their resync below consumes that committed state.
             for gid in groups {
-                let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+                let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+                self.replacement_checkpoint_at("dataset_staging", true);
+                staged.retire_with(&mut |force| {
+                    super::replacement_readiness_checkpoint(&readiness, force);
+                });
+                self.replacement_checkpoint_at("dataset_staging", true);
                 if self
                     .group_ribs
                     .get(&gid)
                     .is_some_and(GroupRibOut::stages_vpn)
                 {
-                    let _ = self.stage_group_vpn_keys(gid, &vpn_keys);
+                    let mut staged = self.stage_group_vpn_keys(gid, &vpn_keys);
+                    staged.retire_with(&mut |force| {
+                        super::replacement_readiness_checkpoint(&readiness, force);
+                    });
                 }
             }
+            memo.retire_with(&mut || checkpoint());
             self.refresh_lane_gauge();
         }
         self.distribute_changes(&HashSet::new(), &HashSet::new());
-        let _ = reply.send(Ok(()));
+        Ok(())
     }
 
     /// Mark a peer's outbound channel dirty for the resync timer, and —
@@ -2150,47 +2215,9 @@ impl RibManager {
         primary: IpAddr,
         comparison: IpAddr,
     ) -> UpdateGroupPeerComparison {
-        let primary_runtime = self.update_groups.members.get(&primary);
-        let comparison_runtime = self.update_groups.members.get(&comparison);
-        let primary_membership = primary_runtime.map_or(
-            UpdateGroupComparisonMembership::Unknown,
-            GroupMembership::comparison_membership,
-        );
-        let comparison_membership = comparison_runtime.map_or(
-            UpdateGroupComparisonMembership::Unknown,
-            GroupMembership::comparison_membership,
-        );
-
-        let (verdict, differences) = match (primary_runtime, comparison_runtime) {
-            (None, _) | (_, None) => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
-            (Some(GroupMembership::Grouped(left)), Some(GroupMembership::Grouped(right))) => {
-                if left == right {
-                    (UpdateGroupComparisonVerdict::Shared, Vec::new())
-                } else {
-                    match (
-                        self.update_groups.group_key(*left),
-                        self.update_groups.group_key(*right),
-                    ) {
-                        (Some(left), Some(right)) => (
-                            UpdateGroupComparisonVerdict::Separate,
-                            grouped_differences(left, right),
-                        ),
-                        _ => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
-                    }
-                }
-            }
-            (Some(_), Some(_)) => (UpdateGroupComparisonVerdict::Private, Vec::new()),
-        };
-
-        UpdateGroupPeerComparison {
-            primary_update_group: primary_runtime
-                .map(GroupMembership::label)
-                .unwrap_or_default(),
-            verdict,
-            primary_membership,
-            comparison_membership,
-            differences,
-        }
+        compare_update_groups(&self.update_groups.members, primary, comparison, |group| {
+            self.update_groups.group_key(group)
+        })
     }
 
     /// Re-derive every update-group gauge from the membership map.
@@ -2471,3 +2498,50 @@ fn classify_effective_distribution_mode(
 
 #[cfg(test)]
 mod tests;
+
+/// Shared comparison logic for live state and the temporary replacement view.
+pub(super) fn compare_update_groups<'a>(
+    members: &HashMap<IpAddr, GroupMembership>,
+    primary: IpAddr,
+    comparison: IpAddr,
+    group_key: impl Fn(usize) -> Option<&'a GroupKey>,
+) -> UpdateGroupPeerComparison {
+    let primary_runtime = members.get(&primary);
+    let comparison_runtime = members.get(&comparison);
+    let primary_membership = primary_runtime.map_or(
+        UpdateGroupComparisonMembership::Unknown,
+        GroupMembership::comparison_membership,
+    );
+    let comparison_membership = comparison_runtime.map_or(
+        UpdateGroupComparisonMembership::Unknown,
+        GroupMembership::comparison_membership,
+    );
+
+    let (verdict, differences) = match (primary_runtime, comparison_runtime) {
+        (None, _) | (_, None) => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
+        (Some(GroupMembership::Grouped(left)), Some(GroupMembership::Grouped(right))) => {
+            if left == right {
+                (UpdateGroupComparisonVerdict::Shared, Vec::new())
+            } else {
+                match (group_key(*left), group_key(*right)) {
+                    (Some(left), Some(right)) => (
+                        UpdateGroupComparisonVerdict::Separate,
+                        grouped_differences(left, right),
+                    ),
+                    _ => (UpdateGroupComparisonVerdict::Unknown, Vec::new()),
+                }
+            }
+        }
+        (Some(_), Some(_)) => (UpdateGroupComparisonVerdict::Private, Vec::new()),
+    };
+
+    UpdateGroupPeerComparison {
+        primary_update_group: primary_runtime
+            .map(GroupMembership::label)
+            .unwrap_or_default(),
+        verdict,
+        primary_membership,
+        comparison_membership,
+        differences,
+    }
+}
