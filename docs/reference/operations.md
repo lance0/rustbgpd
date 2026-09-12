@@ -622,15 +622,67 @@ back, the peer manager serves session snapshots, import-statistics collections,
 and dataset status while it awaits enqueue or completion of the batched RIB
 restore. These are live reads: a failed session restore can leave different
 sessions on different policies, and peer-manager and RIB reads do not share
-a generation pin. The RIB's synchronous restore still fences general queries,
-so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
-there. Standalone policy transactions and a reload's later compensating replay
-keep the full fence. Readiness queries remain available at their existing
-transaction seams. A
-congested backend or a later transaction stage can still exhaust an operator
-read's deadline. [ADR-0132](../adr/0132-operator-read-path.md) proposes typed
-admission as the baseline and records the conditions for any later published
-summary design; it does not change read deadlines or readiness semantics.
+a generation pin.
+
+The extension described by [ADR-0132](../adr/0132-operator-read-path.md) is being
+integrated. Forward API policy transactions and policy-only publication
+compensation admit reads at safe waits. `TestPolicy` uses the operator lane
+for its live peer context; route pages retain their version fence without a
+shared generation pin across context and routes. Bounded operator service
+also runs between completed serial steps. Individual session acknowledgements
+remain fenced until corresponding manager bookkeeping is complete. SIGHUP
+compensation remains fenced after an earlier ambiguous restoration, such as
+session knobs restored before a failed RIB refresh leaves manager metadata
+unchanged. Successful earlier steps permit live reads during later policy and
+dataset restoration; compensation alone does not imply a full fence. During
+API publication compensation, chains restore before staged configuration;
+reads report the current values of each source. Honor-only SIGHUP changes to
+`honor_graceful_shutdown` and `honor_blackhole` use the same admission after
+each acknowledged import-chain update. Candidate classification keeps those
+setters outside policy/dataset generation unwind; hot-knob restoration keeps
+its existing fences.
+
+Forward preflight, cohort selection, clean-state retries, retained-route
+proofs and per-peer RIB export replacement admit bounded reads. Dataset settlement inherits its owner's admission
+through capacity and reply waits. Legacy dataset refresh retains its absolute
+five-second reply deadline; generation settlement retains its existing reply
+budget that excludes read servicing.
+
+For synchronous RIB policy replacement and export-only dataset reevaluation,
+the design captures numeric export statistics and neighbor RIB summaries once
+before mutation. Bounded checkpoints serve those frozen values while ordinary
+RIB queries and mutations stay fenced. The RIB uses one outer executor
+handoff on the daemon's multi-thread runtime so independent RPC tasks can
+consume their replies. This is a temporary observation, not an atomic fleet
+snapshot or persistent cache. Capture cost and session collection can still
+exhaust a read deadline.
+
+The shared RIB backlog drain processes one existing route chunk or primary
+update, serves bounded reads where the transaction permits, then yields.
+Timer, destination-prestage and deferred-registration callers preserve
+route-before-EoR ordering while allowing reads between units. This removes
+a full-backlog drain fence; individual unit cost and sustained input can
+still delay a response or destination preparation.
+
+gNMI neighbor snapshots use the same live operator lane on listeners and
+dial-out, retaining their two-second budget and snapshot failure behavior.
+Periodic BMP sampling overlaps its independent session and RIB input waits;
+each retains its 100 ms bound, including RIB admission and reply. Missing
+inputs are omitted and output remains nonblocking, with existing drop counts.
+
+Readiness retains its live actor checks and existing transaction seams.
+Operator deadlines, complete-result requirements, and the clean transition's
+atomic commit remain unchanged. The [paired native rollback receipt](../perf/artifacts/rib-summary-rollback-2026-09-12/README.md)
+records successful baseline and candidate reads, including candidate calls
+inside restore. It establishes neither a baseline deadline failure nor final
+release qualification; the final phase sweep and qualifying soak remain required.
+
+The serial work still scales with fleet size: 1,000 individual 100 ms state
+probes have a theoretical 100-second ceiling, and 1,000 individual 500 ms
+hot-apply acknowledgements have a 500-second ceiling per changed direction,
+before outer ownership limits. These are component bounds, not measured
+healthy-fleet timings; read service between completed steps avoids one
+uninterrupted fleet-sized fence.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves

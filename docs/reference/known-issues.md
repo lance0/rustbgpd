@@ -26,15 +26,19 @@ resolved.
   export counters, import counters, and dataset reads. Fleet calls such as
   `rbgp policy stats --direction both` can return `DEADLINE_EXCEEDED` during
   reload activity, with no partial rows. Check reload settlement before
-  retrying the read. Forward cohort admission and peer-manager admission
-  during its rollback aggregate reduce specific waits. The RIB's synchronous
-  restore still fences general queries, other transaction waits remain
-  fenced, and import collection still depends on session tasks. These
-  improvements do not establish reload-wide read availability; this issue
-  remains open. Retrying an operator command does not turn a failed
-  management-soak sample into a pass. See the
-  [policy stats contract](api.md#policyservice) and the proposed
-  [operator-read design](../adr/0132-operator-read-path.md).
+  retrying the read. Typed admission reduces specific actor waits; the
+  [operator-read design](../adr/0132-operator-read-path.md) adds temporary RIB
+  summaries for synchronous policy replacement and dataset reevaluation,
+  plus read service between queued RIB work units. Runtime integration and
+  final qualification are still in progress. General RIB queries
+  retain their consistency fences, incomplete restoration can fence live
+  peer-manager reads, and import collection still depends on session tasks.
+  The paired native rollback cell passes on both baseline and candidate; it
+  does not establish a general deadline guarantee. This issue stays open
+  until the final phase coverage and qualifying soak pass on the final runtime
+  candidate. Retrying an operator command does not
+  turn a failed management-soak sample into a pass. See the
+  [policy stats contract](api.md#policyservice).
 
 ## Resolved
 
