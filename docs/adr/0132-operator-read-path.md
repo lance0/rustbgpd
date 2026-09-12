@@ -3,10 +3,9 @@
 **Status:** Proposed
 **Date:** 2026-09-12
 
-This record is a draft for the maintainer to accept, amend, or reject. The
-option analysis and the surface classification are verified against the
-source tree at the date above; the recommendation at the end is the
-drafter's, pending the maintainer's decision.
+Status is Proposed: the option analysis and the surface classification are
+verified against the source tree at the date above; the decision below is
+open until this record is accepted.
 
 ## Context
 
@@ -180,7 +179,7 @@ the responsiveness of bgpctl. This is one of the hot topics that I try to
 solve in the near feature." Session-state reads are answered by the session
 engine independently of RDE load; RIB reads still cross into the RDE. Later
 bgpd releases added explicit flow-control messages between the engines;
-that is not verified against source for this draft and is not relied on.
+that is not verified against source and not relied on.
 
 **BIRD 3.x** keeps the control plane on the main thread and moves protocol
 work to worker thread groups. The user's guide: "There is one main thread,
@@ -365,8 +364,8 @@ Classification:
 Counts over the rows above, taking `GetPolicyStats` as its three stages and
 each joined surface once: **12 snapshot-able, 4 live, 5 mixed**, one
 admission-only row, and one row left unclassified. The
-`ExplainAdvertisedRoute` row is the one the drafter could not classify with
-confidence: the export dry run is pure given its
+`ExplainAdvertisedRoute` row is the one that cannot be classified from the
+types alone: the export dry run is pure given its
 inputs ([ADR-0103](0103-rpol-execution-model.md)), so it is snapshot-able
 if the generation carries the installed chain, and live if it does not.
 `PlanConfigTransaction` is listed as snapshot-able but does real resolution
@@ -416,12 +415,12 @@ Each option implies a direction:
 - **D** inherits C's direction.
 - **E** reports whatever the RIB engine has, mixed, from another process.
 
-Which direction is correct is a product decision this record asks the
-maintainer to make explicitly rather than inherit from an implementation.
+Which direction is correct is a product decision to record explicitly
+rather than inherit from an implementation.
 
 ## The cost of C
 
-Not measured for this draft — no build was run. Stated from the types, at
+Not measured; stated from the types, at
 the flagship shape of 1,000 route-server clients × 400 routes each (400,000
 unique prefixes), the shape of the retained
 [1,000-peer route-server receipt](../perf/route-server-1000-2026-07.md) and
@@ -501,8 +500,6 @@ across every reload phase, including rollback.
 
 ## Decision (proposed)
 
-The drafter's recommendation, pending the maintainer's decision:
-
 **B now; C for the named summary surfaces once the matrix and the two
 in-preparation fixes have landed.**
 
@@ -520,16 +517,15 @@ snapshot-able and the cost section marks cheap: the peer rows
 `ListNeighbors`/`GetNeighborState` read from the peer manager, the export
 half of `GetPolicyStats`, the RIB per-peer snapshot behind `rbgp neighbor`,
 and the readiness `ListPeers`. Those are the four surfaces the four
-instances were about. C is **not** recommended for the paged route
-listings, the explain surfaces, or anything that reaches a session task,
-and it is not recommended before the semantics question is decided,
-because C is the option that changes what an operator sees during a
-transition. D is deferred until a joined surface measurably needs it. E is
-declined.
+instances were about. C is **not** adopted for the paged route listings,
+the explain surfaces, or anything that reaches a session task, and it is
+not adopted before the semantics question is decided, because C is the
+option that changes what an operator sees during a transition. D is
+deferred until a joined surface measurably needs it. E is declined.
 
-If the maintainer prefers A, the classification table and the constants
-table above are still the reference for the next instance. If the
-maintainer prefers C outright, the cost section says which C.
+If A is chosen instead, the classification and constants tables remain the
+reference for the next instance. If C is chosen outright, the cost section
+says which C.
 
 ## Consequences
 
