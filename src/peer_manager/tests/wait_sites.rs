@@ -24,8 +24,8 @@ use rustbgpd_transport::ImportPolicyTermHits;
 /// before a read encounters even a shorter individual fence.
 const READER_DEADLINE: Duration = Duration::from_secs(2);
 
-/// Reads issued while the site is parked. `Fenced` rows probe for `window`
-/// (below the site's own bound) so the release still lands inside the wait.
+/// Reads issued while the site is parked. Both contracts probe for `window`
+/// (below the site's own bound) so no later wait can satisfy the proof.
 #[derive(Clone, Copy, Debug)]
 enum Contract {
     Served,
@@ -37,6 +37,8 @@ enum Contract {
 #[derive(Clone, Copy)]
 enum RibHold {
     None,
+    /// Prefill the only slot and hold the receiver before the owner starts.
+    Capacity,
     /// Hold the reply of the first matching command until release.
     Reply(fn(&RibUpdate) -> bool),
     /// Answer the first `n` matching commands, then hold the next one's reply.
@@ -84,16 +86,28 @@ enum Drive {
     Rfc8212Transition {
         established: bool,
     },
-    /// The same cohort through `apply_resolved_policy_snapshot`, the entry
-    /// `PeerManagerCommand::ApplyResolvedPolicySnapshot` and the config
-    /// transaction rollback use: not the reload owner, admission off.
-    StandalonePolicySnapshot,
+    /// Forward live-impact transaction and catalog-mutation entries.
+    ApiPolicyImpact,
+    CatalogPolicyRefresh,
+    HonorGracefulShutdown,
+    HonorBlackhole,
+    /// API publication-failure compensation replays captured prior policies
+    /// while admitted reads report the sources' current values.
+    ApiPublicationCompensation,
     /// A reload generation whose session replace is rejected after its
     /// policy cohort committed, so the unwind replays the prior chains
-    /// through `apply_resolved_policy_snapshot` with admission off.
+    /// with reads admitted after earlier restoration steps succeeded.
     CompensatingReplay,
     ValidationRefresh,
     DatasetRefresh,
+    DatasetGeneration {
+        compensate: bool,
+    },
+    RetainedStaleCapacity,
+    ExportReplacementCapacity,
+    DatasetExportCapacity {
+        failed_restore: bool,
+    },
     MaxPrefixRestart,
     OutboundRefresh,
     HotExportKnobs,
@@ -260,9 +274,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HALF_QUERY,
-        contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::ImportApplied,
     },
     WaitSite {
@@ -274,12 +286,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "read-only RIB proof on the primary lane under the shared \
-                     RIB_BATCH_REPLY_TIMEOUT walk budget (2 min): nothing is mutated yet, but \
-                     only the forward reload's prestage and cohort waits admit reads, so this \
-                     fence can outlast the 2 s reader deadline when the RIB lane is backed up",
-        },
+        contract: Contract::Served,
         completion: Completion::ImportApplied,
     },
     WaitSite {
@@ -291,9 +298,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HALF_QUERY,
-        contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
@@ -322,9 +327,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HALF_QUERY,
-        contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
@@ -336,12 +339,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "the retry is bounded by what remains of CLEAN_STATE_QUERY_WINDOW, one \
-                     absolute 2 s window shared by the cohort, so it never exceeds the 2 s \
-                     reader deadline; the probe gathers the acknowledgement evidence a \
-                     snapshot would otherwise misreport",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
@@ -387,10 +385,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HALF_QUERY,
-        contract: Contract::Fenced {
-            reason: "post-commit refresh dispatch decides each member's Route Refresh debt; \
-                     bounded by PEER_QUERY_TIMEOUT (100 ms), below the 2 s reader deadline",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     WaitSite {
@@ -405,34 +400,49 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
-    // Non-owner entry through an admitting site. Expected to be decided
-    // deliberately: the fence is the current default for every transaction
-    // that is not the reload owner, and whether these entries should admit
-    // reads is decided separately.
+    // Forward API entries share the SIGHUP owner's read admission.
     WaitSite {
         site: "policy.rs::await_export_policy_cohort_rib_reply",
         awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
-        drive: Drive::StandalonePolicySnapshot,
+        drive: Drive::ApiPolicyImpact,
+        rib: RibHold::Reply(is_cohort_replace),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("apply_policy_impact_snapshot forward API transaction"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::await_export_policy_cohort_rib_reply",
+        awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
+        drive: Drive::CatalogPolicyRefresh,
+        rib: RibHold::Reply(is_cohort_replace),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("apply_policy_change_owned forward catalog refresh"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    // This entry restores captured priors after API publication failed.
+    // It is not the forward API transaction entry.
+    WaitSite {
+        site: "policy.rs::await_export_policy_cohort_rib_reply",
+        awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
+        drive: Drive::ApiPublicationCompensation,
         rib: RibHold::Reply(is_cohort_replace),
         session: answer_all,
         pre_read: false,
         additional_entry: Some(
-            "PeerManagerCommand::ApplyResolvedPolicySnapshot (apply_resolved_policy_snapshot, \
-             admission off)",
+            "PeerManagerCommand::ApplyResolvedPolicySnapshot publication-failure compensation",
         ),
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "current default for a transaction that is not the reload owner: \
-                     apply_resolved_policy_snapshot enters the cohort with admission off, so \
-                     the same wait the SIGHUP owner serves stays fenced here, bounded by the \
-                     RIB's transition ownership; whether standalone policy transactions should \
-                     admit reads is decided separately",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
-    // Non-owner entry through an admitting site, from the reload's own
-    // compensating replay. Expected to be decided deliberately alongside
-    // the standalone row above.
+    // Clean generation replay admits live reads. The failed hot-knob restore
+    // counterexample in reload_generation keeps the owner's full fence.
     WaitSite {
         site: "policy.rs::try_apply_export_only_policy_cohort",
         awaits: "RibUpdate::PrepareExportPolicyDestination reply (destination prestage)",
@@ -442,15 +452,10 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: Some(
             "apply_reload_generation unwind (compensating replay of the prior generation's \
-             chains after a rejected session replace, admission off)",
+             chains after a rejected session replace, no earlier restoration failure)",
         ),
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "a served read would observe the committed generation about to be \
-                     reverted: the unwind replays the prior chains through \
-                     apply_resolved_policy_snapshot with admission off, so the prestage the \
-                     forward owner serves stays fenced here; decided separately",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportRestored,
     },
     WaitSite {
@@ -492,13 +497,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "per-peer authoritative RIB replacement under the shared \
-                     RIB_BATCH_REPLY_TIMEOUT walk budget (2 min): this peer's session already \
-                     runs the new chain while the RIB still evaluates the prior one, and the \
-                     walk mutates peer by peer with no admitting wait between steps; on the \
-                     fallback path this fence can outlast the 2 s reader deadline",
-        },
+        contract: Contract::Served,
         completion: Completion::ExportApplied,
     },
     // The rollback owner admits live peer-manager reads at both waits. The
@@ -576,26 +575,19 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HALF_QUERY,
-        contract: Contract::Fenced {
-            reason: QUERY_PROBE_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::Finished,
     },
     WaitSite {
         site: "policy.rs::reevaluate_dataset_exports",
         awaits: "RibUpdate::ReevaluatePeerExportPolicies reply",
-        drive: Drive::DatasetRefresh,
+        drive: Drive::DatasetGeneration { compensate: false },
         rib: RibHold::Reply(is_reevaluate),
         session: answer_all,
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: "one batched RIB re-evaluation of every export chain referencing the \
-                     swapped dataset; the referencing sessions were just refreshed and their \
-                     export debt is undecided until the RIB answers; bounded by RIB_REPLY_TIMEOUT \
-                     attention time (5 s), which can outlast the 2 s reader deadline",
-        },
+        contract: Contract::Served,
         completion: Completion::Finished,
     },
     WaitSite {
@@ -614,6 +606,120 @@ const WAIT_SITES: &[WaitSite] = &[
                      otherwise show a disabled peer whose restart is already committed",
         },
         completion: Completion::PeerEnabled,
+    },
+    WaitSite {
+        site: "policy.rs::reevaluate_dataset_exports",
+        awaits: "legacy dataset ReevaluatePeerExportPolicies reply",
+        drive: Drive::DatasetRefresh,
+        rib: RibHold::Reply(is_reevaluate),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("legacy refresh_dataset_dependents export reevaluation"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::apply_runtime_policies_for_peer_key",
+        awaits: "post-ACK authoritative state query after matching bookkeeping",
+        drive: Drive::ForwardWalk { clean: false },
+        rib: RibHold::None,
+        session: hold_first_state,
+        pre_read: false,
+        additional_entry: None,
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::ExportApplied,
+    },
+    WaitSite {
+        site: "policy.rs::apply_runtime_policies_for_peer_key",
+        awaits: "honor_graceful_shutdown fan-out post-ACK state query",
+        drive: Drive::HonorGracefulShutdown,
+        rib: RibHold::None,
+        session: hold_first_state,
+        pre_read: false,
+        additional_entry: Some("SIGHUP honor_graceful_shutdown fan-out"),
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::apply_runtime_policies_for_peer_key",
+        awaits: "honor_blackhole fan-out post-ACK state query",
+        drive: Drive::HonorBlackhole,
+        rib: RibHold::None,
+        session: hold_first_state,
+        pre_read: false,
+        additional_entry: Some("SIGHUP honor_blackhole fan-out"),
+        window: HALF_QUERY,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::reevaluate_dataset_exports",
+        awaits: "compensating dataset generation ReevaluatePeerExportPolicies reply",
+        drive: Drive::DatasetGeneration { compensate: true },
+        rib: RibHold::LaterReply(is_reevaluate, 1),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("dataset generation restoration after rejected session replacement"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::reevaluate_dataset_exports",
+        awaits: "full RIB channel capacity before dispatch",
+        drive: Drive::DatasetExportCapacity {
+            failed_restore: false,
+        },
+        rib: RibHold::Capacity,
+        session: answer_all,
+        pre_read: false,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::query_peer_retained_stale",
+        awaits: "full RIB channel capacity before dispatch",
+        drive: Drive::RetainedStaleCapacity,
+        rib: RibHold::Capacity,
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("full RIB channel before retained-stale proof"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::replace_peer_export_policy_in_rib",
+        awaits: "full RIB channel capacity before dispatch",
+        drive: Drive::ExportReplacementCapacity,
+        rib: RibHold::Capacity,
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("full RIB channel before authoritative replacement"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "policy.rs::reevaluate_dataset_exports",
+        awaits: "dataset export capacity after an earlier failed restoration",
+        drive: Drive::DatasetExportCapacity {
+            failed_restore: true,
+        },
+        rib: RibHold::Capacity,
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("failed prior restoration keeps the shared capacity wait fenced"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "earlier failed restoration can leave session and manager metadata inconsistent",
+        },
+        completion: Completion::Finished,
     },
     WaitSite {
         site: "lifecycle.rs::refresh_peer_outbound_in_rib",
@@ -752,6 +858,9 @@ fn spawn_rib(
     cohort_reply: CohortReply,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        if matches!(hold, RibHold::Capacity) {
+            gate.hold().await;
+        }
         let mut armed = true;
         let mut skip = match hold {
             RibHold::LaterReply(_, skip) => skip,
@@ -759,7 +868,7 @@ fn spawn_rib(
         };
         while let Some(update) = rib_rx.recv().await {
             let matcher = match hold {
-                RibHold::None => None,
+                RibHold::None | RibHold::Capacity => None,
                 RibHold::Reply(matcher)
                 | RibHold::LaterReply(matcher, _)
                 | RibHold::Receiver(matcher)
@@ -791,7 +900,7 @@ fn spawn_rib(
                     answer_rib(update, cohort_reply);
                     break;
                 }
-                RibHold::None => unreachable!("matched without a matcher"),
+                RibHold::None | RibHold::Capacity => unreachable!("matched without a matcher"),
             }
         }
     })
@@ -958,6 +1067,45 @@ remote_asn = {replaced_asn}
     ))
 }
 
+fn dataset_generation_config(dir: &std::path::Path) -> Config {
+    let rpol = dir.join("members.rpol");
+    let data = dir.join("customers.list");
+    std::fs::write(&rpol, "dataset asn-set customers\npolicy members-out { term all { if route.origin-as in customers { accept } } }").unwrap();
+    std::fs::write(&data, "64500\n").unwrap();
+    let toml = format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = [{rpol:?}]
+[policy.datasets.customers]
+path = {data:?}
+[[neighbors]]
+address = "10.39.0.1"
+remote_asn = 65002
+import_policy_chain = ["members-out"]
+export_policy_chain = ["members-out"]
+[[neighbors]]
+address = "10.39.0.2"
+remote_asn = 65003
+import_policy_chain = ["members-out"]
+export_policy_chain = ["members-out"]
+[[neighbors]]
+address = "10.39.0.3"
+remote_asn = 65004
+"#,
+        rpol = rpol.to_str().unwrap(),
+        data = data.to_str().unwrap()
+    );
+    let path = dir.join("rustbgpd.toml");
+    std::fs::write(&path, tier_authorized_uds_test_config(&toml)).unwrap();
+    Config::load_with_diagnostics(path.to_str().unwrap()).unwrap()
+}
+
 fn replay_fixture(prior: &Config) -> Config {
     let dir = prior
         .policy
@@ -978,6 +1126,10 @@ fn target(address: IpAddr, import: bool, export: bool) -> ResolvedPeerPolicy {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the matrix drives the real policy and dataset generation entries, including compensation"
+)]
 async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> Result<(), String> {
     let (targets, clean) = match drive {
         Drive::ForwardCohort { import_delta, .. } => (
@@ -989,16 +1141,23 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         ),
         Drive::ForwardWalk { clean } => (vec![target(peers[0], false, true)], clean),
         Drive::Rfc8212Transition { .. } => (vec![target(peers[0], true, false)], false),
-        Drive::StandalonePolicySnapshot => (
+        Drive::ApiPolicyImpact | Drive::ApiPublicationCompensation => (
             peers
                 .iter()
                 .map(|&peer| target(peer, false, true))
                 .collect(),
             false,
         ),
-        Drive::CompensatingReplay
+        Drive::CatalogPolicyRefresh
+        | Drive::HonorGracefulShutdown
+        | Drive::HonorBlackhole
+        | Drive::CompensatingReplay
         | Drive::ValidationRefresh
         | Drive::DatasetRefresh
+        | Drive::DatasetGeneration { .. }
+        | Drive::RetainedStaleCapacity
+        | Drive::ExportReplacementCapacity
+        | Drive::DatasetExportCapacity { .. }
         | Drive::OutboundRefresh
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
@@ -1017,10 +1176,52 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .await
             .map(drop)
             .map_err(|failure| failure.message),
-        Drive::StandalonePolicySnapshot => manager
-            .apply_resolved_policy_snapshot(targets)
+        Drive::ApiPolicyImpact => manager
+            .apply_policy_impact_snapshot(targets, Vec::new())
             .await
             .map(drop),
+        Drive::HonorGracefulShutdown => manager.set_honor_graceful_shutdown(true).await,
+        Drive::HonorBlackhole => manager.set_honor_blackhole(true).await,
+        Drive::CatalogPolicyRefresh => {
+            use rustbgpd_api::peer_types::{
+                ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+            };
+
+            manager.current_config.neighbors = peers
+                .into_iter()
+                .map(|peer| {
+                    let mut neighbor = config_neighbor(peer, 65002);
+                    neighbor.export_policy_chain = vec!["edge-export".to_string()];
+                    neighbor
+                })
+                .collect();
+            match manager
+                .apply_policy_change_owned(
+                    ConfigEvent::SetPolicy {
+                        name: "edge-export".to_string(),
+                        definition: NamedPolicyDefinition {
+                            default_action: "deny".to_string(),
+                            statements: Vec::new(),
+                        },
+                        ack: None,
+                    },
+                    None,
+                )
+                .await
+            {
+                OwnedCatalogMutationOutcome::Success => Ok(()),
+                outcome => Err(format!("catalog mutation failed: {outcome:?}")),
+            }
+        }
+        Drive::ApiPublicationCompensation => manager
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
+            .await
+            .map(drop)
+            .map_err(|failure| failure.message),
         Drive::CompensatingReplay => {
             let candidate = replay_fixture(&manager.current_config);
             let actions = plan_reload_peer_actions(&manager.current_config, &candidate)
@@ -1049,6 +1250,45 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
                 .refresh_dataset_dependents(&["customers".to_string()], &[])
                 .await
         }
+        Drive::DatasetGeneration { compensate } => {
+            let dir = std::path::Path::new(&manager.current_config.policy.rpol_files[0])
+                .parent()
+                .unwrap();
+            std::fs::write(dir.join("customers.list"), "64500\n64999\n").unwrap();
+            let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+                dir.join("rustbgpd.toml").to_str().unwrap(),
+                &manager.current_config.policy.dataset_bindings,
+            )
+            .unwrap();
+            if compensate {
+                candidate.neighbors[2].remote_asn = 65014;
+            }
+            let staged =
+                candidate.prepare_staged_datasets(&manager.current_config.policy.dataset_bindings);
+            let prepared = staged
+                .prepare_generation(&manager.current_config, &candidate)
+                .unwrap();
+            let actions = plan_reload_peer_actions(&manager.current_config, &candidate).unwrap();
+            let outcome =
+                Box::pin(manager.apply_reload_generation(candidate, actions, prepared)).await;
+            assert!(
+                if compensate {
+                    matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_))
+                } else {
+                    matches!(outcome, ReloadGenerationOutcome::Applied(_))
+                },
+                "{outcome:?}"
+            );
+            Ok(())
+        }
+        Drive::RetainedStaleCapacity => manager.query_peer_retained_stale(
+            peers[0], None, OperatorReadAdmission::Served).await.map(drop).map_err(|e| e.to_string()),
+        Drive::ExportReplacementCapacity => manager.replace_peer_export_policy_in_rib(
+            peers[0], Some(deny_policy_chain()), None, OperatorReadAdmission::Served).await.map_err(|e| e.to_string()),
+        Drive::DatasetExportCapacity { failed_restore } => manager.reevaluate_dataset_exports(
+            peers.to_vec(), false, if failed_restore { OperatorReadAdmission::Fenced {
+                reason: "an earlier failed restoration retains its fence while awaiting capacity",
+            }} else { OperatorReadAdmission::Served }, false).await.map_err(|e| e.to_string()),
         Drive::MaxPrefixRestart => {
             manager.handle_due_max_prefix_restarts().await;
             Ok(())
@@ -1118,15 +1358,23 @@ async fn run(row: &WaitSite) {
         Drive::ForwardCohort { cohort_reply, .. } => cohort_reply,
         _ => CohortReply::Committed,
     };
-    let rib_capacity = if matches!(row.rib, RibHold::Receiver(_)) {
+    let rib_capacity = if matches!(row.rib, RibHold::Receiver(_) | RibHold::Capacity) {
         1
     } else {
         16
     };
     let (rib_tx, rib_rx) = mpsc::channel(rib_capacity);
     let rib = spawn_rib(rib_rx, gate.clone(), row.rib, cohort_reply);
-    let (_command_tx, command_rx) = mpsc::channel(16);
+    if matches!(row.rib, RibHold::Capacity) {
+        let (reply, _response) = oneshot::channel();
+        rib_tx
+            .try_send(RibUpdate::QueryPeerRetainedStale { peer: first, reply })
+            .unwrap();
+        assert_eq!(rib_tx.capacity(), 0);
+    }
+    let (command_tx, command_rx) = mpsc::channel(16);
     let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
     let mut manager = PeerManager::new(
         command_rx,
         65001,
@@ -1137,7 +1385,8 @@ async fn run(row: &WaitSite) {
         rib_tx,
         None,
     )
-    .with_operator_queries(operator_rx);
+    .with_operator_queries(operator_rx)
+    .with_readiness_queries(readiness_rx);
 
     let first_established = !matches!(row.drive, Drive::Rfc8212Transition { established: false });
     let parked = matches!(row.drive, Drive::MaxPrefixRestart);
@@ -1159,6 +1408,29 @@ async fn run(row: &WaitSite) {
             let (handle, _) = spawn_session(replaced, true, gate.clone(), answer_all, false);
             insert_test_managed_peer_with_asn(&mut manager, replaced, 65004, handle, false);
             manager.inject_reconfigure_failures.insert(key(replaced), 0);
+            Some(dir)
+        }
+        Drive::DatasetGeneration { compensate } => {
+            let dir = tempfile::tempdir().unwrap();
+            manager.current_config = dataset_generation_config(dir.path());
+            for peer in [first, second] {
+                let neighbor = manager
+                    .current_config
+                    .neighbors
+                    .iter()
+                    .find(|n| n.address == peer.to_string())
+                    .unwrap();
+                let resolved = manager.current_config.resolve_neighbor(neighbor).unwrap();
+                let entry = manager.peers.get_mut(&key(peer)).unwrap();
+                entry.import_policy = resolved.import_policy;
+                entry.export_policy = resolved.export_policy;
+            }
+            let third = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 3));
+            let (handle, _) = spawn_session(third, true, gate.clone(), answer_all, false);
+            insert_test_managed_peer_with_asn(&mut manager, third, 65004, handle, false);
+            if compensate {
+                manager.inject_reconfigure_failures.insert(key(third), 0);
+            }
             Some(dir)
         }
         _ => None,
@@ -1206,12 +1478,20 @@ async fn run(row: &WaitSite) {
         }
         Drive::ForwardCohort { .. }
         | Drive::ForwardWalk { .. }
-        | Drive::StandalonePolicySnapshot
+        | Drive::ApiPolicyImpact
+        | Drive::CatalogPolicyRefresh
+        | Drive::HonorGracefulShutdown
+        | Drive::HonorBlackhole
+        | Drive::ApiPublicationCompensation
+        | Drive::CompensatingReplay
+        | Drive::DatasetGeneration { .. }
+        | Drive::RetainedStaleCapacity
+        | Drive::ExportReplacementCapacity
+        | Drive::DatasetExportCapacity { .. }
         | Drive::OutboundRefresh
         | Drive::HotExportKnobs
         | Drive::GracefulShutdown
-        | Drive::OutboundReplay
-        | Drive::CompensatingReplay => {}
+        | Drive::OutboundReplay => {}
     }
 
     let peers = [first, second];
@@ -1244,9 +1524,22 @@ async fn run(row: &WaitSite) {
                 row.awaits
             )
         });
+    // Capacity rows call the exact helper directly; no earlier admitted
+    // probe can satisfy the reads intended for its reserve wait.
     for _ in 0..3 {
         tokio::task::yield_now().await;
     }
+    let (mutation_reply, mut mutation_response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::SyncExplainConfig {
+            enabled: false,
+            cache_size: 17,
+            reject_retention_enabled: true,
+            reject_retention_capacity: 1024,
+            reply: mutation_reply,
+        })
+        .await
+        .unwrap();
     // Kept alive until the row completes: dropping the receiver cancels the
     // admitted collector and the wait resumes.
     let mut admitted = None;
@@ -1256,11 +1549,26 @@ async fn run(row: &WaitSite) {
             tokio::task::yield_now().await;
         }
     }
+    let read_deadline = tokio::time::Instant::now() + row.window;
     let mut infos = list_peers(&operator_tx).await;
     let mut rows = term_hits(&operator_tx).await;
     match row.contract {
         Contract::Served => {
-            let infos = tokio::time::timeout(HELD_FOREVER, &mut infos)
+            if matches!(
+                row.drive,
+                Drive::HonorGracefulShutdown | Drive::HonorBlackhole
+            ) {
+                let (reply, response) = oneshot::channel();
+                readiness_tx
+                    .send(PeerManagerReadinessQuery::Ping { reply })
+                    .await
+                    .unwrap();
+                tokio::time::timeout_at(read_deadline, response)
+                    .await
+                    .expect("readiness is served during the held honor fan-out")
+                    .unwrap();
+            }
+            let infos = tokio::time::timeout_at(read_deadline, &mut infos)
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
@@ -1269,8 +1577,16 @@ async fn run(row: &WaitSite) {
                     )
                 })
                 .unwrap();
-            assert_eq!(infos.len(), 2, "{site}");
-            let rows = tokio::time::timeout(HELD_FOREVER, &mut rows)
+            let expected = if matches!(
+                row.drive,
+                Drive::DatasetGeneration { .. } | Drive::CompensatingReplay
+            ) {
+                3
+            } else {
+                2
+            };
+            assert_eq!(infos.len(), expected, "{site}");
+            let rows = tokio::time::timeout_at(read_deadline, &mut rows)
                 .await
                 .unwrap_or_else(|_| {
                     panic!(
@@ -1280,7 +1596,7 @@ async fn run(row: &WaitSite) {
                 })
                 .unwrap();
             assert!(
-                matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 2),
+                matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == expected),
                 "{site}: {rows:?}"
             );
         }
@@ -1306,6 +1622,13 @@ async fn run(row: &WaitSite) {
         row.awaits
     );
 
+    assert!(
+        matches!(
+            mutation_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "{site}: queued mutation must remain behind its owner"
+    );
     gate.release();
     let (mut manager, result) = tokio::time::timeout(Duration::from_mins(5), transaction)
         .await
@@ -1327,7 +1650,11 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
             assert!(result.is_ok(), "{site}: {result:?}");
             assert_eq!(
                 first_peer.export_policy,
-                Some(deny_policy_chain()),
+                Some(if matches!(row.drive, Drive::CatalogPolicyRefresh) {
+                    named_deny_policy_chain(&[Some("edge-export")])
+                } else {
+                    deny_policy_chain()
+                }),
                 "{site}"
             );
         }
@@ -1436,4 +1763,435 @@ fn wait_site_table_covers_every_call_site() {
          file::enclosing_fn (left: call sites in the source, right: table rows); add a row \
          stating whether operator reads are served or fenced at the new site, and why"
     );
+}
+
+/// Each session is healthy within its unchanged command/probe budget, but
+/// their serial walk exceeds an operator RPC deadline. Probe the real owner
+/// before the first acknowledgement, then require a complete read before
+/// the walk ends and keep an ordinary mutation queued throughout.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one receipt keeps healthy serial sessions, held acknowledgement, read completion, and owner settlement together"
+)]
+async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
+    let cohort = matches!(drive_kind, Drive::ForwardCohort { .. });
+    let honor = matches!(
+        drive_kind,
+        Drive::HonorGracefulShutdown | Drive::HonorBlackhole
+    );
+    let count = if preflight { 32 } else { 8 };
+    let gate = Gate::new();
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let rib = spawn_rib(rib_rx, gate.clone(), RibHold::None, CohortReply::Committed);
+    let (command_tx, command_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_operator_queries(operator_rx);
+    let mut targets = Vec::new();
+    let installs = Arc::new(AtomicUsize::new(0));
+    for index in 0..count {
+        let address = IpAddr::V4(Ipv4Addr::new(10, 39, 1, u8::try_from(index + 1).unwrap()));
+        let (commands, mut receiver) = mpsc::channel::<PeerCommand>(16);
+        let started = gate.held.clone();
+        let installs = installs.clone();
+        let task = tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    PeerCommand::Shutdown => break,
+                    command @ PeerCommand::QueryState { .. } if preflight => {
+                        started.notify_one();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(80)).await;
+                            answer_session(command, address, true, false);
+                        });
+                    }
+                    command @ (PeerCommand::UpdateImportPolicy { .. }
+                    | PeerCommand::UpdateExportPolicy { .. }) => {
+                        started.notify_one();
+                        if !preflight {
+                            tokio::time::sleep(Duration::from_millis(400)).await;
+                        }
+                        installs.fetch_add(1, Ordering::SeqCst);
+                        answer_session(command, address, true, false);
+                    }
+                    command => answer_session(command, address, true, false),
+                }
+            }
+            Ok(())
+        });
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            PeerHandle::from_parts(commands, task),
+            false,
+        );
+        if !preflight && !honor {
+            manager.current_config.global.ebgp_requires_policy = Some(true);
+            let entry = manager.peers.get_mut(&key(address)).unwrap();
+            entry.rfc8212_external = true;
+            entry.export_policy = Some(crate::config::reserved_rfc8212_deny_chain(
+                crate::config::RFC8212_MISSING_EXPORT_POLICY,
+            ));
+        }
+        if preflight && !cohort {
+            manager.peers.get_mut(&key(address)).unwrap().import_policy =
+                Some(crate::config::reserved_rfc8212_deny_chain(
+                    crate::config::RFC8212_MISSING_IMPORT_POLICY,
+                ));
+        }
+        targets.push(ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: (preflight && !cohort).then(deny_policy_chain),
+            export_policy: (!preflight || cohort).then(|| {
+                if cohort {
+                    deny_policy_chain()
+                } else {
+                    distinct_deny_policy_chain(index)
+                }
+            }),
+        });
+    }
+    let started = tokio::time::Instant::now();
+    let transaction = tokio::spawn(async move {
+        let result = if honor {
+            drive(
+                &mut manager,
+                drive_kind,
+                [targets[0].address, targets[1].address],
+            )
+            .await
+        } else {
+            manager
+                .apply_resolved_policy_snapshot_with_prestage_reads(
+                    targets,
+                    false,
+                    OperatorReadAdmission::Served,
+                )
+                .await
+                .map(drop)
+                .map_err(|failure| failure.message)
+        };
+        (manager, result)
+    });
+    gate.held().await;
+    let (reply, mut mutation) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::SyncExplainConfig {
+            enabled: false,
+            cache_size: 17,
+            reject_retention_enabled: true,
+            reject_retention_capacity: 1024,
+            reply,
+        })
+        .await
+        .unwrap();
+    let mut infos = list_peers(&operator_tx).await;
+    let rows = term_hits(&operator_tx).await;
+    if !preflight {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut infos)
+                .await
+                .is_err(),
+            "reads stay queued while the first session acknowledgement is held"
+        );
+        assert_eq!(installs.load(Ordering::SeqCst), 0);
+    }
+    let infos = tokio::time::timeout(READER_DEADLINE, infos)
+        .await
+        .expect("neighbor read finishes during the walk")
+        .unwrap();
+    assert_eq!(infos.len(), count);
+    assert!(infos.iter().all(|info| !info.stale));
+    if !preflight {
+        assert_eq!(installs.load(Ordering::SeqCst), 1);
+    }
+    if !preflight && !honor {
+        assert_eq!(
+            infos
+                .iter()
+                .filter(|info| info.rfc8212_export_policy
+                    == rustbgpd_api::peer_types::Rfc8212PolicyStatus::Present)
+                .count(),
+            1,
+            "the acknowledged session and managed policy bookkeeping advance together before read service"
+        );
+    }
+    let rows = tokio::time::timeout(READER_DEADLINE, rows)
+        .await
+        .expect("complete import stats finish during the walk")
+        .unwrap();
+    assert!(matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == count));
+    assert!(
+        !transaction.is_finished(),
+        "read must finish while the owner still walks"
+    );
+    assert!(matches!(
+        mutation.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let (mut manager, result) = tokio::time::timeout(Duration::from_secs(20), transaction)
+        .await
+        .unwrap()
+        .unwrap();
+    result.expect("every session and RIB step succeeds");
+    if honor {
+        assert_eq!(installs.load(Ordering::SeqCst), count);
+        assert!(if matches!(drive_kind, Drive::HonorBlackhole) {
+            manager.current_config.global.honor_blackhole
+        } else {
+            manager.current_config.global.honor_graceful_shutdown
+        });
+        assert!(
+            manager
+                .peers
+                .values()
+                .all(|peer| peer.import_policy.is_some())
+        );
+    }
+    assert!(
+        started.elapsed() > READER_DEADLINE,
+        "walk must exceed an operator deadline"
+    );
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+    drop(manager);
+    rib.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn successful_hot_apply_walk_serves_reads_between_acknowledged_peers() {
+    for drive in [Drive::ForwardWalk { clean: false }, FORWARD_COHORT] {
+        serial_policy_walk_serves_reads(drive, false).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn successful_preflight_and_selection_walks_serve_reads_before_completion() {
+    for drive in [Drive::ForwardWalk { clean: false }, FORWARD_COHORT] {
+        serial_policy_walk_serves_reads(drive, true).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn honor_graceful_shutdown_fanout_serves_reads_between_acknowledged_peers() {
+    serial_policy_walk_serves_reads(Drive::HonorGracefulShutdown, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn honor_blackhole_fanout_serves_reads_between_acknowledged_peers() {
+    serial_policy_walk_serves_reads(Drive::HonorBlackhole, false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_dataset_refresh_bounds_capacity_and_reports_every_export_failure() {
+    for full_channel in [true, false] {
+        let (mut manager, _) = rfc8212_status_manager();
+        let (rib_tx, rib_rx) = mpsc::channel(1);
+        let mut receiver = Some(rib_rx);
+        let peers = [
+            "10.39.2.1".parse::<IpAddr>().unwrap(),
+            "10.39.2.2".parse().unwrap(),
+        ];
+        if full_channel {
+            let (reply, _response) = oneshot::channel();
+            rib_tx
+                .try_send(RibUpdate::QueryPeerRetainedStale {
+                    peer: peers[0],
+                    reply,
+                })
+                .unwrap();
+        }
+        manager.rib_tx = rib_tx;
+        for peer in peers {
+            let (handle, _) = spawn_session(peer, true, Gate::new(), answer_all, false);
+            insert_test_managed_peer(&mut manager, peer, handle, false);
+            manager.peers.get_mut(&key(peer)).unwrap().export_policy = Some(dataset_policy_chain());
+        }
+        let rib = (!full_channel).then(|| {
+            let mut receiver = receiver.take().unwrap();
+            tokio::spawn(async move {
+                let RibUpdate::ReevaluatePeerExportPolicies { peers, reply } =
+                    receiver.recv().await.unwrap()
+                else {
+                    panic!("legacy refresh must use the shared dataset reevaluation command")
+                };
+                assert_eq!(peers.len(), 2);
+                reply
+                    .send(Err(rustbgpd_rib::RibCommandError::internal(
+                        "test: accepted reevaluation failed",
+                    )))
+                    .unwrap();
+            })
+        });
+        let started = tokio::time::Instant::now();
+        let failure = manager
+            .refresh_dataset_dependents(&["customers".into()], &[])
+            .await
+            .unwrap_err();
+        assert!(failure.contains("2 of 2"), "{failure}");
+        for peer in peers {
+            assert!(failure.contains(&format!("{peer} (export)")), "{failure}");
+        }
+        if full_channel {
+            assert_eq!(started.elapsed(), RIB_REPLY_TIMEOUT);
+            assert!(
+                failure.contains("capacity deadline before dispatch"),
+                "{failure}"
+            );
+            let receiver = receiver.as_mut().unwrap();
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(RibUpdate::QueryPeerRetainedStale { .. })
+            ));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        } else {
+            assert!(
+                failure.contains("accepted reevaluation failed"),
+                "{failure}"
+            );
+            rib.unwrap().await.unwrap();
+        }
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch() {
+    for drive_kind in [
+        Drive::RetainedStaleCapacity,
+        Drive::ExportReplacementCapacity,
+        Drive::DatasetExportCapacity {
+            failed_restore: false,
+        },
+    ] {
+        let peer = "10.39.3.1".parse::<IpAddr>().unwrap();
+        let gate = Gate::new();
+        let (mut manager, _) = rfc8212_status_manager();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (reply, _response) = oneshot::channel();
+        rib_tx
+            .try_send(RibUpdate::QueryPeerRetainedStale { peer, reply })
+            .unwrap();
+        manager.rib_tx = rib_tx;
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        manager = manager.with_operator_queries(operator_rx);
+        let (handle, _) = spawn_session(peer, true, gate.clone(), hold_first_term_hits, false);
+        insert_test_managed_peer(&mut manager, peer, handle, false);
+        let transaction = tokio::spawn(async move {
+            let result = drive(&mut manager, drive_kind, [peer, peer]).await;
+            (manager, result)
+        });
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let rows = term_hits(&operator_tx).await;
+        gate.held().await;
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !transaction.is_finished(),
+            "owner expiry must not abandon an admitted collector"
+        );
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::QueryPeerRetainedStale { .. })
+        ));
+        gate.release();
+        let rows = tokio::time::timeout(Duration::from_millis(400), rows)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 1));
+        let (mut manager, result) = transaction.await.unwrap();
+        assert!(
+            result.is_err(),
+            "expired capacity must reject before dispatch"
+        );
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() {
+    for wall_reply_budget in [true, false] {
+        let peer = "10.39.3.2".parse::<IpAddr>().unwrap();
+        let gate = Gate::new();
+        let (mut manager, _) = rfc8212_status_manager();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        manager.rib_tx = rib_tx;
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        manager = manager.with_operator_queries(operator_rx);
+        let (handle, _) = spawn_session(peer, true, gate.clone(), hold_first_term_hits, false);
+        insert_test_managed_peer(&mut manager, peer, handle, false);
+        let transaction = tokio::spawn(async move {
+            let result = manager
+                .reevaluate_dataset_exports(
+                    vec![peer],
+                    false,
+                    OperatorReadAdmission::Served,
+                    wall_reply_budget,
+                )
+                .await;
+            (manager, result)
+        });
+        let RibUpdate::ReevaluatePeerExportPolicies { reply, .. } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected actual dataset reevaluation dispatch")
+        };
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let rows = term_hits(&operator_tx).await;
+        gate.held().await;
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        assert!(
+            !transaction.is_finished(),
+            "owner waits for the admitted collector even after wall expiry"
+        );
+        gate.release();
+        assert!(matches!(rows.await.unwrap(), SessionQueryOutcome::Reply(_)));
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        if wall_reply_budget {
+            assert!(
+                transaction.is_finished(),
+                "legacy reply expires after five wall seconds"
+            );
+        } else {
+            assert!(
+                !transaction.is_finished(),
+                "generation reply still has attended budget left"
+            );
+            reply.send(Ok(())).unwrap();
+        }
+        let (mut manager, result) = transaction.await.unwrap();
+        assert_eq!(result.is_err(), wall_reply_budget);
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
 }

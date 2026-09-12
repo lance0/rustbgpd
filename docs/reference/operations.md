@@ -617,8 +617,14 @@ exactly as during prestaging), and the RIB answers general queries between its
 pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
-across it. When a reload's export-policy transition is rejected and rolled
-back, the peer manager serves session snapshots, import-statistics collections,
+across it. Forward API policy transactions and their policy-only
+publication-failure compensation use these same admission points.
+`TestPolicy` also uses the operator lane for its live peer context; its route
+pages retain their version fence, without a shared generation pin across
+peer context and routes.
+
+When a reload's export-policy transition is rejected and rolled back, the peer
+manager serves session snapshots, import-statistics collections,
 and dataset status while it awaits enqueue or completion of the batched RIB
 restore. These are live reads: a failed session restore can leave different
 sessions on different policies, and peer-manager and RIB reads do not share
@@ -640,11 +646,13 @@ reads report the current values of each source. Honor-only SIGHUP changes to
 `honor_graceful_shutdown` and `honor_blackhole` use the same admission after
 each acknowledged import-chain update. Candidate classification keeps those
 setters outside policy/dataset generation unwind; hot-knob restoration keeps
-its existing fences.
+its existing fences. Desired configuration publication and ordinary mutations
+retain their command ordering.
 
-Forward preflight, cohort selection, clean-state retries, retained-route
-proofs and per-peer RIB export replacement admit bounded reads. Dataset
-settlement inherits its owner's admission through capacity and reply waits. Legacy dataset refresh retains its absolute
+Forward preflight, cohort selection, post-application state probes and their
+clean-state retries, retained-route proofs and per-peer RIB export replacement
+admit bounded reads. Dataset settlement inherits its owner's admission through
+capacity and reply waits. Legacy dataset refresh retains its absolute
 five-second reply deadline; generation settlement retains its existing reply
 budget that excludes read servicing.
 
@@ -1569,6 +1577,13 @@ PeerSession/PeerManager→BmpManager path. `state_query_timeout` means the
 periodic statistics tick could not obtain a current session snapshot within
 its bounded deadline; the session may still be Established, so this is not a
 Peer Down signal and the report is retried on the next tick.
+
+The periodic sampler gathers session, peer-RIB, and Loc-RIB values concurrently
+under their existing 100 ms input budgets, including RIB channel admission.
+These are independent observations, not an atomic cross-actor snapshot.
+Unavailable RIB values are omitted for that tick; BMP output uses nonblocking
+sends, with the source-drop counters above recording output backpressure.
+
 The shipped alert pack
 ([`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml))
 fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, `BmpCollectorDrops`, and

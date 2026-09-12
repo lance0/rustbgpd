@@ -166,6 +166,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** Forward API policy transactions and policy-only
+  publication-failure compensation now admit session
+  snapshots, import-policy statistics, and dataset status at the same
+  peer-manager waits as SIGHUP applies. `TestPolicy` uses that operator lane
+  for its live peer context while retaining the route-page version fence.
+  Reads report live observations without a shared generation across their
+  sources; session ACK/bookkeeping fences, other transaction stages, and RIB
+  work can still exhaust caller deadlines.
+
 - Export-policy counters and the RIB portion of neighbor status can be read
   during synchronous export replacement, rollback, and dataset reevaluation.
   A separate bounded summary lane serves values captured before the operation.
@@ -197,6 +206,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the session. An already-admitted read retains its own deadline if scheduling
   expires or its caller disconnects. Later mutations remain queued until that
   read and the scheduling step settle.
+
+- Forward policy transactions admit bounded operator reads during read-only
+  qualification and state probes, authoritative per-peer RIB waits, and between
+  acknowledged session policy steps, including SIGHUP honor-knob fan-outs.
+  Dataset settlement carries explicit forward or compensation admission through
+  RIB capacity and reply waits; legacy dataset
+  refresh also bounds RIB capacity using the existing five-second allowance.
+  Individual session acknowledgements keep their fences; clean generation
+  compensation admits live reads, while earlier restoration failures retain the
+  fence against inconsistent metadata. Existing operator RPC deadlines and
+  mutation ownership are unchanged.
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched
@@ -258,6 +278,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp --json flowspec` now includes raw `extended_communities` as numeric
   values, preserving their order and duplicates alongside the curated actions.
 
+- gNMI neighbor snapshots now use the operator-read lane on TLS and Unix
+  listeners and for dial-out subscriptions. `Get` and subscription snapshots
+  can complete during policy waits that admit operator reads, retaining live
+  session values, the two-second peer-manager deadline, and terminal stream
+  errors when a snapshot is unavailable.
+
 - `rbgp doctor` attributes local process limits and config freshness to the
   connected Unix-socket peer, with process-start verification and reconnect
   updates. Co-resident daemons no longer contribute unrelated low-limit
@@ -301,6 +327,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.rpol` reload transitions that temporarily queue RIB queries. Reloads or
   congested backends that exceed the budget still return `DEADLINE_EXCEEDED`
   with no partial rows.
+
+- Periodic BMP statistics no longer park peer-manager reads or shutdown
+  indefinitely on a full RIB mailbox. Loc-RIB sampling bounds queue admission and reply together;
+  session, peer-RIB, and Loc-RIB sample waits run concurrently instead of
+  accumulating three separate waits. Unavailable values are still omitted.
 
 - The paired route-server cookbook now starts the RFC 8671 post-policy BMP
   capture before RS2's member sessions establish: the `rib_out_post` stream

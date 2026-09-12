@@ -973,6 +973,23 @@ impl PeerManager {
         }
     }
 
+    /// Service queued reads when session policies and manager bookkeeping
+    /// agree. Bound each seam so a read flood cannot
+    /// prevent the owning transaction from advancing to its next step.
+    async fn drain_operator_queries(&mut self, admission: OperatorReadAdmission) {
+        if !admission.admits() {
+            return;
+        }
+        for _ in 0..READINESS_QUERY_BUDGET_PER_POLICY_STEP {
+            let query = self
+                .deferred_operator_queries
+                .pop_front()
+                .or_else(|| self.operator_rx.as_mut().and_then(|rx| rx.try_recv().ok()));
+            let Some(query) = query else { break };
+            Box::pin(self.handle_operator_query(query, true)).await;
+        }
+    }
+
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
@@ -1019,7 +1036,7 @@ impl PeerManager {
     /// own) before this wait resumes, and the ordinary command receiver is
     /// never polled here, so mutations remain strictly behind the owner.
     ///
-    /// A forward reload serves reads while it awaits the cohort's RIB
+    /// A forward policy apply serves reads while it awaits the cohort's RIB
     /// transition and while the same transaction's rollback awaits its
     /// registered RIB aggregate. During the transition every cohort session
     /// already runs its new chains, so a read observes the same mixed
@@ -1757,7 +1774,16 @@ impl PeerManager {
                             let _ = reply.send(self.current_config.effective_redacted_toml());
                         }
                         PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                            let result = self.apply_resolved_policy_snapshot(targets).await;
+                            // API publication rollback restores policy chains before the
+                            // staged config. Reads report each source's current values.
+                            let result = self
+                                .apply_resolved_policy_snapshot_with_prestage_reads(
+                                    targets,
+                                    false,
+                                    OperatorReadAdmission::Served,
+                                )
+                                .await
+                                .map_err(|failure| failure.message);
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ApplyPolicyImpactSnapshot {
