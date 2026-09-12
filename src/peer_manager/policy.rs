@@ -939,6 +939,9 @@ impl PeerManager {
         phases: &mut PolicySnapshotPhaseTimings,
         operator_reads: OperatorReadAdmission,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        // Preparation includes preflight and session setup, even when it
+        // rejects before reaching a destination prestage or commit.
+        self.operator_read_seam = super::OperatorReadSeam::Prestage;
         // ADR-0112: qualify RFC 8212 import-presence transitions before
         // anything below can touch a peer, so one incapable peer rejects the
         // whole edit rather than being discovered mid-fanout and unwound.
@@ -1304,6 +1307,7 @@ impl PeerManager {
         context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
+        self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
@@ -1533,6 +1537,7 @@ impl PeerManager {
                 }
                 matches!(reply_rx.await, Ok(Ok(())))
             };
+            self.operator_read_seam = super::OperatorReadSeam::Prestage;
             self.await_with_readiness_budget(round_trip, RIB_REPLY_TIMEOUT, context.operator_reads)
                 .await
                 .unwrap_or(false)
@@ -1819,6 +1824,7 @@ impl PeerManager {
             })
             .collect();
         let (reply_tx, reply_rx) = oneshot::channel();
+        self.operator_read_seam = super::OperatorReadSeam::ForwardTransition;
         let send_result = self
             .rib_tx
             .send(RibUpdate::ReplacePeerExportPolicies {
@@ -2061,6 +2067,7 @@ impl PeerManager {
         replacements: &[PeerExportPolicyReplacement],
         operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
+        self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
@@ -2424,6 +2431,7 @@ impl PeerManager {
         context: &mut PolicySnapshotContext,
         require_exact_pending: bool,
     ) -> Result<(), PolicyRollbackFailure> {
+        self.operator_read_seam = super::OperatorReadSeam::Rollback;
         let pending_priors = priors
             .iter()
             .map(|prior| {

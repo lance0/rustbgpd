@@ -740,7 +740,7 @@ async fn forward_walk_rib_budget_stops_expired_retained_proofs() {
 
 /// Session for cohort read tests. A rejected restore leaves its live state
 /// Idle with an error; other commands acknowledge immediately.
-fn cohort_session_with_import_stats(
+pub(super) fn cohort_session_with_import_stats(
     addr: IpAddr,
     installs: Arc<AtomicUsize>,
     reject_restore: bool,
@@ -887,7 +887,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     assert_eq!(installs.load(Ordering::SeqCst), 2);
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     let infos = tokio::time::timeout(Duration::from_secs(1), response)
@@ -897,11 +897,14 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     assert_eq!(infos.len(), 2);
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-            peer: None,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     let rows = tokio::time::timeout(Duration::from_secs(1), response)
@@ -1060,7 +1063,7 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
     assert_eq!(installs.load(Ordering::SeqCst), 4);
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     let infos = tokio::time::timeout(Duration::from_secs(1), response)
@@ -1088,11 +1091,14 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
     );
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-            peer: None,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     let rows = tokio::time::timeout(Duration::from_secs(1), response)
