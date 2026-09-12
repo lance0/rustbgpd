@@ -11,6 +11,8 @@ use super::*;
 
 use std::collections::BTreeMap;
 
+use crate::config::{PreparedDatasetGeneration, plan_reload_peer_actions};
+use crate::peer_manager::generation::ReloadGenerationOutcome;
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerOperatorQuery, ResolvedPeerPolicy};
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyRestoreReceipt};
@@ -36,6 +38,8 @@ enum RibHold {
     None,
     /// Hold the reply of the first matching command until release.
     Reply(fn(&RibUpdate) -> bool),
+    /// Answer the first `n` matching commands, then hold the next one's reply.
+    LaterReply(fn(&RibUpdate) -> bool, usize),
     /// Answer the first matching command, then stop receiving until release,
     /// so the next send parks on the full (capacity 1) channel.
     Receiver(fn(&RibUpdate) -> bool),
@@ -79,6 +83,14 @@ enum Drive {
     Rfc8212Transition {
         established: bool,
     },
+    /// The same cohort through `apply_resolved_policy_snapshot`, the entry
+    /// `PeerManagerCommand::ApplyResolvedPolicySnapshot` and the config
+    /// transaction rollback use: not the reload owner, admission off.
+    StandalonePolicySnapshot,
+    /// A reload generation whose session replace is rejected after its
+    /// policy cohort committed, so the unwind replays the prior chains
+    /// through `apply_resolved_policy_snapshot` with admission off.
+    CompensatingReplay,
     ValidationRefresh,
     DatasetRefresh,
     MaxPrefixRestart,
@@ -102,6 +114,10 @@ struct WaitSite {
     session: SessionScript,
     /// Park one admitted term-hits read before probing.
     pre_read: bool,
+    /// `Some` when the row re-exercises a site another row already covers,
+    /// through a different production entry point. Such rows are not
+    /// counted by the call-site guard.
+    additional_entry: Option<&'static str>,
     window: Duration,
     contract: Contract,
     completion: Completion,
@@ -214,6 +230,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_cohort_replace),
         session: hold_first_term_hits,
         pre_read: true,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "one admitted read completes before the next is polled: its collector must \
@@ -230,6 +247,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: QUERY_PROBE_REASON,
@@ -243,6 +261,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_retained_stale),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "read-only RIB proof on the primary lane under the shared \
@@ -259,6 +278,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: QUERY_PROBE_REASON,
@@ -272,6 +292,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_export_apply,
         pre_read: false,
+        additional_entry: None,
         window: Duration::from_millis(250),
         contract: Contract::Fenced {
             reason: "the session is mid-install: until it acknowledges, neither chain is \
@@ -288,6 +309,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: QUERY_PROBE_REASON,
@@ -301,6 +323,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: stall_then_hold_state,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "the retry is bounded by what remains of CLEAN_STATE_QUERY_WINDOW, one \
@@ -317,6 +340,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_prestage),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
@@ -331,6 +355,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: fail_export_then_hold_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: "failure path mid-unwind of one member: its prior chains were just \
@@ -349,6 +374,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_second_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: "post-commit refresh dispatch decides each member's Route Refresh debt; \
@@ -363,9 +389,58 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_cohort_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
+    },
+    // Non-owner entry through an admitting site. Expected to be decided
+    // deliberately: the fence is the current default for every transaction
+    // that is not the reload owner, and whether these entries should admit
+    // reads is decided separately.
+    WaitSite {
+        site: "policy.rs::await_export_policy_cohort_rib_reply",
+        awaits: "RibUpdate::ReplacePeerExportPolicies reply (cohort transition)",
+        drive: Drive::StandalonePolicySnapshot,
+        rib: RibHold::Reply(is_cohort_replace),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some(
+            "PeerManagerCommand::ApplyResolvedPolicySnapshot (apply_resolved_policy_snapshot, \
+             admission off)",
+        ),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "current default for a transaction that is not the reload owner: \
+                     apply_resolved_policy_snapshot enters the cohort with admission off, so \
+                     the same wait the SIGHUP owner serves stays fenced here, bounded by the \
+                     RIB's transition ownership; whether standalone policy transactions should \
+                     admit reads is decided separately",
+        },
+        completion: Completion::ExportApplied,
+    },
+    // Non-owner entry through an admitting site, from the reload's own
+    // compensating replay. Expected to be decided deliberately alongside
+    // the standalone row above.
+    WaitSite {
+        site: "policy.rs::try_apply_export_only_policy_cohort",
+        awaits: "RibUpdate::PrepareExportPolicyDestination reply (destination prestage)",
+        drive: Drive::CompensatingReplay,
+        rib: RibHold::LaterReply(is_prestage, 1),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some(
+            "apply_reload_generation unwind (compensating replay of the prior generation's \
+             chains after a rejected session replace, admission off)",
+        ),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "a served read would observe the committed generation about to be \
+                     reverted: the unwind replays the prior chains through \
+                     apply_resolved_policy_snapshot with admission off, so the prestage the \
+                     forward owner serves stays fenced here; decided separately",
+        },
+        completion: Completion::ExportRestored,
     },
     WaitSite {
         site: "policy.rs::apply_export_policy_replacements_authoritatively",
@@ -377,6 +452,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Receiver(is_cohort_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
@@ -391,6 +467,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_authoritative_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Served,
         completion: Completion::ExportApplied,
@@ -402,6 +479,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_single_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "per-peer authoritative RIB replacement under the shared \
@@ -425,6 +503,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Receiver(is_cohort_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: ROLLBACK_REASON,
@@ -441,6 +520,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::ExitAfter(is_cohort_replace),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Unreachable {
             why: "the JoinHandle is awaited only in the arm where the detached task already \
@@ -460,6 +540,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_restore),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: ROLLBACK_REASON,
@@ -473,6 +554,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: QUERY_PROBE_REASON,
@@ -486,6 +568,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: hold_first_state,
         pre_read: false,
+        additional_entry: None,
         window: HALF_QUERY,
         contract: Contract::Fenced {
             reason: QUERY_PROBE_REASON,
@@ -499,6 +582,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::Reply(is_reevaluate),
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: HELD_FOREVER,
         contract: Contract::Fenced {
             reason: "one batched RIB re-evaluation of every export chain referencing the \
@@ -515,6 +599,7 @@ const WAIT_SITES: &[WaitSite] = &[
         rib: RibHold::None,
         session: answer_all,
         pre_read: false,
+        additional_entry: None,
         window: Duration::from_millis(250),
         contract: Contract::Fenced {
             reason: "every Start send shares one absolute PEER_LIFECYCLE_COMMAND_TIMEOUT \
@@ -610,10 +695,15 @@ fn spawn_rib(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut armed = true;
+        let mut skip = match hold {
+            RibHold::LaterReply(_, skip) => skip,
+            _ => 0,
+        };
         while let Some(update) = rib_rx.recv().await {
             let matcher = match hold {
                 RibHold::None => None,
                 RibHold::Reply(matcher)
+                | RibHold::LaterReply(matcher, _)
                 | RibHold::Receiver(matcher)
                 | RibHold::ExitAfter(matcher) => Some(matcher),
             };
@@ -621,9 +711,14 @@ fn spawn_rib(
                 answer_rib(update, cohort_reply);
                 continue;
             }
+            if skip > 0 {
+                skip -= 1;
+                answer_rib(update, cohort_reply);
+                continue;
+            }
             armed = false;
             match hold {
-                RibHold::Reply(_) => {
+                RibHold::Reply(..) | RibHold::LaterReply(..) => {
                     let gate = gate.clone();
                     tokio::spawn(async move {
                         gate.hold().await;
@@ -758,6 +853,60 @@ fn dataset_policy_chain() -> PolicyChain {
     )])
 }
 
+/// Reload configs for the compensating replay: the candidate gives the two
+/// matrix peers an export chain (a cohort) and changes a third, policy-free
+/// neighbor's session-bound `remote_asn` (a replace, which is rejected); the
+/// manager's prior config is the same neighbors without either. The rpol file
+/// lives in a directory kept alive for the row.
+fn reload_config(dir: &std::path::Path, candidate: bool) -> Config {
+    let export = if candidate {
+        "export_policy_chain = [\"members-out\"]"
+    } else {
+        ""
+    };
+    load_test_config(&format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[policy]
+rpol_files = [{rpol:?}]
+
+[[neighbors]]
+address = "10.39.0.1"
+remote_asn = 65002
+{export}
+
+[[neighbors]]
+address = "10.39.0.2"
+remote_asn = 65003
+{export}
+
+[[neighbors]]
+address = "10.39.0.3"
+remote_asn = {replaced_asn}
+"#,
+        rpol = dir.join("members.rpol").to_str().unwrap(),
+        replaced_asn = if candidate { 65014 } else { 65004 },
+    ))
+}
+
+fn replay_fixture(prior: &Config) -> Config {
+    let dir = prior
+        .policy
+        .rpol_files
+        .first()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .expect("the prior config names the rpol directory")
+        .to_path_buf();
+    reload_config(&dir, true)
+}
+
 fn target(address: IpAddr, import: bool, export: bool) -> ResolvedPeerPolicy {
     ResolvedPeerPolicy {
         address,
@@ -778,9 +927,17 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         ),
         Drive::ForwardWalk { clean } => (vec![target(peers[0], false, true)], clean),
         Drive::Rfc8212Transition { .. } => (vec![target(peers[0], true, false)], false),
-        Drive::ValidationRefresh | Drive::DatasetRefresh | Drive::MaxPrefixRestart => {
-            (Vec::new(), false)
-        }
+        Drive::StandalonePolicySnapshot => (
+            peers
+                .iter()
+                .map(|&peer| target(peer, false, true))
+                .collect(),
+            false,
+        ),
+        Drive::CompensatingReplay
+        | Drive::ValidationRefresh
+        | Drive::DatasetRefresh
+        | Drive::MaxPrefixRestart => (Vec::new(), false),
     };
     match drive {
         Drive::ForwardCohort { .. }
@@ -790,6 +947,28 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             .await
             .map(drop)
             .map_err(|failure| failure.message),
+        Drive::StandalonePolicySnapshot => manager
+            .apply_resolved_policy_snapshot(targets)
+            .await
+            .map(drop),
+        Drive::CompensatingReplay => {
+            let candidate = replay_fixture(&manager.current_config);
+            let actions = plan_reload_peer_actions(&manager.current_config, &candidate)
+                .map_err(|error| error.to_string())?;
+            match Box::pin(manager.apply_reload_generation(
+                candidate,
+                actions,
+                PreparedDatasetGeneration::default(),
+            ))
+            .await
+            {
+                ReloadGenerationOutcome::Applied(receipt) => Err(format!(
+                    "the rejected session replace must unwind the generation: {receipt}"
+                )),
+                ReloadGenerationOutcome::FullyCompensated(message) => Err(message),
+                outcome => panic!("the replay must fully compensate: {outcome:?}"),
+            }
+        }
         Drive::ValidationRefresh => {
             manager
                 .soft_reset_import_validation_dependents(ImportValidationDependency::Rpki)
@@ -871,9 +1050,26 @@ async fn run(row: &WaitSite) {
     let parked = matches!(row.drive, Drive::MaxPrefixRestart);
     let (handle, first_commands) =
         spawn_session(first, first_established, gate.clone(), row.session, parked);
-    insert_test_managed_peer(&mut manager, first, handle, false);
+    insert_test_managed_peer_with_asn(&mut manager, first, 65002, handle, false);
     let (handle, _) = spawn_session(second, true, gate.clone(), answer_all, false);
-    insert_test_managed_peer(&mut manager, second, handle, false);
+    insert_test_managed_peer_with_asn(&mut manager, second, 65003, handle, false);
+    let _rpol_dir = match row.drive {
+        Drive::CompensatingReplay => {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("members.rpol"),
+                "policy members-out { term all { set med 20; accept } }",
+            )
+            .unwrap();
+            manager.current_config = reload_config(dir.path(), false);
+            let replaced = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 3));
+            let (handle, _) = spawn_session(replaced, true, gate.clone(), answer_all, false);
+            insert_test_managed_peer_with_asn(&mut manager, replaced, 65004, handle, false);
+            manager.inject_reconfigure_failures.insert(key(replaced), 0);
+            Some(dir)
+        }
+        _ => None,
+    };
     match row.drive {
         Drive::Rfc8212Transition { .. } => {
             manager.peers.get_mut(&key(first)).unwrap().import_policy =
@@ -915,7 +1111,10 @@ async fn run(row: &WaitSite) {
                 .try_send(PeerCommand::Start)
                 .expect("the parked session channel has one free slot");
         }
-        Drive::ForwardCohort { .. } | Drive::ForwardWalk { .. } => {}
+        Drive::ForwardCohort { .. }
+        | Drive::ForwardWalk { .. }
+        | Drive::StandalonePolicySnapshot
+        | Drive::CompensatingReplay => {}
     }
 
     let peers = [first, second];
@@ -940,7 +1139,14 @@ async fn run(row: &WaitSite) {
         return;
     }
 
-    gate.held().await;
+    tokio::time::timeout(Duration::from_mins(5), gate.held())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{site}: the stub never parked the transaction on {}",
+                row.awaits
+            )
+        });
     for _ in 0..3 {
         tokio::task::yield_now().await;
     }
@@ -1065,7 +1271,9 @@ async fn check_completion(row: &WaitSite, manager: &mut PeerManager, result: Res
 #[tokio::test(start_paused = true)]
 async fn every_wait_site_honours_its_operator_read_contract() {
     for row in WAIT_SITES {
-        run(row).await;
+        tokio::time::timeout(Duration::from_mins(15), run(row))
+            .await
+            .unwrap_or_else(|_| panic!("{}: the row did not complete", row.site));
     }
 }
 
@@ -1105,7 +1313,9 @@ fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> 
 }
 
 /// A new `await_with_readiness*` call site must get a row in `WAIT_SITES`
-/// stating whether operator reads are served or fenced there, and why.
+/// stating whether operator reads are served or fenced there, and why. Rows
+/// that re-exercise a covered site through another entry point
+/// (`additional_entry`) are not counted, so each site is keyed once.
 #[test]
 fn wait_site_table_covers_every_call_site() {
     let mut sources = BTreeMap::new();
@@ -1117,7 +1327,10 @@ fn wait_site_table_covers_every_call_site() {
         sources.extend(wait_call_sites(file, source));
     }
     let mut table = BTreeMap::new();
-    for row in WAIT_SITES {
+    for row in WAIT_SITES
+        .iter()
+        .filter(|row| row.additional_entry.is_none())
+    {
         *table.entry(row.site.to_string()).or_default() += 1_usize;
     }
     assert_eq!(
