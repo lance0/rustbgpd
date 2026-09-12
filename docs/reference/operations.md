@@ -617,8 +617,12 @@ exactly as during prestaging), and the RIB answers general queries between its
 pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
-across it. Rollback and standalone policy transactions keep the full fence.
-Readiness queries remain available at their existing transaction seams. A
+across it. When a reload's export-policy transition is rejected and rolled
+back, the same reads are served while the daemon awaits the batched RIB
+restore; every session already runs its prior chain again, so a read observes
+the generation being restored. Standalone policy transactions and a reload's
+later compensating replay keep the full fence. Readiness queries remain
+available at their existing transaction seams. A
 congested backend or a later transaction stage can still exhaust an operator
 read's deadline.
 

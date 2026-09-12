@@ -40,6 +40,14 @@ cannot resume across it. Section 1's "only the readiness lane" wording and
 Section 5's "no general query is admitted" describe the design before this
 amendment. Rollback and standalone policy transactions are unchanged.
 
+**Amended:** 2026-09-12 — the rollback of a rejected cohort transition admits
+the same operator-read lane while the peer manager awaits its exact RIB
+compensation batch. Every cohort session already runs its prior chain again
+at that point, so a read observes the generation being restored; the
+ordinary command receiver stays unpolled and the two-minute batch-reply bound
+is unchanged. Standalone policy transactions and a reload's later
+compensating replay keep the full fence.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server

@@ -30,8 +30,8 @@ use crate::policy_admin::{
 };
 
 use super::{
-    CLEAN_STATE_QUERY_WINDOW, ManagedPeer, PEER_POLICY_UPDATE_TIMEOUT, PEER_QUERY_TIMEOUT,
-    PeerManager, RIB_REPLY_TIMEOUT, lifecycle::PeerReshapeSnapshotOutcome,
+    CLEAN_STATE_QUERY_WINDOW, ManagedPeer, OperatorReadAdmission, PEER_POLICY_UPDATE_TIMEOUT,
+    PEER_QUERY_TIMEOUT, PeerManager, RIB_REPLY_TIMEOUT, lifecycle::PeerReshapeSnapshotOutcome,
 };
 
 /// Peers applied between cohort-setup progress lines. Sized so a
@@ -335,8 +335,10 @@ impl LazyRibBudget {
     }
 }
 
-#[derive(Default)]
-struct PolicySnapshotRibBudget {
+/// Per-transaction state of one resolved policy snapshot: the RIB budgets its
+/// walks share, the clean-convergence retry window, and the operator-read
+/// admission its owner decided at entry.
+struct PolicySnapshotContext {
     /// Shared by every per-peer RIB command of the authoritative forward walk.
     forward: LazyRibBudget,
     /// Shared by every rollback partition's registered RIB aggregate. Anchored
@@ -344,6 +346,12 @@ struct PolicySnapshotRibBudget {
     /// the compensation's budget.
     rollback: LazyRibBudget,
     clean_state_window: CleanStateQueryWindow,
+    /// Whether this transaction admits the bounded operator-read lane while
+    /// it awaits a RIB aggregate. Decided once where the transaction starts,
+    /// so a rollback admits exactly what its forward apply admitted: reads
+    /// served while the registered rollback aggregate is awaited observe the
+    /// prior generation, which is the generation being restored.
+    operator_reads: OperatorReadAdmission,
 }
 
 struct PolicyRollbackPeerPlan {
@@ -540,10 +548,15 @@ impl PeerManager {
         };
         let commands = managed.handle.commands_sender();
         let state = self
-            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                commands,
-                PEER_QUERY_TIMEOUT,
-            ))
+            .await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ),
+                OperatorReadAdmission::Fenced {
+                    reason: "100 ms state probe in the RFC 8212 preflight, before any peer is touched",
+                },
+            )
             .await;
         self.drain_readiness_queries().await;
 
@@ -669,9 +682,17 @@ impl PeerManager {
                 .await
                 .map_err(|_| failed("the RIB manager dropped the retained-stale reply"))
         };
-        tokio::time::timeout_at(deadline, self.await_with_readiness(round_trip))
-            .await
-            .map_err(|_| timed_out())?
+        tokio::time::timeout_at(
+            deadline,
+            self.await_with_readiness(
+                round_trip,
+                OperatorReadAdmission::Fenced {
+                    reason: "read-only RIB retained-stale proof on the primary lane, bounded by the walk budget",
+                },
+            ),
+        )
+        .await
+        .map_err(|_| timed_out())?
     }
 
     /// ADR-0112: qualify every target whose RFC 8212 import verdict would move,
@@ -920,9 +941,14 @@ impl PeerManager {
         // One forward RIB budget for the whole transaction: the presence
         // proofs below and the authoritative walk's per-peer applies both
         // queue on the RIB's primary lane, so they are bounded in total.
-        let mut rollback_rib_budget = PolicySnapshotRibBudget::default();
+        let mut context = PolicySnapshotContext {
+            forward: LazyRibBudget::default(),
+            rollback: LazyRibBudget::default(),
+            clean_state_window: CleanStateQueryWindow::default(),
+            operator_reads: PeerManager::forward_admission(allow_operator_reads),
+        };
         let preflight = self
-            .preflight_rfc8212_import_transitions(&targets, &mut rollback_rib_budget.forward)
+            .preflight_rfc8212_import_transitions(&targets, &mut context.forward)
             .await;
         phases.preflight_us = elapsed_us(preflight_started);
         preflight
@@ -939,7 +965,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut rollback_rib_budget,
+                    &mut context,
                     require_clean_convergence,
                 )
                 .await;
@@ -947,11 +973,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(
-                    captured,
-                    &mut rollback_rib_budget,
-                    require_clean_convergence,
-                )
+                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -971,7 +993,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut rollback_rib_budget,
+                    &mut context,
                     require_clean_convergence,
                 )
                 .await;
@@ -979,11 +1001,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(
-                    captured,
-                    &mut rollback_rib_budget,
-                    require_clean_convergence,
-                )
+                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -1004,7 +1022,7 @@ impl PeerManager {
         let Some(cohort_result) = self
             .try_apply_export_only_policy_cohort(
                 &cohort,
-                &mut rollback_rib_budget,
+                &mut context,
                 require_clean_convergence,
                 phases,
                 allow_operator_reads,
@@ -1021,7 +1039,7 @@ impl PeerManager {
             let captured = self
                 .apply_resolved_policy_snapshot_authoritatively(
                     targets,
-                    &mut rollback_rib_budget,
+                    &mut context,
                     require_clean_convergence,
                 )
                 .await;
@@ -1029,11 +1047,7 @@ impl PeerManager {
             let captured = captured?;
             let convergence_started = Instant::now();
             let outcome = self
-                .complete_policy_snapshot(
-                    captured,
-                    &mut rollback_rib_budget,
-                    require_clean_convergence,
-                )
+                .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
                 .await;
             phases.convergence_check_us = elapsed_us(convergence_started);
             return outcome;
@@ -1049,7 +1063,7 @@ impl PeerManager {
         let authoritative_remainder = self
             .apply_resolved_policy_snapshot_authoritatively(
                 remainder,
-                &mut rollback_rib_budget,
+                &mut context,
                 require_clean_convergence,
             )
             .await;
@@ -1066,22 +1080,14 @@ impl PeerManager {
                 );
                 let convergence_started = Instant::now();
                 let outcome = self
-                    .complete_policy_snapshot(
-                        captured,
-                        &mut rollback_rib_budget,
-                        require_clean_convergence,
-                    )
+                    .complete_policy_snapshot(captured, &mut context, require_clean_convergence)
                     .await;
                 phases.convergence_check_us = elapsed_us(convergence_started);
                 outcome
             }
             Err(remainder_error) => {
                 let rollback = self
-                    .restore_resolved_policies(
-                        captured,
-                        &mut rollback_rib_budget,
-                        require_clean_convergence,
-                    )
+                    .restore_resolved_policies(captured, &mut context, require_clean_convergence)
                     .await;
                 let message = match &rollback {
                     Ok(()) => format!(
@@ -1114,7 +1120,7 @@ impl PeerManager {
     async fn complete_policy_snapshot(
         &mut self,
         captured: Vec<CapturedResolvedPolicy>,
-        rollback_rib_budget: &mut PolicySnapshotRibBudget,
+        context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         let convergence_debt = require_clean_convergence
@@ -1127,7 +1133,7 @@ impl PeerManager {
             });
         if convergence_debt {
             return match self
-                .restore_resolved_policies(captured, rollback_rib_budget, require_clean_convergence)
+                .restore_resolved_policies(captured, context, require_clean_convergence)
                 .await
             {
                 Ok(()) => Err(PolicySnapshotFailure::compensated_code(
@@ -1219,10 +1225,15 @@ impl PeerManager {
                 .commands_sender();
 
             let outcome = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                    commands,
-                    PEER_QUERY_TIMEOUT,
-                ))
+                .await_with_readiness(
+                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                        commands,
+                        PEER_QUERY_TIMEOUT,
+                    ),
+                    OperatorReadAdmission::Fenced {
+                        reason: "100 ms state probe during cohort selection, before any peer is touched",
+                    },
+                )
                 .await;
             self.drain_readiness_queries().await;
             match outcome {
@@ -1286,7 +1297,7 @@ impl PeerManager {
     async fn apply_resolved_policy_snapshot_authoritatively(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
-        rollback_rib_budget: &mut PolicySnapshotRibBudget,
+        context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
         // Captured priors, in application order, for peers actually mutated.
@@ -1319,9 +1330,8 @@ impl PeerManager {
                     target.export_policy.clone(),
                     RefreshFailureHandling::Fatal,
                     None,
-                    require_clean_convergence
-                        .then_some(&mut rollback_rib_budget.clean_state_window),
-                    Some(&mut rollback_rib_budget.forward),
+                    require_clean_convergence.then_some(&mut context.clean_state_window),
+                    Some(&mut context.forward),
                 )
                 .await
             {
@@ -1332,11 +1342,7 @@ impl PeerManager {
                 applied[applied_idx].adj_rib_in_may_have_moved = apply_error.refresh_delivery_began;
                 let restored = std::mem::take(&mut applied);
                 return match self
-                    .restore_resolved_policies(
-                        restored,
-                        rollback_rib_budget,
-                        require_clean_convergence,
-                    )
+                    .restore_resolved_policies(restored, context, require_clean_convergence)
                     .await
                 {
                     Ok(()) => Err(PolicySnapshotFailure::compensated_code(
@@ -1376,7 +1382,13 @@ impl PeerManager {
         operation: &'static str,
     ) -> Result<(), rustbgpd_transport::PeerCommandError> {
         match self
-            .await_with_readiness_budget(round_trip, PEER_POLICY_UPDATE_TIMEOUT)
+            .await_with_readiness_budget(
+                round_trip,
+                PEER_POLICY_UPDATE_TIMEOUT,
+                OperatorReadAdmission::Fenced {
+                    reason: "500 ms session hot-apply; the per-session step completes before reads resume",
+                },
+            )
             .await
         {
             Some(result) => result,
@@ -1397,10 +1409,15 @@ impl PeerManager {
         window: &mut CleanStateQueryWindow,
     ) -> StateQueryOutcome {
         let first = self
-            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                commands.clone(),
-                PEER_QUERY_TIMEOUT,
-            ))
+            .await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands.clone(),
+                    PEER_QUERY_TIMEOUT,
+                ),
+                OperatorReadAdmission::Fenced {
+                    reason: "100 ms clean-convergence state probe after session application",
+                },
+            )
             .await;
         self.drain_readiness_queries().await;
         if !matches!(first, StateQueryOutcome::TimedOut) {
@@ -1410,9 +1427,12 @@ impl PeerManager {
             return StateQueryOutcome::TimedOut;
         };
         let retried = self
-            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                commands, remaining,
-            ))
+            .await_with_readiness(
+                rustbgpd_transport::PeerHandle::query_state_outcome_with(commands, remaining),
+                OperatorReadAdmission::Fenced {
+                    reason: "single bounded retry of the clean-convergence state probe",
+                },
+            )
             .await;
         self.drain_readiness_queries().await;
         retried
@@ -1439,7 +1459,7 @@ impl PeerManager {
     async fn try_apply_export_only_policy_cohort(
         &mut self,
         targets: &[&ResolvedPeerPolicy],
-        rollback_rib_budget: &mut PolicySnapshotRibBudget,
+        context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
         phase_timings: &mut PolicySnapshotPhaseTimings,
         allow_operator_reads: bool,
@@ -1585,11 +1605,7 @@ impl PeerManager {
                         managed.pending_refresh = true;
                     }
                     let prior_restore = self
-                        .restore_resolved_policies(
-                            captured,
-                            rollback_rib_budget,
-                            require_clean_convergence,
-                        )
+                        .restore_resolved_policies(captured, context, require_clean_convergence)
                         .await;
                     return Some(Err(match prior_restore {
                         Ok(()) => PolicySnapshotFailure::ambiguous_code(
@@ -1701,6 +1717,9 @@ impl PeerManager {
                                         refresh_commands,
                                         PEER_QUERY_TIMEOUT,
                                     ),
+                                    OperatorReadAdmission::Fenced {
+                                        reason: "100 ms state probe while unwinding a failed cohort export apply",
+                                    },
                                 )
                                 .await
                                 .is_some_and(|state| state.fsm_state == SessionState::Established);
@@ -1748,11 +1767,7 @@ impl PeerManager {
                     Ok(())
                 };
                 let prior_restore = self
-                    .restore_resolved_policies(
-                        captured,
-                        rollback_rib_budget,
-                        require_clean_convergence,
-                    )
+                    .restore_resolved_policies(captured, context, require_clean_convergence)
                     .await;
                 let prior_restore_code = prior_restore.as_ref().err().map(|error| error.code);
                 let prior_restore = prior_restore.map_err(|error| error.to_string());
@@ -1845,7 +1860,7 @@ impl PeerManager {
                 self.discard_prepared_export_destination(targets[0]).await;
             }
             let rollback = self
-                .restore_resolved_policies(captured, rollback_rib_budget, require_clean_convergence)
+                .restore_resolved_policies(captured, context, require_clean_convergence)
                 .await;
             return Some(Err(match rollback {
                 Ok(()) => PolicySnapshotFailure::compensated_code(
@@ -1888,16 +1903,18 @@ impl PeerManager {
                 .handle
                 .commands_sender();
             let state = if require_clean_convergence {
-                self.query_clean_session_state(
-                    commands,
-                    &mut rollback_rib_budget.clean_state_window,
-                )
-                .await
+                self.query_clean_session_state(commands, &mut context.clean_state_window)
+                    .await
             } else {
-                self.await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                    commands,
-                    PEER_QUERY_TIMEOUT,
-                ))
+                self.await_with_readiness(
+                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                        commands,
+                        PEER_QUERY_TIMEOUT,
+                    ),
+                    OperatorReadAdmission::Fenced {
+                        reason: "100 ms state probe before a deferred route refresh",
+                    },
+                )
                 .await
             };
             self.drain_readiness_queries().await;
@@ -1928,11 +1945,7 @@ impl PeerManager {
                     }
                     captured[index].adj_rib_in_may_have_moved = failure.delivery_began;
                     let rollback = self
-                        .restore_resolved_policies(
-                            captured,
-                            rollback_rib_budget,
-                            require_clean_convergence,
-                        )
+                        .restore_resolved_policies(captured, context, require_clean_convergence)
                         .await;
                     return Some(Err(match rollback {
                         Ok(()) => PolicySnapshotFailure::compensated_code(
@@ -1971,11 +1984,7 @@ impl PeerManager {
                     managed.pending_refresh = true;
                 }
                 let rollback = self
-                    .restore_resolved_policies(
-                        captured,
-                        rollback_rib_budget,
-                        require_clean_convergence,
-                    )
+                    .restore_resolved_policies(captured, context, require_clean_convergence)
                     .await;
                 return Some(Err(match rollback {
                     Ok(()) => PolicySnapshotFailure::compensated_code(
@@ -2144,9 +2153,17 @@ impl PeerManager {
                 .await
                 .map_err(|_| RibCommandError::internal("RIB manager dropped reply"))?
         };
-        tokio::time::timeout_at(deadline, self.await_with_readiness(round_trip))
-            .await
-            .map_err(|_| timed_out())?
+        tokio::time::timeout_at(
+            deadline,
+            self.await_with_readiness(
+                round_trip,
+                OperatorReadAdmission::Fenced {
+                    reason: "per-peer RIB export replacement of an authoritative walk, bounded by the walk budget",
+                },
+            ),
+        )
+        .await
+        .map_err(|_| timed_out())?
     }
 
     /// Apply a live-impact transaction that may include static neighbors and
@@ -2235,7 +2252,7 @@ impl PeerManager {
     async fn register_policy_rollback_rib(
         &mut self,
         plans: &[PolicyRollbackPeerPlan],
-        budget: &mut PolicySnapshotRibBudget,
+        context: &mut PolicySnapshotContext,
     ) -> Result<Option<RegisteredPolicyRollbackRib>, RuntimeConfigPolicyFailureCode> {
         // `plans` is newest-first because session compensation already ran in
         // reverse application order. The RIB command owns the reversal, so
@@ -2264,7 +2281,7 @@ impl PeerManager {
             return Err(RuntimeConfigPolicyFailureCode::RollbackBatchDuplicate);
         }
 
-        let deadline = budget.rollback.deadline();
+        let deadline = context.rollback.deadline();
         let rib_tx = self.rib_tx.clone();
         let (enqueued_tx, enqueued_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -2287,7 +2304,16 @@ impl PeerManager {
             }
         });
 
-        match tokio::time::timeout_at(deadline, self.await_with_readiness(enqueued_rx)).await {
+        // Both waits below admit the operator-read lane on the transaction's
+        // terms: every session already runs its restored chain, so a read
+        // observes the generation being restored, and the rollback's own
+        // two-minute budget is unchanged.
+        match tokio::time::timeout_at(
+            deadline,
+            self.await_with_readiness(enqueued_rx, context.operator_reads),
+        )
+        .await
+        {
             Ok(Ok(())) => Ok(Some(RegisteredPolicyRollbackRib { deadline, task })),
             Err(_) => {
                 // Dropping a JoinHandle detaches rather than cancels it. The
@@ -2296,7 +2322,10 @@ impl PeerManager {
                 drop(task);
                 Err(RuntimeConfigPolicyFailureCode::RollbackBatchTimeout)
             }
-            Ok(Err(_)) => match self.await_with_readiness(task).await {
+            Ok(Err(_)) => match self
+                .await_with_readiness(task, context.operator_reads)
+                .await
+            {
                 Ok(Err(code)) => Err(code),
                 Ok(Ok(_)) | Err(_) => Err(RuntimeConfigPolicyFailureCode::RollbackBatchReplyLost),
             },
@@ -2384,7 +2413,10 @@ impl PeerManager {
     /// before any Route Refresh, and all RIB sends/replies share one lazy
     /// absolute deadline across this top-level policy transaction. Timing out or
     /// dropping the caller detaches the exact registered aggregate so FIFO repair
-    /// can continue while conservative pending flags retain retry intent.
+    /// can continue while conservative pending flags retain retry intent. While
+    /// the aggregate is awaited, the operator-read lane is admitted on the
+    /// transaction's terms (`context.operator_reads`); the ordinary command
+    /// receiver stays unpolled, so mutations remain behind the rollback.
     #[expect(
         clippy::too_many_lines,
         reason = "exact rollback keeps session, RIB, refresh, bookkeeping, and pending-flag acknowledgements in one owner"
@@ -2392,7 +2424,7 @@ impl PeerManager {
     async fn restore_resolved_policies(
         &mut self,
         priors: Vec<CapturedResolvedPolicy>,
-        budget: &mut PolicySnapshotRibBudget,
+        context: &mut PolicySnapshotContext,
         require_exact_pending: bool,
     ) -> Result<(), PolicyRollbackFailure> {
         let pending_priors = priors
@@ -2459,7 +2491,7 @@ impl PeerManager {
             }
         }
 
-        let registered = match self.register_policy_rollback_rib(&plans, budget).await {
+        let registered = match self.register_policy_rollback_rib(&plans, context).await {
             Ok(registered) => registered,
             Err(code) => {
                 failure_code.get_or_insert(code);
@@ -2476,7 +2508,7 @@ impl PeerManager {
         if let Some(registered) = registered {
             match tokio::time::timeout_at(
                 registered.deadline,
-                self.await_with_readiness(registered.task),
+                self.await_with_readiness(registered.task, context.operator_reads),
             )
             .await
             {
@@ -2621,10 +2653,15 @@ impl PeerManager {
                 continue;
             };
             let state = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                    commands,
-                    PEER_QUERY_TIMEOUT,
-                ))
+                .await_with_readiness(
+                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                        commands,
+                        PEER_QUERY_TIMEOUT,
+                    ),
+                    OperatorReadAdmission::Fenced {
+                        reason: "100 ms state probe in a validation-cache refresh fan-out",
+                    },
+                )
                 .await;
             self.drain_readiness_queries().await;
             match state {
@@ -2775,10 +2812,15 @@ impl PeerManager {
                 continue;
             };
             let state = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                    commands,
-                    PEER_QUERY_TIMEOUT,
-                ))
+                .await_with_readiness(
+                    rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                        commands,
+                        PEER_QUERY_TIMEOUT,
+                    ),
+                    OperatorReadAdmission::Fenced {
+                        reason: "100 ms state probe in a dataset refresh fan-out",
+                    },
+                )
                 .await;
             self.drain_readiness_queries().await;
             match state {
@@ -3024,7 +3066,13 @@ impl PeerManager {
         let (reply, response) = oneshot::channel();
         permit.send(RibUpdate::ReevaluatePeerExportPolicies { peers, reply });
         match self
-            .await_with_readiness_budget(response, RIB_REPLY_TIMEOUT)
+            .await_with_readiness_budget(
+                response,
+                RIB_REPLY_TIMEOUT,
+                OperatorReadAdmission::Fenced {
+                    reason: "one batched dataset export re-evaluation, bounded by RIB_REPLY_TIMEOUT",
+                },
+            )
             .await
         {
             Some(Ok(Ok(()))) => Ok(()),

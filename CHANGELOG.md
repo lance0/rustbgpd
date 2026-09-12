@@ -135,6 +135,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
+  with `DEADLINE_EXCEEDED` when they arrive while a rejected reload is rolling
+  its export policies back. The peer manager awaited the rollback's batched
+  RIB restore with operator reads parked behind it for up to the two-minute
+  batch budget, so every status command issued right after a failed reload
+  could time out. Reads are now served while that restore is awaited, on the
+  same terms as during the forward transition; every session already runs its
+  restored chain again, so a read observes the generation being restored.
+  Mutations still wait for the rollback to finish, and its budget is unchanged.
+
+- **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched
   export-policy transition is in progress. Both actors previously parked
   operator reads behind the whole RIB transition, so a read arriving more than
