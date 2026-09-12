@@ -153,6 +153,7 @@ states that the whole decision is Superseded.
 | [0129](0129-prefix-sid-domain-boundary.md) | BGP Prefix-SID administrative-domain boundary | Proposed (no runtime behavior shipped) | 2026-08-29 | Unstated |
 | [0130](0130-identity-conditional-external-policy-fence.md) | Identity-conditional external-policy transaction fence | Accepted | 2026-09-01 | Active |
 | [0131](0131-read-only-mcp-server.md) | Read-only MCP server for the explain surfaces | Accepted | 2026-09-05 | Active |
+| [0132](0132-operator-read-path.md) | Where operator reads live — admission at each wait site versus a published read generation | Proposed (drafter recommends B now, C for named summary surfaces) | 2026-09-12 | Unstated |
 
 ## Supporting records
 
@@ -166,7 +167,7 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The six Proposed records do not state one of the navigation lifecycles above.
+The seven Proposed records do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
@@ -175,6 +176,7 @@ They remain **Unstated** rather than being inferred as Parked:
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0124](0124-bounded-config-history-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
+- [ADR-0132](0132-operator-read-path.md)
 
 ## Template
 

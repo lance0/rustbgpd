@@ -620,7 +620,9 @@ switch point; a route listing started before the commit cannot be continued
 across it. Rollback and standalone policy transactions keep the full fence.
 Readiness queries remain available at their existing transaction seams. A
 congested backend or a later transaction stage can still exhaust an operator
-read's deadline.
+read's deadline. Whether reads should keep entering the owning actor at all,
+or be answered from a published generation, is the open question in
+[ADR-0132](../adr/0132-operator-read-path.md).
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves
