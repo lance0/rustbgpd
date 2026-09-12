@@ -633,9 +633,34 @@ so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
 there. During API publication-failure compensation, chains restore before the
 staged configuration: admitted reads report their sources' current values
 without claiming an atomic prior-generation snapshot. Session ACK/bookkeeping
-fences remain in place. Readiness queries remain available at their existing
-transaction seams. A congested backend or another transaction stage can still
-exhaust an operator read's deadline.
+fences remain in place. Clean generation compensation admits these live reads
+after earlier restoration steps succeed. A failed earlier restoration keeps reads fenced,
+because acknowledged session settings and manager metadata can disagree.
+Readiness queries remain available at their existing transaction seams. A
+congested backend or a later transaction stage can still exhaust an operator
+read's deadline.
+
+Forward policy transactions also serve bounded operator reads during RFC 8212
+preflight, cohort selection, post-application state probes (including their clean
+retry), retained-route proofs, and per-peer RIB export replacement. Each session
+policy acknowledgement remains fenced until the corresponding manager bookkeeping
+matches; a bounded batch of queued reads then runs before the next policy step.
+The SIGHUP `honor_graceful_shutdown` and `honor_blackhole` fan-outs use the same
+admission after each acknowledged import-chain update, while desired configuration
+publication and ordinary mutations retain their command ordering.
+Dataset generation settlement inherits its owner's admission through RIB capacity
+and reply waits; compensation serves them only after earlier restoration steps
+succeed. Legacy dataset refresh uses the same bounded RIB dispatch, preserving its
+five-second wall-clock reply deadline. Generation settlement keeps its existing
+reply budget that excludes read servicing. These are live reads, with unchanged
+RPC deadlines and no common generation pin across peers or actors.
+
+The serial work still scales with fleet size: 1,000 individual 100 ms state probes
+have a theoretical 100-second ceiling, and 1,000 individual 500 ms hot-apply
+acknowledgements have a 500-second ceiling per changed direction, before outer
+ownership limits. These are component bounds, not measured healthy-fleet timings;
+operator service between completed steps prevents those delays accumulating as
+one uninterrupted read fence.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves

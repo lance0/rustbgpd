@@ -207,6 +207,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expires or its caller disconnects. Later mutations remain queued until that
   read and the scheduling step settle.
 
+- Forward policy transactions admit bounded operator reads during read-only
+  qualification and state probes, authoritative per-peer RIB waits, and between
+  acknowledged session policy steps, including SIGHUP honor-knob fan-outs.
+  Dataset settlement carries explicit forward or compensation admission through
+  RIB capacity and reply waits; legacy dataset
+  refresh also bounds RIB capacity using the existing five-second allowance.
+  Individual session acknowledgements keep their fences; clean generation
+  compensation admits live reads, while earlier restoration failures retain the
+  fence against inconsistent metadata. Existing operator RPC deadlines and
+  mutation ownership are unchanged.
+
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched
   export-policy transition is in progress. Both actors previously parked
