@@ -13,6 +13,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The RIB logs one `post-commit first general query timing` record per
+  committed export-policy transition that an operator read follows within
+  ten seconds: the terminal commit poll's duration, the general queries and
+  primary updates queued at commit, the wall-clock wait from the end of that
+  poll to the first general query dispatched, elapsed wall time inside
+  route-chunk, primary-update, and dirty-resync work in that span, and the
+  unattributed remainder (including other actor work, idle time, and
+  scheduling delays). This describes the RIB side before query execution,
+  not end-to-end operator latency; actor scheduling is unchanged.
+
 - Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
   `bgp_rib_readiness_query_wait_seconds{seam}`. The first times route-chunk
   construction and processing, coalesced outbound distribution, and subsequent
