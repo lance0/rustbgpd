@@ -5234,6 +5234,204 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
     assert!(manager.post_commit_query_trace.is_none());
 }
 
+/// A committed transition arms the post-commit query trace and the first
+/// general query served afterwards consumes it, whichever event-loop path
+/// delivers that query. With the actor idle after the commit (no primary
+/// backlog) the delivering path is the query-lane select arm; a trace
+/// consumed only by the bounded drains survives that query, so the record
+/// is missing here and a later drain would report the whole idle gap as
+/// the wait.
+#[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one running-actor scenario carries the log capture, the committed transition, and both query paths"
+)]
+async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc as StdArc;
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct Fields(BTreeMap<String, String>);
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+    struct Capture(StdArc<Mutex<Vec<Fields>>>);
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+    const RECORD: &str = "post-commit first general query timing";
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let records = |captured: &Mutex<Vec<Fields>>| -> Vec<BTreeMap<String, String>> {
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|fields| fields.0.get("message").is_some_and(|m| m.contains(RECORD)))
+            .map(|fields| fields.0.clone())
+            .collect()
+    };
+    // The run loop is spawned on this current-thread runtime, so the
+    // thread's default subscriber sees the actor's records.
+    let _subscriber = tracing::subscriber::set_default(Capture(StdArc::clone(&captured)));
+
+    let (tx, rx) = mpsc::channel(32);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_2201);
+    let next_policy = community_chain(0xFDE8_2202);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 31,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 16);
+    let routes_received = |prefix: Ipv4Prefix| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    };
+    tx.send(routes_received(Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 118, 0),
+        24,
+    )))
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    let committed_at = std::time::Instant::now();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert!(update.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_2202))
+        }));
+    }
+    assert!(
+        records(&captured).is_empty(),
+        "nothing is emitted before a query"
+    );
+
+    // Idle actor, then one general query delivered by the select arm.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let idle_gap = committed_at.elapsed();
+    let (reply, count) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(count.await.unwrap(), 1);
+    let first = records(&captured);
+    assert_eq!(
+        first.len(),
+        1,
+        "exactly one post-commit record after the first general query, \
+         served from the idle select arm: {first:?}"
+    );
+    let wait_us: u64 = first[0]["first_query_wait_us"].parse().unwrap();
+    let observed_us = u64::try_from(committed_at.elapsed().as_micros()).unwrap();
+    assert!(
+        wait_us >= u64::try_from(idle_gap.as_micros()).unwrap() && wait_us <= observed_us + 100_000,
+        "first_query_wait_us={wait_us} must match the observed idle gap \
+         ({idle_gap:?} .. {observed_us} us)"
+    );
+    assert_eq!(first[0]["queued_general_queries"], "0");
+
+    // A later primary update and its bounded drain find no trace to emit.
+    let (reply, count) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(routes_received(Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 119, 0),
+        24,
+    )))
+    .unwrap();
+    let _ = count.await.unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert_eq!(
+        records(&captured).len(),
+        1,
+        "the trace is consumed once; a later drain emits nothing"
+    );
+
+    drop(tx);
+    drop(query_tx);
+    handle.await.unwrap();
+}
+
 /// With wall-clock budget in hand, the probe-and-prepare phase strides the
 /// whole cohort in a handful of polls instead of one route-slice per poll —
 /// the fenced pre-commit window must not scale with table x member count
