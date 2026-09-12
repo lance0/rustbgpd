@@ -112,7 +112,11 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                 print("converged (stub)", flush=True)
                 while not (root / "probe-held").exists():
                     time.sleep(0.01)
-                finish = Path(os.environ.get("RELOADSTALL_EVIDENCE_DIR", root / "engine-finish"))
+                configured = os.environ.get("RELOADSTALL_EVIDENCE_DIR")
+                if configured is None:
+                    (root / "engine-withdraw").write_text(str(time.monotonic()))
+                    raise SystemExit(0)
+                finish = Path(configured)
                 finish.mkdir()
                 (finish / "ready").write_text("ready\\n")
                 deadline = time.monotonic() + 12
