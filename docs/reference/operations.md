@@ -618,13 +618,16 @@ pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
 across it. When a reload's export-policy transition is rejected and rolled
-back, the same reads are served while the daemon awaits the batched RIB
-restore; every session already runs its prior chain again, so a read observes
-the generation being restored. Standalone policy transactions and a reload's
-later compensating replay keep the full fence. Readiness queries remain
-available at their existing transaction seams. A
-congested backend or a later transaction stage can still exhaust an operator
-read's deadline.
+back, the peer manager serves session snapshots, import-statistics collections,
+and dataset status while it awaits enqueue or completion of the batched RIB
+restore. These are live reads: a failed session restore can leave different
+sessions on different policies, and peer-manager and RIB reads do not share
+a generation pin. The RIB's synchronous restore still fences general queries,
+so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
+there. Standalone policy transactions and a reload's later compensating replay
+keep the full fence. Readiness queries remain available at their existing
+transaction seams. A congested backend or a later transaction stage can still
+exhaust an operator read's deadline.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves

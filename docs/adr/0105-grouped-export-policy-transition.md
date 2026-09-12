@@ -41,12 +41,15 @@ Section 5's "no general query is admitted" describe the design before this
 amendment. Rollback and standalone policy transactions are unchanged.
 
 **Amended:** 2026-09-12 — the rollback of a rejected cohort transition admits
-the same operator-read lane while the peer manager awaits its exact RIB
-compensation batch. Every cohort session already runs its prior chain again
-at that point, so a read observes the generation being restored; the
-ordinary command receiver stays unpolled and the two-minute batch-reply bound
-is unchanged. Standalone policy transactions and a reload's later
-compensating replay keep the full fence.
+the same operator-read lane while the peer manager awaits enqueue or completion
+of its exact RIB compensation batch. Session restoration has been attempted,
+but an unsuccessful restore can leave a session on a different policy. Reads
+report live session state without a common generation pin. The RIB still
+executes the authoritative restore synchronously and fences general queries,
+so this admission alone does not guarantee completion of neighbor RPCs or
+export-policy statistics within their deadlines. The ordinary command receiver
+stays unpolled and the two-minute batch-reply bound is unchanged. Standalone
+policy transactions and a reload's later compensating replay keep the full fence.
 
 ## Context
 

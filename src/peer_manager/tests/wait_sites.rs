@@ -1,7 +1,8 @@
 //! Operator-read admission at every peer-manager transaction wait.
 //!
-//! Every `await_with_readiness*` call site is one row of [`WAIT_SITES`]: what
-//! the site awaits, how a stub parks the transaction there, and whether a
+//! Every `await_with_readiness*` or `finish_admitted_operator_read` call site
+//! is one row of [`WAIT_SITES`]: what the site awaits, how a stub parks the
+//! transaction there, and whether a
 //! concurrent operator read (`ListPeers`, `QueryImportPolicyTermHits`) is
 //! served or deliberately fenced while it is parked. One driver runs every
 //! row. [`wait_site_table_covers_every_call_site`] fails when a call site is
@@ -18,9 +19,9 @@ use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyRestoreReceipt};
 use rustbgpd_transport::ImportPolicyTermHits;
 
-/// Server-side deadline of every peer-manager read (`PEER_MANAGER_READ_TIMEOUT`
-/// in the API crate). A fenced site whose bound is below this never fails a
-/// reader on its own.
+/// Fresh caller budget used by this matrix (`PEER_MANAGER_READ_TIMEOUT` in
+/// the API crate). Prior queueing or other stages can consume that budget
+/// before a read encounters even a shorter individual fence.
 const READER_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Reads issued while the site is parked. `Fenced` rows probe for `window`
@@ -216,12 +217,7 @@ const FORWARD_COHORT: Drive = Drive::ForwardCohort {
 const QUERY_PROBE_REASON: &str = "one session state probe bounded by PEER_QUERY_TIMEOUT (100 ms), \
      below the 2 s reader deadline; the readiness lane is drained after it";
 
-const ROLLBACK_REASON: &str = "rollback: sessions already run the restored chains while the RIB still \
-     evaluates the rejected ones; the readiness-only helper keeps operator reads fenced until the \
-     restore batch is acknowledged, bounded by the rollback budget (RIB_BATCH_REPLY_TIMEOUT, 2 min), \
-     which can outlast the 2 s reader deadline";
-
-/// One row per `await_with_readiness*` call site, in source order.
+/// One row per actor wait-helper call site, in source order.
 const WAIT_SITES: &[WaitSite] = &[
     WaitSite {
         site: "mod.rs::handle_operator_query",
@@ -235,8 +231,8 @@ const WAIT_SITES: &[WaitSite] = &[
         contract: Contract::Fenced {
             reason: "one admitted read completes before the next is polled: its collector must \
                      finish before a prestage ACK can advance a session's installed policy, and \
-                     it is bounded by that read's own deadline, so a queued read waits at most \
-                     one reader deadline",
+                     the collector uses the admitted read's absolute deadline; queued reads \
+                     can already have spent part of their own budget",
         },
         completion: Completion::ExportApplied,
     },
@@ -490,9 +486,8 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         completion: Completion::ExportApplied,
     },
-    // Expected to flip to `Contract::Served` by the rollback-admission change
-    // that lets the rollback owner admit operator reads at both rollback waits
-    // (this row and `restore_resolved_policies` below).
+    // The rollback owner admits live peer-manager reads at both waits. The
+    // RIB's general-query lane is a separate contract, not exercised here.
     WaitSite {
         site: "policy.rs::register_policy_rollback_rib",
         awaits: "rollback RestorePeerExportPoliciesAuthoritatively enqueue acknowledgement",
@@ -505,9 +500,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: ROLLBACK_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::ExportRestored,
     },
     WaitSite {
@@ -529,7 +522,7 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         completion: Completion::ExportRestored,
     },
-    // Expected to flip to `Contract::Served` together with the enqueue row.
+    // Deliberately served together with the rollback enqueue row above.
     WaitSite {
         site: "policy.rs::restore_resolved_policies",
         awaits: "rollback RestorePeerExportPoliciesAuthoritatively aggregate reply",
@@ -542,9 +535,7 @@ const WAIT_SITES: &[WaitSite] = &[
         pre_read: false,
         additional_entry: None,
         window: HELD_FOREVER,
-        contract: Contract::Fenced {
-            reason: ROLLBACK_REASON,
-        },
+        contract: Contract::Served,
         completion: Completion::ExportRestored,
     },
     WaitSite {
@@ -943,7 +934,11 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         Drive::ForwardCohort { .. }
         | Drive::ForwardWalk { .. }
         | Drive::Rfc8212Transition { .. } => manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, clean, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                clean,
+                OperatorReadAdmission::Served,
+            )
             .await
             .map(drop)
             .map_err(|failure| failure.message),
@@ -1280,11 +1275,10 @@ async fn every_wait_site_honours_its_operator_read_contract() {
 /// Call sites of the wait helpers per enclosing function, excluding the
 /// helper definitions themselves.
 fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> {
-    const HELPERS: [&str; 4] = [
+    const HELPERS: [&str; 3] = [
         "await_with_readiness",
-        "await_with_readiness_and_operator_reads",
         "await_with_readiness_budget",
-        "await_with_readiness_and_operator_budget",
+        "finish_admitted_operator_read",
     ];
     let mut sites = BTreeMap::new();
     let mut current = "<none>";
@@ -1304,7 +1298,8 @@ fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> 
                 .next()
                 .expect("split yields at least one piece");
         }
-        let calls = trimmed.matches(".await_with_readiness").count();
+        let calls = trimmed.matches(".await_with_readiness").count()
+            + trimmed.matches(".finish_admitted_operator_read").count();
         if calls > 0 && !HELPERS.contains(&current) {
             *sites.entry(format!("{file}::{current}")).or_default() += calls;
         }
@@ -1312,7 +1307,7 @@ fn wait_call_sites(file: &'static str, source: &str) -> BTreeMap<String, usize> 
     sites
 }
 
-/// A new `await_with_readiness*` call site must get a row in `WAIT_SITES`
+/// A new actor wait-helper call site must get a row in `WAIT_SITES`
 /// stating whether operator reads are served or fenced there, and why. Rows
 /// that re-exercise a covered site through another entry point
 /// (`additional_entry`) are not counted, so each site is keyed once.
@@ -1335,7 +1330,7 @@ fn wait_site_table_covers_every_call_site() {
     }
     assert_eq!(
         sources, table,
-        "every await_with_readiness* call site needs exactly one WAIT_SITES row keyed by \
+        "every actor wait-helper call site needs exactly one WAIT_SITES row keyed by \
          file::enclosing_fn (left: call sites in the source, right: table rows); add a row \
          stating whether operator reads are served or fenced at the new site, and why"
     );

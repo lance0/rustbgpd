@@ -953,9 +953,10 @@ impl PeerManager {
     /// registered RIB aggregate. During the transition every cohort session
     /// already runs its new chains, so a read observes the same mixed
     /// per-session generation the destination prestage admits; during the
-    /// rollback every session already runs its restored chain again, so a
-    /// read observes the prior generation, which is the generation being
-    /// restored.
+    /// rollback reads report live session state after restoration has been
+    /// attempted, including failed restores. Neither wait pins a common
+    /// generation across sessions or the RIB, whose authoritative restore
+    /// still fences its general-query lane.
     async fn await_with_readiness<F>(
         &mut self,
         future: F,

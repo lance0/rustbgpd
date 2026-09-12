@@ -348,9 +348,9 @@ struct PolicySnapshotContext {
     clean_state_window: CleanStateQueryWindow,
     /// Whether this transaction admits the bounded operator-read lane while
     /// it awaits a RIB aggregate. Decided once where the transaction starts,
-    /// so a rollback admits exactly what its forward apply admitted: reads
-    /// served while the registered rollback aggregate is awaited observe the
-    /// prior generation, which is the generation being restored.
+    /// so a rollback admits exactly what its forward apply admitted. Reads
+    /// report live state after session restoration was attempted; failed
+    /// restores can leave sessions on different policies.
     operator_reads: OperatorReadAdmission,
 }
 
@@ -2301,8 +2301,9 @@ impl PeerManager {
         });
 
         // Both waits below admit the operator-read lane on the transaction's
-        // terms: every session already runs its restored chain, so a read
-        // observes the generation being restored, and the rollback's own
+        // terms, reporting live state after session restoration was attempted.
+        // Some restores may have failed; admission does not imply a common
+        // generation or an available RIB query lane. The rollback's own
         // two-minute budget is unchanged.
         match tokio::time::timeout_at(
             deadline,
