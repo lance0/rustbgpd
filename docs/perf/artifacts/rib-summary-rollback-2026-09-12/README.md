@@ -33,8 +33,8 @@ normalization, and harness hashes are in [summary.json](summary.json).
 
 During the engine's 900-second control window, the controller changed both
 existing policy chains and sent one SIGHUP. Each run committed a 1,000-member
-RIB cohort, then the real peer without Route Refresh rejected the deferred
-refresh. Both executed a 1,000-member authoritative restore and recorded exactly
+RIB cohort, then the daemon rejected the deferred import refresh because
+that peer had not negotiated Route Refresh. Both executed a 1,000-member authoritative restore and recorded exactly
 one `rejected_no_effect`, with zero complete, partial, ignored, or task-failure
 deltas. This exercises rollback after commit, not rejection during preflight.
 
@@ -66,8 +66,8 @@ cannot identify projection allocation bytes or guarantee a transient peak.
 Seven expected rejection warning/error records occurred in each probe interval.
 After the last probe, owned teardown produced channel/writer warnings:
 11,821/918 for baseline and 11,406/921 for candidate. All owned children were
-reaped and listening ports released. Two earlier invalid harness attempts are
-excluded from this pair and retained locally.
+reaped and listening ports released. Earlier fixture and preflight failures
+are excluded from this pair and retained locally.
 
 ## Evidence
 
