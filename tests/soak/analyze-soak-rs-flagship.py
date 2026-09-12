@@ -123,7 +123,7 @@ def expected_management_route_prefix(routes_per_peer: object) -> Optional[str]:
     return f"{first}.{second}.{third}.0/24"
 
 
-def analyze_management_load(raw: bytes, meta: dict) -> dict:
+def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> dict:
     """Validate bounded JSONL evidence without trusting its terminal summary."""
     schema_errors: list[str] = []
     failures: list[dict] = []
@@ -261,6 +261,7 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
         )
     started_at = None
     summary_end = None
+    summary_end_unix = None
     stop_requested = None
     summary_scheduled = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
     summary_completed = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
@@ -284,6 +285,7 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
         summary_start = finite_number(summary.get("started_monotonic"))
         stop_requested = finite_number(summary.get("stop_requested_monotonic"))
         summary_end = finite_number(summary.get("completed_monotonic"))
+        summary_end_unix = finite_number(summary.get("completed_unix"))
         duration = finite_number(summary.get("duration_ms"))
         if (
             summary_start is None or stop_requested is None
@@ -378,12 +380,22 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
 
     measured_start = finite_number(meta.get("measured_start_monotonic"))
     measured_end = finite_number(meta.get("measured_end_monotonic"))
+    finish_release = finite_number(meta.get("engine_finish_release_monotonic"))
+    first_shutdown = finite_number(first_shutdown)
+    last_operation = max(
+        (record["completed_monotonic"]
+         for group in operations.values() for record in group), default=None,
+    )
     brackets = (
         started_at is not None and stop_requested is not None
         and summary_end is not None
         and measured_start is not None and measured_end is not None
         and started_at <= measured_start <= measured_end
         <= stop_requested <= summary_end
+        and finish_release is not None and summary_end <= finish_release
+        and last_operation is not None and last_operation <= summary_end
+        and summary_end_unix is not None and first_shutdown is not None
+        and summary_end_unix < first_shutdown
     )
 
     return {
@@ -398,6 +410,10 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
                 "measured_end": measured_end,
                 "stop_requested": stop_requested,
                 "load_end": summary_end,
+                "last_operation_completed": last_operation,
+                "engine_finish_release": finish_release,
+                "load_end_unix": summary_end_unix,
+                "engine_first_shutdown_unix": first_shutdown,
             },
             "pass": brackets,
         },
@@ -836,8 +852,11 @@ def main() -> int:
 
     cycles = parse_cycles(cycle_lines)
     result = analyze(rows, cycles, meta, args.min_slope_seconds)
-    result["gates"].update(analyze_management_load(management_raw, meta))
     result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
+    result["gates"].update(analyze_management_load(
+        management_raw, meta,
+        result["gates"]["daemon_log"]["value"]["first_administrative_shutdown_unix"],
+    ))
     result["verdict"] = (
         "pass" if all(gate["pass"] for gate in result["gates"].values())
         else "fail"

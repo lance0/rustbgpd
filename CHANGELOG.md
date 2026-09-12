@@ -166,6 +166,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The route-server flagship soak drains its management probes before releasing
+  the engine's final session shutdown. The analyzer checks this ordering against
+  the daemon log, preventing natural teardown from being counted as a stable
+  prefix failure while preserving every recorded probe result.
+
 - **Operator-visible:** Forward API policy transactions and policy-only
   publication-failure compensation now admit session
   snapshots, import-policy statistics, and dataset status at the same

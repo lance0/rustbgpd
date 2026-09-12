@@ -55,8 +55,8 @@ TRIP_LIMIT_MARGIN="${TRIP_LIMIT_MARGIN:-50}"
 TRIP_PREFIXES="${TRIP_PREFIXES:-64}"
 TRIP_RESTART_SECONDS="${TRIP_RESTART_SECONDS:-120}"
 TRIP_REESTABLISH_SEC="${TRIP_REESTABLISH_SEC:-300}"
-# Engine-side session hold after a final-cycle trip; the runner's final
-# evidence drain window is half of it, so the sessions always outlive it.
+# Engine-side session hold after a final-cycle trip, before the final
+# ready/ack barrier, so the runner can collect the recovery evidence.
 TRIP_FINAL_QUIESCE_SEC="${TRIP_FINAL_QUIESCE_SEC:-120}"
 CONVERGE_CAP_SEC="${CONVERGE_CAP_SEC:-900}"
 LISTEN_PORT="${LISTEN_PORT:-1790}"
@@ -198,6 +198,7 @@ DAEMON_PID=""
 SCEN=""
 MEASURED_START_MONOTONIC=""
 MEASURED_END_MONOTONIC=""
+ENGINE_FINISH_RELEASE_MONOTONIC=""
 RUN_INTERRUPTED=0
 
 monotonic_now() {
@@ -590,6 +591,7 @@ write_run_json() {
         printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
         printf '  "measured_start_monotonic": %s,\n' "$measured_start"
         printf '  "measured_end_monotonic": %s,\n' "$measured_end"
+        printf '  "engine_finish_release_monotonic": %s,\n' "${ENGINE_FINISH_RELEASE_MONOTONIC:-null}"
         printf '  "nofile_soft": %s,\n' "$RUSTBGPD_NOFILE_SOFT_JSON"
         printf '  "designated_member": "%s"\n' "$DESIGNATED_ADDR"
         echo "}"
@@ -648,6 +650,7 @@ main() {
 
     write_run_json
 
+    [[ ! -e $RUN_DIR/engine-finish ]] || abort "engine finish evidence path already exists"
     "$DAEMON" "$SCEN/config.toml" >"$RUSTBGPD_LOG" 2>&1 &
     DAEMON_PID=$!
     log "daemon started pid=$DAEMON_PID"
@@ -669,6 +672,7 @@ main() {
         RELOADSTALL_TRIP_PREFIXES=$TRIP_PREFIXES \
         RELOADSTALL_TRIP_REESTABLISH_SECS=$TRIP_REESTABLISH_SEC \
         RELOADSTALL_FINAL_QUIESCE_SECS=$TRIP_FINAL_QUIESCE_SEC \
+        RELOADSTALL_EVIDENCE_DIR="$RUN_DIR/engine-finish" \
         "$HARNESS" "$SOAK_PEERS" "$TOTAL_PREFIXES" "$LISTEN_PORT" "$DAEMON_PID" \
         "$SCEN/member.rpol" "$SCEN/gen-a.rpol" "$SCEN/gen-b.rpol" \
         "$RELOADS" "$CONTROL_SECS" "$SOAK_PEERS" >"$RELOADSTALL_LOG" 2>&1 &
@@ -696,14 +700,26 @@ main() {
     while :; do
         now=$(date +%s)
         if ! pid_running "$H_PID"; then
-            MEASURED_END_MONOTONIC=$(monotonic_now)
-            process_log
-            break
+            abort "engine exited before final evidence acknowledgement"
         fi
         pid_running "$MANAGEMENT_LOAD_PID" || abort "management-plane load exited before engine"
         pid_running "$DAEMON_PID" || abort "daemon died mid-soak"
         process_log
         trip_evidence_tick
+        if [[ -f $RUN_DIR/engine-finish/ready ]]; then
+            # The engine holds every session until ack. Drain even an
+            # already-running probe before allowing its final Cease fan-out.
+            [[ -z $TRIP_N ]] || abort "final trip headroom evidence never settled"
+            MEASURED_END_MONOTONIC=$(monotonic_now)
+            if ! stop_management_load; then
+                abort "management-plane load did not terminate cleanly"
+            fi
+            pid_running "$H_PID" || abort "engine exited while draining management-plane load"
+            ENGINE_FINISH_RELEASE_MONOTONIC=$(monotonic_now)
+            write_run_json
+            printf 'ack\n' >"$RUN_DIR/engine-finish/ack"
+            break
+        fi
         if ((now >= next_sample)); then
             sample_row $((now - start_epoch))
             next_sample=$((now + SAMPLE_INTERVAL))
@@ -716,23 +732,7 @@ main() {
     wait "$H_PID" || hrc=$?
     H_PID=""
     ((hrc == 0)) || abort "engine exited non-zero: $hrc"
-    if ! stop_management_load; then
-        abort "management-plane load did not terminate cleanly"
-    fi
     write_run_json
-    if [[ -n $TRIP_N ]]; then
-        # Drain the last trip's headroom evidence (bounded). When the last
-        # trip rides the last reload, the engine holds every session up for
-        # TRIP_FINAL_QUIESCE_SEC after `trip N complete`, so the live loop
-        # above normally settles this before the engine exits; this drain
-        # (half the hold) is the fail-closed backstop.
-        local drain_deadline=$(($(date +%s) + TRIP_FINAL_QUIESCE_SEC / 2))
-        while [[ -n $TRIP_N ]]; do
-            (($(date +%s) < drain_deadline)) || abort "trip $TRIP_N headroom evidence never settled"
-            trip_evidence_tick
-            sleep 1
-        done
-    fi
     log "engine and management-plane load completed cleanly; running analyzer"
 
     terminate "$DAEMON_PID"

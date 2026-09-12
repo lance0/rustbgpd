@@ -352,6 +352,8 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertEqual(len(summaries), 1)
         self.assertIs(records[-1], summaries[0])
         self.assertEqual(summaries[0]["result"], "clean_sigterm")
+        self.assertGreater(summaries[0]["completed_unix"], 0)
+        self.assertLessEqual(summaries[0]["completed_unix"], time.time())
         self.assertNotIn("payload", raw.decode())
 
     def test_jsonl_sink_completes_short_writes_and_rejects_no_progress(self):
