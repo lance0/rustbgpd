@@ -21,7 +21,7 @@ use rustbgpd_wire::{
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
 
-use crate::peer_types::PeerManagerOperatorQuery;
+use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerOperatorQuery};
 use crate::policy_service::PolicyService;
 use crate::proto::neighbor_service_server::NeighborService as NeighborRpc;
 use crate::proto::policy_service_server::PolicyService as PolicyRpc;
@@ -178,10 +178,10 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         .with_summary_queries(summary_rx);
     let manager_task = tokio::spawn(manager.run());
     let (peer_tx, _peer_rx) = mpsc::channel(1);
-    let (operator_tx, mut operator_rx) = mpsc::channel(8);
+    let (operator_tx, mut operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(8);
     let peer_task = tokio::spawn(async move {
         while let Some(query) = operator_rx.recv().await {
-            match query {
+            match query.query {
                 PeerManagerOperatorQuery::ListPeers { reply } => {
                     let _ = reply.send(vec![crate::test_support::peer_info(peer)]);
                 }

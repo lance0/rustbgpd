@@ -17,9 +17,10 @@ use crate::actor_read::{
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    PeerManagerCommand, PeerManagerOperatorQuery, PolicyStatementDefinition,
-    ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
+    ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
+    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
+    PolicyStatementDefinition, ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition,
+    ValidationPolicyScopeSnapshot,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
@@ -334,7 +335,7 @@ fn input_definition_to_proto(definition: &NamedPolicyDefinition) -> proto::Polic
 pub struct PolicyService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -390,9 +391,9 @@ impl PolicyService {
         }
     }
 
-    /// Attach the operator query lane serviced before session policy application.
+    /// Attach the operator query lane served at explicit actor admission points.
     #[must_use]
-    pub fn with_operator_queries(mut self, tx: mpsc::Sender<PeerManagerOperatorQuery>) -> Self {
+    pub fn with_operator_queries(mut self, tx: mpsc::Sender<EnqueuedOperatorQuery>) -> Self {
         self.operator_tx = Some(tx);
         self
     }
@@ -577,7 +578,7 @@ async fn owned_policy_mutation_body(
 /// though they do not have a `[[neighbors]]` row.
 async fn require_managed_peer_address(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<&mpsc::Sender<EnqueuedOperatorQuery>>,
     address: IpAddr,
     deadline: tokio::time::Instant,
     audit: Option<&GrpcAuditHandle>,
@@ -2427,7 +2428,7 @@ mod tests {
             .with_rib_summary_queries(summary_tx);
         let actor = tokio::spawn(async move {
             let PeerManagerOperatorQuery::HasPeerAddress { address, reply } =
-                operator_rx.recv().await.unwrap()
+                operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected managed peer query");
             };
@@ -2437,7 +2438,7 @@ mod tests {
                 peer,
                 deadline,
                 reply,
-            } = operator_rx.recv().await.unwrap()
+            } = operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected import counters");
             };
@@ -2445,7 +2446,7 @@ mod tests {
             assert!(deadline > tokio::time::Instant::now());
             reply.send(SessionQueryOutcome::Reply(Vec::new())).unwrap();
             let PeerManagerOperatorQuery::QueryPolicyDatasets { reply } =
-                operator_rx.recv().await.unwrap()
+                operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected dataset query");
             };
@@ -4102,6 +4103,7 @@ policy customer-in(peer_lp: u32) {
             tokio::time::timeout(Duration::from_secs(3), operator_rx.recv())
                 .await
                 .expect("dataset lookup must follow the export reply")
+                .map(|enqueued| enqueued.query)
         else {
             panic!("expected dataset lookup on the operator lane");
         };

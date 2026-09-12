@@ -6,7 +6,7 @@ use rustbgpd_rib::{RibSummaryQuery, RibUpdate};
 use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
-use crate::peer_types::{PeerManagerCommand, PeerManagerOperatorQuery};
+use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerCommand, PeerManagerOperatorQuery};
 
 /// Server-side deadline for every peer-manager read. All peer-manager reads
 /// are O(peers) state lookups, so this matches the duration class of the
@@ -26,11 +26,13 @@ pub(crate) async fn peer_manager_read<T>(
 /// for service constructors without an operator receiver.
 pub(crate) async fn peer_manager_operator_read<T>(
     tx: &mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<&mpsc::Sender<EnqueuedOperatorQuery>>,
     build: impl FnOnce(oneshot::Sender<T>) -> PeerManagerOperatorQuery,
 ) -> Result<T, Status> {
     match operator_tx {
-        Some(operator_tx) => bounded_peer_manager_read(operator_tx, build).await,
+        Some(operator_tx) => {
+            bounded_peer_manager_read(operator_tx, |reply| build(reply).into()).await
+        }
         None => peer_manager_read(tx, |reply| build(reply).into()).await,
     }
 }
@@ -124,7 +126,7 @@ mod tests {
             if full {
                 let (reply, _response) = oneshot::channel();
                 operator_tx
-                    .send(PeerManagerOperatorQuery::ListPeers { reply })
+                    .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
                     .await
                     .unwrap();
             }
@@ -157,6 +159,33 @@ mod tests {
         .unwrap();
         assert!(peers.is_empty());
         actor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn operator_read_stamp_includes_channel_admission_wait() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (reply, _response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            peer_manager_operator_read(&tx, Some(&operator_tx), |reply| {
+                PeerManagerOperatorQuery::ListPeers { reply }
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(operator_rx.recv().await.unwrap());
+        let enqueued = operator_rx.recv().await.unwrap();
+        assert_eq!(enqueued.enqueued.elapsed(), Duration::from_millis(500));
+        let PeerManagerOperatorQuery::ListPeers { reply } = enqueued.query else {
+            panic!("expected operator peer list");
+        };
+        reply.send(Vec::new()).unwrap();
+        assert!(task.await.unwrap().unwrap().is_empty());
     }
 
     /// Load-bearing: without a server-side deadline inside

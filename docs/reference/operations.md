@@ -617,10 +617,17 @@ exactly as during prestaging), and the RIB answers general queries between its
 pre-commit transition polls from the pre-commit state. Reads that arrive during
 the RIB's short commit batches wait for the commit, which remains the single
 switch point; a route listing started before the commit cannot be continued
-across it. Rollback and standalone policy transactions keep the full fence.
-Readiness queries remain available at their existing transaction seams. A
-congested backend or a later transaction stage can still exhaust an operator
-read's deadline.
+across it. When a reload's export-policy transition is rejected and rolled
+back, the peer manager serves session snapshots, import-statistics collections,
+and dataset status while it awaits enqueue or completion of the batched RIB
+restore. These are live reads: a failed session restore can leave different
+sessions on different policies, and peer-manager and RIB reads do not share
+a generation pin. The RIB's synchronous restore still fences general queries,
+so `rbgp neighbor` and `rbgp policy stats --direction both` can still time out
+there. Standalone policy transactions and a reload's later compensating replay
+keep the full fence. Readiness queries remain available at their existing
+transaction seams. A congested backend or a later transaction stage can still
+exhaust an operator read's deadline.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves
@@ -1318,6 +1325,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
 | `bgp_rib_actor_work_duration_seconds{work_unit}` | Wall-clock duration of RIB actor ingest components. The closed `work_unit` set is `route_chunk` (construction and processing of one bounded route chunk, excluding its drained-batch tail), `distribute_flush` (the coalesced outbound pass across the peer set, including readiness servicing at peer boundaries), and `exact_export_retire` (retiring exact-export rejections after that pass). Compare the `le="0.2"` bucket against the series count to count components above 200 ms. These are component timings for correlation with readiness waits, not uninterrupted stalls, a bound on probe latency, or coverage of all actor work |
 | `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing) and `policy_transition_fence` (synchronous replacement checkpoints). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
+| `bgp_peer_manager_operator_query_wait_seconds{seam}` | Wall-clock delay from send on the peer manager's operator-read lane until actor service begins, including bounded-channel admission wait. The closed `seam` set is `unfenced`, `prestage` (policy preflight, cohort selection, destination prestage and session setup), `forward_transition`, `commit_batches`, and `rollback`. The label is the current command's policy marker, or the latest completed marked command overlapping the wait; intervening ordinary commands preserve it. Markers include trailing command work. A wait spanning several phases is recorded once under one label, not split by cause. Fenced phases produce samples only when reads are eventually drained, so their counts depend on arrival timing and are not phase load. Service after caller timeout still counts; sends canceled before admission and reads never drained do not. Excludes work before the send, service execution, and reply delivery; this is not RPC latency or a timeout rate. The 0.1 s, 0.5 s, and 2 s edges match per-peer, explain, and aggregate budgets; `count - bucket{le="2"}` counts waits over 2 s |
 | `bgp_orr_input_objects{classification}` | Inputs considered by the ORR default-topology builder before NLRI deduplication. Exactly five classifications exist: `included_default`, `excluded_nondefault`, `malformed_topology`, `malformed_attribute_29`, and `default_with_ignored_flex_algo`. The Flex series is a subset of included default objects: its base object and classic metric remain usable. All series reset to zero when no vantage is configured |
 
 The shipped alert pack raises `BgpPolicyTransitionStalled` when

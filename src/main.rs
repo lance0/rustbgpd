@@ -95,8 +95,8 @@ use crate::reload::{
 };
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
-    ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerOperatorQuery, PeerManagerReadinessQuery, WarmCheckpointCapture,
+    EnqueuedOperatorQuery, ImportValidationDependency, PeerManagerCommand,
+    PeerManagerNeighborConfig, PeerManagerReadinessQuery, WarmCheckpointCapture,
     WarmCheckpointSession,
 };
 use rustbgpd_api::runtime_config_settlement::{
@@ -4160,8 +4160,7 @@ async fn run<T>(
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
         mpsc::channel::<PeerManagerReadinessQuery>(64);
-    let (peer_mgr_operator_tx, peer_mgr_operator_rx) =
-        mpsc::channel::<PeerManagerOperatorQuery>(64);
+    let (peer_mgr_operator_tx, peer_mgr_operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     let mut rpki_cache_queries = None;
