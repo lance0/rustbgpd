@@ -135,6 +135,35 @@ const RIB_BATCH_REPLY_TIMEOUT: Duration = Duration::from_mins(2);
 /// masquerading as a missing session.
 const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Whether an actor-owned wait admits the bounded operator-read lane
+/// (`rbgp neighbor`, `rbgp policy stats`, dataset status) while it is driven.
+/// The dedicated readiness lane is always admitted; the ordinary command
+/// receiver never is, so mutations stay strictly behind the owner. Operator
+/// reads carry deadlines of 100 ms to 2 s, so any wait that can outlast them
+/// must justify fencing them at the site: a fenced wait names what bounds it
+/// or what a served read would observe, the same way a lint allowance names
+/// its reason.
+#[derive(Clone, Copy, Debug)]
+enum OperatorReadAdmission {
+    /// Serve each operator read as it arrives; the wait resumes after the
+    /// read completes.
+    Served,
+    /// Leave operator reads queued behind the wait.
+    Fenced {
+        #[expect(
+            dead_code,
+            reason = "the reason documents the fence at its call site; it is not runtime state"
+        )]
+        reason: &'static str,
+    },
+}
+
+impl OperatorReadAdmission {
+    const fn admits(self) -> bool {
+        matches!(self, Self::Served)
+    }
+}
+
 /// Maximum number of session-side import-policy snapshots in flight per
 /// collector/RPC. The cap bounds each collector's memory/work while every
 /// query still shares the caller's single absolute deadline.
@@ -647,7 +676,7 @@ impl PeerManager {
             // Finish the admitted snapshot before a prestage ACK can let
             // the reload advance any session's installed policy.
             if let Some(task) = self.answer_operator_query(query).await {
-                let _ = self.await_with_readiness(task).await;
+                let _ = self.finish_admitted_operator_read(task).await;
             }
         } else {
             self.answer_normal_operator_query(query).await;
@@ -884,10 +913,12 @@ impl PeerManager {
         }
     }
 
-    /// Drive one owned transaction step while servicing at most one read-only
-    /// readiness query at a time. The transaction future is biased first, so a
-    /// probe flood cannot delay a completed apply/rollback step.
-    async fn await_with_readiness<F>(&mut self, future: F) -> F::Output
+    /// Finish one admitted operator read while servicing only the readiness
+    /// lane. This is the one wait that takes no admission: the read it
+    /// drives was itself admitted by an [`Self::await_with_readiness`] wait,
+    /// which admits the next read once this one completes, so reads stay in
+    /// order and the admitting wait never nests.
+    async fn finish_admitted_operator_read<F>(&mut self, future: F) -> F::Output
     where
         F: Future,
     {
@@ -909,19 +940,27 @@ impl PeerManager {
         }
     }
 
-    /// Like [`Self::await_with_readiness`], optionally admitting the bounded
-    /// operator-read lane as well. Only the forward reload owner passes
-    /// `true`, and only while it awaits the cohort's RIB transition: every
-    /// cohort session already runs its new chains at that point, so a read
-    /// admitted here observes the same mixed per-session generation the
-    /// destination prestage already admits, and the ordinary command
-    /// receiver stays unpolled so mutations remain strictly behind the
-    /// transaction. Each admitted read completes (through the readiness-only
-    /// helper, as during prestage) before the wait resumes.
-    async fn await_with_readiness_and_operator_reads<F>(
+    /// Drive one owned step while servicing at most one read-only readiness
+    /// query at a time and, when `admission` is [`OperatorReadAdmission::Served`],
+    /// the bounded operator-read lane as well. The step future is biased
+    /// first, so a probe flood cannot delay a completed apply/rollback step.
+    /// Each admitted operator read completes (through a fenced wait of its
+    /// own) before this wait resumes, and the ordinary command receiver is
+    /// never polled here, so mutations remain strictly behind the owner.
+    ///
+    /// A forward reload serves reads while it awaits the cohort's RIB
+    /// transition and while the same transaction's rollback awaits its
+    /// registered RIB aggregate. During the transition every cohort session
+    /// already runs its new chains, so a read observes the same mixed
+    /// per-session generation the destination prestage admits; during the
+    /// rollback reads report live session state after restoration has been
+    /// attempted, including failed restores. Neither wait pins a common
+    /// generation across sessions or the RIB, whose authoritative restore
+    /// still fences its general-query lane.
+    async fn await_with_readiness<F>(
         &mut self,
         future: F,
-        allow_operator_reads: bool,
+        admission: OperatorReadAdmission,
     ) -> F::Output
     where
         F: Future,
@@ -937,9 +976,12 @@ impl PeerManager {
                         None => self.readiness_rx = None,
                     }
                 }
-                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if allow_operator_reads => {
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if admission.admits() => {
                     match query {
-                        Some(query) => self.handle_operator_query(query, true).await,
+                        // Boxed so the read's handler is not part of every
+                        // fenced wait's state machine; it allocates only
+                        // when a read is actually admitted.
+                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
                         None => self.operator_rx = None,
                     }
                 }
@@ -947,35 +989,19 @@ impl PeerManager {
         }
     }
 
-    /// Like [`Self::await_with_readiness`], but bound the transaction step by
-    /// a budget that accrues only while the step itself is being driven. Wall
-    /// time spent servicing an interleaved readiness query is not charged: a
-    /// `tokio::time::timeout` inside the step would keep counting during that
-    /// servicing, so a probe flood (or any long servicing burst) would be
-    /// deducted from a healthy session command's deadline — the mechanism
-    /// behind the cohort-setup starvation. Returns `None` when the accrued
-    /// budget elapses before the future completes.
+    /// Like [`Self::await_with_readiness`], but bound the step by a budget
+    /// that accrues only while the step itself is being driven. Wall time
+    /// spent servicing an interleaved readiness or operator query is not
+    /// charged: a `tokio::time::timeout` inside the step would keep counting
+    /// during that servicing, so a probe flood (or any long servicing burst)
+    /// would be deducted from a healthy session command's deadline — the
+    /// mechanism behind the cohort-setup starvation. Returns `None` when the
+    /// accrued budget elapses before the future completes.
     async fn await_with_readiness_budget<F>(
         &mut self,
         future: F,
         budget: Duration,
-    ) -> Option<F::Output>
-    where
-        F: Future,
-    {
-        self.await_with_readiness_and_operator_budget(future, budget, false)
-            .await
-    }
-
-    /// Only a forward reload admits operator snapshots, during its initial
-    /// destination prestage here and while it awaits the cohort RIB
-    /// transition in [`Self::await_with_readiness_and_operator_reads`]. All
-    /// other transaction waits keep this lane fenced.
-    async fn await_with_readiness_and_operator_budget<F>(
-        &mut self,
-        future: F,
-        budget: Duration,
-        allow_operator_reads: bool,
+        admission: OperatorReadAdmission,
     ) -> Option<F::Output>
     where
         F: Future,
@@ -999,10 +1025,10 @@ impl PeerManager {
                         return None;
                     }
                 }
-                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if allow_operator_reads => {
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if admission.admits() => {
                     remaining = remaining.saturating_sub(attended.elapsed());
                     match query {
-                        Some(query) => self.handle_operator_query(query, true).await,
+                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
                         None => self.operator_rx = None,
                     }
                     if remaining.is_zero() {
