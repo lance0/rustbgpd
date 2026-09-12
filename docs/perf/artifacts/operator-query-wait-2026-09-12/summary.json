@@ -1,0 +1,163 @@
+{
+  "source": {
+    "head": "bad6aba136397dc3b6b2b6e82e0f68e92799d60f",
+    "tree": "c28ddd694009fdd913654d4e921ebb5b2ff06cc7",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)\n",
+    "daemon_version": "rustbgpd 0.69.0\n",
+    "cli_version": "rbgp 0.69.0\n",
+    "hashes": {
+      "rbgp": "053f8461a620e1cd4e0db91c1693748f7ddda22ee0a7b9031787f8ebe8ffa37a",
+      "reloadstall": "047248889e6e7badf26882e408b88e90d47b747cf70a9a830b67f50cdd6e0a40",
+      "rustbgpd": "ad0fca2bfe63782c619494822eb0f6ac5d3576de85c2a1aaf15199e7b98081f9"
+    }
+  },
+  "shape": {
+    "peers": 1000,
+    "changed_peers": 1000,
+    "ipv4_prefixes": 400000,
+    "prefixes_per_peer": 400,
+    "expected_prefixes_per_observer": 399600,
+    "reloads": 2,
+    "daemon_cpus": "2-3",
+    "engine_cpus": "4-7",
+    "probe_cpus": "8-15",
+    "nofile_soft": 65536,
+    "cycle_quiesce_seconds": 40,
+    "probe_offsets_from_prestage_end_seconds": [
+      0.15,
+      0.45,
+      0.55,
+      0.65
+    ],
+    "control_seconds": 15
+  },
+  "run_started_utc": "2026-09-12T16:58:02.568134+00:00",
+  "run_finished_utc": "2026-09-12T16:59:56.529350+00:00",
+  "engine_exit": 0,
+  "exact_cold_convergence_seconds": 5.3,
+  "establishment_retries": 0,
+  "sessions_up_per_reload": [
+    1000,
+    1000
+  ],
+  "probe_duration_ms_min": 16.4,
+  "probe_duration_ms_max": 430.3,
+  "probe_arrival_relative_to_rib_commit_seconds_min": -0.49113893508911133,
+  "probe_arrival_relative_to_rib_commit_seconds_max": 0.04720473289489746,
+  "histogram_waves": [
+    {
+      "observations": 12.0,
+      "queue_wait_sum_seconds": 0.171536653,
+      "reload": 1,
+      "rpc_count": 8,
+      "rpc_duration_sum_seconds": 1.1322,
+      "seams": {
+        "commit_batches": {
+          "count": 0.0,
+          "over_2s": 0.0,
+          "sum": 0.0
+        },
+        "forward_transition": {
+          "count": 6.0,
+          "over_2s": 0.0,
+          "sum": 3.0425e-05
+        },
+        "prestage": {
+          "count": 0.0,
+          "over_2s": 0.0,
+          "sum": 0.0
+        },
+        "rollback": {
+          "count": 0.0,
+          "over_2s": 0.0,
+          "sum": 0.0
+        },
+        "unfenced": {
+          "count": 6.0,
+          "over_2s": 0.0,
+          "sum": 0.171506228
+        }
+      }
+    },
+    {
+      "observations": 12.0,
+      "queue_wait_sum_seconds": 0.207753624,
+      "reload": 2,
+      "rpc_count": 8,
+      "rpc_duration_sum_seconds": 1.5344,
+      "seams": {
+        "commit_batches": {
+          "count": 3.0,
+          "over_2s": 0.0,
+          "sum": 0.207706302
+        },
+        "forward_transition": {
+          "count": 7.0,
+          "over_2s": 0.0,
+          "sum": 3.5864e-05
+        },
+        "prestage": {
+          "count": 0.0,
+          "over_2s": 0.0,
+          "sum": 0.0
+        },
+        "rollback": {
+          "count": 0.0,
+          "over_2s": 0.0,
+          "sum": 0.0
+        },
+        "unfenced": {
+          "count": 2.0,
+          "over_2s": 0.0,
+          "sum": 1.1457999999991975e-05
+        }
+      }
+    }
+  ],
+  "scrapes": [
+    {
+      "completed_wall": 1789232307.001295,
+      "file": "metrics-01-before.prom",
+      "record": "metrics",
+      "reload": 1,
+      "started_wall": 1789232306.9161873,
+      "when": "before"
+    },
+    {
+      "completed_wall": 1789232308.8613696,
+      "file": "metrics-01-after.prom",
+      "record": "metrics",
+      "reload": 1,
+      "started_wall": 1789232308.7887208,
+      "when": "after"
+    },
+    {
+      "completed_wall": 1789232350.1099327,
+      "file": "metrics-02-before.prom",
+      "record": "metrics",
+      "reload": 2,
+      "started_wall": 1789232350.0425885,
+      "when": "before"
+    },
+    {
+      "completed_wall": 1789232352.0931625,
+      "file": "metrics-02-after.prom",
+      "record": "metrics",
+      "reload": 2,
+      "started_wall": 1789232352.0225859,
+      "when": "after"
+    }
+  ],
+  "log_review": {
+    "errors": 0,
+    "startup_legacy_rfc8212_warning": 1,
+    "post_measurement_disconnect_resync_warnings": 236326,
+    "first_disconnect_resync_warning_utc": "2026-09-12T16:59:52.717822Z",
+    "last_disconnect_resync_warning_utc": "2026-09-12T16:59:56.468993Z"
+  },
+  "cleanup": {
+    "owned_processes_reaped": true,
+    "owned_ports_free": true
+  }
+}

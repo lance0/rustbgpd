@@ -1641,6 +1641,7 @@ mod inbound_admission;
 mod lifecycle;
 mod max_prefix;
 mod metrics;
+mod operator_read_wait;
 mod peer_groups;
 mod persistence;
 mod policy;

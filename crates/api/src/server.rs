@@ -44,8 +44,8 @@ use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{
-    CatalogMutationError, ConfigEvent, ConfigPersistAck, OwnedCatalogMutation,
-    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
+    CatalogMutationError, ConfigEvent, ConfigPersistAck, EnqueuedOperatorQuery,
+    OwnedCatalogMutation, OwnedCatalogMutationOutcome, PeerManagerCommand,
     PeerManagerReadinessQuery,
 };
 use crate::policy_service::PolicyService;
@@ -1100,7 +1100,7 @@ pub struct ServeConfig {
     /// Dedicated read-only peer-manager lane used only by core readiness.
     pub peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     /// Operator queries admitted before session policy application.
-    pub peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
+    pub peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Narrow synchronous reader for the latest authoritative VRP table.
@@ -1904,7 +1904,7 @@ async fn run_tcp_listener(
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
-    peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
+    peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2175,7 +2175,7 @@ async fn run_uds_listener(
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
-    peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
+    peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
     asn: u32,
     router_id: String,
     listen_port: u32,

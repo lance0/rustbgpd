@@ -1045,31 +1045,37 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
         if !compensate {
             let (reply, response) = oneshot::channel();
             operator_tx
-                .send(PeerManagerOperatorQuery::ListPeers { reply })
+                .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
                 .await
                 .unwrap();
             assert_eq!(response.await.unwrap().len(), 3);
             let (reply, response) = oneshot::channel();
             operator_tx
-                .send(PeerManagerOperatorQuery::GetPeerState {
-                    peer: key("10.0.0.2".parse().unwrap()),
-                    reply,
-                })
+                .send(
+                    PeerManagerOperatorQuery::GetPeerState {
+                        peer: key("10.0.0.2".parse().unwrap()),
+                        reply,
+                    }
+                    .into(),
+                )
                 .await
                 .unwrap();
             assert!(response.await.unwrap().is_some());
             let (reply, response) = oneshot::channel();
             operator_tx
-                .send(PeerManagerOperatorQuery::HasPeerAddress {
-                    address: "10.0.0.2".parse().unwrap(),
-                    reply,
-                })
+                .send(
+                    PeerManagerOperatorQuery::HasPeerAddress {
+                        address: "10.0.0.2".parse().unwrap(),
+                        reply,
+                    }
+                    .into(),
+                )
                 .await
                 .unwrap();
             assert!(response.await.unwrap());
             let (reply, response) = oneshot::channel();
             operator_tx
-                .send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply })
+                .send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply }.into())
                 .await
                 .unwrap();
             assert!(response.await.unwrap().is_empty());
@@ -1111,7 +1117,7 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
         }
         let (reply, mut response) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
             .await
             .unwrap();
         let (reply, ping) = oneshot::channel();
