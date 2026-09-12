@@ -15,11 +15,13 @@ use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use tracing::debug;
 
-use crate::actor_read::peer_manager_read;
+use crate::actor_read::peer_manager_operator_read;
 use crate::audit::{gnmi_set_summary, set_request_summary};
 use crate::gnmi;
 use crate::gnmi_ext;
-use crate::peer_types::{PeerInfo, PeerManagerCommand};
+use crate::peer_types::{
+    EnqueuedOperatorQuery, PeerInfo, PeerManagerCommand, PeerManagerOperatorQuery,
+};
 use crate::proto;
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
@@ -220,11 +222,25 @@ impl GnmiService {
         access_mode: AccessMode,
         peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
     ) -> Self {
+        Self::new_with_operator_queries(asn, router_id, access_mode, peer_mgr_tx, None)
+    }
+
+    /// Create a service whose live peer snapshots use the operator lane when
+    /// configured, retaining the ordinary command fallback for embedders.
+    #[must_use]
+    pub fn new_with_operator_queries(
+        asn: u32,
+        router_id: String,
+        access_mode: AccessMode,
+        peer_mgr_tx: tokio::sync::mpsc::Sender<PeerManagerCommand>,
+        operator_tx: Option<tokio::sync::mpsc::Sender<EnqueuedOperatorQuery>>,
+    ) -> Self {
         let mut service = Self::with_peer_snapshot(asn, router_id, move || {
             let peer_mgr_tx = peer_mgr_tx.clone();
+            let operator_tx = operator_tx.clone();
             Box::pin(async move {
-                peer_manager_read(&peer_mgr_tx, |reply| PeerManagerCommand::ListPeers {
-                    reply,
+                peer_manager_operator_read(&peer_mgr_tx, operator_tx.as_ref(), |reply| {
+                    PeerManagerOperatorQuery::ListPeers { reply }
                 })
                 .await
             })
@@ -4167,6 +4183,124 @@ mod tests {
         for (surface, error) in errors {
             assert_eq!(error.code(), tonic::Code::Unavailable, "{surface}");
             assert_eq!(error.message(), expected_message, "{surface}");
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_peer_snapshots_serve_every_gnmi_surface_with_commands_parked() {
+        let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = tokio::sync::mpsc::channel::<EnqueuedOperatorQuery>(1);
+        let actor = tokio::spawn(async move {
+            // Get plus the four subscription bootstrap paths all share this
+            // live snapshot callback. The ordinary receiver stays parked.
+            for _ in 0..5 {
+                let query = operator_rx.recv().await.expect("expected operator read");
+                let PeerManagerOperatorQuery::ListPeers { reply } = query.query else {
+                    panic!("expected live ListPeers query");
+                };
+                let peer = test_peer("203.0.113.2".parse().unwrap());
+                reply.send(vec![peer]).unwrap();
+            }
+        });
+        let manager = event_history_manager().await;
+        let service = GnmiService::new_with_operator_queries(
+            65001,
+            "192.0.2.1".into(),
+            crate::server::AccessMode::ReadOnly,
+            peer_tx,
+            Some(operator_tx),
+        )
+        .with_event_history(Some(manager.handle()));
+        let mut harness = serve(service).await;
+        let path = neighbor_session_state_wildcard_path();
+        let response = harness.client.get(get_request(path.clone())).await.unwrap();
+        assert_eq!(json_ietf_values(response.get_ref()), ["\"ESTABLISHED\""]);
+        for list in [
+            subscription_list(
+                gnmi::subscription_list::Mode::Once,
+                gnmi::SubscriptionMode::TargetDefined,
+                path.clone(),
+            ),
+            subscription_list(
+                gnmi::subscription_list::Mode::Poll,
+                gnmi::SubscriptionMode::TargetDefined,
+                path.clone(),
+            ),
+            subscription_list(
+                gnmi::subscription_list::Mode::Stream,
+                gnmi::SubscriptionMode::Sample,
+                path.clone(),
+            ),
+            stream_on_change_list(path),
+        ] {
+            let mut stream = harness
+                .client
+                .subscribe(tokio_stream::iter(vec![subscribe_msg(list)]))
+                .await
+                .unwrap()
+                .into_inner();
+            let updates = subscribe_updates(next_bounded(&mut stream).await.unwrap().unwrap());
+            assert_eq!(updates.len(), 1);
+            assert_eq!(
+                updates[0].val.as_ref().unwrap().value,
+                Some(gnmi::typed_value::Value::JsonIetfVal(
+                    b"\"ESTABLISHED\"".to_vec()
+                ))
+            );
+            assert_sync(&mut stream).await;
+        }
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        actor.await.unwrap();
+        drop(harness);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn operator_peer_snapshot_outages_do_not_fall_back_on_any_gnmi_surface() {
+        for drop_reply in [false, true] {
+            let (peer_tx, mut peer_rx) = tokio::sync::mpsc::channel(1);
+            let (operator_tx, mut operator_rx) =
+                tokio::sync::mpsc::channel::<EnqueuedOperatorQuery>(1);
+            let actor = tokio::spawn(async move {
+                if drop_reply {
+                    for _ in 0..5 {
+                        let query = operator_rx.recv().await.expect("expected operator read");
+                        let PeerManagerOperatorQuery::ListPeers { reply } = query.query else {
+                            panic!("expected live ListPeers query");
+                        };
+                        drop(reply);
+                    }
+                }
+            });
+            // In the send-failure case the configured lane is closed before
+            // any RPC starts; a healthy ordinary channel must not hide that.
+            if !drop_reply {
+                operator_tx.closed().await;
+            }
+            let manager = event_history_manager().await;
+            let service = GnmiService::new_with_operator_queries(
+                65001,
+                "192.0.2.1".into(),
+                crate::server::AccessMode::ReadOnly,
+                peer_tx,
+                Some(operator_tx),
+            )
+            .with_event_history(Some(manager.handle()));
+            assert_peer_snapshot_outage(
+                service,
+                if drop_reply {
+                    "peer manager dropped reply"
+                } else {
+                    "peer manager unavailable"
+                },
+            )
+            .await;
+            assert!(peer_rx.try_recv().is_err());
+            actor.await.unwrap();
+            manager.shutdown().await;
         }
     }
 

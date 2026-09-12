@@ -267,6 +267,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp --json flowspec` now includes raw `extended_communities` as numeric
   values, preserving their order and duplicates alongside the curated actions.
 
+- gNMI neighbor snapshots now use the operator-read lane on TLS and Unix
+  listeners and for dial-out subscriptions. `Get` and subscription snapshots
+  can complete during policy waits that admit operator reads, retaining live
+  session values, the two-second peer-manager deadline, and terminal stream
+  errors when a snapshot is unavailable.
+
 - `rbgp doctor` attributes local process limits and config freshness to the
   connected Unix-socket peer, with process-start verification and reconnect
   updates. Co-resident daemons no longer contribute unrelated low-limit

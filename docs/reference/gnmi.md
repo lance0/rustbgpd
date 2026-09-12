@@ -58,6 +58,15 @@ are `sensitive_read`; `Set` is `operator_only`.
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
 | `Set` | Operator-only. Supports the static-neighbor and peer-group config subsets below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 
+Neighbor snapshots for `Get`, subscription bootstrap, periodic sampling, and
+heartbeat reconciliation use the peer manager's operator-read lane on TLS and
+Unix listeners and for dial-out subscriptions. They report the same live
+session observations as native neighbor reads and can complete during policy
+waits that admit operator reads; they do not pin peers to a common policy
+generation. The existing two-second peer-manager budget covers both queue
+admission and reply. An unavailable or timed-out snapshot still fails the
+request or terminates the subscription with its error; dial-out reconnects.
+
 ### `Set` static-neighbor scope
 
 The first supported config surface is static, numbered BGP neighbors under:

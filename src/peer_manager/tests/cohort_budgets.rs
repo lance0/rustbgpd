@@ -1007,7 +1007,13 @@ fn rib_holding_cohort_reply(
 /// the reply with the readiness-only helper parks both reads until the
 /// held reply is released and fails the bounded expectations below.
 #[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one held policy owner proves native and gNMI read admission plus ordinary mutation ordering"
+)]
 async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
+    use rustbgpd_api::gnmi::{self, g_nmi_server::GNmi as _};
+    use rustbgpd_api::gnmi_dialout::GnmiService;
     use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, ResolvedPeerPolicy};
 
     let first = IpAddr::V4(Ipv4Addr::new(10, 38, 0, 1));
@@ -1017,7 +1023,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     let (release_tx, release_rx) = oneshot::channel();
     let rib = rib_holding_cohort_reply(rib_rx, held_tx, release_rx);
 
-    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (command_tx, command_rx) = mpsc::channel(16);
     let (operator_tx, operator_rx) = mpsc::channel(4);
     let mut manager = PeerManager::new(
         command_rx,
@@ -1064,6 +1070,17 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     // new chain and the reply is held until released below.
     held_rx.await.unwrap();
     assert_eq!(installs.load(Ordering::SeqCst), 2);
+    let (mutation_reply, mut mutation_response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::SyncExplainConfig {
+            enabled: false,
+            cache_size: 17,
+            reject_retention_enabled: true,
+            reject_retention_capacity: 1024,
+            reply: mutation_reply,
+        })
+        .await
+        .unwrap();
     let (reply, response) = oneshot::channel();
     operator_tx
         .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
@@ -1074,6 +1091,61 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         .expect("a neighbor snapshot is answered while the cohort RIB reply is awaited")
         .unwrap();
     assert_eq!(infos.len(), 2);
+    let service = GnmiService::new_with_operator_queries(
+        65001,
+        "10.0.0.1".into(),
+        rustbgpd_api::server::AccessMode::ReadOnly,
+        command_tx.clone(),
+        Some(operator_tx.clone()),
+    );
+    let elem = |name: &str, keys: &[(&str, &str)]| gnmi::PathElem {
+        name: name.into(),
+        key: keys
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect(),
+    };
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        service.get(tonic::Request::new(gnmi::GetRequest {
+            path: vec![gnmi::Path {
+                elem: vec![
+                    elem("network-instances", &[]),
+                    elem("network-instance", &[("name", "DEFAULT")]),
+                    elem("protocols", &[]),
+                    elem("protocol", &[("identifier", "BGP"), ("name", "BGP")]),
+                    elem("bgp", &[]),
+                    elem("neighbors", &[]),
+                    elem("neighbor", &[("neighbor-address", "*")]),
+                    elem("state", &[]),
+                    elem("peer-as", &[]),
+                ],
+                ..Default::default()
+            }],
+            r#type: gnmi::get_request::DataType::State as i32,
+            encoding: gnmi::Encoding::JsonIetf as i32,
+            ..Default::default()
+        })),
+    )
+    .await
+    .expect("gNMI must use the admitted lane while the policy owner is held")
+    .unwrap()
+    .into_inner();
+    let values = response
+        .notification
+        .iter()
+        .flat_map(|notification| &notification.update)
+        .map(|update| update.val.as_ref().unwrap().value.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        infos
+            .iter()
+            .map(|info| Some(gnmi::typed_value::Value::JsonIetfVal(
+                info.remote_asn.to_string().into_bytes()
+            )))
+            .collect::<Vec<_>>()
+    );
     let (reply, response) = oneshot::channel();
     operator_tx
         .send(
@@ -1098,18 +1170,24 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         !reload.is_finished(),
         "the transaction stays parked on the held reply"
     );
+    assert!(matches!(
+        mutation_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
 
     release_tx.send(()).unwrap();
-    let (mut manager, result) = reload.await.unwrap();
+    let (manager, result) = reload.await.unwrap();
     result.expect("the cohort commits once the held reply is released");
     assert_eq!(
         manager.peers.get(&key(first)).unwrap().export_policy,
         Some(next)
     );
-    for (_, managed) in manager.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
-    }
-    drop(manager);
+    let manager_task = tokio::spawn(Box::pin(manager.run()));
+    mutation_response
+        .await
+        .expect("ordinary mutation executes once the policy owner releases");
+    command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
     rib.await.unwrap();
 }
 
