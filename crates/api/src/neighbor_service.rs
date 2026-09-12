@@ -12,10 +12,10 @@ use tonic::{Request, Response, Status};
 use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, DynamicRangeError, NeighborCreateAddPath, OutboundRefreshError,
-    OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo,
-    PeerKey, PeerLifecycleError, PeerManagerCommand, PeerManagerOperatorQuery,
-    PresenceAwareNeighborCreate, Rfc8212PolicyStatus,
+    ConfigEvent, DynamicRangeError, EnqueuedOperatorQuery, NeighborCreateAddPath,
+    OutboundRefreshError, OwnedNeighborMutation, OwnedNeighborMutationError,
+    OwnedNeighborMutationOutcome, PeerInfo, PeerKey, PeerLifecycleError, PeerManagerCommand,
+    PeerManagerOperatorQuery, PresenceAwareNeighborCreate, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::runtime_config_settlement::{
@@ -92,7 +92,7 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
 pub struct NeighborService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
@@ -152,7 +152,7 @@ impl NeighborService {
 
     /// Attach the operator query lane serviced before session policy application.
     #[must_use]
-    pub fn with_operator_queries(mut self, tx: mpsc::Sender<PeerManagerOperatorQuery>) -> Self {
+    pub fn with_operator_queries(mut self, tx: mpsc::Sender<EnqueuedOperatorQuery>) -> Self {
         self.operator_tx = Some(tx);
         self
     }
@@ -1686,14 +1686,15 @@ mod tests {
         let (svc, mut rib_rx) = read_service(peer_tx);
         let svc = svc.with_operator_queries(operator_tx);
         let actor = tokio::spawn(async move {
-            let PeerManagerOperatorQuery::ListPeers { reply } = operator_rx.recv().await.unwrap()
+            let PeerManagerOperatorQuery::ListPeers { reply } =
+                operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected operator peer list");
             };
             reply.send(Vec::new()).unwrap();
             for address in ["192.0.2.1", "192.0.2.2"] {
                 let PeerManagerOperatorQuery::GetPeerState { peer, reply } =
-                    operator_rx.recv().await.unwrap()
+                    operator_rx.recv().await.unwrap().query
                 else {
                     panic!("expected operator peer state");
                 };
@@ -3576,6 +3577,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(3), operator_rx.recv())
                 .await
                 .expect("neighbor inventory must use the operator lane")
+                .map(|enqueued| enqueued.query)
         else {
             panic!("expected peer inventory");
         };

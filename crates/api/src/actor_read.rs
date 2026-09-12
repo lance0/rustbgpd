@@ -6,7 +6,7 @@ use rustbgpd_rib::RibUpdate;
 use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
-use crate::peer_types::{PeerManagerCommand, PeerManagerOperatorQuery};
+use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerCommand, PeerManagerOperatorQuery};
 
 /// Server-side deadline for every peer-manager read. All peer-manager reads
 /// are O(peers) state lookups, so this matches the duration class of the
@@ -26,11 +26,13 @@ pub(crate) async fn peer_manager_read<T>(
 /// for service constructors without an operator receiver.
 pub(crate) async fn peer_manager_operator_read<T>(
     tx: &mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<&mpsc::Sender<EnqueuedOperatorQuery>>,
     build: impl FnOnce(oneshot::Sender<T>) -> PeerManagerOperatorQuery,
 ) -> Result<T, Status> {
     match operator_tx {
-        Some(operator_tx) => bounded_peer_manager_read(operator_tx, build).await,
+        Some(operator_tx) => {
+            bounded_peer_manager_read(operator_tx, |reply| build(reply).into()).await
+        }
         None => peer_manager_read(tx, |reply| build(reply).into()).await,
     }
 }
@@ -86,7 +88,7 @@ mod tests {
             if full {
                 let (reply, _response) = oneshot::channel();
                 operator_tx
-                    .send(PeerManagerOperatorQuery::ListPeers { reply })
+                    .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
                     .await
                     .unwrap();
             }

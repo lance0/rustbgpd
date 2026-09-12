@@ -765,11 +765,14 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
         });
         let (reply, response) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer: Some(address),
-                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-                reply,
-            })
+            .send(
+                PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                    peer: Some(address),
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                    reply,
+                }
+                .into(),
+            )
             .await
             .unwrap();
         let (_, session_reply) = admitted_rx.recv().await.unwrap();
@@ -847,17 +850,20 @@ async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
     let task = tokio::spawn(manager.run());
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-            peer: Some(address),
-            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: Some(address),
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     let (_, session_reply) = admitted_rx.recv().await.unwrap();
     let (reply, existence) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+        .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply }.into())
         .await
         .unwrap();
     assert!(
@@ -943,7 +949,7 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
         let (single_reply, mut single_snapshot) = oneshot::channel();
         match lane {
             "operator_list" => operator_tx
-                .send(PeerManagerOperatorQuery::ListPeers { reply })
+                .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
                 .await
                 .unwrap(),
             "ordinary_list" => command_tx
@@ -955,10 +961,13 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
                 .await
                 .unwrap(),
             "operator_get" => operator_tx
-                .send(PeerManagerOperatorQuery::GetPeerState {
-                    peer: key(address),
-                    reply: single_reply,
-                })
+                .send(
+                    PeerManagerOperatorQuery::GetPeerState {
+                        peer: key(address),
+                        reply: single_reply,
+                    }
+                    .into(),
+                )
                 .await
                 .unwrap(),
             "ordinary_get" => command_tx
@@ -979,15 +988,18 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
         // starting another state-query cohort or hiding the import request.
         let (reply, deferred_list) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
             .await
             .unwrap();
         let (reply, deferred_get) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::GetPeerState {
-                peer: key(address),
-                reply,
-            })
+            .send(
+                PeerManagerOperatorQuery::GetPeerState {
+                    peer: key(address),
+                    reply,
+                }
+                .into(),
+            )
             .await
             .unwrap();
 
@@ -996,11 +1008,14 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
         let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
         let (reply, mut stats) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer: None,
-                deadline,
-                reply,
-            })
+            .send(
+                PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                    peer: None,
+                    deadline,
+                    reply,
+                }
+                .into(),
+            )
             .await
             .unwrap();
         let (reply, mut mutation) = oneshot::channel();
@@ -1122,18 +1137,18 @@ async fn normal_snapshot_admission_budget_yields_to_completion_and_cancellation(
         for _ in 0..if exhaust_budget { 2 } else { 1 } {
             let (reply, response) = oneshot::channel();
             operator_tx
-                .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+                .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply }.into())
                 .await
                 .unwrap();
             assert!(response.await.unwrap());
         }
         let (reply, mut excess) = oneshot::channel();
         operator_tx
-            .try_send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+            .try_send(PeerManagerOperatorQuery::HasPeerAddress { address, reply }.into())
             .unwrap();
         let (reply, mut datasets) = oneshot::channel();
         operator_tx
-            .try_send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply })
+            .try_send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply }.into())
             .unwrap();
         // With an open slot, close the snapshot before yielding so its
         // cancellation and the queued read are ready in the same poll.
@@ -1225,15 +1240,18 @@ async fn normal_snapshot_deferred_limit_and_order_survive_repeated_reads() {
     let state_reply = state_replies.recv().await.unwrap();
     let (reply, first_list) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     let (reply, first_get) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::GetPeerState {
-            peer: key(address),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::GetPeerState {
+                peer: key(address),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     for _ in 0..5 {
@@ -1242,15 +1260,18 @@ async fn normal_snapshot_deferred_limit_and_order_survive_repeated_reads() {
     assert_eq!(operator_tx.capacity(), 2);
     let (reply, second_list) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     let (reply, second_get) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::GetPeerState {
-            peer: key(address),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::GetPeerState {
+                peer: key(address),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     state_reply
@@ -1270,9 +1291,12 @@ async fn normal_snapshot_deferred_limit_and_order_survive_repeated_reads() {
     )
     .await
     .unwrap();
-    assert!(matches!(first, PeerManagerOperatorQuery::ListPeers { .. }));
+    assert!(matches!(
+        first.query,
+        PeerManagerOperatorQuery::ListPeers { .. }
+    ));
     let worker = tokio::spawn(async move {
-        manager.answer_normal_operator_query(first).await;
+        manager.answer_normal_operator_query(first.query).await;
         manager
     });
     let state_reply = state_replies.recv().await.unwrap();
@@ -1302,7 +1326,7 @@ async fn normal_snapshot_deferred_limit_and_order_survive_repeated_reads() {
         .await
         .unwrap();
         assert_eq!(
-            matches!(query, PeerManagerOperatorQuery::GetPeerState { .. }),
+            matches!(query.query, PeerManagerOperatorQuery::GetPeerState { .. }),
             expected_get
         );
         manager.handle_operator_query(query, false).await;
@@ -1343,12 +1367,12 @@ async fn deferred_neighbor_read_survives_receiver_close_and_fences_prestage_ack(
         let state_reply = state_replies.recv().await.unwrap();
         let (reply, deferred_response) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
             .await
             .unwrap();
         let (reply, marker) = oneshot::channel();
         operator_tx
-            .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+            .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply }.into())
             .await
             .unwrap();
         assert!(

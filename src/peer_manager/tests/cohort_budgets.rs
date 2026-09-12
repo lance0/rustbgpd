@@ -741,7 +741,10 @@ async fn forward_walk_rib_budget_stops_expired_retained_proofs() {
 /// Established session for the cohort read test: hot-applies export policy
 /// immediately, answers state queries as Established, and answers the
 /// import-stats query so the fleet collection can complete.
-fn cohort_session_with_import_stats(addr: IpAddr, installs: Arc<AtomicUsize>) -> PeerHandle {
+pub(super) fn cohort_session_with_import_stats(
+    addr: IpAddr,
+    installs: Arc<AtomicUsize>,
+) -> PeerHandle {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
@@ -866,7 +869,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     assert_eq!(installs.load(Ordering::SeqCst), 2);
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     let infos = tokio::time::timeout(Duration::from_secs(1), response)
@@ -876,11 +879,14 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     assert_eq!(infos.len(), 2);
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-            peer: None,
-            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     let rows = tokio::time::timeout(Duration::from_secs(1), response)

@@ -29,6 +29,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(
             added,
             {
+                "bgp_peer_manager_operator_query_wait_seconds",
                 "bgp_rib_actor_work_duration_seconds",
                 "bgp_rib_readiness_query_wait_seconds",
                 "bgp_update_malformed_causes_total",

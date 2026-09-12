@@ -1289,6 +1289,7 @@ impl PeerManager {
         rollback_rib_budget: &mut PolicySnapshotRibBudget,
         require_clean_convergence: bool,
     ) -> Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure> {
+        self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         // Captured priors, in application order, for peers actually mutated.
         let mut applied: Vec<CapturedResolvedPolicy> = Vec::new();
         for target in targets {
@@ -1510,6 +1511,7 @@ impl PeerManager {
                 }
                 matches!(reply_rx.await, Ok(Ok(())))
             };
+            self.operator_read_seam = super::OperatorReadSeam::Prestage;
             self.await_with_readiness_and_operator_budget(
                 round_trip,
                 RIB_REPLY_TIMEOUT,
@@ -1812,6 +1814,7 @@ impl PeerManager {
                 reply: reply_tx,
             })
             .await;
+        self.operator_read_seam = super::OperatorReadSeam::ForwardTransition;
         let cohort_result = match send_result {
             Err(_) => Err("RIB manager unavailable".to_string()),
             Ok(()) => {
@@ -2056,6 +2059,7 @@ impl PeerManager {
         replacements: &[PeerExportPolicyReplacement],
         allow_operator_reads: bool,
     ) -> Result<(), String> {
+        self.operator_read_seam = super::OperatorReadSeam::CommitBatches;
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
@@ -2395,6 +2399,7 @@ impl PeerManager {
         budget: &mut PolicySnapshotRibBudget,
         require_exact_pending: bool,
     ) -> Result<(), PolicyRollbackFailure> {
+        self.operator_read_seam = super::OperatorReadSeam::Rollback;
         let pending_priors = priors
             .iter()
             .map(|prior| {
