@@ -5158,6 +5158,82 @@ async fn general_queries_served_between_precommit_polls_and_fenced_during_commit
     assert_eq!(Some(page.version), manager.route_page_advertised_version);
 }
 
+/// The post-commit query trace counts the actor work run between the
+/// terminal commit poll and the next general query, and that query's drain
+/// consumes it: one attribution record per commit, and untraced drains
+/// leave nothing armed.
+#[tokio::test]
+async fn post_commit_query_trace_accounts_work_until_first_general_query() {
+    use super::super::{PostCommitQueryTrace, PostCommitWork};
+    const ROUTE_COUNT: usize = 2;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (mut manager, _peers, _receivers) = direct_clean_transition_manager(2, ROUTE_COUNT, None);
+    manager.query_rx = query_rx;
+    assert!(!manager.traced_route_chunk());
+    assert!(manager.post_commit_query_trace.is_none());
+
+    manager.post_commit_query_trace = Some(PostCommitQueryTrace {
+        since: std::time::Instant::now(),
+        member_count: 2,
+        terminal_poll: std::time::Duration::from_millis(1),
+        queued_general_queries: 0,
+        ingest_backlog: 0,
+        busy: std::time::Duration::ZERO,
+        route_chunks: 0,
+        primary_updates: 0,
+        resync_ticks: 0,
+    });
+    let announced = vec![crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 42),
+    )];
+    manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+    });
+    while manager.traced_route_chunk() {}
+    let trace = manager
+        .post_commit_query_trace
+        .as_ref()
+        .expect("trace stays armed until a query");
+    assert_eq!(trace.primary_updates, 1);
+    assert_eq!(
+        trace.route_chunks, 1,
+        "only the processed chunk counts, not the empty-queue probe"
+    );
+    assert!(trace.busy > std::time::Duration::ZERO);
+
+    let (reply, mut response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(
+        response.try_recv().is_ok(),
+        "the query is served by the drain that consumes the trace"
+    );
+    assert!(
+        manager.post_commit_query_trace.is_none(),
+        "the first general query consumes the trace"
+    );
+
+    let (reply, mut response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(response.try_recv().is_ok());
+    assert!(manager.post_commit_query_trace.is_none());
+}
+
 /// With wall-clock budget in hand, the probe-and-prepare phase strides the
 /// whole cohort in a handful of polls instead of one route-slice per poll —
 /// the fenced pre-commit window must not scale with table x member count

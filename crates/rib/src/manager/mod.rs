@@ -827,6 +827,10 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
+    /// Attribution of the first general query served after a committed
+    /// transition; armed by the terminal commit poll, finished by the next
+    /// general-query drain.
+    post_commit_query_trace: Option<PostCommitQueryTrace>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
     /// Advanced one budgeted slice at a time only when no ordinary
@@ -943,6 +947,75 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 /// once ownership is far beyond any legitimate transition receipt.
 pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
     std::time::Duration::from_secs(30);
+
+/// A general query served later than this after a committed transition is
+/// unrelated to the commit; the trace is dropped instead of reporting the
+/// idle gap as a wait.
+const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Actor work units accounted between a transition's terminal commit poll and
+/// the first general query served afterwards.
+#[derive(Clone, Copy)]
+enum PostCommitWork {
+    RouteChunk,
+    PrimaryUpdate,
+    ResyncTick,
+}
+
+/// What the actor ran between a committed clean policy transition's terminal
+/// poll and the first general query it served afterwards. One
+/// `post-commit first general query timing` record per committed transition
+/// that a general query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`]:
+/// `first_query_wait_us` is wall-clock from the end of the terminal poll,
+/// `busy_us` the actor work run in that span, and `unattributed_us` the
+/// remainder — time the actor task was parked or not scheduled. With
+/// `queued_general_queries > 0` the query was already waiting at commit, so
+/// the whole wait is the operator-visible post-commit tail.
+struct PostCommitQueryTrace {
+    since: std::time::Instant,
+    member_count: usize,
+    terminal_poll: std::time::Duration,
+    queued_general_queries: usize,
+    ingest_backlog: usize,
+    busy: std::time::Duration,
+    route_chunks: u32,
+    primary_updates: u32,
+    resync_ticks: u32,
+}
+
+impl PostCommitQueryTrace {
+    fn record(&mut self, unit: PostCommitWork, elapsed: std::time::Duration) {
+        self.busy += elapsed;
+        let counter = match unit {
+            PostCommitWork::RouteChunk => &mut self.route_chunks,
+            PostCommitWork::PrimaryUpdate => &mut self.primary_updates,
+            PostCommitWork::ResyncTick => &mut self.resync_ticks,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn emit(self) {
+        let wait = self.since.elapsed();
+        if wait > POST_COMMIT_QUERY_TRACE_WINDOW {
+            return;
+        }
+        let micros =
+            |duration: std::time::Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        info!(
+            member_count = self.member_count,
+            terminal_poll_us = micros(self.terminal_poll),
+            queued_general_queries = self.queued_general_queries,
+            ingest_backlog_at_commit = self.ingest_backlog,
+            first_query_wait_us = micros(wait),
+            busy_us = micros(self.busy),
+            unattributed_us = micros(wait.saturating_sub(self.busy)),
+            route_chunks = self.route_chunks,
+            primary_updates = self.primary_updates,
+            resync_ticks = self.resync_ticks,
+            "post-commit first general query timing"
+        );
+    }
+}
 
 struct ReplacementReadiness {
     #[cfg(feature = "bench-internals")]
@@ -1667,6 +1740,7 @@ impl RibManager {
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
+            post_commit_query_trace: None,
             pending_destination_prestage: None,
             prepared_destination: None,
             pending_exact_export_withdrawals: HashSet::new(),
@@ -2130,8 +2204,39 @@ impl RibManager {
             let Ok(query) = self.query_rx.try_recv() else {
                 break;
             };
+            if let Some(trace) = self.post_commit_query_trace.take() {
+                trace.emit();
+            }
             self.handle_update(query);
         }
+    }
+
+    /// Run one actor work unit, accounting its duration to the post-commit
+    /// query trace while one is armed.
+    fn traced<T>(&mut self, unit: PostCommitWork, work: impl FnOnce(&mut Self) -> T) -> T {
+        if self.post_commit_query_trace.is_none() {
+            return work(self);
+        }
+        let started = std::time::Instant::now();
+        let out = work(self);
+        if let Some(trace) = self.post_commit_query_trace.as_mut() {
+            trace.record(unit, started.elapsed());
+        }
+        out
+    }
+
+    /// [`Self::process_next_route_chunk`] under the post-commit query trace:
+    /// only a processed chunk counts, not the empty-queue probe.
+    fn traced_route_chunk(&mut self) -> bool {
+        if self.post_commit_query_trace.is_none() {
+            return self.process_next_route_chunk();
+        }
+        let started = std::time::Instant::now();
+        let processed = self.process_next_route_chunk();
+        if processed && let Some(trace) = self.post_commit_query_trace.as_mut() {
+            trace.record(PostCommitWork::RouteChunk, started.elapsed());
+        }
+        processed
     }
 
     /// Preserve the policy-transition ownership fence when a primary update
@@ -2419,19 +2524,21 @@ impl RibManager {
         // Route batches are actor-deferred for fairness. During a timer race,
         // however, preserve channel order: an EoR or timeout must not release
         // selection before route payloads accepted ahead of it are applied.
-        while self.process_next_route_chunk() {
+        while self.traced_route_chunk() {
             drained = true;
         }
         while let Ok(update) = self.rx.try_recv() {
             drained = true;
-            self.handle_update(update);
+            self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                manager.handle_update(update);
+            });
             if self.pending_clean_policy_transition.is_some() {
                 // The accepted cohort command now owns FIFO. Leave every
                 // later primary update queued until its atomic finalize or
                 // fail-closed fallback handoff completes.
                 break;
             }
-            while self.process_next_route_chunk() {
+            while self.traced_route_chunk() {
                 drained = true;
             }
         }
@@ -4082,6 +4189,9 @@ impl RibManager {
                 .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
+                // A newly owned transition supersedes any trace still armed
+                // from the previous commit.
+                self.post_commit_query_trace = None;
                 // The type-narrow readiness lane interleaves at every poll,
                 // and a bounded general-query budget between pre-commit
                 // polls (see `drain_general_queries_between_transition_polls`).
@@ -4120,6 +4230,17 @@ impl RibManager {
                         if let Some(reply) = reply {
                             terminal_reply = Some((reply, Ok(crate::update::ExportPolicyCohortOutcome::Committed)));
                         }
+                        manager.post_commit_query_trace = Some(PostCommitQueryTrace {
+                            since: std::time::Instant::now(),
+                            member_count,
+                            terminal_poll: started.elapsed(),
+                            queued_general_queries: manager.query_rx.len(),
+                            ingest_backlog: manager.rx.len(),
+                            busy: std::time::Duration::ZERO,
+                            route_chunks: 0,
+                            primary_updates: 0,
+                            resync_ticks: 0,
+                        });
                         None
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
@@ -4213,7 +4334,8 @@ impl RibManager {
                     count = self.dirty_peers.len(),
                     "resync timer fired for dirty peers"
                 );
-                let backlog = self.resync_dirty_peers_bounded();
+                let backlog =
+                    self.traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
                 if self.resync_tick_pending() {
                     self.metrics.record_rib_dirty_resync("still_dirty");
                     let interval = if backlog {
@@ -4304,7 +4426,7 @@ impl RibManager {
                 continue;
             }
 
-            if self.process_next_route_chunk() {
+            if self.traced_route_chunk() {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
@@ -4326,7 +4448,9 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                self.handle_update(update);
+                                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                                    manager.handle_update(update);
+                                });
                                 self.drain_general_queries_if_unfenced();
                             }
                             None => break,
@@ -4337,7 +4461,8 @@ impl RibManager {
                             count = self.dirty_peers.len(),
                             "resync timer fired for dirty peers"
                         );
-                        let backlog = self.resync_dirty_peers_bounded();
+                        let backlog = self
+                            .traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
 
                         // Reset for next tick if work remains, otherwise disarm.
                         if self.resync_tick_pending() {
@@ -4409,7 +4534,9 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                self.handle_update(update);
+                                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                                    manager.handle_update(update);
+                                });
                                 self.drain_general_queries_if_unfenced();
                             }
                             None => break,
