@@ -2204,11 +2204,19 @@ impl RibManager {
             let Ok(query) = self.query_rx.try_recv() else {
                 break;
             };
-            if let Some(trace) = self.post_commit_query_trace.take() {
-                trace.emit();
-            }
-            self.handle_update(query);
+            self.serve_general_query(query);
         }
+    }
+
+    /// Serve one item received from the general query lane. Every delivery
+    /// path (the bounded drains and both event-loop select arms) goes
+    /// through here so the post-commit query trace is consumed by the
+    /// first general query actually served, whichever path serves it.
+    fn serve_general_query(&mut self, query: RibUpdate) {
+        if let Some(trace) = self.post_commit_query_trace.take() {
+            trace.emit();
+        }
+        self.handle_update(query);
     }
 
     /// Run one actor work unit, accounting its duration to the post-commit
@@ -4440,7 +4448,7 @@ impl RibManager {
                     }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
-                            Some(q) => self.handle_update(q),
+                            Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
@@ -4526,7 +4534,7 @@ impl RibManager {
                     }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
-                            Some(q) => self.handle_update(q),
+                            Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
