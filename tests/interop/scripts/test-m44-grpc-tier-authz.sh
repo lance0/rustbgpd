@@ -49,6 +49,7 @@ grpc_mtls() {
         "$@" 2>&1
 }
 
+# Drain captured output: grep -q can close early and fail printf under pipefail.
 # Assert a principal's call to a method is ALLOWED — i.e. it reaches
 # the handler. The handler may itself succeed or return a non-authz
 # error, but it must NOT be PermissionDenied.
@@ -64,7 +65,7 @@ assert_allowed() {
     else
         out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method") || true
     fi
-    if printf '%s' "$out" | grep -q "PermissionDenied"; then
+    if printf '%s' "$out" | grep "PermissionDenied" >/dev/null; then
         fail "$desc (expected allow, got PermissionDenied)"
         printf '  grpcurl output: %s\n' "$out" >&2
     else
@@ -79,10 +80,10 @@ assert_allowed_status() {
     local desc=$1 who=$2 method=$3 data=$4 expected_status=$5
     local out
     out=$(grpc_mtls "$who" -d "$data" "$GRPC_ADDR" "$method") || true
-    if printf '%s' "$out" | grep -q "PermissionDenied"; then
+    if printf '%s' "$out" | grep "PermissionDenied" >/dev/null; then
         fail "$desc (expected allow, got PermissionDenied)"
         printf '  grpcurl output: %s\n' "$out" >&2
-    elif printf '%s' "$out" | grep -Fq "Code: $expected_status"; then
+    elif printf '%s' "$out" | grep -F "Code: $expected_status" >/dev/null; then
         ok "$desc"
     else
         fail "$desc (expected handler status $expected_status)"
@@ -101,7 +102,7 @@ assert_denied() {
     else
         out=$(grpc_mtls "$who" "$GRPC_ADDR" "$method") || true
     fi
-    if printf '%s' "$out" | grep -q "PermissionDenied"; then
+    if printf '%s' "$out" | grep "PermissionDenied" >/dev/null; then
         ok "$desc"
     else
         fail "$desc (expected PermissionDenied)"
@@ -217,12 +218,12 @@ main() {
     log "Checking bgp_grpc_authz_decisions_total denial labels..."
     local metrics
     metrics=$(prom_scrape)
-    if printf '%s' "$metrics" | grep -q 'bgp_grpc_authz_decisions_total{[^}]*result="role_tier_denied"'; then
+    if printf '%s' "$metrics" | grep 'bgp_grpc_authz_decisions_total{[^}]*result="role_tier_denied"' >/dev/null; then
         ok "metric records role_tier_denied"
     else
         fail "metric missing role_tier_denied label"
     fi
-    if printf '%s' "$metrics" | grep -q 'bgp_grpc_authz_decisions_total{[^}]*result="principal_unmapped"'; then
+    if printf '%s' "$metrics" | grep 'bgp_grpc_authz_decisions_total{[^}]*result="principal_unmapped"' >/dev/null; then
         ok "metric records principal_unmapped"
     else
         fail "metric missing principal_unmapped label"
