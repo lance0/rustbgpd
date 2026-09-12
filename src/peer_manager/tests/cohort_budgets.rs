@@ -855,7 +855,11 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         .collect::<Vec<_>>();
     let reload = tokio::spawn(async move {
         let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
             .await;
         (manager, result)
     });
@@ -1018,7 +1022,11 @@ async fn operator_reads_are_served_while_the_rollback_rib_reply_is_held() {
         .collect::<Vec<_>>();
     let reload = tokio::spawn(async move {
         let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
             .await;
         (manager, result)
     });

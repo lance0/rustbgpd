@@ -988,49 +988,6 @@ impl PeerManager {
         }
     }
 
-    /// Forward-path spelling of [`Self::await_with_readiness`] for the sites
-    /// that still carry the reload owner's decision as a flag.
-    async fn await_with_readiness_and_operator_reads<F>(
-        &mut self,
-        future: F,
-        allow_operator_reads: bool,
-    ) -> F::Output
-    where
-        F: Future,
-    {
-        self.await_with_readiness(future, Self::forward_admission(allow_operator_reads))
-            .await
-    }
-
-    const fn forward_admission(allow_operator_reads: bool) -> OperatorReadAdmission {
-        if allow_operator_reads {
-            OperatorReadAdmission::Served
-        } else {
-            OperatorReadAdmission::Fenced {
-                reason: "the transaction owner entered with operator reads fenced",
-            }
-        }
-    }
-
-    /// Forward-path spelling of [`Self::await_with_readiness_budget`] for the
-    /// sites that still carry the reload owner's decision as a flag.
-    async fn await_with_readiness_and_operator_budget<F>(
-        &mut self,
-        future: F,
-        budget: Duration,
-        allow_operator_reads: bool,
-    ) -> Option<F::Output>
-    where
-        F: Future,
-    {
-        self.await_with_readiness_budget(
-            future,
-            budget,
-            Self::forward_admission(allow_operator_reads),
-        )
-        .await
-    }
-
     /// Like [`Self::await_with_readiness`], but bound the step by a budget
     /// that accrues only while the step itself is being driven. Wall time
     /// spent servicing an interleaved readiness or operator query is not

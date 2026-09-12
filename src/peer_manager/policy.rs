@@ -861,18 +861,23 @@ impl PeerManager {
         self.apply_resolved_policy_snapshot_with_prestage_reads(
             targets,
             require_clean_convergence,
-            false,
+            OperatorReadAdmission::Fenced {
+                reason: "standalone policy transactions and a reload's compensating replay keep their fence",
+            },
         )
         .await
     }
 
-    /// The forward reload owner may admit reads before the first policy effect.
-    /// Rollback and standalone policy operations use the fenced wrapper above.
+    /// The forward reload owner passes `Served`, admitting reads from its
+    /// first destination prestage on; standalone policy operations and a
+    /// reload's compensating replay use the fenced wrapper above. The
+    /// admission travels on the transaction context to every wait that
+    /// honours it, the rollback included.
     pub(super) async fn apply_resolved_policy_snapshot_with_prestage_reads(
         &mut self,
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
-        allow_operator_reads: bool,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         let snapshot_started = Instant::now();
         let mut phases = PolicySnapshotPhaseTimings {
@@ -885,7 +890,7 @@ impl PeerManager {
                 targets,
                 require_clean_convergence,
                 &mut phases,
-                allow_operator_reads,
+                operator_reads,
             )
             .await;
         let total_us = elapsed_us(snapshot_started);
@@ -932,7 +937,7 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         phases: &mut PolicySnapshotPhaseTimings,
-        allow_operator_reads: bool,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // ADR-0112: qualify RFC 8212 import-presence transitions before
         // anything below can touch a peer, so one incapable peer rejects the
@@ -945,7 +950,7 @@ impl PeerManager {
             forward: LazyRibBudget::default(),
             rollback: LazyRibBudget::default(),
             clean_state_window: CleanStateQueryWindow::default(),
-            operator_reads: PeerManager::forward_admission(allow_operator_reads),
+            operator_reads,
         };
         let preflight = self
             .preflight_rfc8212_import_transitions(&targets, &mut context.forward)
@@ -1025,7 +1030,6 @@ impl PeerManager {
                 &mut context,
                 require_clean_convergence,
                 phases,
-                allow_operator_reads,
             )
             .await
         else {
@@ -1462,7 +1466,6 @@ impl PeerManager {
         context: &mut PolicySnapshotContext,
         require_clean_convergence: bool,
         phase_timings: &mut PolicySnapshotPhaseTimings,
-        allow_operator_reads: bool,
     ) -> Option<Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure>> {
         if targets.len() < 2 {
             return None;
@@ -1530,13 +1533,9 @@ impl PeerManager {
                 }
                 matches!(reply_rx.await, Ok(Ok(())))
             };
-            self.await_with_readiness_and_operator_budget(
-                round_trip,
-                RIB_REPLY_TIMEOUT,
-                allow_operator_reads,
-            )
-            .await
-            .unwrap_or(false)
+            self.await_with_readiness_budget(round_trip, RIB_REPLY_TIMEOUT, context.operator_reads)
+                .await
+                .unwrap_or(false)
         };
         info!(
             cohort_targets = targets.len(),
@@ -1830,7 +1829,7 @@ impl PeerManager {
         let cohort_result = match send_result {
             Err(_) => Err("RIB manager unavailable".to_string()),
             Ok(()) => {
-                self.await_export_policy_cohort_rib_reply(reply_rx, allow_operator_reads)
+                self.await_export_policy_cohort_rib_reply(reply_rx, context.operator_reads)
                     .await
             }
         };
@@ -1848,7 +1847,7 @@ impl PeerManager {
                 }
                 self.apply_export_policy_replacements_authoritatively(
                     &replacements,
-                    allow_operator_reads,
+                    context.operator_reads,
                 )
                 .await
             }
@@ -2038,12 +2037,9 @@ impl PeerManager {
     async fn await_export_policy_cohort_rib_reply(
         &mut self,
         reply_rx: oneshot::Receiver<Result<ExportPolicyCohortOutcome, String>>,
-        allow_operator_reads: bool,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<ExportPolicyCohortOutcome, String> {
-        match self
-            .await_with_readiness_and_operator_reads(reply_rx, allow_operator_reads)
-            .await
-        {
+        match self.await_with_readiness(reply_rx, operator_reads).await {
             Err(_) => Err("RIB manager dropped cohort reply".to_string()),
             Ok(result) => result,
         }
@@ -2063,17 +2059,17 @@ impl PeerManager {
     async fn apply_export_policy_replacements_authoritatively(
         &mut self,
         replacements: &[PeerExportPolicyReplacement],
-        allow_operator_reads: bool,
+        operator_reads: OperatorReadAdmission,
     ) -> Result<(), String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
-            .await_with_readiness_and_operator_reads(
+            .await_with_readiness(
                 rib_tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
                     replacements: replacements.to_vec(),
                     reply: reply_tx,
                 }),
-                allow_operator_reads,
+                operator_reads,
             )
             .await
             .is_err()
@@ -2082,7 +2078,7 @@ impl PeerManager {
         }
         let result = match tokio::time::timeout(
             super::RIB_BATCH_REPLY_TIMEOUT,
-            self.await_with_readiness_and_operator_reads(reply_rx, allow_operator_reads),
+            self.await_with_readiness(reply_rx, operator_reads),
         )
         .await
         {
