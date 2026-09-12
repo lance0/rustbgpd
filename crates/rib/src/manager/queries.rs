@@ -131,6 +131,22 @@ pub(super) fn send_mrt_snapshot(
     }
 }
 
+pub(super) fn snapshot_export_chain(
+    owner: Option<IpAddr>,
+    chain: &rustbgpd_policy::PolicyChain,
+) -> crate::update::ExportPolicyTermHits {
+    crate::update::ExportPolicyTermHits {
+        peer: owner,
+        evals: chain.hit_counters().evals(),
+        eval_errors: chain.hit_counters().eval_errors(),
+        last_error: chain
+            .hit_counters()
+            .last_error()
+            .map(|error| error.to_string()),
+        terms: chain.term_hit_rows(),
+    }
+}
+
 fn materialize_neighbor_rib_snapshot(
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
@@ -158,7 +174,7 @@ fn materialize_neighbor_rib_snapshot(
     })
 }
 
-fn send_neighbor_rib_snapshot(
+pub(super) fn send_neighbor_rib_snapshot(
     reply: tokio::sync::oneshot::Sender<NeighborRibSnapshotResponse>,
     peers: Vec<IpAddr>,
     comparison: Option<(IpAddr, IpAddr)>,
@@ -2675,21 +2691,25 @@ impl RibManager {
             reply,
             peers,
             comparison,
-            |peer| NeighborRibSnapshot {
-                peer,
-                advertised_count: self
-                    .grouped_advertised_count(peer)
-                    .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
-                policy_stats: self
-                    .export_policy_stats
-                    .get(&peer)
-                    .copied()
-                    .unwrap_or_default(),
-                outbound: self.peer_outbound_state(peer),
-            },
+            |peer| self.neighbor_rib_snapshot(peer),
             |primary, comparison| self.update_group_comparison(primary, comparison),
         );
     }
+    pub(super) fn neighbor_rib_snapshot(&self, peer: IpAddr) -> NeighborRibSnapshot {
+        NeighborRibSnapshot {
+            peer,
+            advertised_count: self
+                .grouped_advertised_count(peer)
+                .unwrap_or_else(|| self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len)),
+            policy_stats: self
+                .export_policy_stats
+                .get(&peer)
+                .copied()
+                .unwrap_or_default(),
+            outbound: self.peer_outbound_state(peer),
+        }
+    }
+
     /// Snapshot the live per-term hit counters of installed export
     /// chains (ADR-0096 Decision 3.3): one entry per peer with an
     /// installed chain, plus the shared global fallback instance for
@@ -2700,24 +2720,20 @@ impl RibManager {
         peer: Option<IpAddr>,
         reply: tokio::sync::oneshot::Sender<Vec<crate::update::ExportPolicyTermHits>>,
     ) {
-        let snapshot = |owner: Option<IpAddr>,
-                        chain: &rustbgpd_policy::PolicyChain|
-         -> crate::update::ExportPolicyTermHits {
-            crate::update::ExportPolicyTermHits {
-                peer: owner,
-                evals: chain.hit_counters().evals(),
-                eval_errors: chain.hit_counters().eval_errors(),
-                last_error: chain
-                    .hit_counters()
-                    .last_error()
-                    .map(|error| error.to_string()),
-                terms: chain.term_hit_rows(),
-            }
-        };
+        if reply.is_closed() {
+            return;
+        }
+        let _ = reply.send(self.export_policy_term_hits(peer));
+    }
+
+    pub(super) fn export_policy_term_hits(
+        &self,
+        peer: Option<IpAddr>,
+    ) -> Vec<crate::update::ExportPolicyTermHits> {
         let mut out = Vec::new();
         if let Some(peer) = peer {
             if let Some(chain) = self.export_policy_for(peer) {
-                out.push(snapshot(Some(peer), chain));
+                out.push(snapshot_export_chain(Some(peer), chain));
             }
         } else {
             let mut peers: Vec<IpAddr> = self
@@ -2728,14 +2744,14 @@ impl RibManager {
             peers.sort_unstable();
             for peer in peers {
                 if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
-                    out.push(snapshot(Some(peer), chain));
+                    out.push(snapshot_export_chain(Some(peer), chain));
                 }
             }
             if let Some(chain) = self.export_policy.as_ref() {
-                out.push(snapshot(None, chain));
+                out.push(snapshot_export_chain(None, chain));
             }
         }
-        let _ = reply.send(out);
+        out
     }
     /// Serve `QueryOrrStatus`: per-vantage resolution/SPF/bound-peer
     /// status plus topology totals, from the cached `OrrState` (fresh by

@@ -95,8 +95,8 @@ use crate::reload::{
 };
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
-    ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerOperatorQuery, PeerManagerReadinessQuery, WarmCheckpointCapture,
+    EnqueuedOperatorQuery, ImportValidationDependency, PeerManagerCommand,
+    PeerManagerNeighborConfig, PeerManagerReadinessQuery, WarmCheckpointCapture,
     WarmCheckpointSession,
 };
 use rustbgpd_api::runtime_config_settlement::{
@@ -3980,6 +3980,7 @@ async fn run<T>(
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(resolve_rib_channel_capacity());
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
+    let (rib_summary_tx, rib_summary_rx) = mpsc::channel::<rustbgpd_rib::RibSummaryQuery>(256);
     let (rib_readiness_tx, rib_readiness_rx) = mpsc::channel::<rustbgpd_rib::RibReadinessQuery>(64);
 
     // Spawn BMP subsystem (manager + per-collector clients). Spawned
@@ -4109,7 +4110,8 @@ async fn run<T>(
     // global inheritance. A startup fallback here would restore an old chain
     // when a peer reconnects after the global chain was removed.
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
-        .with_readiness_queries(rib_readiness_rx);
+        .with_readiness_queries(rib_readiness_rx)
+        .with_summary_queries(rib_summary_rx);
     #[cfg(target_os = "linux")]
     if (config.global.honor_blackhole && config.global.install_blackhole_discard)
         || !config.fib_tables.is_empty()
@@ -4158,8 +4160,7 @@ async fn run<T>(
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
         mpsc::channel::<PeerManagerReadinessQuery>(64);
-    let (peer_mgr_operator_tx, peer_mgr_operator_rx) =
-        mpsc::channel::<PeerManagerOperatorQuery>(64);
+    let (peer_mgr_operator_tx, peer_mgr_operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     let mut rpki_cache_queries = None;
@@ -5231,6 +5232,7 @@ async fn run<T>(
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         rib_readiness_tx: rib_readiness_tx.clone(),
+        rib_summary_tx,
         vrp_snapshot: {
             let rx = validation_watch_rx.clone();
             // Clone the table Arc while the watch borrow is scoped to this

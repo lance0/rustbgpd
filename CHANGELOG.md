@@ -13,6 +13,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The RIB logs one `post-commit first general query timing` record per
+  committed export-policy transition that an operator read follows within
+  ten seconds: the terminal commit poll's duration, the general queries and
+  primary updates queued at commit, the wall-clock wait from the end of that
+  poll to the first general or summary query dispatched, elapsed wall time in
+  completed route-chunk, primary-update, and dirty-resync work units, and the
+  unattributed remainder (including other actor work, idle time, and
+  scheduling delays). A synchronous owner still running when a summary
+  dispatches from the frozen view or during retirement remains unattributed.
+  This describes the RIB side before query execution,
+  not end-to-end operator latency. The historical event name is retained;
+  `query_lane` identifies the dispatch lane and `queued_summary_queries` adds
+  its queue depth at commit.
+
 - Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
   `bgp_rib_readiness_query_wait_seconds{seam}`. The first times route-chunk
   construction and processing, coalesced outbound distribution, and subsequent
@@ -23,6 +37,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   services readiness internally, and query waits exclude admission wait, prior
   peer-manager work, and reply delivery. Both use the shared RIB actor latency
   buckets, including an exact 200 ms boundary. Actor scheduling is unchanged.
+
+- Added `bgp_peer_manager_operator_query_wait_seconds{seam}`, timing each
+  operator-lane read (neighbor snapshots, policy stats, dataset status) from
+  send until peer-manager service begins, including bounded-channel admission
+  wait. Service after the caller's deadline still contributes a sample; sends
+  canceled before admission and reads never drained do not. The wait excludes
+  work before the send, service execution, and reply delivery. The closed
+  `seam` set is `unfenced`, `prestage` (policy preflight, cohort selection,
+  destination prestage and session setup), `forward_transition`,
+  `commit_batches`, and `rollback`. It reports the current command's policy
+  marker, or the latest completed marked command overlapping the wait;
+  intervening ordinary commands preserve it. A marker includes trailing
+  command work. Reads report their entire wait under one label, not the
+  time caused by each phase. Fenced phases
+  produce samples only after reads are drained, so per-seam counts depend on
+  arrival timing and are not phase load. Buckets retain the shared RIB actor
+  latency edges and add an exact 2 s edge: 100 ms, 500 ms and 2 s are caller
+  budget boundaries, and `count - bucket{le="2"}` counts waits over 2 s.
 
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
@@ -133,6 +165,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   updates no longer require editing contract tests.
 
 ### Fixed
+
+- Export-policy counters and the RIB portion of neighbor status can be read
+  during synchronous export replacement, rollback, and dataset reevaluation.
+  A separate bounded summary lane serves values captured before the operation.
+  The daemon hands the executor to sibling tasks during this synchronous scope,
+  allowing the RPCs woken by those replies to run; general route queries and
+  mutations retain their fences. Reads return current
+  RIB values after completion. Existing RPC deadlines remain unchanged, and
+  peer-manager/session observations in the same response remain independent.
+  Projection capture must finish before this service begins; capture and
+  retirement timings are available in diagnostic builds.
+
+- RIB backlog draining before timers, export-policy destination preparation,
+  and deferred initial registrations now serves bounded reads and yields
+  between route chunks and primary messages. Earlier route payloads still
+  complete before later End-of-RIB messages or timer release; an aggregate
+  of short ingest work can no longer bypass the ordinary actor fairness seam.
+
+- **Operator-visible:** The peer manager now serves session snapshots,
+  import-policy statistics, and dataset status while a rejected reload awaits
+  enqueue or completion of its batched RIB restore. These reads report live
+  state, including sessions whose restoration failed; they do not promise a
+  common policy generation. Mutations and the rollback's two-minute batch
+  budget are unchanged.
+
+- Outbound refresh, GSHUT refresh, and live export-knob refresh share one
+  five-second budget for RIB queue admission and acknowledgement. Refresh
+  and replay scheduling serve readiness and operator reads while waiting;
+  hot-knob refresh keeps reads fenced until manager metadata catches up with
+  the session. An already-admitted read retains its own deadline if scheduling
+  expires or its caller disconnects. Later mutations remain queued until that
+  read and the scheduling step settle.
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched

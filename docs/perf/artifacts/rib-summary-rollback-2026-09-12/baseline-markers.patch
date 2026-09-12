@@ -1,0 +1,16 @@
+diff --git a/crates/rib/src/manager/distribution/mod.rs b/crates/rib/src/manager/distribution/mod.rs
+index 88c588060..928cc5db6 100644
+--- a/crates/rib/src/manager/distribution/mod.rs
++++ b/crates/rib/src/manager/distribution/mod.rs
+@@ -3670,7 +3670,11 @@ impl RibManager {
+         // the detached receiver owns the late acknowledgement, while this actor
+         // must still repair the RIB. Never use `reply.is_closed()` as a reason to
+         // skip compensation.
++        #[cfg(feature = "bench-internals")]
++        info!(target: "replacement_summary", operation = "restore", phase = "enter", "replacement summary baseline scope");
+         let result = self.restore_export_policy_replacements_synchronously(replacements);
++        #[cfg(feature = "bench-internals")]
++        info!(target: "replacement_summary", operation = "restore", phase = "exit", "replacement summary baseline scope");
+         let _ = reply.send(result);
+     }
+ 

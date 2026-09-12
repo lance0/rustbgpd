@@ -1,0 +1,94 @@
+# Operator query wait histogram — 2026-09-12
+
+> **Document class: HISTORICAL.** This receipt describes one bounded local cell at the revision below.
+
+Two reloads of a 1,000-peer route server reconcile the exported operator query
+wait histogram with 16 successful timed CLI calls. This verifies observation
+counts and nonzero waits at this shape; it does not qualify a soak or establish
+a general operator deadline guarantee.
+
+## Measured setup
+
+- Source: `bad6aba136397dc3b6b2b6e82e0f68e92799d60f`, clean before building;
+  source tree `c28ddd694009fdd913654d4e921ebb5b2ff06cc7`.
+- Rust/Cargo 1.98.1, x86_64 Linux. Release daemon and CLI version 0.69.0;
+  `reloadstall` built from the same source through its separate scale workspace.
+  Exact executable hashes are in [binary-hashes.txt](binary-hashes.txt).
+- 1,000 loopback eBGP route-server sessions; 400,000 IPv4 prefixes, 400 per
+  sender and exactly 399,600 received per observer. All peers change policy;
+  the harness runs its normal steady churn, without max-prefix trips.
+- AMD Ryzen Threadripper 7970X; daemon pinned to CPUs 2–3, harness to 4–7,
+  CLI probes to 8–15. File-descriptor soft limit: 65,536. Builds and other
+  native lab measurements were excluded during the cell.
+- 15-second control window, two SIGHUP reloads, 40-second cycle quiescence.
+  At 0.15, 0.45, 0.55, and 0.65 seconds after each final cohort session
+  hot-apply progress record, start `rbgp neighbor` and
+  `rbgp policy stats --direction both`, both with JSON output over the daemon's
+  Unix socket. Capture a metrics body before each wave and one second after
+  all its calls finish. One post-convergence `/readyz` returned
+  [ready](readyz.txt); detector scrapes are outside the CLI count.
+
+## Observations
+
+Both reloads committed with 1,000/1,000 sessions. Exact cold convergence took
+5.3 seconds with zero establishment retries. The 16 CLI calls all exited zero,
+with observed durations of 16.4–430.3 ms. Actual call starts ranged from
+491.1 ms before to 47.2 ms after the RIB commit. This is a narrow sampled
+window, not exhaustive phase coverage.
+
+| Reload | Successful CLI calls | Histogram observations | Sum of operator waits | Sum of CLI durations | Observations above 2 s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 8 | 12 | 0.171537 s | 1.1322 s | 0 |
+| 2 | 8 | 12 | 0.207754 s | 1.5344 s | 0 |
+
+Each neighbor call contributes one operator query; each policy-stats call
+contributes two (import statistics and dataset status). Its export query uses
+the RIB lane. Therefore each wave must add exactly 12 observations across the
+closed five-label set. The filtered scrapes satisfy that count, and their wait
+sums fit within the independently timed CLI totals. These quantities are not
+equal: the histogram starts at the stamped channel send and stops at service
+start, while CLI timing includes process startup, service, and reply delivery.
+
+Reload 1 added six `forward_transition` and six `unfenced` observations.
+Reload 2 added seven `forward_transition`, three `commit_batches`, and two
+`unfenced` observations. `prestage` and `rollback` remained zero in this cell;
+paused-time regressions exercise those labels and observation after caller
+cancellation. A label is a command's phase marker, including trailing command
+work; it does not allocate the wait among causes. The RIB commit and later
+peer-manager phase-summary timestamps are retained separately.
+
+No error records were logged. The generated legacy configuration emitted one
+RFC 8212 posture warning at startup. After both measured waves, the harness's
+final mass disconnect emitted 236,326 outbound-channel resync warnings over
+3.75 seconds; those teardown records are outside the measurement. The daemon,
+harness, probe, and sampler were reaped, and their two listening ports were free.
+
+## Retained evidence
+
+[summary.json](summary.json) contains exact source/toolchain identity, shape,
+per-label deltas, scrape timestamps, and cleanup results.
+[engine-inventory.txt](engine-inventory.txt) retains exact convergence,
+settlement, session, and reload rows.
+[probes.jsonl.gz](probes.jsonl.gz) contains the 16 original successful probe rows;
+[phase-markers.jsonl.gz](phase-markers.jsonl.gz) retains both actual RIB commits
+and peer-manager phase summaries.
+
+The four compressed snapshots retain only
+`bgp_peer_manager_operator_query_wait_seconds` and
+`bgp_rib_readiness_query_wait_seconds`:
+[1 before](metrics-01-before.prom.gz), [1 after](metrics-01-after.prom.gz),
+[2 before](metrics-02-before.prom.gz), [2 after](metrics-02-after.prom.gz).
+For each wave, subtract before from after, sum `_count` over all five seams,
+and compare it with `neighbor calls + 2 × policy-stats calls`; use
+`_count - _bucket{le="2"}` for observations above 2 seconds.
+The data is ordinary gzip text and JSON. [SHA256SUMS](SHA256SUMS) covers every
+retained file; original unfiltered logs and their hashes remain local.
+
+The shape is generated by
+[`gen-scenario.py`](../../../../bench/scale/reloadstall/gen-scenario.py)
+with 1,000 peers and 1,000 changed peers. The
+[`reloadstall` driver](../../../../bench/scale/reloadstall/src/main.rs)
+receives `1000 400000 PORT PID LIVE_POLICY POLICY_A POLICY_B 2 15 1000`, with
+`RELOADSTALL_CYCLE_QUIESCE_SECS=40` and its reload-metrics address pointing at
+the daemon. The timed CLI schedule and scrape boundaries above specify the
+additional observation wave.

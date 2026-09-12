@@ -52,6 +52,15 @@ fn sock(addr: IpAddr) -> SocketAddr {
     SocketAddr::new(addr, 179)
 }
 
+async fn replay_outbound_result(
+    manager: &mut PeerManager,
+    peer: PeerKey,
+) -> Result<(), rustbgpd_api::peer_types::OutboundRefreshError> {
+    let (reply, response) = oneshot::channel();
+    manager.replay_outbound(peer, reply).await;
+    response.await.expect("replay scheduling reply")
+}
+
 fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
         min_hold_time: None,
@@ -1641,6 +1650,8 @@ mod inbound_admission;
 mod lifecycle;
 mod max_prefix;
 mod metrics;
+mod operator_read_wait;
+mod outbound_waits;
 mod peer_groups;
 mod persistence;
 mod policy;
@@ -1652,3 +1663,4 @@ mod reload_generation;
 mod rfc8212;
 mod snapshots;
 mod transport_config;
+mod wait_sites;

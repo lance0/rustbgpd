@@ -13,6 +13,7 @@ mod helpers;
 mod outbound_prefix_limits;
 mod peer_lifecycle;
 mod queries;
+mod replacement_summaries;
 use peer_lifecycle::SessionTeardownDisposition;
 mod route_refresh;
 mod selection_deferral;
@@ -76,8 +77,8 @@ use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportEncoder, ExactExportKey, NeighborPolicyStats, OutboundRouteUpdate,
-    RibReadinessError, RibReadinessQuery, RibUpdate, RoutePageError, RoutePageVersion,
-    RouteQueryScope,
+    RibReadinessError, RibReadinessQuery, RibSummaryQuery, RibUpdate, RoutePageError,
+    RoutePageVersion, RouteQueryScope,
 };
 
 #[cfg(test)]
@@ -813,8 +814,10 @@ pub struct RibManager {
     query_rx: mpsc::Receiver<RibUpdate>,
     /// Dedicated type-narrow lane used only by core readiness.
     readiness_rx: Option<mpsc::Receiver<RibReadinessQuery>>,
-    /// Only the readiness receiver and invariant count are shared across
-    /// synchronous replacement helpers. Canonical RIB state remains actor-owned.
+    /// Dedicated lane for summaries with frozen replacement projections.
+    summary_rx: Option<mpsc::Receiver<RibSummaryQuery>>,
+    /// Readiness and frozen values are shared across synchronous replacement
+    /// helpers. Canonical RIB state remains actor-owned.
     replacement_readiness: Option<Arc<Mutex<ReplacementReadiness>>>,
     #[cfg(test)]
     replacement_readiness_test_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync>>,
@@ -827,6 +830,10 @@ pub struct RibManager {
     /// interleave; general queries, primary mutations, and timers remain
     /// ordered behind the final commit or fail-closed fallback handoff.
     pending_clean_policy_transition: Option<distribution::PendingCleanPolicyTransition>,
+    /// Attribution of the first general or summary query after a committed
+    /// transition; armed by the terminal commit poll, finished by the next
+    /// dispatch on any delivery path, including a frozen replacement view.
+    post_commit_query_trace: Option<PostCommitQueryTrace>,
     /// In-progress unfenced staging of a prospective clean-transition
     /// destination group (`RibUpdate::PrepareExportPolicyDestination`).
     /// Advanced one budgeted slice at a time only when no ordinary
@@ -944,7 +951,85 @@ const SLOW_POLICY_TRANSITION: std::time::Duration = std::time::Duration::from_se
 pub(in crate::manager) const MAX_HEALTHY_POLICY_TRANSITION_AGE: std::time::Duration =
     std::time::Duration::from_secs(30);
 
+/// Limit the observation window after a committed transition. Queries
+/// arriving after it do not emit a record; the interval alone cannot
+/// establish whether a query was delayed by the commit.
+const POST_COMMIT_QUERY_TRACE_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Actor work units accounted between a transition's terminal commit poll and
+/// the first general or summary query dispatched afterwards.
+#[derive(Clone, Copy)]
+enum PostCommitWork {
+    RouteChunk,
+    PrimaryUpdate,
+    ResyncTick,
+}
+
+/// What the actor ran between a committed clean policy transition's terminal
+/// poll and the first general or summary query it dispatches afterwards. One
+/// `post-commit first general query timing` record per committed transition
+/// that a general or summary query follows within [`POST_COMMIT_QUERY_TRACE_WINDOW`].
+/// The historical event name is retained; `query_lane` identifies the receiver.
+/// `first_query_wait_us` is wall-clock from the end of the terminal poll,
+/// `busy_us` the elapsed wall time in completed units of the three instrumented
+/// work classes, and `unattributed_us` the remainder, including uninstrumented
+/// actor work, idle time, and scheduling delays outside those classes. A
+/// synchronous owner still running at a frozen-summary or retirement dispatch
+/// has not completed its work unit, so its elapsed time remains unattributed.
+/// Dispatch is measured before the query handler runs, not at reply
+/// completion. The two queued-query fields report lane depths at commit;
+/// neither identifies whether the dispatched request itself was queued then.
+struct PostCommitQueryTrace {
+    since: std::time::Instant,
+    member_count: usize,
+    terminal_poll: std::time::Duration,
+    queued_general_queries: usize,
+    queued_summary_queries: usize,
+    ingest_backlog: usize,
+    busy: std::time::Duration,
+    route_chunks: u32,
+    primary_updates: u32,
+    resync_ticks: u32,
+}
+
+impl PostCommitQueryTrace {
+    fn record(&mut self, unit: PostCommitWork, elapsed: std::time::Duration) {
+        self.busy += elapsed;
+        let counter = match unit {
+            PostCommitWork::RouteChunk => &mut self.route_chunks,
+            PostCommitWork::PrimaryUpdate => &mut self.primary_updates,
+            PostCommitWork::ResyncTick => &mut self.resync_ticks,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn emit(self, query_lane: &'static str) {
+        let wait = self.since.elapsed();
+        if wait > POST_COMMIT_QUERY_TRACE_WINDOW {
+            return;
+        }
+        let micros =
+            |duration: std::time::Duration| u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        info!(
+            member_count = self.member_count,
+            terminal_poll_us = micros(self.terminal_poll),
+            queued_general_queries = self.queued_general_queries,
+            queued_summary_queries = self.queued_summary_queries,
+            query_lane,
+            ingest_backlog_at_commit = self.ingest_backlog,
+            first_query_wait_us = micros(wait),
+            busy_us = micros(self.busy),
+            unattributed_us = micros(wait.saturating_sub(self.busy)),
+            route_chunks = self.route_chunks,
+            primary_updates = self.primary_updates,
+            resync_ticks = self.resync_ticks,
+            "post-commit first general query timing"
+        );
+    }
+}
+
 struct ReplacementReadiness {
+    summaries: Option<replacement_summaries::ReplacementSummaries>,
     #[cfg(feature = "bench-internals")]
     capacities: HashMap<&'static str, (usize, usize, usize)>,
     #[cfg(test)]
@@ -996,7 +1081,8 @@ fn replacement_readiness_checkpoint_at(
 }
 
 /// Call only on the actor while its synchronous replacement fence is held.
-/// The short mutex guard never spans a helper, callback, or canonical mutation.
+/// The shared handle exposes readiness and frozen values; canonical RIB
+/// state remains exclusively owned by the actor.
 #[expect(
     clippy::ref_option,
     reason = "callbacks borrow the actor's optional shared fence handle without creating another owner"
@@ -1046,6 +1132,9 @@ fn replacement_readiness_checkpoint(
         {
             readiness.serviced += 1;
         }
+    }
+    if let Some(summaries) = readiness.summaries.as_mut() {
+        summaries.drain();
     }
 }
 
@@ -1660,6 +1749,7 @@ impl RibManager {
             rx,
             query_rx,
             readiness_rx: None,
+            summary_rx: None,
             replacement_readiness: None,
             #[cfg(test)]
             replacement_readiness_test_hook: None,
@@ -1667,6 +1757,7 @@ impl RibManager {
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
             pending_clean_policy_transition: None,
+            post_commit_query_trace: None,
             pending_destination_prestage: None,
             prepared_destination: None,
             pending_exact_export_withdrawals: HashSet::new(),
@@ -1721,7 +1812,8 @@ impl RibManager {
     }
 
     /// Export replacement does not change Loc-RIB cardinality. Keep that exact
-    /// actor-owned invariant while only readiness acknowledgements interleave.
+    /// actor-owned invariant while readiness acknowledgements and optional
+    /// frozen operator summaries interleave.
     fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
         let age = self.pending_clean_policy_transition.as_ref().map_or(
             std::time::Duration::ZERO,
@@ -1740,6 +1832,7 @@ impl RibManager {
         }
         let started = tokio::time::Instant::now() - age;
         self.replacement_readiness = Some(Arc::new(Mutex::new(ReplacementReadiness {
+            summaries: None,
             #[cfg(feature = "bench-internals")]
             capacities: HashMap::new(),
             #[cfg(test)]
@@ -2126,12 +2219,52 @@ impl RibManager {
 
     /// Drain a bounded number of pending queries from the priority channel.
     fn drain_queries(&mut self, limit: usize) {
+        self.drain_summary_queries();
         for _ in 0..limit {
             let Ok(query) = self.query_rx.try_recv() else {
                 break;
             };
-            self.handle_update(query);
+            self.serve_general_query(query);
         }
+    }
+
+    /// Serve one item received from the general query lane. Every delivery
+    /// path (the bounded drains and both event-loop select arms) goes
+    /// through here so the post-commit query trace is consumed by the
+    /// first general query dispatched, whichever path delivers it.
+    fn serve_general_query(&mut self, query: RibUpdate) {
+        if let Some(trace) = self.post_commit_query_trace.take() {
+            trace.emit("general");
+        }
+        self.handle_update(query);
+    }
+
+    /// Run one actor work unit, accounting its duration to the post-commit
+    /// query trace while one is armed.
+    fn traced<T>(&mut self, unit: PostCommitWork, work: impl FnOnce(&mut Self) -> T) -> T {
+        if self.post_commit_query_trace.is_none() {
+            return work(self);
+        }
+        let started = std::time::Instant::now();
+        let out = work(self);
+        if let Some(trace) = self.post_commit_query_trace.as_mut() {
+            trace.record(unit, started.elapsed());
+        }
+        out
+    }
+
+    /// [`Self::process_next_route_chunk`] under the post-commit query trace:
+    /// only a processed chunk counts, not the empty-queue probe.
+    fn traced_route_chunk(&mut self) -> bool {
+        if self.post_commit_query_trace.is_none() {
+            return self.process_next_route_chunk();
+        }
+        let started = std::time::Instant::now();
+        let processed = self.process_next_route_chunk();
+        if processed && let Some(trace) = self.post_commit_query_trace.as_mut() {
+            trace.record(PostCommitWork::RouteChunk, started.elapsed());
+        }
+        processed
     }
 
     /// Preserve the policy-transition ownership fence when a primary update
@@ -2414,28 +2547,30 @@ impl RibManager {
         }
     }
 
-    fn drain_ready_updates(&mut self) -> bool {
-        let mut drained = false;
-        // Route batches are actor-deferred for fairness. During a timer race,
-        // however, preserve channel order: an EoR or timeout must not release
-        // selection before route payloads accepted ahead of it are applied.
-        while self.process_next_route_chunk() {
-            drained = true;
+    /// Apply one queued actor unit before timer or idle-only work. Returning
+    /// `true` keeps that work deferred until the primary backlog is empty.
+    async fn drain_ready_updates(&mut self) -> bool {
+        // Finish an older route batch before receiving its following EoR or
+        // other primary message. Yielding between chunks preserves that FIFO
+        // while giving operator reads and the executor their ordinary seam.
+        if !self.traced_route_chunk() {
+            let Ok(update) = self.rx.try_recv() else {
+                return false;
+            };
+            self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                manager.handle_update(update);
+            });
         }
-        while let Ok(update) = self.rx.try_recv() {
-            drained = true;
-            self.handle_update(update);
-            if self.pending_clean_policy_transition.is_some() {
-                // The accepted cohort command now owns FIFO. Leave every
-                // later primary update queued until its atomic finalize or
-                // fail-closed fallback handoff completes.
-                break;
-            }
-            while self.process_next_route_chunk() {
-                drained = true;
-            }
-        }
-        drained
+        let transition_elapsed = self
+            .pending_clean_policy_transition
+            .as_ref()
+            .map(distribution::PendingCleanPolicyTransition::elapsed);
+        self.drain_readiness_queries(transition_elapsed);
+        // A newly accepted cohort owns the next actor turn. Its own
+        // between-poll seam decides when general queries can be served.
+        self.drain_general_queries_if_unfenced();
+        tokio::task::yield_now().await;
+        true
     }
 
     /// Process a single `RibUpdate` message.
@@ -4082,6 +4217,9 @@ impl RibManager {
                 .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
+                // A newly owned transition supersedes any trace still armed
+                // from the previous commit.
+                self.post_commit_query_trace = None;
                 // The type-narrow readiness lane interleaves at every poll,
                 // and a bounded general-query budget between pre-commit
                 // polls (see `drain_general_queries_between_transition_polls`).
@@ -4120,6 +4258,18 @@ impl RibManager {
                         if let Some(reply) = reply {
                             terminal_reply = Some((reply, Ok(crate::update::ExportPolicyCohortOutcome::Committed)));
                         }
+                        manager.post_commit_query_trace = Some(PostCommitQueryTrace {
+                            since: std::time::Instant::now(),
+                            member_count,
+                            terminal_poll: started.elapsed(),
+                            queued_general_queries: manager.query_rx.len(),
+                            queued_summary_queries: manager.summary_rx.as_ref().map_or(0, mpsc::Receiver::len),
+                            ingest_backlog: manager.rx.len(),
+                            busy: std::time::Duration::ZERO,
+                            route_chunks: 0,
+                            primary_updates: 0,
+                            resync_ticks: 0,
+                        });
                         None
                     }
                     distribution::CleanPolicyTransitionAdvance::Fallback(mut failed) => {
@@ -4213,7 +4363,8 @@ impl RibManager {
                     count = self.dirty_peers.len(),
                     "resync timer fired for dirty peers"
                 );
-                let backlog = self.resync_dirty_peers_bounded();
+                let backlog =
+                    self.traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
                 if self.resync_tick_pending() {
                     self.metrics.record_rib_dirty_resync("still_dirty");
                     let interval = if backlog {
@@ -4231,7 +4382,7 @@ impl RibManager {
                 continue;
             }
             if has_gr_timers && gr_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 let expired: Vec<IpAddr> = self
@@ -4246,14 +4397,14 @@ impl RibManager {
                 continue;
             }
             if has_llgr_timers && llgr_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.sweep_expired_llgr_stale();
                 continue;
             }
             if has_refresh_timers && refresh_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.expire_refresh_windows();
@@ -4262,7 +4413,7 @@ impl RibManager {
             if has_selection_timer && selection_sleep.deadline() <= now {
                 // A queued current-session EoR wins the all-EoR release race
                 // over a simultaneously ready timer.
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.expire_selection_deferral();
@@ -4275,8 +4426,7 @@ impl RibManager {
             // between slices. Readiness and a bounded query budget are
             // served every iteration, mirroring the paced-flush seams.
             if self.pending_destination_prestage.is_some() {
-                if self.drain_ready_updates() {
-                    self.drain_readiness_queries(None);
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.drain_readiness_queries(None);
@@ -4293,8 +4443,7 @@ impl RibManager {
             // full-table catch-up, so a mass reconnect cannot head-of-line
             // block re-announcement delivery to survivors.
             if !self.pending_initial_registrations.is_empty() {
-                if self.drain_ready_updates() {
-                    self.drain_readiness_queries(None);
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.drain_readiness_queries(None);
@@ -4304,7 +4453,7 @@ impl RibManager {
                 continue;
             }
 
-            if self.process_next_route_chunk() {
+            if self.traced_route_chunk() {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
@@ -4316,9 +4465,15 @@ impl RibManager {
                             None => self.readiness_rx = None,
                         }
                     }
+                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                        match summary {
+                            Some(query) => self.serve_summary_query(query),
+                            None => self.summary_rx = None,
+                        }
+                    }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
-                            Some(q) => self.handle_update(q),
+                            Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
@@ -4326,7 +4481,9 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                self.handle_update(update);
+                                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                                    manager.handle_update(update);
+                                });
                                 self.drain_general_queries_if_unfenced();
                             }
                             None => break,
@@ -4337,7 +4494,8 @@ impl RibManager {
                             count = self.dirty_peers.len(),
                             "resync timer fired for dirty peers"
                         );
-                        let backlog = self.resync_dirty_peers_bounded();
+                        let backlog = self
+                            .traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
 
                         // Reset for next tick if work remains, otherwise disarm.
                         if self.resync_tick_pending() {
@@ -4356,7 +4514,7 @@ impl RibManager {
                         }
                     }
                     () = gr_sleep.as_mut(), if has_gr_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         // Find all peers whose GR deadline has expired
@@ -4372,19 +4530,19 @@ impl RibManager {
                         }
                     }
                     () = llgr_sleep.as_mut(), if has_llgr_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.sweep_expired_llgr_stale();
                     }
                     () = refresh_sleep.as_mut(), if has_refresh_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.expire_refresh_windows();
                     }
                     () = selection_sleep.as_mut(), if has_selection_timer => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.expire_selection_deferral();
@@ -4399,9 +4557,15 @@ impl RibManager {
                             None => self.readiness_rx = None,
                         }
                     }
+                    summary = Self::receive_summary_query(&mut self.summary_rx) => {
+                        match summary {
+                            Some(query) => self.serve_summary_query(query),
+                            None => self.summary_rx = None,
+                        }
+                    }
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
-                            Some(q) => self.handle_update(q),
+                            Some(q) => self.serve_general_query(q),
                             None => query_rx_open = false,
                         }
                     }
@@ -4409,7 +4573,9 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
-                                self.handle_update(update);
+                                self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                                    manager.handle_update(update);
+                                });
                                 self.drain_general_queries_if_unfenced();
                             }
                             None => break,

@@ -11,13 +11,16 @@ use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
+use crate::actor_read::{
+    peer_manager_operator_read, peer_manager_read, rib_manager_read, rib_summary_read,
+};
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    PeerManagerCommand, PeerManagerOperatorQuery, PolicyStatementDefinition,
-    ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
+    ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
+    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
+    PolicyStatementDefinition, ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition,
+    ValidationPolicyScopeSnapshot,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
@@ -332,7 +335,7 @@ fn input_definition_to_proto(definition: &NamedPolicyDefinition) -> proto::Polic
 pub struct PolicyService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -340,6 +343,7 @@ pub struct PolicyService {
     /// (ADR-0096 Decision 6). `None` when the service was built
     /// without it — `TestPolicy` then reports `FAILED_PRECONDITION`.
     rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+    rib_summary_tx: Option<mpsc::Sender<rustbgpd_rib::RibSummaryQuery>>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     owned_actor_timeout: Duration,
 }
@@ -381,14 +385,15 @@ impl PolicyService {
             runtime_config_lock,
             config_mutation_gate,
             rib_tx: None,
+            rib_summary_tx: None,
             settlement: None,
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
         }
     }
 
-    /// Attach the operator query lane serviced before session policy application.
+    /// Attach the operator query lane served at explicit actor admission points.
     #[must_use]
-    pub fn with_operator_queries(mut self, tx: mpsc::Sender<PeerManagerOperatorQuery>) -> Self {
+    pub fn with_operator_queries(mut self, tx: mpsc::Sender<EnqueuedOperatorQuery>) -> Self {
         self.operator_tx = Some(tx);
         self
     }
@@ -409,6 +414,16 @@ impl PolicyService {
     #[must_use]
     pub fn with_rib_query(mut self, rib_tx: mpsc::Sender<rustbgpd_rib::RibUpdate>) -> Self {
         self.rib_tx = Some(rib_tx);
+        self
+    }
+
+    /// Attach the summary lane served from frozen values during RIB replacement.
+    #[must_use]
+    pub fn with_rib_summary_queries(
+        mut self,
+        tx: mpsc::Sender<rustbgpd_rib::RibSummaryQuery>,
+    ) -> Self {
+        self.rib_summary_tx = Some(tx);
         self
     }
 
@@ -563,7 +578,7 @@ async fn owned_policy_mutation_body(
 /// though they do not have a `[[neighbors]]` row.
 async fn require_managed_peer_address(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-    operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
+    operator_tx: Option<&mpsc::Sender<EnqueuedOperatorQuery>>,
     address: IpAddr,
     deadline: tokio::time::Instant,
     audit: Option<&GrpcAuditHandle>,
@@ -1397,7 +1412,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::GetPolicyStatsRequest>,
     ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
-        use rustbgpd_rib::RibUpdate;
+        use rustbgpd_rib::RibSummaryQuery;
 
         let deadline = tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT;
         let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
@@ -1453,9 +1468,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 deadline,
                 "export",
                 audit.as_ref(),
-                rib_manager_read(rib_tx, |reply| RibUpdate::QueryExportPolicyTermHits {
-                    peer,
-                    reply,
+                rib_summary_read(rib_tx, self.rib_summary_tx.as_ref(), |reply| {
+                    RibSummaryQuery::ExportPolicyTermHits { peer, reply }
                 }),
             )
             .await?;
@@ -2403,16 +2417,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_stats_use_operator_lane_for_peer_import_and_datasets() {
+    async fn policy_stats_use_operator_and_rib_summary_lanes() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (operator_tx, mut operator_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (summary_tx, mut summary_rx) = mpsc::channel(1);
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
             .with_operator_queries(operator_tx)
-            .with_rib_query(rib_tx);
+            .with_rib_query(rib_tx)
+            .with_rib_summary_queries(summary_tx);
         let actor = tokio::spawn(async move {
             let PeerManagerOperatorQuery::HasPeerAddress { address, reply } =
-                operator_rx.recv().await.unwrap()
+                operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected managed peer query");
             };
@@ -2422,7 +2438,7 @@ mod tests {
                 peer,
                 deadline,
                 reply,
-            } = operator_rx.recv().await.unwrap()
+            } = operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected import counters");
             };
@@ -2430,15 +2446,15 @@ mod tests {
             assert!(deadline > tokio::time::Instant::now());
             reply.send(SessionQueryOutcome::Reply(Vec::new())).unwrap();
             let PeerManagerOperatorQuery::QueryPolicyDatasets { reply } =
-                operator_rx.recv().await.unwrap()
+                operator_rx.recv().await.unwrap().query
             else {
                 panic!("expected dataset query");
             };
             reply.send(Vec::new()).unwrap();
         });
         let rib = tokio::spawn(async move {
-            let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } =
-                rib_rx.recv().await.unwrap()
+            let rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { reply, .. } =
+                summary_rx.recv().await.unwrap()
             else {
                 panic!("expected export counters");
             };
@@ -2455,6 +2471,10 @@ mod tests {
         .unwrap();
         actor.await.unwrap();
         rib.await.unwrap();
+        assert!(matches!(
+            rib_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
         assert!(matches!(
             peer_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -4083,6 +4103,7 @@ policy customer-in(peer_lp: u32) {
             tokio::time::timeout(Duration::from_secs(3), operator_rx.recv())
                 .await
                 .expect("dataset lookup must follow the export reply")
+                .map(|enqueued| enqueued.query)
         else {
             panic!("expected dataset lookup on the operator lane");
         };
@@ -4292,6 +4313,37 @@ policy customer-in(peer_lp: u32) {
                 if hold_reply { "RIB reply" } else { "RIB send" },
             )
             .await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_summary_admission_and_reply_share_rpc_deadline() {
+        for full in [false, true] {
+            let (peer_tx, _peer_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let (summary_tx, mut summary_rx) = mpsc::channel(1);
+            let (reply, _response) = oneshot::channel();
+            if full {
+                summary_tx
+                    .send(rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+                    .await
+                    .unwrap();
+            }
+            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_rib_query(rib_tx)
+                .with_rib_summary_queries(summary_tx);
+            assert_policy_stats_deadline(&svc, "export", "RIB summary").await;
+            let rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { reply, .. } =
+                summary_rx.try_recv().unwrap()
+            else {
+                panic!("expected summary counters");
+            };
+            assert_eq!(reply.is_closed(), !full);
+            assert!(summary_rx.try_recv().is_err());
+            assert!(matches!(
+                rib_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
         }
     }
 

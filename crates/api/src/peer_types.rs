@@ -1609,6 +1609,24 @@ pub enum PeerManagerOperatorQuery {
     },
 }
 
+/// One operator query stamped with its send instant, so the peer manager can
+/// time send to service, including bounded-channel admission wait. Every
+/// operator-lane sender constructs this (or converts with `.into()`) before
+/// awaiting the send. Sends canceled before admission contribute no sample.
+pub struct EnqueuedOperatorQuery {
+    pub enqueued: tokio::time::Instant,
+    pub query: PeerManagerOperatorQuery,
+}
+
+impl From<PeerManagerOperatorQuery> for EnqueuedOperatorQuery {
+    fn from(query: PeerManagerOperatorQuery) -> Self {
+        Self {
+            enqueued: tokio::time::Instant::now(),
+            query,
+        }
+    }
+}
+
 impl From<PeerManagerOperatorQuery> for PeerManagerCommand {
     fn from(query: PeerManagerOperatorQuery) -> Self {
         match query {

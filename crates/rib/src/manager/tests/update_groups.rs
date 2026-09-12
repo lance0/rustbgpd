@@ -3187,6 +3187,54 @@ async fn accepted_policy_transition_does_not_drain_prequeued_general_queries() {
     );
 }
 
+#[tokio::test]
+async fn destination_prestage_drain_yields_with_primary_backlog_and_read_reply() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 3, None);
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    manager.rx = rx;
+    manager.query_rx = query_rx;
+    let next_policy = community_chain(0xFDE8_2102);
+    let (reply, mut prepared) = oneshot::channel();
+    manager.begin_destination_prestage(peers[0], Some(&next_policy), reply);
+    assert!(manager.pending_destination_prestage.is_some());
+    for index in 0..8 {
+        tx.try_send(RibUpdate::SetPeerPolicyContext {
+            peer: peers[0],
+            session_id: 0,
+            peer_group: Some(format!("context-{index}")),
+        })
+        .unwrap();
+    }
+    let (reply, mut query) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    let mut actor = Box::pin(manager.run());
+    assert!(
+        actor
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert_eq!(query.try_recv().unwrap(), 3);
+    assert!(
+        tx.capacity() < tx.max_capacity(),
+        "prestage drained every primary mutation before yielding"
+    );
+    assert!(matches!(
+        prepared.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    let handle = tokio::spawn(actor);
+    prepared.await.unwrap().unwrap();
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn clean_policy_transition_finishes_after_reply_and_channels_close() {
     let (tx, rx) = mpsc::channel(32);
@@ -5156,6 +5204,314 @@ async fn general_queries_served_between_precommit_polls_and_fenced_during_commit
         "the post-commit answer carries the committed (new) export policy"
     );
     assert_eq!(Some(page.version), manager.route_page_advertised_version);
+}
+
+/// The post-commit query trace counts the actor work run between the
+/// terminal commit poll and the next general query, and that query's drain
+/// consumes it: one attribution record per commit, and untraced drains
+/// leave nothing armed.
+#[tokio::test]
+async fn post_commit_query_trace_accounts_work_until_first_general_query() {
+    use super::super::{PostCommitQueryTrace, PostCommitWork};
+    const ROUTE_COUNT: usize = 2;
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (mut manager, _peers, _receivers) = direct_clean_transition_manager(2, ROUTE_COUNT, None);
+    manager.query_rx = query_rx;
+    assert!(!manager.traced_route_chunk());
+    assert!(manager.post_commit_query_trace.is_none());
+
+    let fresh_trace = || PostCommitQueryTrace {
+        since: std::time::Instant::now(),
+        member_count: 2,
+        terminal_poll: std::time::Duration::from_millis(1),
+        queued_general_queries: 0,
+        queued_summary_queries: 0,
+        ingest_backlog: 0,
+        busy: std::time::Duration::ZERO,
+        route_chunks: 0,
+        primary_updates: 0,
+        resync_ticks: 0,
+    };
+    manager.post_commit_query_trace = Some(fresh_trace());
+    let announced = vec![crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 42),
+    )];
+    manager.traced(PostCommitWork::PrimaryUpdate, |manager| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)),
+            announced,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+    });
+    while manager.traced_route_chunk() {}
+    let trace = manager
+        .post_commit_query_trace
+        .as_ref()
+        .expect("trace stays armed until a query");
+    assert_eq!(trace.primary_updates, 1);
+    assert_eq!(
+        trace.route_chunks, 1,
+        "only the processed chunk counts, not the empty-queue probe"
+    );
+    assert!(trace.busy > std::time::Duration::ZERO);
+
+    let (reply, mut response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(
+        response.try_recv().is_ok(),
+        "the query is served by the drain that consumes the trace"
+    );
+    assert!(
+        manager.post_commit_query_trace.is_none(),
+        "the first general query consumes the trace"
+    );
+
+    let (reply, mut response) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(response.try_recv().is_ok());
+    assert!(manager.post_commit_query_trace.is_none());
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    manager.summary_rx = Some(summary_rx);
+    manager.post_commit_query_trace = Some(fresh_trace());
+    let (reply, mut response) = oneshot::channel();
+    summary_tx
+        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    manager.drain_general_queries_if_unfenced();
+    assert!(response.try_recv().is_ok());
+    assert!(
+        manager.post_commit_query_trace.is_none(),
+        "the first summary query also consumes the trace"
+    );
+}
+
+/// A committed transition arms the post-commit query trace and the first
+/// general query served afterwards consumes it, whichever event-loop path
+/// delivers that query. With the actor idle after the commit (no primary
+/// backlog) the delivering path is the query-lane select arm; a trace
+/// consumed only by the bounded drains survives that query, so the record
+/// is missing here and a later drain would report the whole idle gap as
+/// the wait.
+#[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one running-actor scenario carries the log capture, the committed transition, and both query paths"
+)]
+async fn post_commit_query_trace_is_consumed_by_idle_select_arm_query() {
+    use std::collections::BTreeMap;
+    use std::sync::Arc as StdArc;
+
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    #[derive(Default)]
+    struct Fields(BTreeMap<String, String>);
+    impl Visit for Fields {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+    struct Capture(StdArc<Mutex<Vec<Fields>>>);
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+    const RECORD: &str = "post-commit first general query timing";
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    let records = |captured: &Mutex<Vec<Fields>>| -> Vec<BTreeMap<String, String>> {
+        captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|fields| fields.0.get("message").is_some_and(|m| m.contains(RECORD)))
+            .map(|fields| fields.0.clone())
+            .collect()
+    };
+    // The run loop is spawned on this current-thread runtime, so the
+    // thread's default subscriber sees the actor's records.
+    let _subscriber = tracing::subscriber::set_default(Capture(StdArc::clone(&captured)));
+
+    // Sibling tests may register this process-wide callsite without a
+    // subscriber. Warm it inside this scope, then refresh its cached interest
+    // before measuring the real transition (the same pattern as other RIB logs).
+    super::super::PostCommitQueryTrace {
+        since: std::time::Instant::now(),
+        member_count: 0,
+        terminal_poll: std::time::Duration::ZERO,
+        queued_general_queries: 0,
+        queued_summary_queries: 0,
+        ingest_backlog: 0,
+        busy: std::time::Duration::ZERO,
+        route_chunks: 0,
+        primary_updates: 0,
+        resync_ticks: 0,
+    }
+    .emit("general");
+    tracing::callsite::rebuild_interest_cache();
+    captured.lock().unwrap().clear();
+
+    let (tx, rx) = mpsc::channel(32);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let old_policy = community_chain(0xFDE8_2201);
+    let next_policy = community_chain(0xFDE8_2202);
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 27, 0, 2)),
+    ];
+    let mut receivers = Vec::new();
+    for (index, peer) in peers.iter().copied().enumerate() {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.route_reflector_client = true;
+        spec.export_policy = Some(old_policy.clone());
+        receivers.push(
+            peer_up_with_cohort_encoder(
+                &tx,
+                spec,
+                Arc::new(CohortExactEncoder {
+                    owner: u64::try_from(index + 1).unwrap(),
+                    profile: 31,
+                    max_len: 4_096,
+                    generation: AtomicUsize::new(0),
+                    advance_generation: false,
+                    probes: Arc::clone(&probes),
+                    reuses: Arc::clone(&reuses),
+                }),
+            )
+            .await,
+        );
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 16);
+    let routes_received = |prefix: Ipv4Prefix| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(source),
+        announced: vec![crate::test_support::make_route(prefix, source)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    };
+    tx.send(routes_received(Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 118, 0),
+        24,
+    )))
+    .await
+    .unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicies {
+        replacements: peers
+            .iter()
+            .map(|&peer| crate::update::PeerExportPolicyReplacement {
+                peer,
+                export_policy: Some(next_policy.clone()),
+            })
+            .collect(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        response.await.unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    let committed_at = std::time::Instant::now();
+    for receiver in &mut receivers {
+        let update = receiver.recv().await.unwrap();
+        assert!(update.announce[0].attributes.iter().any(|attribute| {
+            matches!(attribute, PathAttribute::Communities(values) if values.contains(&0xFDE8_2202))
+        }));
+    }
+    assert!(
+        records(&captured).is_empty(),
+        "nothing is emitted before a query"
+    );
+
+    // Idle actor, then one general query delivered by the select arm.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let idle_gap = committed_at.elapsed();
+    let (reply, count) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    assert_eq!(count.await.unwrap(), 1);
+    let first = records(&captured);
+    assert_eq!(
+        first.len(),
+        1,
+        "exactly one post-commit record after the first general query, \
+         served from the idle select arm: {first:?}"
+    );
+    let wait_us: u64 = first[0]["first_query_wait_us"].parse().unwrap();
+    let observed_us = u64::try_from(committed_at.elapsed().as_micros()).unwrap();
+    assert!(
+        wait_us >= u64::try_from(idle_gap.as_micros()).unwrap() && wait_us <= observed_us + 100_000,
+        "first_query_wait_us={wait_us} must match the observed idle gap \
+         ({idle_gap:?} .. {observed_us} us)"
+    );
+    assert_eq!(first[0]["queued_general_queries"], "0");
+
+    // A later primary update and its bounded drain find no trace to emit.
+    let (reply, count) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    tx.try_send(routes_received(Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 119, 0),
+        24,
+    )))
+    .unwrap();
+    let _ = count.await.unwrap();
+    for receiver in &mut receivers {
+        assert_eq!(receiver.recv().await.unwrap().announce.len(), 1);
+    }
+    assert_eq!(
+        records(&captured).len(),
+        1,
+        "the trace is consumed once; a later drain emits nothing"
+    );
+
+    drop(tx);
+    drop(query_tx);
+    handle.await.unwrap();
 }
 
 /// With wall-clock budget in hand, the probe-and-prepare phase strides the
@@ -9110,4 +9466,217 @@ fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
     assert!(fleet.receivers[3].try_recv().is_err());
     assert!(!fleet.manager.dirty_peers.contains(&lagging));
     assert!(!fleet.manager.pending_extra_withdraws.contains_key(&lagging));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression holds real replacement interiors and checks frozen replies plus owner and ordinary-channel fences"
+)]
+fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
+    use crate::update::RibSummaryQuery;
+
+    for operation in ["apply", "restore", "reevaluate"] {
+        let cases = if operation == "reevaluate" {
+            vec![("dataset_staging", community_chain(0xFDE8_0001))]
+        } else {
+            vec![
+                ("shared_inventory", community_chain(0xFDE8_0002)),
+                ("fallback_baseline", peer_context_chain()),
+            ]
+        };
+        for (stage, next) in cases {
+            let old = community_chain(0xFDE8_0001);
+            let mut fleet = replacement_readiness_fleet(&old);
+            let expected_rows: Vec<_> = fleet
+                .members
+                .iter()
+                .map(|peer| fleet.manager.neighbor_rib_snapshot(*peer))
+                .collect();
+            let expected_comparison = fleet
+                .manager
+                .update_group_comparison(fleet.members[0], fleet.members[1]);
+            let expected_terms = format!("{:?}", fleet.manager.export_policy_term_hits(None));
+            let (summary_tx, summary_rx) = mpsc::channel(8);
+            fleet.manager.summary_rx = Some(summary_rx);
+            let (query_tx, query_rx) = mpsc::channel(1);
+            fleet.manager.query_rx = query_rx;
+            let (general_reply, general_response) = oneshot::channel();
+            query_tx
+                .try_send(RibUpdate::QueryLocRibCount {
+                    reply: general_reply,
+                })
+                .unwrap();
+            let general_response = Arc::new(Mutex::new(general_response));
+            let (mutation_tx, mutation_rx) = mpsc::channel(1);
+            fleet.manager.rx = mutation_rx;
+            let (mutation_reply, _mutation_response) = oneshot::channel();
+            mutation_tx
+                .try_send(RibUpdate::QueryLocRibCount {
+                    reply: mutation_reply,
+                })
+                .unwrap();
+            let (neighbors_reply, neighbors_response) = oneshot::channel();
+            let neighbors_response = Arc::new(Mutex::new(neighbors_response));
+            let (terms_reply, terms_response) = oneshot::channel();
+            let terms_response = Arc::new(Mutex::new(terms_response));
+            let queries = Mutex::new(Some((neighbors_reply, terms_reply)));
+            let visits = Arc::new(AtomicUsize::new(0));
+            let captures = Arc::new(AtomicUsize::new(0));
+            let peers = fleet.members.clone();
+            fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+                let visits = visits.clone();
+                let captures = captures.clone();
+                let neighbors_response = neighbors_response.clone();
+                let terms_response = terms_response.clone();
+                let general_response = general_response.clone();
+                move |observed| {
+                    if observed == "summary_capture" {
+                        captures.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if observed != stage {
+                        return;
+                    }
+                    assert!(matches!(
+                        general_response.lock().unwrap().try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ));
+                    assert_eq!(
+                        mutation_tx.capacity(),
+                        0,
+                        "primary queue must stay untouched"
+                    );
+                    match visits.fetch_add(1, Ordering::Relaxed) {
+                        0 => {
+                            let (neighbors_reply, terms_reply) =
+                                queries.lock().unwrap().take().unwrap();
+                            summary_tx
+                                .try_send(RibSummaryQuery::NeighborRibSnapshots {
+                                    peers: peers.clone(),
+                                    comparison: Some((peers[0], peers[1])),
+                                    reply: neighbors_reply,
+                                })
+                                .unwrap();
+                            summary_tx
+                                .try_send(RibSummaryQuery::ExportPolicyTermHits {
+                                    peer: None,
+                                    reply: terms_reply,
+                                })
+                                .unwrap();
+                        }
+                        1 => {
+                            let reply = neighbors_response
+                                .lock()
+                                .unwrap()
+                                .try_recv()
+                                .expect("neighbor summary served inside replacement");
+                            assert_eq!(reply.snapshots, expected_rows);
+                            assert_eq!(reply.comparison, Some(expected_comparison.clone()));
+                            assert_eq!(
+                                format!(
+                                    "{:?}",
+                                    terms_response
+                                        .lock()
+                                        .unwrap()
+                                        .try_recv()
+                                        .expect("term summary served inside replacement")
+                                ),
+                                expected_terms
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }));
+            if operation == "restore" {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        reply,
+                    });
+                assert!(response.try_recv().unwrap().is_ok());
+            } else if operation == "reevaluate" {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+                        peers: fleet.members.clone(),
+                        reply,
+                    });
+                assert_eq!(response.try_recv().unwrap(), Ok(()));
+            } else {
+                let (reply, mut response) = oneshot::channel();
+                fleet
+                    .manager
+                    .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                        replacements: batch_replacements(&fleet.members, &next),
+                        reply,
+                    });
+                assert_eq!(response.try_recv().unwrap(), Ok(()));
+            }
+            assert!(
+                visits.load(Ordering::Relaxed) >= 2,
+                "{stage}: interior not exercised"
+            );
+            assert_eq!(
+                captures.load(Ordering::Relaxed),
+                1,
+                "nested apply must retain the outer snapshot"
+            );
+            assert!(fleet.manager.replacement_readiness.is_none());
+            assert!(fleet.manager.summary_rx.is_some());
+            assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+            fleet.manager.replacement_readiness_test_hook = None;
+            assert!(
+                fleet
+                    .members
+                    .iter()
+                    .all(|peer| fleet.manager.peer_export_policies.get(peer)
+                        == Some(&Some(next.clone())))
+            );
+            fleet.manager.drain_queries(1);
+            assert_eq!(general_response.lock().unwrap().try_recv().unwrap(), 4);
+        }
+    }
+}
+
+#[test]
+fn replacement_summaries_keep_abandoned_apply_and_restore_ownership_rules() {
+    let old = community_chain(0xFDE8_0001);
+    let next = community_chain(0xFDE8_0002);
+    let mut fleet = replacement_readiness_fleet(&old);
+    let (_summary_tx, summary_rx) = mpsc::channel(8);
+    fleet.manager.summary_rx = Some(summary_rx);
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    fleet
+        .manager
+        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next),
+            reply,
+        });
+    assert!(
+        fleet
+            .members
+            .iter()
+            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(old.clone())))
+    );
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    fleet
+        .manager
+        .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements: batch_replacements(&fleet.members, &next),
+            reply,
+        });
+    assert!(
+        fleet
+            .members
+            .iter()
+            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(next.clone())))
+    );
+    assert!(fleet.manager.replacement_readiness.is_none());
+    assert!(fleet.manager.summary_rx.is_some());
 }
