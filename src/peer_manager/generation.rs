@@ -30,9 +30,9 @@ use crate::config::{
 };
 use crate::policy_admin;
 
-use super::PeerManager;
 use super::lifecycle::PeerReshapeSnapshotOutcome;
 use super::policy::{DatasetDependent, DatasetRefreshFailure, PolicySnapshotFailureKind};
+use super::{OperatorReadAdmission, PeerManager};
 
 /// Counts of the per-peer actions one generation applied.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -275,7 +275,11 @@ impl PeerManager {
         // 1. Policy chains through the rollback-capable snapshot. No session
         //    identity is at stake yet, so a failure here costs nothing.
         match self
-            .apply_resolved_policy_snapshot_with_prestage_reads(resolved.policy_targets, true, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                resolved.policy_targets,
+                true,
+                OperatorReadAdmission::Served,
+            )
             .await
         {
             Ok(priors) => applied.policy_priors = Some(priors),

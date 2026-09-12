@@ -277,7 +277,7 @@ const RIB_ACTOR_WORK_UNITS: [&str; 3] = ["route_chunk", "distribute_flush", "exa
 /// Closed labels for the actor seam that served a readiness query.
 const RIB_READINESS_QUERY_SEAMS: [&str; 2] = ["actor_loop", "policy_transition_fence"];
 
-/// Closed labels for the peer-manager seam that held an operator read.
+/// Closed labels for the current or latest completed command's operator-read policy marker.
 const PEER_MANAGER_OPERATOR_QUERY_SEAMS: [&str; 5] = [
     "unfenced",
     "prestage",
@@ -1562,7 +1562,7 @@ impl BgpMetrics {
         let peer_manager_operator_query_wait_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_peer_manager_operator_query_wait_seconds",
-                "Wall-clock delay from send on the peer manager's operator-read lane until actor service, partitioned by the seam that held the read: `unfenced` (normal loop, no transaction held it), `prestage`, `forward_transition`, `commit_batches`, or `rollback` (the policy-transaction wait the read sat behind). Observed even if the caller has timed out, but not if never drained. Excludes prior peer-manager work and reply delivery.",
+                "Wall-clock delay from send on the peer manager's operator-read lane until actor service begins, including bounded-channel admission wait. The seam is the current or latest completed command's policy marker: unfenced, prestage (preflight through session setup), forward_transition, commit_batches, or rollback. Markers include trailing command work; waits are recorded once, not split by cause. Observed after caller timeout if served; sends canceled before admission and reads never drained contribute no sample. Excludes work before send, service execution, and reply delivery.",
             )
             .buckets(operator_query_wait_buckets()),
             &["seam"],
@@ -5390,11 +5390,12 @@ impl BgpMetrics {
     }
 
     /// Observe how long one operator-lane read waited between send and
-    /// peer-manager service.
+    /// peer-manager service begins, including bounded-channel admission wait.
     ///
     /// `seam` is one of the bounded `unfenced`, `prestage`,
     /// `forward_transition`, `commit_batches` or `rollback` values naming
-    /// the transaction wait that held the read.
+    /// the current or latest completed command's policy marker. It includes
+    /// trailing command work, not a causal split of the wait.
     pub fn observe_peer_manager_operator_query_wait(
         &self,
         seam: &str,

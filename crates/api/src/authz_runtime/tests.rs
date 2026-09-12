@@ -1061,6 +1061,10 @@ async fn liveness_rpc_authenticates_and_respects_read_listener_cap() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pinned level per audit case plus the in-scope callsite warm-up"
+)]
 fn only_successful_read_audits_are_debug_and_all_are_counted() {
     use tracing::{Event, Level, Metadata, Subscriber, span};
     struct Levels(Arc<Mutex<Vec<Level>>>);
@@ -1150,10 +1154,19 @@ fn only_successful_read_audits_are_debug_and_all_are_counted() {
             );
         }
     };
-    // Initialize callsites before installing the scoped subscriber; another
-    // parallel test may otherwise register one under its default dispatcher.
-    record(&BgpMetrics::new());
-    tracing::subscriber::with_default(Levels(levels.clone()), || record(&metrics));
+    tracing::subscriber::with_default(Levels(levels.clone()), || {
+        // Registering this dispatcher raises the process max level from OFF,
+        // so sibling tests start registering these callsites right now, and
+        // whichever thread registers one first caches its interest
+        // process-wide; a thread with no subscriber caches `Interest::never()`,
+        // which drops the event on the macro fast path. Warm the callsites,
+        // then re-register everything against this subscriber; a callsite
+        // registers once, so the measured calls cannot lose that race.
+        record(&BgpMetrics::new());
+        tracing::callsite::rebuild_interest_cache();
+        levels.lock().unwrap().clear();
+        record(&metrics);
+    });
     assert_eq!(*levels.lock().unwrap(), cases.map(|(_, _, level)| level));
     assert_eq!(
         gather_text(&metrics)

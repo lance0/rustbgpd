@@ -1,5 +1,5 @@
 //! `bgp_peer_manager_operator_query_wait_seconds{seam}`: an operator read's
-//! send-to-service wait, attributed to the transaction wait that held it.
+//! send-to-service wait, labelled by the current or latest completed command's policy marker.
 
 use super::cohort_budgets::cohort_session_with_import_stats;
 use super::*;
@@ -181,6 +181,119 @@ async fn idle_loop_read_is_timed_as_unfenced() {
         .unwrap();
 }
 
+/// Ordinary and internal commands cannot erase a named phase while an older
+/// stamped send is still waiting for channel admission or actor service.
+#[tokio::test(start_paused = true)]
+async fn ordinary_commands_preserve_the_last_completed_policy_seam() {
+    for internal in [false, true] {
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        let (internal_tx, internal_rx) = mpsc::channel(4);
+        let (mut manager, metrics) = manager_with_operator_lane(command_rx, operator_rx, rib_tx);
+        manager.internal_rx = Some(internal_rx);
+        let config = Box::new(manager.current_config.clone());
+
+        let (reply, response) = oneshot::channel();
+        let queued = EnqueuedOperatorQuery::from(PeerManagerOperatorQuery::ListPeers { reply });
+        manager.operator_read_seam = OperatorReadSeam::Rollback;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        manager.finish_operator_seam();
+        let actor = tokio::spawn(manager.run());
+
+        let (reply, marker) = oneshot::channel();
+        if internal {
+            internal_tx
+                .send(InternalCommand::ReplaceConfigSnapshot {
+                    config,
+                    ack: Some(reply),
+                })
+                .await
+                .unwrap();
+        } else {
+            command_tx
+                .send(PeerManagerCommand::Ping { reply })
+                .await
+                .unwrap();
+        }
+        marker.await.unwrap();
+        operator_tx.send(queued).await.unwrap();
+        assert!(response.await.unwrap().is_empty());
+        assert_eq!(wait_series(&metrics, "rollback").0, 1);
+        assert_eq!(within_two_seconds(&wait_series(&metrics, "rollback").2), 0);
+
+        let (reply, response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+            .await
+            .unwrap();
+        assert!(response.await.unwrap().is_empty());
+        assert_eq!(wait_series(&metrics, "unfenced").0, 1);
+        drop(command_tx);
+        actor.await.unwrap();
+    }
+}
+
+/// An import-presence preflight can reject before any destination prestage
+/// or commit. Reads waiting on its retained-route proof still get a phase.
+#[tokio::test(start_paused = true)]
+async fn rejected_preflight_read_is_labelled_prestage() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 43, 0, 1));
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let (command_tx, command_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (mut manager, metrics) = manager_with_operator_lane(command_rx, operator_rx, rib_tx);
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        acking_policy_handle(peer, SessionState::Idle),
+        false,
+    );
+    manager.peers.get_mut(&key(peer)).unwrap().import_policy = Some(
+        crate::config::reserved_rfc8212_deny_chain(crate::config::RFC8212_MISSING_IMPORT_POLICY),
+    );
+    let actor = tokio::spawn(manager.run());
+    let (reply, applied) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+            targets: vec![ResolvedPeerPolicy {
+                address: peer,
+                interface: None,
+                import_policy: Some(deny_policy_chain()),
+                export_policy: None,
+            }],
+            reply,
+        })
+        .await
+        .unwrap();
+    let RibUpdate::QueryPeerRetainedStale { reply: held, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("preflight must ask for retained routes before applying policy");
+    };
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(3)).await;
+    held.send(1).unwrap();
+    assert!(applied.await.unwrap().is_err());
+    assert_eq!(response.await.unwrap().len(), 1);
+    let (count, sum, buckets) = wait_series(&metrics, "prestage");
+    assert_eq!(
+        count, 1,
+        "a rejected preflight retains its preparation phase"
+    );
+    assert!(sum >= 3.0);
+    assert_eq!(within_two_seconds(&buckets), 0);
+    assert_eq!(wait_series(&metrics, "unfenced").0, 0);
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "preflight must not mutate the RIB"
+    );
+    drop(command_tx);
+    actor.await.unwrap();
+}
+
 /// A read admitted while the forward reload owner awaits the held cohort RIB
 /// reply is served inside that wait and attributed to `forward_transition`.
 #[tokio::test(start_paused = true)]
@@ -206,14 +319,18 @@ async fn read_admitted_during_the_cohort_transition_is_labelled_forward_transiti
         insert_test_managed_peer(
             &mut manager,
             peer,
-            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
             false,
         );
     }
     let targets = export_targets(&peers, &deny_policy_chain());
     let reload = tokio::spawn(async move {
         let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
             .await;
         (manager, result)
     });
@@ -283,7 +400,7 @@ async fn read_fenced_by_rollback_is_timed_when_drained_after_release() {
         insert_test_managed_peer(
             &mut manager,
             peer,
-            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
             false,
         );
     }
@@ -305,22 +422,30 @@ async fn read_fenced_by_rollback_is_timed_when_drained_after_release() {
         .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
-    tokio::time::sleep(FENCED_FOR).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), response)
+            .await
+            .is_err(),
+        "the caller times out and drops its reply receiver while fenced"
+    );
+    tokio::time::sleep(FENCED_FOR.checked_sub(Duration::from_secs(2)).unwrap()).await;
     assert!(
         wait_series(&metrics, "rollback").0 == 0 && wait_series(&metrics, "unfenced").0 == 0,
         "nothing is observed while the read is still fenced"
     );
     release_tx.send(()).unwrap();
 
-    let infos = tokio::time::timeout(Duration::from_secs(30), response)
-        .await
-        .expect("the fenced read is drained once the rollback releases the actor")
-        .unwrap();
-    assert_eq!(infos.len(), 2);
     assert!(
         apply_response.await.unwrap().is_err(),
         "the reload was rejected"
     );
+    // A later read proves the earlier canceled query was drained in FIFO order.
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
+    assert_eq!(response.await.unwrap().len(), 2);
 
     let (count, sum, buckets) = wait_series(&metrics, "rollback");
     assert_eq!(
@@ -336,7 +461,7 @@ async fn read_fenced_by_rollback_is_timed_when_drained_after_release() {
         0,
         "the sample is over the 2 s budget edge"
     );
-    assert_eq!(wait_series(&metrics, "unfenced").0, 0);
+    assert_eq!(wait_series(&metrics, "unfenced").0, 1, "the follow-up read");
     assert_eq!(wait_series(&metrics, "forward_transition").0, 0);
 
     drop(command_tx);
@@ -390,14 +515,18 @@ async fn read_admitted_during_prestage_is_labelled_prestage() {
         insert_test_managed_peer(
             &mut manager,
             peer,
-            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
             false,
         );
     }
     let targets = export_targets(&peers, &deny_policy_chain());
     let reload = tokio::spawn(async move {
         let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
             .await;
         (manager, result)
     });
@@ -473,7 +602,7 @@ async fn read_fenced_by_the_authoritative_walk_is_timed_when_drained_after_relea
     insert_test_managed_peer(
         &mut manager,
         peer,
-        cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+        cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
         false,
     );
     let actor = tokio::spawn(manager.run());

@@ -758,7 +758,11 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
         let (finished, mut finished_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let outcome = manager
-                .await_with_readiness_and_operator_budget(ack_rx, Duration::from_secs(10), true)
+                .await_with_readiness_budget(
+                    ack_rx,
+                    Duration::from_secs(10),
+                    OperatorReadAdmission::Served,
+                )
                 .await;
             let _ = finished.send(outcome);
             manager
@@ -1396,7 +1400,11 @@ async fn deferred_neighbor_read_survives_receiver_close_and_fences_prestage_ack(
         let (ack, ack_rx) = oneshot::channel();
         let worker = tokio::spawn(async move {
             let result = manager
-                .await_with_readiness_and_operator_budget(ack_rx, Duration::from_secs(1), true)
+                .await_with_readiness_budget(
+                    ack_rx,
+                    Duration::from_secs(1),
+                    OperatorReadAdmission::Served,
+                )
                 .await;
             assert!(matches!(result, Some(Ok(()))));
             manager

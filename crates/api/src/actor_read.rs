@@ -123,6 +123,33 @@ mod tests {
         actor.await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn operator_read_stamp_includes_channel_admission_wait() {
+        let (tx, _rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (reply, _response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+            .await
+            .unwrap();
+        let task = tokio::spawn(async move {
+            peer_manager_operator_read(&tx, Some(&operator_tx), |reply| {
+                PeerManagerOperatorQuery::ListPeers { reply }
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        drop(operator_rx.recv().await.unwrap());
+        let enqueued = operator_rx.recv().await.unwrap();
+        assert_eq!(enqueued.enqueued.elapsed(), Duration::from_millis(500));
+        let PeerManagerOperatorQuery::ListPeers { reply } = enqueued.query else {
+            panic!("expected operator peer list");
+        };
+        reply.send(Vec::new()).unwrap();
+        assert!(task.await.unwrap().unwrap().is_empty());
+    }
+
     /// Load-bearing: without a server-side deadline inside
     /// `peer_manager_read`, a wedged peer-manager actor leaves the request
     /// pending forever and the outer test guard expires instead of observing

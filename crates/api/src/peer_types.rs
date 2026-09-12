@@ -1610,9 +1610,9 @@ pub enum PeerManagerOperatorQuery {
 }
 
 /// One operator query stamped with its send instant, so the peer manager can
-/// time admission to service even for a read that sat in the lane while a
-/// transaction fenced it. Every operator-lane sender constructs this (or
-/// converts with `.into()`) at the send site.
+/// time send to service, including bounded-channel admission wait. Every
+/// operator-lane sender constructs this (or converts with `.into()`) before
+/// awaiting the send. Sends canceled before admission contribute no sample.
 pub struct EnqueuedOperatorQuery {
     pub enqueued: tokio::time::Instant,
     pub query: PeerManagerOperatorQuery,

@@ -738,23 +738,37 @@ async fn forward_walk_rib_budget_stops_expired_retained_proofs() {
     );
 }
 
-/// Established session for the cohort read test: hot-applies export policy
-/// immediately, answers state queries as Established, and answers the
-/// import-stats query so the fleet collection can complete.
+/// Session for cohort read tests. A rejected restore leaves its live state
+/// Idle with an error; other commands acknowledge immediately.
 pub(super) fn cohort_session_with_import_stats(
     addr: IpAddr,
     installs: Arc<AtomicUsize>,
+    reject_restore: bool,
 ) -> PeerHandle {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
     let task = tokio::spawn(async move {
+        let mut restore_failed = false;
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                PeerCommand::UpdateExportPolicy { policy, reply } => {
                     installs.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    restore_failed = reject_restore && policy.is_none();
+                    let result = if restore_failed {
+                        Err(rustbgpd_transport::PeerCommandError::CommandFailed(
+                            "test: session restore rejected".to_string(),
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
                 }
                 PeerCommand::QueryState { reply } => {
-                    let _ = reply.send(policy_test_peer_state(addr, SessionState::Established));
+                    let mut state = policy_test_peer_state(addr, SessionState::Established);
+                    if restore_failed {
+                        state.fsm_state = SessionState::Idle;
+                        state.last_error = "test: session restore rejected".to_string();
+                    }
+                    let _ = reply.send(state);
                 }
                 PeerCommand::QueryImportPolicyTermHits { reply } => {
                     let _ = reply.send(Some(rustbgpd_transport::ImportPolicyTermHits {
@@ -842,7 +856,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         insert_test_managed_peer(
             &mut manager,
             peer,
-            cohort_session_with_import_stats(peer, Arc::clone(&installs)),
+            cohort_session_with_import_stats(peer, Arc::clone(&installs), false),
             false,
         );
     }
@@ -858,7 +872,11 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         .collect::<Vec<_>>();
     let reload = tokio::spawn(async move {
         let result = manager
-            .apply_resolved_policy_snapshot_with_prestage_reads(targets, false, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
             .await;
         (manager, result)
     });
@@ -914,4 +932,229 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
     }
     drop(manager);
     rib.await.unwrap();
+}
+
+/// Stub RIB that rejects the cohort transition and then holds the rollback
+/// aggregate: signals `held` once `RestorePeerExportPoliciesAuthoritatively`
+/// arrives and answers ordered `Restored` receipts only after `release`.
+fn rib_rejecting_cohort_and_holding_rollback_reply(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    held: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut held = Some(held);
+        let mut release = Some(release);
+        while let Some(update) = rib_rx.recv().await {
+            match update {
+                RibUpdate::PrepareExportPolicyDestination { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
+                    let _ = reply.send(Err("test: cohort transition rejected".to_string()));
+                }
+                RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                } => {
+                    if let Some(held) = held.take() {
+                        let _ = held.send(());
+                    }
+                    let release = release.take();
+                    tokio::spawn(async move {
+                        if let Some(release) = release {
+                            let _ = release.await;
+                        }
+                        // Receipts are in rollback execution order, the
+                        // reverse of the forward-ordered replacements.
+                        let receipts = replacements
+                            .iter()
+                            .rev()
+                            .map(|replacement| {
+                                rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                                    peer: replacement.peer,
+                                }
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(receipts));
+                    });
+                }
+                _ => {}
+            }
+        }
+    })
+}
+
+/// Operator reads admitted while a rejected reload's rollback awaits its RIB
+/// aggregate: with the restore reply held here, a peer-manager snapshot and the
+/// fleet import-stats collection both complete on the operator lane instead
+/// of waiting up to the two-minute batch budget. A failed session restore is
+/// visible in its live snapshot; admission does not imply successful rollback
+/// or a common generation. Awaiting the aggregate with a fenced helper parks both
+/// reads until the held reply is released and fails the bounded expectations.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the rejected transition, the held rollback aggregate, and the served reads share one fixture"
+)]
+async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
+    use super::super::policy::PolicySnapshotFailureKind;
+    use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, ResolvedPeerPolicy};
+
+    let first = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 1));
+    let second = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 2));
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(8);
+    let (held_tx, held_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let rib = rib_rejecting_cohort_and_holding_rollback_reply(rib_rx, held_tx, release_rx);
+
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_operator_queries(operator_rx);
+    let installs = Arc::new(AtomicUsize::new(0));
+    for peer in [first, second] {
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            cohort_session_with_import_stats(
+                peer,
+                Arc::clone(&installs),
+                reject_first_restore && peer == first,
+            ),
+            false,
+        );
+    }
+    let next = deny_policy_chain();
+    let targets = [first, second]
+        .into_iter()
+        .map(|address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: None,
+            export_policy: Some(next.clone()),
+        })
+        .collect::<Vec<_>>();
+    let reload = tokio::spawn(async move {
+        let result = manager
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                targets,
+                false,
+                OperatorReadAdmission::Served,
+            )
+            .await;
+        (manager, result)
+    });
+
+    // The cohort was rejected and both session restores were attempted. The
+    // successful restores' aggregate is held even if one session rejected.
+    tokio::time::timeout(Duration::from_secs(5), held_rx)
+        .await
+        .expect("the rollback reaches its RIB aggregate")
+        .unwrap();
+    assert_eq!(installs.load(Ordering::SeqCst), 4);
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
+        .await
+        .unwrap();
+    let infos = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("a neighbor snapshot is answered while the rollback RIB reply is awaited")
+        .unwrap();
+    assert_eq!(infos.len(), 2);
+    let first_info = infos.iter().find(|info| info.address == first).unwrap();
+    assert_eq!(
+        first_info.state,
+        if reject_first_restore {
+            SessionState::Idle
+        } else {
+            SessionState::Established
+        },
+        "the admitted snapshot reports the session's live state"
+    );
+    assert_eq!(
+        first_info.last_error,
+        if reject_first_restore {
+            "test: session restore rejected"
+        } else {
+            ""
+        }
+    );
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
+    let rows = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("the import-stats collection is answered while the rollback RIB reply is awaited")
+        .unwrap();
+    assert!(
+        matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 2),
+        "{rows:?}"
+    );
+    assert!(
+        !reload.is_finished(),
+        "the transaction stays parked on the held rollback reply"
+    );
+
+    release_tx.send(()).unwrap();
+    let (mut manager, result) = reload.await.unwrap();
+    let failure = result.expect_err("the rejected cohort transition compensates");
+    assert_eq!(
+        failure.kind,
+        if reject_first_restore {
+            PolicySnapshotFailureKind::CompensationAmbiguous
+        } else {
+            PolicySnapshotFailureKind::FullyCompensated
+        },
+        "{}",
+        failure.message
+    );
+    for peer in [first, second] {
+        let restored = manager.peers.get(&key(peer)).unwrap();
+        assert_eq!(
+            (
+                restored.export_policy.as_ref(),
+                restored.pending_export_apply
+            ),
+            if reject_first_restore && peer == first {
+                (Some(&next), true)
+            } else {
+                (None, false)
+            },
+            "{peer} keeps the acknowledged policy and any outstanding restore intent"
+        );
+    }
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+    drop(manager);
+    rib.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn operator_reads_are_served_while_the_rollback_rib_reply_is_held() {
+    assert_operator_reads_during_rollback(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn operator_reads_report_a_failed_session_restore_while_rollback_is_held() {
+    assert_operator_reads_during_rollback(true).await;
 }

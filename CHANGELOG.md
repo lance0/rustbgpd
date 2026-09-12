@@ -13,6 +13,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The RIB logs one `post-commit first general query timing` record per
+  committed export-policy transition that an operator read follows within
+  ten seconds: the terminal commit poll's duration, the general queries and
+  primary updates queued at commit, the wall-clock wait from the end of that
+  poll to the first general query dispatched, elapsed wall time inside
+  route-chunk, primary-update, and dirty-resync work in that span, and the
+  unattributed remainder (including other actor work, idle time, and
+  scheduling delays). This describes the RIB side before query execution,
+  not end-to-end operator latency; actor scheduling is unchanged.
+
 - Added `bgp_rib_actor_work_duration_seconds{work_unit}` and
   `bgp_rib_readiness_query_wait_seconds{seam}`. The first times route-chunk
   construction and processing, coalesced outbound distribution, and subsequent
@@ -26,18 +36,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Added `bgp_peer_manager_operator_query_wait_seconds{seam}`, timing each
   operator-lane read (neighbor snapshots, policy stats, dataset status) from
-  send until peer-manager service, including service after the caller's
-  deadline. The `seam` label names the policy-transaction wait that held the
-  read: `unfenced`, `prestage`, `forward_transition`, `commit_batches`, or
-  `rollback`, so a read that timed out during a reload is attributed to the
-  fence that caused it rather than to a generic deadline. Reads never drained
-  contribute no sample; the wait excludes prior peer-manager work and reply
-  delivery. Buckets are the shared RIB actor latency set plus an exact 2 s
-  edge, so with 100 ms and 500 ms every operator-read caller budget is a
-  bucket boundary and the over-budget share is a subtraction. Phases that do
-  not drain reads mid-phase (`commit_batches`, `rollback`, and `prestage`
-  outside a forward reload) only produce a sample when a read outlives the
-  whole phase, so per-seam counts there measure arrival skew, not load.
+  send until peer-manager service begins, including bounded-channel admission
+  wait. Service after the caller's deadline still contributes a sample; sends
+  canceled before admission and reads never drained do not. The wait excludes
+  work before the send, service execution, and reply delivery. The closed
+  `seam` set is `unfenced`, `prestage` (policy preflight, cohort selection,
+  destination prestage and session setup), `forward_transition`,
+  `commit_batches`, and `rollback`. It reports the current command's policy
+  marker, or the latest completed marked command overlapping the wait;
+  intervening ordinary commands preserve it. A marker includes trailing
+  command work. Reads report their entire wait under one label, not the
+  time caused by each phase. Fenced phases
+  produce samples only after reads are drained, so per-seam counts depend on
+  arrival timing and are not phase load. Buckets retain the shared RIB actor
+  latency edges and add an exact 2 s edge: 100 ms, 500 ms and 2 s are caller
+  budget boundaries, and `count - bucket{le="2"}` counts waits over 2 s.
 
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
@@ -148,6 +161,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   updates no longer require editing contract tests.
 
 ### Fixed
+
+- **Operator-visible:** The peer manager now serves session snapshots,
+  import-policy statistics, and dataset status while a rejected reload awaits
+  enqueue or completion of its batched RIB restore. These reads report live
+  state, including sessions whose restoration failed; they do not promise a
+  common policy generation. This removes the peer-manager wait, but the RIB's
+  synchronous restore still fences its queries, so `rbgp neighbor` and
+  `rbgp policy stats --direction both` can still exhaust their deadlines.
+  Mutations and the rollback's two-minute batch budget are unchanged.
 
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched

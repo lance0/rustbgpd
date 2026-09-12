@@ -1127,11 +1127,20 @@ async fn assert_generation_operator_read_boundaries(compensate: bool) {
             .unwrap();
         ping.await.unwrap();
         let queued_response = if compensate {
+            // The held message here is the destination prestage of the
+            // generation-level compensation: the policy phase committed, the
+            // later peer replacement failed, and the generation replays the
+            // captured priors through the forward snapshot path with operator
+            // reads fenced (`apply_resolved_policy_snapshot`). That prestage
+            // is bounded by `RIB_REPLY_TIMEOUT` and admits nothing. The
+            // in-transaction rollback aggregate (a rejected cohort's
+            // `RestorePeerExportPoliciesAuthoritatively`) is a different wait
+            // and does admit reads; `cohort_budgets` covers it.
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), &mut response)
                     .await
                     .is_err(),
-                "operator reads must stay fenced during rollback"
+                "operator reads must stay fenced during the compensating replay's prestage"
             );
             Some(response)
         } else {

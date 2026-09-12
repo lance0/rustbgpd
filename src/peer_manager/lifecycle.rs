@@ -15,8 +15,8 @@ use tracing::{debug, error, info, warn};
 use crate::policy_admin::apply_config_event;
 
 use super::{
-    ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT, PeerManager,
-    PeerShutdownOutcome,
+    ManagedPeer, OperatorReadAdmission, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT,
+    PeerManager, PeerShutdownOutcome,
 };
 
 pub(super) enum RuntimeCreatePeerFailureEffect {
@@ -284,6 +284,10 @@ impl PeerManager {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the restart fan-out keeps hold-down expiry, BFD withholding, and per-peer outcome bookkeeping together"
+    )]
     pub(super) async fn handle_due_max_prefix_restarts(&mut self) {
         let now = tokio::time::Instant::now();
         let mut due: Vec<(PeerKey, u64)> = self
@@ -353,7 +357,12 @@ impl PeerManager {
             .iter()
             .map(|(_, commands)| send_max_prefix_start_before(commands.clone(), attempt_deadline));
         let results = self
-            .await_with_readiness(futures::future::join_all(attempts))
+            .await_with_readiness(
+                futures::future::join_all(attempts),
+                OperatorReadAdmission::Fenced {
+                    reason: "bounded max-prefix restart fan-out outside any policy transaction",
+                },
+            )
             .await;
 
         for ((peer, _commands), result) in starts.into_iter().zip(results) {
