@@ -47,7 +47,10 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
-    let mut manager = timer_manager(rx, query_rx).with_readiness_queries(readiness_rx);
+    let (summary_tx, summary_rx) = mpsc::channel(8);
+    let mut manager = timer_manager(rx, query_rx)
+        .with_readiness_queries(readiness_rx)
+        .with_summary_queries(summary_rx);
     let total = 3 * ROUTES_RECEIVED_CHUNK_SIZE;
     if pending_chunk {
         manager.handle_update(routes(source, 0, total));
@@ -61,6 +64,10 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
     let (query, mut query_response) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryLocRibCount { reply: query })
+        .unwrap();
+    let (reply, mut summary_response) = oneshot::channel();
+    summary_tx
+        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
         .unwrap();
     let (readiness, mut readiness_response) = oneshot::channel();
     readiness_tx
@@ -88,6 +95,12 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
         "general read waited for the whole ingest backlog: {observed}/{total}"
     );
     assert!(readiness_response.try_recv().unwrap().unwrap() < total);
+    assert!(
+        summary_response
+            .try_recv()
+            .expect("typed summary must be served at the first drain seam")
+            .is_empty()
+    );
     assert!(
         matches!(
             barrier_response.try_recv(),
@@ -179,7 +192,10 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     let (tx, rx) = mpsc::channel(8);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
-    let mut manager = timer_manager(rx, query_rx).with_readiness_queries(readiness_rx);
+    let (summary_tx, summary_rx) = mpsc::channel(8);
+    let mut manager = timer_manager(rx, query_rx)
+        .with_readiness_queries(readiness_rx)
+        .with_summary_queries(summary_rx);
     let (outbound_tx, _outbound_rx) = mpsc::channel(8);
     manager.outbound_peers.insert(peer, outbound_tx);
     let (reply, mut transition) = oneshot::channel();
@@ -196,6 +212,10 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     let (reply, mut query) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    let (reply, mut summary) = oneshot::channel();
+    summary_tx
+        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
         .unwrap();
     let (reply, mut readiness) = oneshot::channel();
     readiness_tx
@@ -218,6 +238,10 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
         Err(oneshot::error::TryRecvError::Empty)
     ));
     assert!(matches!(
+        summary.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
         primary.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     ));
@@ -227,6 +251,7 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     ));
     let handle = tokio::spawn(actor);
     assert_eq!(query.await.unwrap(), 0);
+    assert!(summary.await.unwrap().is_empty());
     let _outcome = transition.await.unwrap();
     assert_eq!(primary.await.unwrap(), 0);
     drop(tx);

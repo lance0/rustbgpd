@@ -35,6 +35,8 @@ mod peer_group_service;
 pub mod peer_types;
 mod policy_helpers;
 mod policy_service;
+#[cfg(test)]
+mod replacement_summary_tests;
 pub mod rib_service;
 pub mod rpki_service;
 pub mod runtime_config_settlement;

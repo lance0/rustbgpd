@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use rustbgpd_rib::RibUpdate;
+use rustbgpd_rib::{RibSummaryQuery, RibUpdate};
 use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
@@ -65,6 +65,27 @@ pub(crate) async fn rib_manager_read<T>(
     tx: &mpsc::Sender<RibUpdate>,
     build: impl FnOnce(oneshot::Sender<T>) -> RibUpdate,
 ) -> Result<T, Status> {
+    rib_read(tx, build).await
+}
+
+/// Use the bounded summary lane when configured. The caller retains its
+/// existing deadline across both admission and reply; a closed configured
+/// lane never falls back behind the general-query fence.
+pub(crate) async fn rib_summary_read<T>(
+    tx: &mpsc::Sender<RibUpdate>,
+    summary_tx: Option<&mpsc::Sender<RibSummaryQuery>>,
+    build: impl FnOnce(oneshot::Sender<T>) -> RibSummaryQuery,
+) -> Result<T, Status> {
+    match summary_tx {
+        Some(summary_tx) => rib_read(summary_tx, build).await,
+        None => rib_manager_read(tx, |reply| build(reply).into()).await,
+    }
+}
+
+async fn rib_read<T, C>(
+    tx: &mpsc::Sender<C>,
+    build: impl FnOnce(oneshot::Sender<T>) -> C,
+) -> Result<T, Status> {
     let (reply, response) = oneshot::channel();
     tx.send(build(reply))
         .await
@@ -79,6 +100,23 @@ mod tests {
     use super::*;
     use crate::peer_types::PeerManagerCommand;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn closed_rib_summary_lane_does_not_fall_back() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let (summary_tx, summary_rx) = mpsc::channel(1);
+        drop(summary_rx);
+        let error = rib_summary_read(&tx, Some(&summary_tx), |reply| {
+            RibSummaryQuery::ExportPolicyTermHits { peer: None, reply }
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn operator_read_bounds_admission_and_reply() {
