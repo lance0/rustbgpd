@@ -1371,6 +1371,7 @@ mod outbound_prefix_limits;
 mod paged_query;
 mod per_client_best;
 mod policy;
+mod ready_drain;
 mod refresh;
 mod replay;
 mod rpki;
