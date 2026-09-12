@@ -1682,15 +1682,7 @@ impl PeerHandle {
         &self,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        match tokio::time::timeout(deadline, async {
-            let (reply, result) = oneshot::channel();
-            self.commands
-                .send(PeerCommand::ReplayOutbound { reply })
-                .await
-                .map_err(|_| PeerCommandError::SessionExited)?;
-            result.await.map_err(|_| PeerCommandError::ReplyDropped)?
-        })
-        .await
+        match tokio::time::timeout(deadline, Self::replay_outbound_via(self.commands.clone())).await
         {
             Ok(result) => result,
             Err(_) => Err(PeerCommandError::TimedOut {
@@ -1698,6 +1690,23 @@ impl PeerHandle {
                 deadline,
             }),
         }
+    }
+
+    /// Schedule replay through an owned command sender. The caller owns the
+    /// deadline, including any work it interleaves with this round trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns a session refusal, delivery error, or dropped acknowledgement.
+    pub async fn replay_outbound_via(
+        commands: mpsc::Sender<PeerCommand>,
+    ) -> Result<(), PeerCommandError> {
+        let (reply, result) = oneshot::channel();
+        commands
+            .send(PeerCommand::ReplayOutbound { reply })
+            .await
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        result.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Send a ROUTE-REFRESH command with a bounded deadline.

@@ -180,6 +180,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp policy stats --direction both` can still exhaust their deadlines.
   Mutations and the rollback's two-minute batch budget are unchanged.
 
+- Outbound refresh, GSHUT refresh, and live export-knob refresh share one
+  five-second budget for RIB queue admission and acknowledgement. Refresh
+  and replay scheduling serve readiness and operator reads while waiting;
+  hot-knob refresh keeps reads fenced until manager metadata catches up with
+  the session. An already-admitted read retains its own deadline if scheduling
+  expires or its caller disconnects. Later mutations remain queued until that
+  read and the scheduling step settle.
+
 - **Operator-visible:** `rbgp policy stats` and `rbgp neighbor` no longer fail
   with `DEADLINE_EXCEEDED` when they arrive while a SIGHUP reload's batched
   export-policy transition is in progress. Both actors previously parked

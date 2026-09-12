@@ -234,6 +234,81 @@ async fn ordinary_commands_preserve_the_last_completed_policy_seam() {
     }
 }
 
+/// A new unmarked admitting wait must retain the policy seam that held an
+/// older read, while a read sent after that policy command remains unfenced.
+#[tokio::test(start_paused = true)]
+async fn unmarked_refresh_wait_preserves_the_completed_policy_seam() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 44, 0, 1));
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let (command_tx, command_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let (mut manager, metrics) = manager_with_operator_lane(command_rx, operator_rx, rib_tx);
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        acking_policy_handle(peer, SessionState::Established),
+        false,
+    );
+    let (reply, response) = oneshot::channel();
+    let queued = EnqueuedOperatorQuery::from(PeerManagerOperatorQuery::HasPeerAddress {
+        address: peer,
+        reply,
+    });
+    manager.operator_read_seam = OperatorReadSeam::Rollback;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    manager.finish_operator_seam();
+    let actor = tokio::spawn(manager.run());
+    let (reply, refreshed) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::RefreshOutbound {
+            peer: key(peer),
+            reply,
+        })
+        .await
+        .unwrap();
+    let RibUpdate::RefreshPeerOutbound { reply: held, .. } = rib_rx.recv().await.unwrap() else {
+        panic!("refresh must hold its RIB acknowledgement before reads arrive");
+    };
+    operator_tx.send(queued).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("the read must be admitted while refresh acknowledgement stays held")
+            .unwrap()
+    );
+    let (count, sum, buckets) = wait_series(&metrics, "rollback");
+    assert_eq!(
+        count, 1,
+        "an unmarked wait retains the seam that held this read"
+    );
+    assert!(sum >= 3.0);
+    assert_eq!(within_two_seconds(&buckets), 0);
+    assert_eq!(wait_series(&metrics, "unfenced").0, 0);
+
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(
+            PeerManagerOperatorQuery::HasPeerAddress {
+                address: peer,
+                reply,
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .expect("the read must be admitted while refresh acknowledgement stays held")
+            .unwrap()
+    );
+    assert_eq!(wait_series(&metrics, "unfenced").0, 1);
+    held.send(Ok(())).unwrap();
+    refreshed.await.unwrap().unwrap();
+    drop(command_tx);
+    actor.await.unwrap();
+}
+
 /// An import-presence preflight can reject before any destination prestage
 /// or commit. Reads waiting on its retained-route proof still get a phase.
 #[tokio::test(start_paused = true)]

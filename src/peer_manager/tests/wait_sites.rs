@@ -107,6 +107,10 @@ enum Drive {
         failed_restore: bool,
     },
     MaxPrefixRestart,
+    OutboundRefresh,
+    HotExportKnobs,
+    GracefulShutdown,
+    OutboundReplay,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +189,17 @@ fn hold_first_term_hits(command: &PeerCommand, index: usize) -> SessionAction {
         PeerCommand::QueryImportPolicyTermHits { .. } if index == 0 => SessionAction::Hold,
         _ => SessionAction::Answer,
     }
+}
+
+fn hold_first_replay(command: &PeerCommand, index: usize) -> SessionAction {
+    match command {
+        PeerCommand::ReplayOutbound { .. } if index == 0 => SessionAction::Hold,
+        _ => SessionAction::Answer,
+    }
+}
+
+fn is_outbound_refresh(update: &RibUpdate) -> bool {
+    matches!(update, RibUpdate::RefreshPeerOutbound { .. })
 }
 
 fn is_prestage(update: &RibUpdate) -> bool {
@@ -680,6 +695,57 @@ const WAIT_SITES: &[WaitSite] = &[
         },
         completion: Completion::Finished,
     },
+    WaitSite {
+        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
+        awaits: "RibUpdate::RefreshPeerOutbound acknowledgement",
+        drive: Drive::OutboundRefresh,
+        rib: RibHold::Reply(is_outbound_refresh),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
+        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged export-knob update",
+        drive: Drive::HotExportKnobs,
+        rib: RibHold::Reply(is_outbound_refresh),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("hot_update_peer_in_place"),
+        window: HELD_FOREVER,
+        contract: Contract::Fenced {
+            reason: "the session has candidate knobs while manager metadata retains prior \
+                     values until refresh succeeds; reads would mix the two",
+        },
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "lifecycle.rs::refresh_peer_outbound_in_rib",
+        awaits: "RibUpdate::RefreshPeerOutbound after acknowledged GSHUT toggle",
+        drive: Drive::GracefulShutdown,
+        rib: RibHold::Reply(is_outbound_refresh),
+        session: answer_all,
+        pre_read: false,
+        additional_entry: Some("set_graceful_shutdown"),
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
+    WaitSite {
+        site: "lifecycle.rs::replay_outbound",
+        awaits: "PeerCommand::ReplayOutbound scheduling acknowledgement",
+        drive: Drive::OutboundReplay,
+        rib: RibHold::None,
+        session: hold_first_replay,
+        pre_read: false,
+        additional_entry: None,
+        window: HELD_FOREVER,
+        contract: Contract::Served,
+        completion: Completion::Finished,
+    },
 ];
 
 /// Shared hold point: a stub signals `held` when it parks the transaction and
@@ -736,6 +802,7 @@ fn answer_rib(update: RibUpdate, cohort_reply: CohortReply) {
         }
         RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
         | RibUpdate::ReplacePeerExportPolicy { reply, .. }
+        | RibUpdate::RefreshPeerOutbound { reply, .. }
         | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
             let _ = reply.send(Ok(()));
         }
@@ -820,6 +887,7 @@ fn command_kind(command: &PeerCommand) -> &'static str {
         PeerCommand::UpdateImportPolicy { .. } => "UpdateImportPolicy",
         PeerCommand::SendRouteRefresh { .. } => "SendRouteRefresh",
         PeerCommand::QueryImportPolicyTermHits { .. } => "QueryImportPolicyTermHits",
+        PeerCommand::ReplayOutbound { .. } => "ReplayOutbound",
         _ => "other",
     }
 }
@@ -845,6 +913,9 @@ fn answer_session(command: PeerCommand, addr: IpAddr, established: bool, fail: b
         }
         PeerCommand::UpdateExportPolicy { reply, .. }
         | PeerCommand::UpdateImportPolicy { reply, .. }
+        | PeerCommand::ReplayOutbound { reply }
+        | PeerCommand::UpdateRuntimeConfig { reply, .. }
+        | PeerCommand::UpdateGracefulShutdown { reply, .. }
         | PeerCommand::SendRouteRefresh { reply, .. } => {
             let _ = reply.send(if fail { failed() } else { Ok(()) });
         }
@@ -1059,6 +1130,10 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
         | Drive::RetainedStaleCapacity
         | Drive::ExportReplacementCapacity
         | Drive::DatasetExportCapacity { .. }
+        | Drive::OutboundRefresh
+        | Drive::HotExportKnobs
+        | Drive::GracefulShutdown
+        | Drive::OutboundReplay
         | Drive::MaxPrefixRestart => (Vec::new(), false),
     };
     match drive {
@@ -1188,6 +1263,26 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
             manager.handle_due_max_prefix_restarts().await;
             Ok(())
         }
+        Drive::OutboundRefresh => manager
+            .refresh_outbound(key(peers[0]))
+            .await
+            .map_err(|error| error.to_string()),
+        Drive::HotExportKnobs => {
+            let peer = key(peers[0]);
+            let mut config = PeerManager::removed_peer_config(&peer, &manager.peers[&peer]);
+            config.remove_private_as = rustbgpd_transport::RemovePrivateAs::All;
+            manager
+                .hot_update_peer_in_place(config)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Drive::GracefulShutdown => manager
+            .set_graceful_shutdown(Some(key(peers[0])), true)
+            .await
+            .map_err(|error| error.to_string()),
+        Drive::OutboundReplay => replay_outbound_result(manager, key(peers[0]))
+            .await
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -1358,7 +1453,11 @@ async fn run(row: &WaitSite) {
         | Drive::DatasetGeneration { .. }
         | Drive::RetainedStaleCapacity
         | Drive::ExportReplacementCapacity
-        | Drive::DatasetExportCapacity { .. } => {}
+        | Drive::DatasetExportCapacity { .. }
+        | Drive::OutboundRefresh
+        | Drive::HotExportKnobs
+        | Drive::GracefulShutdown
+        | Drive::OutboundReplay => {}
     }
 
     let peers = [first, second];
