@@ -317,6 +317,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   congested backends that exceed the budget still return `DEADLINE_EXCEEDED`
   with no partial rows.
 
+- Periodic BMP statistics no longer park peer-manager reads or shutdown
+  indefinitely on a full RIB mailbox. Loc-RIB sampling bounds queue admission and reply together;
+  session, peer-RIB, and Loc-RIB sample waits run concurrently instead of
+  accumulating three separate waits. Unavailable values are still omitted.
+
 - The paired route-server cookbook now starts the RFC 8671 post-policy BMP
   capture before RS2's member sessions establish: the `rib_out_post` stream
   sends no dump to a collector that connects later, and

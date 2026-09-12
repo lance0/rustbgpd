@@ -1522,6 +1522,13 @@ PeerSession/PeerManager→BmpManager path. `state_query_timeout` means the
 periodic statistics tick could not obtain a current session snapshot within
 its bounded deadline; the session may still be Established, so this is not a
 Peer Down signal and the report is retried on the next tick.
+
+The periodic sampler gathers session, peer-RIB, and Loc-RIB values concurrently
+under their existing 100 ms input budgets, including RIB channel admission.
+These are independent observations, not an atomic cross-actor snapshot.
+Unavailable RIB values are omitted for that tick; BMP output uses nonblocking
+sends, with the source-drop counters above recording output backpressure.
+
 The shipped alert pack
 ([`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml))
 fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, `BmpCollectorDrops`, and
