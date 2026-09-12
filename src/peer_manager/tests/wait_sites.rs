@@ -982,26 +982,29 @@ async fn drive(manager: &mut PeerManager, drive: Drive, peers: [IpAddr; 2]) -> R
 }
 
 async fn list_peers(
-    operator_tx: &mpsc::Sender<PeerManagerOperatorQuery>,
+    operator_tx: &mpsc::Sender<EnqueuedOperatorQuery>,
 ) -> oneshot::Receiver<Vec<PeerInfo>> {
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .send(PeerManagerOperatorQuery::ListPeers { reply }.into())
         .await
         .unwrap();
     response
 }
 
 async fn term_hits(
-    operator_tx: &mpsc::Sender<PeerManagerOperatorQuery>,
+    operator_tx: &mpsc::Sender<EnqueuedOperatorQuery>,
 ) -> oneshot::Receiver<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>> {
     let (reply, response) = oneshot::channel();
     operator_tx
-        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-            peer: None,
-            deadline: tokio::time::Instant::now() + READER_DEADLINE,
-            reply,
-        })
+        .send(
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline: tokio::time::Instant::now() + READER_DEADLINE,
+                reply,
+            }
+            .into(),
+        )
         .await
         .unwrap();
     response

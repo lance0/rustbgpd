@@ -34,6 +34,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer-manager work, and reply delivery. Both use the shared RIB actor latency
   buckets, including an exact 200 ms boundary. Actor scheduling is unchanged.
 
+- Added `bgp_peer_manager_operator_query_wait_seconds{seam}`, timing each
+  operator-lane read (neighbor snapshots, policy stats, dataset status) from
+  send until peer-manager service begins, including bounded-channel admission
+  wait. Service after the caller's deadline still contributes a sample; sends
+  canceled before admission and reads never drained do not. The wait excludes
+  work before the send, service execution, and reply delivery. The closed
+  `seam` set is `unfenced`, `prestage` (policy preflight, cohort selection,
+  destination prestage and session setup), `forward_transition`,
+  `commit_batches`, and `rollback`. It reports the current command's policy
+  marker, or the latest completed marked command overlapping the wait;
+  intervening ordinary commands preserve it. A marker includes trailing
+  command work. Reads report their entire wait under one label, not the
+  time caused by each phase. Fenced phases
+  produce samples only after reads are drained, so per-seam counts depend on
+  arrival timing and are not phase load. Buckets retain the shared RIB actor
+  latency edges and add an exact 2 s edge: 100 ms, 500 ms and 2 s are caller
+  budget boundaries, and `count - bucket{le="2"}` counts waits over 2 s.
+
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
   answer without topology disclosure using the `read` authorization tier.
   The new RPC is outside the narrow v1 contract. Ordinary `rbgp health`
