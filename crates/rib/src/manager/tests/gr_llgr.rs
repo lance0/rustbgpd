@@ -2142,7 +2142,7 @@ mod deadline_map {
 
 // Build the same busy-actor deferral window as the lifecycle tests, with
 // retained FlowSpec and fresh input from the re-established session.
-fn deferred_retention_peer(
+async fn deferred_retention_peer(
     llgr: bool,
 ) -> (
     mpsc::Sender<RibUpdate>,
@@ -2196,7 +2196,7 @@ fn deferred_retention_peer(
     .unwrap();
     let new_rx = establish_peer(&mut manager, peer);
     // Consume the queued context while leaving the initial registration pending.
-    manager.drain_ready_updates();
+    manager.drain_ready_updates().await;
     if llgr {
         // The GR timer can expire before the deferred dump. Promotion is
         // nonterminal; the original LLGR timer then owns terminal cleanup.
@@ -2225,7 +2225,7 @@ fn deferred_retention_peer(
 #[tokio::test]
 async fn retention_expiry_spares_deferred_reestablished_peer() {
     for llgr in [false, true] {
-        let (_tx, mut manager, _new_rx) = deferred_retention_peer(llgr);
+        let (_tx, mut manager, _new_rx) = deferred_retention_peer(llgr).await;
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         if llgr {
             manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::FlowSpec)]);
@@ -2257,7 +2257,7 @@ async fn retention_expiry_spares_deferred_reestablished_peer() {
 #[tokio::test(start_paused = true)]
 async fn run_loop_retention_expiry_precedes_deferred_registration() {
     for llgr in [false, true] {
-        let (tx, manager, mut new_rx) = deferred_retention_peer(llgr);
+        let (tx, manager, mut new_rx) = deferred_retention_peer(llgr).await;
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         // Start the actual actor with a due timer and a pending registration.
         // Virtual time makes the ordering deterministic without a bulk table.

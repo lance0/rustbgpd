@@ -2529,30 +2529,30 @@ impl RibManager {
         }
     }
 
-    fn drain_ready_updates(&mut self) -> bool {
-        let mut drained = false;
-        // Route batches are actor-deferred for fairness. During a timer race,
-        // however, preserve channel order: an EoR or timeout must not release
-        // selection before route payloads accepted ahead of it are applied.
-        while self.traced_route_chunk() {
-            drained = true;
-        }
-        while let Ok(update) = self.rx.try_recv() {
-            drained = true;
+    /// Apply one queued actor unit before timer or idle-only work. Returning
+    /// `true` keeps that work deferred until the primary backlog is empty.
+    async fn drain_ready_updates(&mut self) -> bool {
+        // Finish an older route batch before receiving its following EoR or
+        // other primary message. Yielding between chunks preserves that FIFO
+        // while giving operator reads and the executor their ordinary seam.
+        if !self.traced_route_chunk() {
+            let Ok(update) = self.rx.try_recv() else {
+                return false;
+            };
             self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                 manager.handle_update(update);
             });
-            if self.pending_clean_policy_transition.is_some() {
-                // The accepted cohort command now owns FIFO. Leave every
-                // later primary update queued until its atomic finalize or
-                // fail-closed fallback handoff completes.
-                break;
-            }
-            while self.traced_route_chunk() {
-                drained = true;
-            }
         }
-        drained
+        let transition_elapsed = self
+            .pending_clean_policy_transition
+            .as_ref()
+            .map(distribution::PendingCleanPolicyTransition::elapsed);
+        self.drain_readiness_queries(transition_elapsed);
+        // A newly accepted cohort owns the next actor turn. Its own
+        // between-poll seam decides when general queries can be served.
+        self.drain_general_queries_if_unfenced();
+        tokio::task::yield_now().await;
+        true
     }
 
     /// Process a single `RibUpdate` message.
@@ -4363,7 +4363,7 @@ impl RibManager {
                 continue;
             }
             if has_gr_timers && gr_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 let expired: Vec<IpAddr> = self
@@ -4378,14 +4378,14 @@ impl RibManager {
                 continue;
             }
             if has_llgr_timers && llgr_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.sweep_expired_llgr_stale();
                 continue;
             }
             if has_refresh_timers && refresh_sleep.deadline() <= now {
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.expire_refresh_windows();
@@ -4394,7 +4394,7 @@ impl RibManager {
             if has_selection_timer && selection_sleep.deadline() <= now {
                 // A queued current-session EoR wins the all-EoR release race
                 // over a simultaneously ready timer.
-                if self.drain_ready_updates() {
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.expire_selection_deferral();
@@ -4407,8 +4407,7 @@ impl RibManager {
             // between slices. Readiness and a bounded query budget are
             // served every iteration, mirroring the paced-flush seams.
             if self.pending_destination_prestage.is_some() {
-                if self.drain_ready_updates() {
-                    self.drain_readiness_queries(None);
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.drain_readiness_queries(None);
@@ -4425,8 +4424,7 @@ impl RibManager {
             // full-table catch-up, so a mass reconnect cannot head-of-line
             // block re-announcement delivery to survivors.
             if !self.pending_initial_registrations.is_empty() {
-                if self.drain_ready_updates() {
-                    self.drain_readiness_queries(None);
+                if self.drain_ready_updates().await {
                     continue;
                 }
                 self.drain_readiness_queries(None);
@@ -4491,7 +4489,7 @@ impl RibManager {
                         }
                     }
                     () = gr_sleep.as_mut(), if has_gr_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         // Find all peers whose GR deadline has expired
@@ -4507,19 +4505,19 @@ impl RibManager {
                         }
                     }
                     () = llgr_sleep.as_mut(), if has_llgr_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.sweep_expired_llgr_stale();
                     }
                     () = refresh_sleep.as_mut(), if has_refresh_timers => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.expire_refresh_windows();
                     }
                     () = selection_sleep.as_mut(), if has_selection_timer => {
-                        if self.drain_ready_updates() {
+                        if self.drain_ready_updates().await {
                             continue;
                         }
                         self.expire_selection_deferral();
