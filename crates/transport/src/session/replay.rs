@@ -105,7 +105,7 @@ impl PeerSession {
     )]
     pub(super) async fn start_outbound_replay(
         &mut self,
-        response: oneshot::Sender<Result<(), PeerCommandError>>,
+        mut response: oneshot::Sender<Result<(), PeerCommandError>>,
     ) {
         if response.is_closed() {
             return;
@@ -153,7 +153,7 @@ impl PeerSession {
             scheduling: None,
             reply: None,
         });
-        let result = tokio::time::timeout_at(deadline, async {
+        let admission = tokio::time::timeout_at(deadline, async {
             bmp_tx
                 .send(BmpEvent::OutboundReplayBegin {
                     peer_info,
@@ -163,13 +163,16 @@ impl PeerSession {
                 .map_err(|_| {
                     PeerCommandError::ReplayUnavailable("BMP manager is unavailable".into())
                 })?;
+            // Begin may reset collector monitoring before its acknowledgement,
+            // even if enrollment later fails or the caller cancels. Ordinary
+            // BMP EoRs must not certify that abandoned capture.
+            self.replay_eor_suppressed = true;
             if !enrolled.await.unwrap_or(false) {
                 return Err(PeerCommandError::ReplayUnavailable(
                     "no eligible connected BMP collector or replay enrollment refused".into(),
                 ));
             }
-            self.replay_eor_suppressed = true;
-            if response.is_closed() || !replay.is_valid() {
+            if !replay.is_valid() {
                 return Err(PeerCommandError::ReplayUnavailable(
                     "replay scheduling canceled".into(),
                 ));
@@ -188,12 +191,17 @@ impl PeerSession {
                     PeerCommandError::ReplayUnavailable("RIB manager is unavailable".into())
                 })?;
             Ok(admitted)
-        })
-        .await
-        .unwrap_or(Err(PeerCommandError::TimedOut {
-            operation: "replay_outbound",
-            deadline: REPLAY_TIMEOUT,
-        }));
+        });
+        let result = tokio::select! {
+            biased;
+            () = response.closed() => Err(PeerCommandError::ReplayUnavailable(
+                "replay caller canceled before acknowledgement".into(),
+            )),
+            result = admission => result.unwrap_or(Err(PeerCommandError::TimedOut {
+                operation: "replay_outbound",
+                deadline: REPLAY_TIMEOUT,
+            })),
+        };
         match result {
             Ok(admitted) => {
                 if let Some(pending) = &mut self.pending_replay {
