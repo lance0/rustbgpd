@@ -5,7 +5,7 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
-## 0.21.0 - YYYY-MM-DD
+## 0.21.0 - 2026-09-13
 
 - `ExtendedCommunity::as_flowspec_action` interprets negative byte/packet
   traffic rates as zero per RFC 8955 sections 7.1 and 7.2, and

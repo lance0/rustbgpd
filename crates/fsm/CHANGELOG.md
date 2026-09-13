@@ -5,7 +5,7 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
-## 0.8.0 - YYYY-MM-DD
+## 0.8.0 - 2026-09-13
 
 - Prepared the wire dependency move to `0.21.0`. Public signatures expose
   wire types, so embedders exchanging those types must upgrade to the

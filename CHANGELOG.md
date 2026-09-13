@@ -11,7 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.70.0] — YYYY-MM-DD
+## [0.70.0] — 2026-09-13
 
 ### Added
 
