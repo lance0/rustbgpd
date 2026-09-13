@@ -235,6 +235,8 @@ artifacts under [`artifacts/soak/`](artifacts/soak). Harnesses live in
 | Receipt | Duration | What it proves |
 |---------|----------|----------------|
 | [Route-server flagship](soaks/soak-rs-flagship-24h.md) | 24 h | 1000 eBGP RS clients × 400 routes under churn; 48/48 barrier-verified SIGHUP reloads and 6/6 max-prefix trip/timed-restart chains with exact flap/breach accounting; peak RSS 581.7 MB, late slope 0.07 MB/h |
+| [Route-server flagship, 2026-09-11](soaks/soak-rs-flagship-24h-2026-09-11.md) | 24 h | Published red: same shape plus management-plane load; reloads, trips, sessions, and memory gates passed; failed management correctness (two unattributed read timeouts plus one runner teardown-ordering result) and management cadence |
+| [Route-server flagship, 2026-09-12](soaks/soak-rs-flagship-24h-2026-09-12.md) | 24 h | Published red: same shape plus management-plane load; zero management failures; failed management cadence only (missed 1 s metrics slots during reload commits) |
 | [Route-reflector flagship](soaks/soak-rr-flagship-24h.md) | 24 h | 1000 iBGP RR clients × 100 routes; 5,486,092 churn cycles closed by an exact terminal reflected-delivery receipt (99,900 non-self prefixes per observer, 0 parse errors); zero flaps; peak RSS 342.5 MB |
 | [Gate 8b BUM-state](soaks/soak-gate8b-24h-bum-state.md) | 24 h | BUM-port flag triplet survives 71 DF-flip cycles; flat RSS |
 | [Gate 8b MAC-churn dry run](soaks/soak-gate8b-mac-churn-1h.md) | 1 h | Dry run gating the 24 h MAC-churn soak |
