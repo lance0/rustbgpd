@@ -1145,13 +1145,14 @@ service PolicyService {
   // Counters accumulate on the live evaluation path since a chain
   // instance was installed and reset when the chain is replaced
   // (policy reload / hot-apply installs a fresh instance). Export
-  // chains are read from the RIB manager; import chains are read from
-  // selected live session tasks. A session with no installed import
-  // chain contributes no row. A bounded session-read timeout returns
-  // DEADLINE_EXCEEDED; a selected session that exits during the query
-  // returns UNAVAILABLE. An explicit address that does not resolve to
-  // one unique managed static or accepted dynamic peer returns
-  // NOT_FOUND.
+  // chains are read from the RIB manager; import chains are read from the
+  // selected session's actual installed publication. A session with no
+  // installed import chain contributes no row. Expiry of the shared read
+  // deadline returns DEADLINE_EXCEEDED; a selected session that exits or has
+  // unavailable counter state returns UNAVAILABLE. An address that does not resolve
+  // to one unique managed static or accepted dynamic peer returns NOT_FOUND.
+  // Import counter values are sampled during collection; the response is not
+  // an atomic fleet snapshot and does not establish session readiness.
   //
   // Side-effect free read; does not reset any counter. Explain queries
   // and TestPolicy dry runs never move these counters either — only
@@ -1842,7 +1843,8 @@ message PolicyTermStat {
   // by the compiler). Empty for TOML statements — address those by
   // term_index.
   string term = 4;
-  // Times this term's guard matched since chain install.
+  // Times this term's guard matched since chain install. Import values are
+  // sampled during collection with routes_evaluated, not an atomic row.
   uint64 hits = 5;
 }
 
@@ -1854,8 +1856,9 @@ message PolicyChainStats {
   string peer_address = 1;
   // "import" or "export".
   string direction = 2;
-  // Routes evaluated through this chain since install — the
-  // denominator for the per-term hit counts.
+  // Routes evaluated through this chain since install. For import rows,
+  // this denominator and the term counters are sampled during collection;
+  // they are not one atomic row or an exact-instant ratio.
   uint64 routes_evaluated = 3;
   repeated PolicyTermStat terms = 4;
   // Install identity of the chain the counters belong to. Import

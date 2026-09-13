@@ -255,7 +255,7 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
         .await
         .expect("the API entry admits complete import statistics")
         .unwrap();
-    assert!(matches!(stats, SessionQueryOutcome::Reply(rows) if rows.len() == 2));
+    assert!(matches!(stats, Ok(rows) if rows.len() == 2));
     assert!(!applied.is_finished(), "the cohort is still held");
     assert!(matches!(
         mutation.try_recv(),
@@ -925,6 +925,8 @@ pub(super) fn cohort_session_with_import_stats(
     reject_restore: bool,
 ) -> PeerHandle {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let (publication, receiver) =
+        tokio::sync::watch::channel(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
     let task = tokio::spawn(async move {
         let mut restore_failed = false;
         while let Some(command) = session_rx.recv().await {
@@ -962,9 +964,10 @@ pub(super) fn cohort_session_with_import_stats(
                 _ => {}
             }
         }
+        drop(publication);
         Ok(())
     });
-    PeerHandle::from_parts(session_tx, task)
+    PeerHandle::from_parts_with_import_policy_counters(session_tx, task, receiver)
 }
 
 /// Stub RIB that holds the cohort reply: signals `held` once the batched
@@ -1162,10 +1165,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         .await
         .expect("the import-stats collection is answered while the cohort RIB reply is awaited")
         .unwrap();
-    assert!(
-        matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 2),
-        "{rows:?}"
-    );
+    assert!(matches!(rows, Ok(ref rows) if rows.len() == 2), "{rows:?}");
     assert!(
         !reload.is_finished(),
         "the transaction stays parked on the held reply"
@@ -1362,10 +1362,7 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
         .await
         .expect("the import-stats collection is answered while the rollback RIB reply is awaited")
         .unwrap();
-    assert!(
-        matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 2),
-        "{rows:?}"
-    );
+    assert!(matches!(rows, Ok(ref rows) if rows.len() == 2), "{rows:?}");
     assert!(
         !reload.is_finished(),
         "the transaction stays parked on the held rollback reply"

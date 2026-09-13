@@ -639,7 +639,24 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
             .handle_command(PeerCommand::QueryImportPolicyTermHits { reply: reply_tx })
             .await;
         assert_eq!(flow, ControlFlow::Continue(()));
-        reply_rx.await.expect("session replied")
+        let direct = reply_rx.await.expect("session replied");
+        let published = crate::PeerHandle::read_import_policy_counters(
+            session.import_policy_counters.as_ref().unwrap().subscribe(),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let fields = |value: &crate::ImportPolicyTermHits| {
+            (
+                value.generation,
+                value.evals,
+                value.eval_errors,
+                value.last_error.clone(),
+                value.terms.clone(),
+            )
+        };
+        assert_eq!(published.as_ref().map(fields), direct.as_ref().map(fields));
+        published
     }
     async fn install(session: &mut PeerSession, chain: PolicyChain) {
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -656,6 +673,8 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
     }
 
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (publication, _receiver) = watch::channel(None);
+    session.set_import_policy_counters(publication);
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
     session.negotiated = Some(Arc::new(negotiated));
@@ -742,6 +761,12 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
         "explain must not bump term hits"
     );
 
+    // Connection flaps reset session diagnostics, not the installed chain's
+    // generation or its live term counters.
+    session.execute_actions(vec![Action::SessionDown]).await;
+    let flapped = snapshot(&mut session).await.unwrap();
+    assert_eq!((flapped.generation, flapped.evals), (1, 1));
+
     // A content-equal reinstall is a fresh chain instance: counters
     // reset and the generation advances, so the read surface never
     // presents the new instance as continuous history.
@@ -750,6 +775,48 @@ async fn query_import_policy_term_hits_snapshots_without_counting() {
     assert_eq!(third.generation, 2);
     assert_eq!(third.evals, 0);
     assert_eq!(third.terms[0].hits, 0);
+    let prior = session.import_policy.as_ref().unwrap().clone();
+    let old_counters = Arc::downgrade(session.import_policy.as_ref().unwrap().hit_counters());
+    let mut candidate = prior.clone();
+    candidate.policies[0].name = Some("candidate-import".to_string());
+    let (reply, lost_ack) = oneshot::channel();
+    drop(lost_ack);
+    let _ = session
+        .handle_command(PeerCommand::UpdateImportPolicy {
+            policy: Some(Box::new(candidate)),
+            reply,
+        })
+        .await;
+    let ambiguous = snapshot(&mut session).await.unwrap();
+    assert_eq!(
+        ambiguous.generation, 3,
+        "lost ACK does not cancel an actual install"
+    );
+    assert_eq!(
+        ambiguous.terms[0].policy.as_deref(),
+        Some("candidate-import")
+    );
+    assert!(
+        old_counters.upgrade().is_none(),
+        "no reader retains the replaced counters"
+    );
+    install(&mut session, prior).await;
+    let restored = snapshot(&mut session).await.unwrap();
+    assert_eq!((restored.generation, restored.evals), (4, 0));
+    assert_eq!(restored.terms[0].policy.as_deref(), Some("edge-import"));
+    let (reply, response) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::UpdateImportPolicy {
+            policy: None,
+            reply,
+        })
+        .await;
+    response.await.unwrap().unwrap();
+    assert_eq!(session.import_policy_generation, 5);
+    assert!(
+        snapshot(&mut session).await.is_none(),
+        "a clear publishes legitimate absence"
+    );
 }
 
 /// Statement-level explain (the ADR-0073 deferred enrichment): a

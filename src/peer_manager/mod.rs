@@ -843,18 +843,23 @@ impl PeerManager {
         peer: Option<IpAddr>,
         deadline: tokio::time::Instant,
         mut reply: oneshot::Sender<
-            SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+            Result<
+                Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>,
+                rustbgpd_transport::handle::ImportPolicyStatsError,
+            >,
         >,
     ) -> Option<tokio::task::JoinHandle<()>> {
+        use rustbgpd_transport::handle::ImportPolicyStatsError;
+
         // Import chains and counters live in sessions. Normal reads detach
         // this collector; prestage reads finish it before session application,
-        // while continuing to service readiness. Every send and reply shares
-        // the RPC deadline, and any failed session fails the complete snapshot.
+        // while continuing to service readiness. Every observation shares the
+        // RPC deadline, and any unavailable source fails the complete result.
         if deadline <= tokio::time::Instant::now() {
-            let _ = reply.send(SessionQueryOutcome::TimedOut);
+            let _ = reply.send(Err(ImportPolicyStatsError::TimedOut));
             return None;
         }
-        // Do not clone a fleet of session senders for an
+        // Do not clone a fleet of publication receivers for an
         // RPC that was cancelled while its command waited
         // in the manager queue.
         if reply.is_closed() {
@@ -862,54 +867,56 @@ impl PeerManager {
         }
         let targets: Vec<_> = if let Some(address) = peer {
             let Some(key) = self.unique_peer_key_for_address(address) else {
-                let _ = reply.send(SessionQueryOutcome::SessionGone);
+                let _ = reply.send(Err(ImportPolicyStatsError::SessionGone));
                 return None;
             };
             let Some(managed) = self.peers.get(&key) else {
-                let _ = reply.send(SessionQueryOutcome::SessionGone);
+                let _ = reply.send(Err(ImportPolicyStatsError::SessionGone));
                 return None;
             };
-            vec![(key.address, managed.handle.commands_sender())]
+            vec![(key.address, managed.handle.import_policy_counters())]
         } else {
             self.peers
                 .iter()
-                .map(|(key, managed)| (key.address, managed.handle.commands_sender()))
+                .map(|(key, managed)| (key.address, managed.handle.import_policy_counters()))
                 .collect()
         };
         Some(tokio::spawn(async move {
             let collection = async move {
                 let mut out = Vec::new();
                 let queries = stream::iter(targets)
-                    .map(|(address, commands)| async move {
-                        let outcome = PeerHandle::query_import_policy_term_hits_with_deadline(
-                            commands, deadline,
-                        )
-                        .await;
+                    .map(|(address, publication)| async move {
+                        let outcome =
+                            PeerHandle::read_import_policy_counters(publication, deadline).await;
                         (address, outcome)
                     })
                     .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
                 tokio::pin!(queries);
                 while let Some((address, outcome)) = queries.next().await {
+                    if deadline <= tokio::time::Instant::now() {
+                        return Err(ImportPolicyStatsError::TimedOut);
+                    }
                     match outcome {
-                        SessionQueryOutcome::Reply(Some(snapshot)) => {
+                        Ok(Some(snapshot)) => {
                             out.push((address, snapshot));
                         }
-                        SessionQueryOutcome::Reply(None) => {}
-                        SessionQueryOutcome::TimedOut => {
-                            return SessionQueryOutcome::TimedOut;
-                        }
-                        SessionQueryOutcome::SessionGone => {
-                            return SessionQueryOutcome::SessionGone;
-                        }
+                        Ok(None) => {}
+                        Err(error) => return Err(error),
                     }
+                    // Ready publications must still offer cancellation and other
+                    // runtime tasks a turn between bounded units of collection.
+                    tokio::task::coop::consume_budget().await;
                 }
                 out.sort_unstable_by_key(|(address, _)| *address);
-                SessionQueryOutcome::Reply(out)
+                if deadline <= tokio::time::Instant::now() {
+                    return Err(ImportPolicyStatsError::TimedOut);
+                }
+                Ok(out)
             };
             let result = tokio::select! {
                 biased;
                 // Dropping `collection` releases every
-                // target sender and in-flight reply future.
+                // publication receiver and pinned descriptor.
                 () = reply.closed() => return,
                 result = collection => result,
             };

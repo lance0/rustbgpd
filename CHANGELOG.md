@@ -130,6 +130,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Import policy statistics read the selected session's installed live counters
+  without waiting for its command queue. The shared two-second deadline,
+  cancellation and all-or-error responses remain. Success establishes counter
+  availability rather than session progress; numeric fields are sampled during
+  collection, with generation and labels tied to one installed chain.
+
 - The route-server flagship soak analyzer now fails its `/readyz` gate on
   three consecutive breached samples rather than on a single one. This follows
   Kubernetes's default failure count; the soak's 30-second interval and 250 ms
