@@ -396,6 +396,76 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
 }
 
 #[tokio::test]
+async fn shared_group_buffered_consumer_yields_for_new_reads() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (mut member, _wire) = shared_group_member(65001).await;
+    let (commands, receiver) = mpsc::channel(8);
+    member.commands = receiver;
+    member.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Permit,
+    }])));
+    let generation = member.import_policy_generation;
+    let announce: Vec<_> = (0..129_u32)
+        .map(|index| {
+            make_sourced_route(
+                Ipv4Addr::new(10, 44, 0, 1),
+                Ipv4Prefix::new(Ipv4Addr::from(0x0A40_0000 + index * 256), 24),
+                64_601,
+            )
+        })
+        .collect();
+    let (typed, update, chunks) = shared_query_update(&member, &announce);
+    assert_eq!(chunks.len(), 129, "fixture spans three checkpoints");
+    typed.test_publish(chunks);
+    typed.test_finish(super::shared_group::StreamTerminal::Complete);
+    {
+        let consumer = member.handle_outbound_route_update(update);
+        tokio::pin!(consumer);
+        assert!(
+            poll_fn(|cx| Poll::Ready(consumer.as_mut().poll(cx)))
+                .await
+                .is_pending(),
+            "completed shared stream must yield before draining every chunk"
+        );
+
+        // These reads do not exist until the consumer has handed back control.
+        // Await admission in another task without resuming the consumer, so the
+        // proof does not depend on Tokio's choice of which task to poll next.
+        let (mut state, mut counters) = tokio::spawn(async move {
+            let (reply, state) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryState { reply })
+                .unwrap();
+            let (reply, counters) = oneshot::channel();
+            commands
+                .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+                .unwrap();
+            (state, counters)
+        })
+        .await
+        .unwrap();
+        consumer.await;
+
+        // No outer actor loop runs: both replies must come from shared work.
+        let state = state.try_recv().expect("state answered inside shared work");
+        assert!(state.updates_sent > 0 && state.updates_sent < 129);
+        let counters = counters
+            .try_recv()
+            .expect("stats answered inside shared work")
+            .expect("installed import chain");
+        assert_eq!(counters.generation, generation);
+        assert_eq!(counters.evals, 0);
+    }
+    assert_eq!(member.updates_sent, 129);
+    let writer = member.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+}
+
+#[tokio::test]
 async fn shared_transition_payload_excludes_only_the_target_source() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;

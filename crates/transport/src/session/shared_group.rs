@@ -615,6 +615,9 @@ impl PeerSession {
                 // drain without ever waiting for another encoder notification.
                 if index % 64 == 0 {
                     self.poll_shared_group_command();
+                    // Let read producers run even when the stream is complete.
+                    // Only consumers yield; the encoder keeps its election guard.
+                    tokio::task::yield_now().await;
                 }
                 if !self.wants_shared_chunk(update, &chunk) {
                     continue;
