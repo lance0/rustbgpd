@@ -442,6 +442,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   already deferred by the session; queued mutations keep their FIFO position
   even when their acknowledgement receiver has closed.
 
+- Neighbor and import-counter reads can complete while a live explicit outbound
+  replay waits for BMP admission, collector enrollment, or RIB admission. Replay
+  retains its original five-second deadline and channel queue positions; deferred
+  mutations and live diagnostics keep later commands behind them.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

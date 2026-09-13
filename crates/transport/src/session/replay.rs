@@ -99,6 +99,44 @@ impl PeerSession {
         self.pending_replay = None;
     }
 
+    /// Keep each admission future's queue position and the operation's original
+    /// deadline while serving only snapshots that cannot change replay state.
+    async fn await_replay_admission<T>(
+        &mut self,
+        admission: impl std::future::Future<Output = T>,
+        response: &mut oneshot::Sender<Result<(), PeerCommandError>>,
+        deadline: tokio::time::Instant,
+    ) -> Result<T, PeerCommandError> {
+        let admission = tokio::time::timeout_at(deadline, admission);
+        tokio::pin!(admission);
+        let mut commands_open = true;
+        loop {
+            tokio::select! {
+                biased;
+                () = response.closed() => return Err(PeerCommandError::ReplayUnavailable(
+                    "replay caller canceled before acknowledgement".into(),
+                )),
+                result = &mut admission => return result.map_err(|_| PeerCommandError::TimedOut {
+                    operation: "replay_outbound",
+                    deadline: REPLAY_TIMEOUT,
+                }),
+                () = async {
+                    match self.deferred_command.as_mut() {
+                        Some(command) => command.read_canceled().await,
+                        None => std::future::pending().await,
+                    }
+                } => self.deferred_command = None,
+                command = self.commands.recv(),
+                    if commands_open && self.deferred_command.is_none() => {
+                    match command {
+                        Some(command) => self.handle_read_during_wait(command),
+                        None => commands_open = false,
+                    }
+                }
+            }
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "enrollment and bounded RIB admission retain one operation and caller reply under the same deadline"
@@ -153,21 +191,28 @@ impl PeerSession {
             scheduling: None,
             reply: None,
         });
-        let admission = tokio::time::timeout_at(deadline, async {
-            bmp_tx
-                .send(BmpEvent::OutboundReplayBegin {
+        let result = async {
+            self.await_replay_admission(
+                bmp_tx.send(BmpEvent::OutboundReplayBegin {
                     peer_info,
                     replay: Arc::clone(&replay),
-                })
-                .await
-                .map_err(|_| {
-                    PeerCommandError::ReplayUnavailable("BMP manager is unavailable".into())
-                })?;
+                }),
+                &mut response,
+                deadline,
+            )
+            .await?
+            .map_err(|_| {
+                PeerCommandError::ReplayUnavailable("BMP manager is unavailable".into())
+            })?;
             // Begin may reset collector monitoring before its acknowledgement,
             // even if enrollment later fails or the caller cancels. Ordinary
             // BMP EoRs must not certify that abandoned capture.
             self.replay_eor_suppressed = true;
-            if !enrolled.await.unwrap_or(false) {
+            if !self
+                .await_replay_admission(enrolled, &mut response, deadline)
+                .await?
+                .unwrap_or(false)
+            {
                 return Err(PeerCommandError::ReplayUnavailable(
                     "no eligible connected BMP collector or replay enrollment refused".into(),
                 ));
@@ -178,30 +223,25 @@ impl PeerSession {
                 ));
             }
             let (rib_reply, admitted) = oneshot::channel();
-            self.rib_tx
-                .send(RibUpdate::ReplayPeerOutbound {
+            let rib_tx = self.rib_tx.clone();
+            self.await_replay_admission(
+                rib_tx.send(RibUpdate::ReplayPeerOutbound {
                     peer: self.peer_ip,
                     session_id: self.session_identity.id,
                     families,
                     replay: Arc::clone(&replay),
                     reply: rib_reply,
-                })
-                .await
-                .map_err(|_| {
-                    PeerCommandError::ReplayUnavailable("RIB manager is unavailable".into())
-                })?;
+                }),
+                &mut response,
+                deadline,
+            )
+            .await?
+            .map_err(|_| {
+                PeerCommandError::ReplayUnavailable("RIB manager is unavailable".into())
+            })?;
             Ok(admitted)
-        });
-        let result = tokio::select! {
-            biased;
-            () = response.closed() => Err(PeerCommandError::ReplayUnavailable(
-                "replay caller canceled before acknowledgement".into(),
-            )),
-            result = admission => result.unwrap_or(Err(PeerCommandError::TimedOut {
-                operation: "replay_outbound",
-                deadline: REPLAY_TIMEOUT,
-            })),
-        };
+        }
+        .await;
         match result {
             Ok(admitted) => {
                 if let Some(pending) = &mut self.pending_replay {
