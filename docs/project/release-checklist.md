@@ -183,10 +183,11 @@ release:
       forgotten regeneration fails the build instead of drifting
       silently.
 - [ ] **No method sits at `read` unless it is pure liveness with zero
-      topology / route / policy / state disclosure.** The tier is
-      currently empty by design — anything read-only that exposes the
-      network belongs at `sensitive_read`. A new method landing at
-      `read` is the most likely under-tiering mistake; scrutinize it.
+      topology / route / policy / state disclosure.** `ControlService.CheckLiveness`
+      is the deliberate pure-liveness exception; it occupies this tier.
+      Anything else read-only that exposes topology, routes, policy, or state
+      belongs at `sensitive_read`. A new method landing at `read` is the most
+      likely under-tiering mistake; scrutinize it.
 - [ ] **Every event / explain / route-listing surface is
       `sensitive_read`+** — `WatchEvents`, `SubscribeFromEvent`,
       `List*Events`, `Explain*`, `List*Routes`, gNMI `Subscribe`. These
