@@ -166,6 +166,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Shared update-group consumers yield at their bounded chunk checkpoints even
+  when the encoder has already completed, allowing other tasks to enqueue
+  session-state and import-counter reads during the drain. Encoder election,
+  command ordering, and writer failure handling are unchanged.
+
 - The route-server flagship soak drains its management probes before releasing
   the engine's final session shutdown. The analyzer checks this ordering against
   the daemon log, preventing natural teardown from being counted as a stable
