@@ -32,7 +32,12 @@ resolved.
   plus read service between queued RIB work units. Final phase coverage and
   qualifying soak remain outstanding. General RIB queries retain their
   consistency fences, incomplete restoration can fence live peer-manager
-  reads, and import collection still depends on session tasks.
+  reads, and remaining import-read latency can still arise in peer-manager
+  selection, publication collection, or response delivery. Installed import
+  counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md);
+  it does not remove those caller and scheduling waits.
+  The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
+  records CPU placement, complete call results and remaining stale observations.
   The paired native rollback cell passes on both baseline and candidate; it
   does not establish a general deadline guarantee. This issue stays open
   until the final phase coverage and qualifying soak pass on the final runtime

@@ -1,0 +1,856 @@
+{
+  "configuration": "isolated-generator",
+  "source_arm": "P",
+  "reused_original_build": true,
+  "source_commit": "5d0a49cea7f2e80885b296e8edb57c33e31d0848",
+  "source_clean": true,
+  "daemon_sha256": "e4fc68cb0274f90c8d98c85e03fe9945d1265104f1435d164280d8d93319c778",
+  "cli_sha256": "513a5fe4701b652ec1dcba5b3129908e19f1825538958f71867b3cc434f0a991",
+  "load_generator_sha256": "91b6034ea577257671f88caace50375487738335435a79b46add816f5cb912be",
+  "build_receipt_sha256": "4a75738c6adcca8beef2a87736f76242412f16b6f3329dc81ffd54e2c1ca426e",
+  "private_capture_sha256": "728c7b7f073d8798268cbc9634389e56a52173af5ce441db7fe71f88467d25aa",
+  "profile": "release",
+  "daemon_features": [
+    "default",
+    "jemalloc",
+    "tikv-jemallocator"
+  ],
+  "toolchain": {
+    "rustc": "1.98.1",
+    "cargo": "1.98.1"
+  },
+  "settings": {
+    "peers": 1000,
+    "ipv4_prefixes_per_peer": 400,
+    "reloads": 12,
+    "calls_per_reload": 2,
+    "statistics_direction": "both",
+    "daemon_worker_threads": 2,
+    "generator_worker_threads": 24,
+    "daemon_cpus": [
+      2,
+      3
+    ],
+    "generator_cpus": [
+      4,
+      5
+    ],
+    "observer_cpus": [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "generator_churn_parameter": 1000,
+    "churner_tasks": 8,
+    "control_seconds": 15,
+    "cycle_quiesce_seconds": 40,
+    "hot_apply_to_probe_seconds": 0.5,
+    "actual_commit_band_ms": [
+      -220,
+      0
+    ],
+    "minimum_complete_pairs_in_band": 6,
+    "external_call_deadline_ms": 2000,
+    "subprocess_timeout_seconds": 5,
+    "native_timeout_seconds": 1900,
+    "termination_allowance_seconds": 45
+  },
+  "original_verdict": {
+    "strict_pass": false,
+    "run_exit": 1,
+    "cell_exit": 1,
+    "acceptance_exit": 1,
+    "coverage_pass": true,
+    "actual_in_band_pairs": 12,
+    "calls_retained": 24,
+    "calls_over_2s": 0,
+    "strict_calls_passed": 16
+  },
+  "summary": {
+    "statistics_nonzero_exit": 0,
+    "neighbor_nonzero_exit": 0,
+    "successful_statistics_inventories": [
+      {
+        "reload": 1,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 2,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 3,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 4,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 5,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 6,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 7,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 8,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 9,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 10,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 11,
+        "import_rows": 1000,
+        "export_rows": 1000
+      },
+      {
+        "reload": 12,
+        "import_rows": 1000,
+        "export_rows": 1000
+      }
+    ],
+    "successful_neighbor_bodies": 12,
+    "neighbor_bodies_with_stale_rows": 8,
+    "marked_stale_rows_per_successful_neighbor_body": {
+      "min": 0,
+      "max": 93
+    },
+    "all_reload_rows_sessions_up": 1000,
+    "runtime_errors": 0,
+    "parse_errors": 0,
+    "endpoint_neighbor_inventory": {
+      "before": {
+        "rows": 1000,
+        "unique_peers": 1000,
+        "established": 1000
+      },
+      "after": {
+        "rows": 1000,
+        "unique_peers": 1000,
+        "established": 1000
+      }
+    },
+    "owned_processes_reaped": true,
+    "owned_ports_released": true
+  },
+  "reloads": [
+    {
+      "reload": 1,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 301.302,
+          "exit_code": 0,
+          "start_minus_commit_ms": -82.253,
+          "completion_minus_commit_ms": 219.049,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "1ff5e1f0a189dd8a407889232d7a66bdc7d7880b0c9824c1aad29d7ef1eb72b1",
+          "rows": 1000,
+          "marked_stale_rows": 0,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": true
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 334.398,
+          "exit_code": 0,
+          "start_minus_commit_ms": -82.057,
+          "completion_minus_commit_ms": 252.342,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "68248d34911f3ebbfb955b744a076e9ad7e32da41ed39cc4b2cd49e3befc4dc1",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 120,
+          "budget": 1999,
+          "rpc_elapsed": 120,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 79,
+          "budget": 1879,
+          "rpc_elapsed": 200,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1799,
+          "rpc_elapsed": 200,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 2,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 365.193,
+          "exit_code": 0,
+          "start_minus_commit_ms": -81.125,
+          "completion_minus_commit_ms": 284.068,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "36a98aa781017598fd527575486381e572f6d0cff6d8f3559cf24d219f772001",
+          "rows": 1000,
+          "marked_stale_rows": 0,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": true
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 379.254,
+          "exit_code": 0,
+          "start_minus_commit_ms": -81.026,
+          "completion_minus_commit_ms": 298.229,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "f8dd4f5ca6dbc6a920c1279b51912e22ac8ac2a0c016079303c5edb464f5e9c3",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 142,
+          "budget": 1999,
+          "rpc_elapsed": 142,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 105,
+          "budget": 1857,
+          "rpc_elapsed": 247,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1752,
+          "rpc_elapsed": 247,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 3,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 383.347,
+          "exit_code": 0,
+          "start_minus_commit_ms": -72.506,
+          "completion_minus_commit_ms": 310.841,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "79180fc19ee4fa52298680d30e297745c4d29cfd43d434c35f2338446eed180a",
+          "rows": 1000,
+          "marked_stale_rows": 3,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 398.412,
+          "exit_code": 0,
+          "start_minus_commit_ms": -72.318,
+          "completion_minus_commit_ms": 326.094,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "1958334976deda2da75d0a76186ced0a9f74f78860bad8f46278d56612bf32e2",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 159,
+          "budget": 1999,
+          "rpc_elapsed": 159,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 121,
+          "budget": 1839,
+          "rpc_elapsed": 281,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1717,
+          "rpc_elapsed": 282,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 4,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 313.069,
+          "exit_code": 0,
+          "start_minus_commit_ms": -84.909,
+          "completion_minus_commit_ms": 228.16,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "c2f5358cbcf78686ba91119d1871ab6fa90bab2356f3f491261465b703474659",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        },
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 429.541,
+          "exit_code": 0,
+          "start_minus_commit_ms": -85.012,
+          "completion_minus_commit_ms": 344.528,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "c044e70d96eae9a74fb2719333682dbfcb25c72a201d5d096d729b283c2d1c1d",
+          "rows": 1000,
+          "marked_stale_rows": 0,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 147,
+          "budget": 1999,
+          "rpc_elapsed": 147,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 97,
+          "budget": 1852,
+          "rpc_elapsed": 245,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1754,
+          "rpc_elapsed": 245,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 5,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 394.588,
+          "exit_code": 0,
+          "start_minus_commit_ms": -76.469,
+          "completion_minus_commit_ms": 318.12,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "0053a9a242c7f1f1afb7056d11a11b47c5a3150ca017d583d9363657c22f5b84",
+          "rows": 1000,
+          "marked_stale_rows": 93,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 435.982,
+          "exit_code": 0,
+          "start_minus_commit_ms": -76.337,
+          "completion_minus_commit_ms": 359.645,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "1e4125f356d58cc3060454c6c00c5b23e6aa8a522fbd13312164a8f5d5153113",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 227,
+          "budget": 1999,
+          "rpc_elapsed": 227,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 157,
+          "budget": 1771,
+          "rpc_elapsed": 385,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1613,
+          "rpc_elapsed": 386,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 6,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 413.136,
+          "exit_code": 0,
+          "start_minus_commit_ms": -79.017,
+          "completion_minus_commit_ms": 334.119,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "3cfa461133d054e226c674359b04190e99acf70fa5a6d1e27faae5db79a6ebb5",
+          "rows": 1000,
+          "marked_stale_rows": 0,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": true
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 416.523,
+          "exit_code": 0,
+          "start_minus_commit_ms": -78.914,
+          "completion_minus_commit_ms": 337.609,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "9b983d0fab057c6dceedadd24961fe50ae934c1d417f6b07ef40404434da2c6d",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 222,
+          "budget": 1999,
+          "rpc_elapsed": 222,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 138,
+          "budget": 1777,
+          "rpc_elapsed": 360,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1638,
+          "rpc_elapsed": 361,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 7,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 421.172,
+          "exit_code": 0,
+          "start_minus_commit_ms": -82.877,
+          "completion_minus_commit_ms": 338.296,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "db0c8b57749ccc246e05c324ef588bb2d2e9584508e78799bfff4237c5212b24",
+          "rows": 1000,
+          "marked_stale_rows": 8,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 447.075,
+          "exit_code": 0,
+          "start_minus_commit_ms": -82.689,
+          "completion_minus_commit_ms": 364.386,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "2bd32e1bcf8116d602ee0b7982429993ba01bb61ad59c38460d61dc10c639d3a",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 118,
+          "budget": 1999,
+          "rpc_elapsed": 118,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 196,
+          "budget": 1880,
+          "rpc_elapsed": 316,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1683,
+          "rpc_elapsed": 316,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 8,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 413.787,
+          "exit_code": 0,
+          "start_minus_commit_ms": -76.874,
+          "completion_minus_commit_ms": 336.913,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "119956145ac3d680713aef2477279573023cb567b860461fb4e103c963e4364c",
+          "rows": 1000,
+          "marked_stale_rows": 5,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 457.886,
+          "exit_code": 0,
+          "start_minus_commit_ms": -76.684,
+          "completion_minus_commit_ms": 381.203,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "023b33a1c02782da9438a582a0d934a8a5fef8e0a6a1984ae673943706d72230",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 191,
+          "budget": 1999,
+          "rpc_elapsed": 191,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 214,
+          "budget": 1807,
+          "rpc_elapsed": 407,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1592,
+          "rpc_elapsed": 407,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 9,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 425.155,
+          "exit_code": 0,
+          "start_minus_commit_ms": -112.462,
+          "completion_minus_commit_ms": 312.693,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "967fb606c5804f0a3f2072783900315ff56c32ffa6630623d40054cb300e69ea",
+          "rows": 1000,
+          "marked_stale_rows": 13,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 492.029,
+          "exit_code": 0,
+          "start_minus_commit_ms": -112.366,
+          "completion_minus_commit_ms": 379.663,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "da759f3a501b416e24a76066017aa51e89b0193240697aee7436ced1589ffb2d",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 174,
+          "budget": 1999,
+          "rpc_elapsed": 174,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 231,
+          "budget": 1824,
+          "rpc_elapsed": 406,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1593,
+          "rpc_elapsed": 406,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 10,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 393.099,
+          "exit_code": 0,
+          "start_minus_commit_ms": -121.107,
+          "completion_minus_commit_ms": 271.993,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "cf5a7cdd9c56e370e5ddebb99bf79f8b68cae07fd419dd7975c560ae198da3d6",
+          "rows": 1000,
+          "marked_stale_rows": 2,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 473.865,
+          "exit_code": 0,
+          "start_minus_commit_ms": -120.975,
+          "completion_minus_commit_ms": 352.89,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "3a6ecdde58da483dd00891088293bf26d5f2ca4bc8bb47dfc83e7030ec546b88",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 237,
+          "budget": 1999,
+          "rpc_elapsed": 237,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 143,
+          "budget": 1761,
+          "rpc_elapsed": 382,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1617,
+          "rpc_elapsed": 382,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 11,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 442.317,
+          "exit_code": 0,
+          "start_minus_commit_ms": -81.198,
+          "completion_minus_commit_ms": 361.119,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "bb6c47e831bfe76b33be5fd6d713fac999a1dc2f0eba35ec572c7f19e40515ea",
+          "rows": 1000,
+          "marked_stale_rows": 16,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 467.172,
+          "exit_code": 0,
+          "start_minus_commit_ms": -80.977,
+          "completion_minus_commit_ms": 386.195,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "d8ed6e4bd6c7238235126701f38268ea7108bb60125bb39bd907157970a7c2f4",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 141,
+          "budget": 1999,
+          "rpc_elapsed": 141,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 269,
+          "budget": 1857,
+          "rpc_elapsed": 411,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1588,
+          "rpc_elapsed": 411,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 12,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 426.143,
+          "exit_code": 0,
+          "start_minus_commit_ms": -78.676,
+          "completion_minus_commit_ms": 347.467,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "74a21fb7a839ca630d71fcb2b7dabe2ee3d7c7b2af73816c468d87961bc9b02f",
+          "rows": 1000,
+          "marked_stale_rows": 1,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 470.851,
+          "exit_code": 0,
+          "start_minus_commit_ms": -78.581,
+          "completion_minus_commit_ms": 392.269,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "8caf18a1f3ff2e8003780054e5fecafd4c7973c9acc0ae08908ae09a72ed3211",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 168,
+          "budget": 1999,
+          "rpc_elapsed": 168,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 246,
+          "budget": 1830,
+          "rpc_elapsed": 415,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1584,
+          "rpc_elapsed": 415,
+          "code": "Ok"
+        }
+      }
+    }
+  ],
+  "limits": [
+    "One isolated-generator configuration control of the original build; no release qualification or general performance claim.",
+    "Only generator CPU placement changed; actual phase and delivered pressure remain measured comparison limits.",
+    "The full original strict verdict, including stale rows and phase coverage, is preserved.",
+    "Counter availability does not establish session progress or an atomic numeric snapshot.",
+    "No retries, extra probes, timing changes or acceptance exemptions were used."
+  ]
+}
