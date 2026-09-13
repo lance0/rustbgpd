@@ -17,6 +17,7 @@ retains routes for the advertised restart window (RFC 4724), then
 demotes to LLGR_STALE (RFC 9494) if `llgr_stale_time > 0`. Check the
 peer-group template carries what you think it does:
 
+<!-- rustbgpd-config-conformance -->
 ```toml
 [peer_groups.rr-clients]
 graceful_restart = true
