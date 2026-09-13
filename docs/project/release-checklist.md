@@ -728,7 +728,9 @@ Before rolling any versions:
 - [ ] Preview the release workflow's extracted and reflowed GitHub release body
       and confirm it preserves the `### Upgrade notes` heading and its entries.
 
-1. Update `CHANGELOG.md` with the new version section
+1. Update `CHANGELOG.md` with the new version section (`## [X.Y.Z]`, without
+   a leading `v`) and the actual release date in UTC. Leave a fresh
+   `[Unreleased]` section above it.
 2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
    and confirm every user-visible change (features, fixes, interop suites) is
    listed under the new version — not misattributed to a prior release. Check
@@ -744,6 +746,15 @@ Before rolling any versions:
      selected by their own crate manifests and release steps; never align them
      to the daemon workspace bump. Retain both `path` and `version` so
      downstream publish dry-runs resolve from crates.io.
+   - Refresh root `Cargo.lock` and `bench/scale/Cargo.lock` for the new
+     workspace package versions without updating unrelated dependencies.
+   - Move `docs/reference/v1-stable-surface.json` `baseline_release` with
+     the workspace version. For a new release line, append the consecutive
+     upgrade exercise using the previous release's immutable fixture and
+     parser test. Keep the README baseline aligned; preserve older exercises.
+   - Update the workspace release and target changelog section in
+     `scripts/check_metric_release_notes.py` and its companion test. Keep
+     the released metric baseline until a newer release has actually shipped.
    - [ ] Confirm each published library crate archive contains regular-file
          `LICENSE-MIT` and `LICENSE-APACHE` entries whose contents match the
          canonical repository-root license texts; the SPDX `MIT OR Apache-2.0`
@@ -755,9 +766,11 @@ Before rolling any versions:
 4. Run the full checklist above (fmt, clippy `-D warnings`, test, doc
    `-D warnings`, release build)
 5. Commit the final release candidate (workspace):
-   `release: prep vX.Y.Z — bump workspace, roll CHANGELOG`
+   `chore(release): prepare vX.Y.Z`
 6. Push the final release candidate to `main`: `git push origin main`.
-7. Wait for every applicable gate to pass on that exact final `main` SHA.
+7. Wait for every applicable gate to pass on that exact final `main` SHA,
+   including the stable-surface and metric release-note checks. The
+   tag-triggered publication workflows do not run those Python checks.
    When an independently published crate changed, manually dispatch
    `semver-checks.yml` at the release commit because it has no push trigger.
    - If this cycle touched `.github/workflows/release.yml`, run the
@@ -844,6 +857,20 @@ Review the generated changes and run the offline checks before committing:
 python3 -m unittest -v scripts/test_check_embedding_versions.py
 python3 scripts/check_embedding_versions.py
 ```
+
+For a coordinated wire compatibility-line change, validate all three prepared
+packages together before publishing:
+
+```bash
+cargo publish --locked --dry-run --all-features \
+  -p rustbgpd-wire -p rustbgpd-fsm -p rustbgpd-rpki
+```
+
+Cargo's multi-package dry-run verifies the normalized packages against a
+temporary local registry, so FSM and RPKI can resolve the prepared wire version
+without uploading it. Actual publication still follows wire, then FSM and RPKI;
+an individual dependent-only package or dry-run needs the new wire version in
+the registry. Run these checks from the final committed source.
 
 ### rustbgpd-wire crate release
 
