@@ -1,6 +1,6 @@
 # ADR-0133: Installed Import-Counter Reads
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-13
 
 ## Context
@@ -47,8 +47,16 @@ its channel lock, and dropping the read releases its publication reference.
 Session task destruction closes the publication, including when a join handle
 has not yet been reaped. Concurrent readers and selected retired channels can
 retain publications across multiple generations. Installation, retention and
-reclamation costs still require measurement; the latest-value channel does
-not imply a global memory bound.
+reclamation costs scale with the installed policies, terms and labels, and
+with the generations readers retain. Neither the latest-value channel nor
+the 64-observation per-request limit implies a global memory bound.
+
+Publishing initializes the chain's counter cache, including any required
+compiled cache, during session construction or installation instead of
+waiting for the first evaluation or statistics request. Labels are copied
+into the descriptor. The descriptor does not retain the compiled cache;
+the installed chain retains its existing ownership. This deliberately moves
+lazy initialization work earlier and needs workload-specific cost evidence.
 
 ## Consequences
 
@@ -78,5 +86,51 @@ likewise documents short borrow locking and distinguishes `has_changed` from
 the unread-value behavior of `changed`; it does not make the observation
 lock-free or transactional.
 
-This ADR remains Proposed until implementation review and native evidence are
-complete.
+## Cost evidence
+
+The [reproducible allocation receipt](../perf/artifacts/installed-import-counters-2026-09-13/README.md)
+at `5d0a49cea` exercises 1,000 peers, two term labels per policy, four
+independently retained installations and retired channel ownership. Cold
+descriptor construction requests 1,248,000 bytes per generation for the
+9/12/7-byte label shape, including lazy initialization; the warm case
+requests 196,000 bytes. Three 256-byte labels increase those figures to
+2,968,000 and 936,000 bytes. Publication and reader captures allocate zero
+in these measured windows, which have no waiting tasks or concurrent
+reader contention. Final-owner release invalidates the exercised descriptor
+and counter Weak references, and all four accounting scopes balance to zero.
+
+These are instrumented `System` requested-size observations, not daemon
+jemalloc residency, RSS, a latency distribution or a general leak proof.
+The reference reload scenario leaves import policy unchanged; four fresh
+import installations are a separate ownership stress shape. Final Weak
+disposal includes entire retained Arc backing allocations, not just control
+headers. Larger policy shapes and more retained generations need their own
+measurement.
+
+## Native evidence and remaining limits
+
+The [retained native diagnostic](../perf/artifacts/installed-import-counters-2026-09-13/native-summary.json)
+uses the same revision, 1,000 peers with 400 IPv4 prefixes each, 12 reloads
+and 24 scheduled calls. The two-worker daemon and 24-worker generator share
+two CPUs. All 12 probe pairs start inside the original -220 to 0 ms
+commit-relative band, satisfying its six-pair floor.
+
+The diagnostic fails: 19 calls exceed two seconds, 11 of 12 statistics
+requests fail in the import stage, and two neighbor requests fail. The one
+successful statistics response contains all 1,000 import and 1,000 export
+rows. All ten successful neighbor bodies contain all 1,000 peers, with
+370–649 rows explicitly marked stale. Independent routing and live endpoint
+records retain all 1,000 sessions; no runtime or parse errors occur.
+
+This observation does not establish the complete operator-read latency
+target. The import stage still includes manager admission, collection and
+response observation; these records cannot isolate their individual waits.
+Neighbor reads retain separate peer-manager and RIB budgets, so a response
+can meet those API budgets while missing the diagnostic's stricter external
+two-second target. Marked-stale rows are unavailable observations, not lost
+sessions or a new zero-stale release gate.
+
+This decision accepts the measured ownership and counter-availability
+contract. Complete driven-phase latency and qualifying-soak evidence remain
+separate work; neither this diagnostic nor the component regressions supply
+a release-qualification pass.

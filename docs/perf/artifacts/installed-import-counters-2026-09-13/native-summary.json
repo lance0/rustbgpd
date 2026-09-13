@@ -1,0 +1,731 @@
+{
+  "source_commit": "5d0a49cea7f2e80885b296e8edb57c33e31d0848",
+  "source_clean": true,
+  "daemon_sha256": "e4fc68cb0274f90c8d98c85e03fe9945d1265104f1435d164280d8d93319c778",
+  "cli_sha256": "513a5fe4701b652ec1dcba5b3129908e19f1825538958f71867b3cc434f0a991",
+  "load_generator_sha256": "91b6034ea577257671f88caace50375487738335435a79b46add816f5cb912be",
+  "build_receipt_sha256": "4a75738c6adcca8beef2a87736f76242412f16b6f3329dc81ffd54e2c1ca426e",
+  "private_capture_sha256": "f2e5c3c496153a64a5be6f69e68a68df4dad2853f8a8991f9897377bc4ab8b54",
+  "profile": "release",
+  "daemon_features": [
+    "default",
+    "jemalloc",
+    "tikv-jemallocator"
+  ],
+  "toolchain": {
+    "rustc": "1.98.1",
+    "cargo": "1.98.1"
+  },
+  "settings": {
+    "peers": 1000,
+    "ipv4_prefixes_per_peer": 400,
+    "reloads": 12,
+    "calls_per_reload": 2,
+    "statistics_direction": "both",
+    "daemon_worker_threads": 2,
+    "generator_worker_threads": 24,
+    "daemon_cpus": [
+      2,
+      3
+    ],
+    "generator_cpus": [
+      2,
+      3
+    ],
+    "observer_cpus": [
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "generator_churn_parameter": 1000,
+    "churner_tasks": 8,
+    "control_seconds": 15,
+    "cycle_quiesce_seconds": 40,
+    "hot_apply_to_probe_seconds": 0.5,
+    "actual_commit_band_ms": [
+      -220,
+      0
+    ],
+    "minimum_complete_pairs_in_band": 6,
+    "external_call_deadline_ms": 2000,
+    "subprocess_timeout_seconds": 5,
+    "native_timeout_seconds": 1900,
+    "termination_allowance_seconds": 45
+  },
+  "original_verdict": {
+    "strict_pass": false,
+    "run_exit": 1,
+    "cell_exit": 1,
+    "acceptance_exit": 1,
+    "coverage_pass": true,
+    "actual_in_band_pairs": 12,
+    "calls_retained": 24,
+    "calls_over_2s": 19,
+    "strict_calls_passed": 1
+  },
+  "summary": {
+    "statistics_nonzero_exit": 11,
+    "neighbor_nonzero_exit": 2,
+    "successful_statistics_inventories": [
+      {
+        "reload": 8,
+        "import_rows": 1000,
+        "export_rows": 1000
+      }
+    ],
+    "successful_neighbor_bodies": 10,
+    "marked_stale_rows_per_successful_neighbor_body": {
+      "min": 370,
+      "max": 649
+    },
+    "all_reload_rows_sessions_up": 1000,
+    "runtime_errors": 0,
+    "parse_errors": 0,
+    "endpoint_neighbor_inventory": {
+      "before": {
+        "rows": 1000,
+        "unique_peers": 1000,
+        "established": 1000
+      },
+      "after": {
+        "rows": 1000,
+        "unique_peers": 1000,
+        "established": 1000
+      }
+    },
+    "owned_processes_reaped": true,
+    "owned_ports_released": true
+  },
+  "reloads": [
+    {
+      "reload": 1,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2151.879,
+          "exit_code": 1,
+          "start_minus_commit_ms": -94.041,
+          "completion_minus_commit_ms": 2057.838,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2458.71,
+          "exit_code": 0,
+          "start_minus_commit_ms": -94.179,
+          "completion_minus_commit_ms": 2364.531,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "2236a264213b4c58e73e1d8e1dd325294f50f9fea02c5e41cce88014222ed753",
+          "rows": 1000,
+          "marked_stale_rows": 370,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 26,
+          "budget": 1999,
+          "rpc_elapsed": 26,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2023,
+          "budget": 1972,
+          "rpc_elapsed": 2050,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 2,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 1888.741,
+          "exit_code": 0,
+          "start_minus_commit_ms": -106.817,
+          "completion_minus_commit_ms": 1781.924,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "17e05323693e2a349bca73b3fb91aae12a9af43be085591e0a6839ae8783fd80",
+          "rows": 1000,
+          "marked_stale_rows": 630,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2210.894,
+          "exit_code": 1,
+          "start_minus_commit_ms": -106.717,
+          "completion_minus_commit_ms": 2104.177,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 577,
+          "budget": 1999,
+          "rpc_elapsed": 577,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 1545,
+          "budget": 1422,
+          "rpc_elapsed": 2122,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 3,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2161.759,
+          "exit_code": 1,
+          "start_minus_commit_ms": -122.757,
+          "completion_minus_commit_ms": 2039.002,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2161.663,
+          "exit_code": 1,
+          "start_minus_commit_ms": -122.575,
+          "completion_minus_commit_ms": 2039.088,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 670,
+          "budget": 1999,
+          "rpc_elapsed": 670,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 1398,
+          "budget": 1328,
+          "rpc_elapsed": 2069,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 4,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 1893.462,
+          "exit_code": 0,
+          "start_minus_commit_ms": -113.036,
+          "completion_minus_commit_ms": 1780.426,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "6c0fb77d0b21a6aaf3cded7698a828aa07fed4da75d650871c1644d3dd507970",
+          "rows": 1000,
+          "marked_stale_rows": 520,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2214.194,
+          "exit_code": 1,
+          "start_minus_commit_ms": -112.943,
+          "completion_minus_commit_ms": 2101.251,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 1,
+          "budget": 1999,
+          "rpc_elapsed": 1,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2079,
+          "budget": 1998,
+          "rpc_elapsed": 2080,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 5,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 1752.879,
+          "exit_code": 0,
+          "start_minus_commit_ms": -84.684,
+          "completion_minus_commit_ms": 1668.195,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "16ef72e54ec9e96b6ae893a6fbba4f1671d39b6aa06da40fab27a212a15c0c31",
+          "rows": 1000,
+          "marked_stale_rows": 583,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2186.481,
+          "exit_code": 1,
+          "start_minus_commit_ms": -84.591,
+          "completion_minus_commit_ms": 2101.89,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 126,
+          "budget": 1999,
+          "rpc_elapsed": 126,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 1930,
+          "budget": 1873,
+          "rpc_elapsed": 2057,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 6,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 1985.974,
+          "exit_code": 0,
+          "start_minus_commit_ms": -85.644,
+          "completion_minus_commit_ms": 1900.33,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "54f7ce32b20721f04fc27ef231dabfa212079a9c8ded3604b83df26ee86b45b6",
+          "rows": 1000,
+          "marked_stale_rows": 575,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2239.069,
+          "exit_code": 1,
+          "start_minus_commit_ms": -85.56,
+          "completion_minus_commit_ms": 2153.509,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 759,
+          "budget": 1999,
+          "rpc_elapsed": 759,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 1245,
+          "budget": 1239,
+          "rpc_elapsed": 2005,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 7,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2354.129,
+          "exit_code": 1,
+          "start_minus_commit_ms": -89.486,
+          "completion_minus_commit_ms": 2264.643,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2545.143,
+          "exit_code": 0,
+          "start_minus_commit_ms": -89.626,
+          "completion_minus_commit_ms": 2455.517,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "a8885910b51481942412132494f28e6a2ff24a531d07a9740f2b319067103263",
+          "rows": 1000,
+          "marked_stale_rows": 539,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 13,
+          "budget": 1999,
+          "rpc_elapsed": 13,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2201,
+          "budget": 1986,
+          "rpc_elapsed": 2214,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 8,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 1523.078,
+          "exit_code": 0,
+          "start_minus_commit_ms": -79.963,
+          "completion_minus_commit_ms": 1443.115,
+          "in_band": true,
+          "within_2s": true,
+          "body_sha256": "a58d714e77bc02ed16c7957851885bdb6d9b3104691b5031d9e63144b15e6c5c",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": 1000,
+          "export_rows": 1000,
+          "strict_call_pass": true
+        },
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2834.0,
+          "exit_code": 0,
+          "start_minus_commit_ms": -80.062,
+          "completion_minus_commit_ms": 2753.938,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "394c24544ec84df836ba86d7d0e473ac81b0cca25fde441fa5a8bb655b41de28",
+          "rows": 1000,
+          "marked_stale_rows": 513,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_ok",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 53,
+          "budget": 1999,
+          "rpc_elapsed": 54,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 764,
+          "budget": 1945,
+          "rpc_elapsed": 818,
+          "code": "Ok"
+        },
+        "datasets": {
+          "elapsed": 0,
+          "budget": 1181,
+          "rpc_elapsed": 818,
+          "code": "Ok"
+        }
+      }
+    },
+    {
+      "reload": 9,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2029.614,
+          "exit_code": 0,
+          "start_minus_commit_ms": -110.863,
+          "completion_minus_commit_ms": 1918.752,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "b137d470c22d72160c5be224c045d06c753faede3c2e134516cc015a0086d191",
+          "rows": 1000,
+          "marked_stale_rows": 539,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2413.586,
+          "exit_code": 1,
+          "start_minus_commit_ms": -110.764,
+          "completion_minus_commit_ms": 2302.822,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 7,
+          "budget": 1999,
+          "rpc_elapsed": 7,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2257,
+          "budget": 1992,
+          "rpc_elapsed": 2265,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 10,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2228.266,
+          "exit_code": 0,
+          "start_minus_commit_ms": -95.984,
+          "completion_minus_commit_ms": 2132.282,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "1038b25d29576072d3320f0ced7ff45b1bec037853b5395ad596c84c17d29820",
+          "rows": 1000,
+          "marked_stale_rows": 649,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2362.933,
+          "exit_code": 1,
+          "start_minus_commit_ms": -95.88,
+          "completion_minus_commit_ms": 2267.054,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 47,
+          "budget": 1999,
+          "rpc_elapsed": 47,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2191,
+          "budget": 1952,
+          "rpc_elapsed": 2238,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 11,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2150.172,
+          "exit_code": 0,
+          "start_minus_commit_ms": -108.895,
+          "completion_minus_commit_ms": 2041.277,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "f52489e18ff95c75cfc125e04512eecdcf8c4298677ec8ef41a2fae81f084a8c",
+          "rows": 1000,
+          "marked_stale_rows": 376,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2279.891,
+          "exit_code": 1,
+          "start_minus_commit_ms": -108.704,
+          "completion_minus_commit_ms": 2171.187,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 246,
+          "budget": 1999,
+          "rpc_elapsed": 246,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 1776,
+          "budget": 1752,
+          "rpc_elapsed": 2023,
+          "code": "DeadlineExceeded"
+        }
+      }
+    },
+    {
+      "reload": 12,
+      "complete_pair_in_band": true,
+      "calls": [
+        {
+          "operation": "policy_stats",
+          "elapsed_ms": 2356.157,
+          "exit_code": 1,
+          "start_minus_commit_ms": -88.02,
+          "completion_minus_commit_ms": 2268.137,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        },
+        {
+          "operation": "neighbor",
+          "elapsed_ms": 2418.651,
+          "exit_code": 1,
+          "start_minus_commit_ms": -88.109,
+          "completion_minus_commit_ms": 2330.542,
+          "in_band": true,
+          "within_2s": false,
+          "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "rows": null,
+          "marked_stale_rows": null,
+          "import_rows": null,
+          "export_rows": null,
+          "strict_call_pass": false
+        }
+      ],
+      "statistics_audit_result": "handler_deadline_exceeded",
+      "statistics_stages_ms": {
+        "export": {
+          "elapsed": 41,
+          "budget": 1999,
+          "rpc_elapsed": 41,
+          "code": "Ok"
+        },
+        "import": {
+          "elapsed": 2191,
+          "budget": 1958,
+          "rpc_elapsed": 2233,
+          "code": "DeadlineExceeded"
+        }
+      }
+    }
+  ],
+  "limits": [
+    "One diagnostic capture; no general causal performance claim or release qualification.",
+    "Counter availability does not establish session responsiveness or an atomic numeric snapshot.",
+    "Marked-stale neighbor rows describe unavailable fresh observations; the separate engine and live endpoint records retained all 1000 sessions.",
+    "Statistics stage timings include the remaining peer-manager admission and collection path; they do not identify a single blocking work unit.",
+    "No retries, extra probes, timing changes or acceptance exemptions were used."
+  ]
+}
