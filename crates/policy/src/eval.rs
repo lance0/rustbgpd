@@ -429,13 +429,45 @@ impl PolicyHitCounters {
         self.last_error.lock().map_or(None, |guard| guard.clone())
     }
 
+    /// Read the error count and detail together without waiting for the cold
+    /// error writer. A poisoned tuple is unavailable, even after later writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WouldBlock` while an error is being recorded, or `Poisoned`
+    /// if an earlier writer panicked while holding the error lock.
+    pub fn try_snapshot_error(
+        &self,
+    ) -> Result<(u64, Option<EvalError>), std::sync::TryLockError<()>> {
+        match self.last_error.try_lock() {
+            Ok(error) => Ok((self.eval_errors(), error.clone())),
+            Err(std::sync::TryLockError::WouldBlock) => Err(std::sync::TryLockError::WouldBlock),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(std::sync::TryLockError::Poisoned(
+                std::sync::PoisonError::new(()),
+            )),
+        }
+    }
+
+    /// Observe one term's counter; absent indices indicate a shape mismatch.
+    #[must_use]
+    pub fn term_hits(&self, policy_index: usize, term_index: usize) -> Option<u64> {
+        self.policies
+            .get(policy_index)?
+            .get(term_index)
+            .map(|hits| hits.load(Ordering::Relaxed))
+    }
+
     /// Record one evaluation error: bump the counter and retain the
     /// error as [`last_error`](Self::last_error). Error path only.
     fn record_eval_error(&self, error: &EvalError) {
+        // Preserve every error increment after poisoning, while nonblocking
+        // readers continue to report the poisoned tuple as unavailable.
+        let mut guard = self
+            .last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.eval_errors.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut guard) = self.last_error.lock() {
-            *guard = Some(error.clone());
-        }
+        *guard = Some(error.clone());
     }
 
     /// Snapshot of the per-term hit grid (`snapshot()[p][t]`).
@@ -1678,6 +1710,87 @@ mod tests {
         CompiledChain, CompiledPolicy, MatchExpr, PolicySource, SetId, Term, TermAction,
     };
     use crate::sets::{PrefixSet, PrefixSetEntry};
+
+    #[test]
+    fn import_counter_error_snapshot_is_nonblocking_and_poison_is_explicit() {
+        use std::sync::{TryLockError, mpsc};
+        use std::time::Duration;
+
+        let counters = Arc::new(super::PolicyHitCounters::for_chain(&CompiledChain::empty()));
+        let held = counters.last_error.lock().unwrap();
+        let (reply, response) = mpsc::channel();
+        let reader_counters = Arc::clone(&counters);
+        let reader = std::thread::spawn(move || {
+            reply.send(reader_counters.try_snapshot_error()).unwrap();
+        });
+        let observed = response.recv_timeout(Duration::from_millis(100));
+        drop(held);
+        reader.join().unwrap();
+        assert!(matches!(observed, Ok(Err(TryLockError::WouldBlock))));
+
+        let poisoned = Arc::clone(&counters);
+        assert!(
+            std::thread::spawn(move || {
+                let _held = poisoned.last_error.lock().unwrap();
+                panic!("test: interrupted cold error writer");
+            })
+            .join()
+            .is_err()
+        );
+        let error = super::EvalError {
+            kind: super::EvalErrorKind::DivideByZero,
+            policy: Some("failure".to_string()),
+            term: None,
+        };
+        counters.record_eval_error(&error);
+        counters.record_eval_error(&error);
+        assert_eq!(
+            counters.eval_errors(),
+            2,
+            "poison must never discard increments"
+        );
+        assert!(matches!(
+            counters.try_snapshot_error(),
+            Err(TryLockError::Poisoned(_))
+        ));
+        assert_eq!(
+            *counters.last_error.lock().unwrap_err().into_inner(),
+            Some(error)
+        );
+    }
+
+    #[test]
+    fn import_counter_error_snapshot_keeps_count_and_detail_coherent() {
+        let counters = Arc::new(super::PolicyHitCounters::for_chain(&CompiledChain::empty()));
+        let writer_counters = Arc::clone(&counters);
+        let writer = std::thread::spawn(move || {
+            for sequence in 1..=10_000 {
+                writer_counters.record_eval_error(&super::EvalError {
+                    kind: super::EvalErrorKind::DivideByZero,
+                    policy: Some(sequence.to_string()),
+                    term: None,
+                });
+            }
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !writer.is_finished() && std::time::Instant::now() < deadline {
+            if let Ok((count, detail)) = counters.try_snapshot_error() {
+                assert_eq!(
+                    detail.and_then(|error| error.policy),
+                    (count > 0).then(|| count.to_string())
+                );
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            writer.is_finished(),
+            "error writer did not complete within five seconds"
+        );
+        writer.join().unwrap();
+        let (count, detail) = counters.try_snapshot_error().unwrap();
+        assert_eq!(count, 10_000);
+        assert_eq!(detail.unwrap().policy.as_deref(), Some("10000"));
+    }
 
     fn ctx(prefix: Option<Prefix>) -> RouteContext<'static> {
         RouteContext {

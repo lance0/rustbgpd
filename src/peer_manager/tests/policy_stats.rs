@@ -1,20 +1,221 @@
 use super::*;
+use rustbgpd_transport::handle::{ImportPolicyStatsError, InstalledImportPolicy};
+use tokio::sync::watch;
+
+fn policy_counter_context() -> rustbgpd_policy::RouteContext<'static> {
+    rustbgpd_policy::RouteContext {
+        prefix: None,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &[],
+        large_communities: &[],
+        as_path_str: "",
+        as_path: None,
+        as_path_len: 0,
+        origin_asn: None,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        family: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    }
+}
+
+async fn publication_selected(publication: &watch::Sender<Option<Arc<InstalledImportPolicy>>>) {
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while publication.receiver_count() < 2 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("manager selected this publication before owner progress");
+}
+
+async fn publication_readers_released(
+    publication: &watch::Sender<Option<Arc<InstalledImportPolicy>>>,
+) {
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while publication.receiver_count() > 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("collection must release publication receivers promptly");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real RPC fixture retains the session hold, counter values, live readiness and cleanup"
+)]
+async fn import_policy_stats_rpc_reads_live_counters_while_real_session_is_held() {
+    use rustbgpd_api::proto::policy_service_server::PolicyService as PolicyServiceRpc;
+    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+
+    let (commands, command_rx) = mpsc::channel(8);
+    let (operator, operator_rx) = mpsc::channel(8);
+    let (readiness, readiness_rx) = mpsc::channel(8);
+    let (manager_rib, _manager_rib_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        "192.0.2.1".parse().unwrap(),
+        None,
+        None,
+        BgpMetrics::new(),
+        manager_rib.clone(),
+        None,
+    )
+    .with_operator_queries(operator_rx)
+    .with_readiness_queries(readiness_rx);
+    let (session_rib, held_rib) = mpsc::channel(1);
+    let (held, _response) = oneshot::channel();
+    session_rib
+        .try_send(RibUpdate::QueryLocRibCount { reply: held })
+        .unwrap();
+    let mut chain = validation_policy_chain(ImportValidationDependency::Rpki);
+    chain.policies[0].name = Some("held-import".to_string());
+    let context = rustbgpd_policy::RouteContext {
+        validation_state: rustbgpd_wire::RpkiValidation::Invalid,
+        ..policy_counter_context()
+    };
+    for _ in 0..7 {
+        let _ = chain.evaluate(&context);
+    }
+    let address = "192.0.2.2".parse::<IpAddr>().unwrap();
+    let config = rustbgpd_transport::TransportConfig::new(
+        rustbgpd_fsm::PeerConfig::new(65001, 65002, "192.0.2.1".parse().unwrap()),
+        std::net::SocketAddr::new(address, 179),
+    );
+    let handle = PeerHandle::spawn(
+        config,
+        BgpMetrics::new(),
+        session_rib,
+        Some(chain),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    let session_commands = handle.commands_sender();
+    let (reply, mut export_ack) = oneshot::channel();
+    session_commands
+        .send(PeerCommand::UpdateExportPolicy {
+            policy: None,
+            reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while session_commands.capacity() != session_commands.max_capacity() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual session parks in export RIB admission");
+    insert_test_managed_peer(&mut manager, address, handle, false);
+    let (hold_manager, hold_requested) = oneshot::channel();
+    let (manager_held, pause_ack) = oneshot::channel();
+    let actor = tokio::spawn(async move {
+        let run = manager.run();
+        tokio::pin!(run);
+        tokio::select! {
+            () = &mut run => {}
+            _ = hold_requested => {
+                manager_held.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }
+        }
+    });
+    let probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(commands.clone(), manager_rib)
+        .with_peer_manager_readiness(readiness.clone());
+    let service = rustbgpd_api::PolicyService::with_runtime_config_coordinator(
+        AccessMode::ReadOnly,
+        commands,
+        None,
+        None,
+        RuntimeConfigCoordinator::new(),
+    )
+    .with_operator_queries(operator);
+    let started = tokio::time::Instant::now();
+    let result = service
+        .get_policy_stats(tonic::Request::new(
+            rustbgpd_api::proto::GetPolicyStatsRequest {
+                peer_address: address.to_string(),
+                direction: "import".to_string(),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(result.chains.len(), 1);
+    assert_eq!(result.chains[0].peer_address, address.to_string());
+    assert_eq!(result.chains[0].routes_evaluated, 7);
+    assert_eq!(result.chains[0].policy_generation, 0);
+    assert_eq!(result.chains[0].eval_errors, 0);
+    assert_eq!(result.chains[0].terms.len(), 1);
+    assert_eq!(result.chains[0].terms[0].policy, "held-import");
+    assert_eq!(result.chains[0].terms[0].hits, 7);
+    assert!(result.chains[0].last_error.is_empty());
+    assert!(matches!(
+        export_ack.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(
+        matches!(
+            PeerHandle::query_state_outcome_with(
+                session_commands.clone(),
+                Duration::from_millis(20)
+            )
+            .await,
+            rustbgpd_transport::StateQueryOutcome::TimedOut
+        ),
+        "counter availability does not prove live session progress"
+    );
+    let (reply, ping) = oneshot::channel();
+    readiness
+        .send(rustbgpd_api::peer_types::PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    ping.await.unwrap();
+    hold_manager.send(()).unwrap();
+    pause_ack.await.unwrap();
+    assert!(
+        matches!(
+            probe.check().await,
+            Err(rustbgpd_api::health_probe::CoreReadinessError::PeerManagerTimedOut)
+        ),
+        "published counter success cannot replace live core actor progress"
+    );
+    actor.abort();
+    let _ = actor.await;
+    // PeerHandle drop does not stop the held session: release its RIB owner,
+    // then explicitly wait for the command receiver to close.
+    drop(held_rib);
+    session_commands.send(PeerCommand::Shutdown).await.unwrap();
+    session_commands.closed().await;
+}
 
 fn chainless_policy_query_handle() -> PeerHandle {
     let (commands, mut command_rx) = mpsc::channel(4);
+    let (publication, receiver) = watch::channel(Some(installed_policy(0, None)));
     let task = tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
-            match command {
-                rustbgpd_transport::PeerCommand::QueryImportPolicyTermHits { reply } => {
-                    let _ = reply.send(None);
-                }
-                rustbgpd_transport::PeerCommand::Shutdown => break,
-                other => panic!("unexpected peer command: {other:?}"),
+            if matches!(command, PeerCommand::Shutdown) {
+                break;
             }
         }
+        drop(publication);
         Ok(())
     });
-    PeerHandle::from_parts(commands, task)
+    PeerHandle::from_parts_with_import_policy_counters(commands, task, receiver)
 }
 
 fn gone_policy_query_handle() -> PeerHandle {
@@ -23,66 +224,52 @@ fn gone_policy_query_handle() -> PeerHandle {
     PeerHandle::from_parts(commands, tokio::spawn(async { Ok(()) }))
 }
 
-type ControlledPolicyAdmission = (
-    IpAddr,
-    oneshot::Sender<Option<rustbgpd_transport::ImportPolicyTermHits>>,
-);
+type ControlledPolicyAdmission = (IpAddr, watch::Sender<Option<Arc<InstalledImportPolicy>>>);
 
 fn controlled_policy_query_handle(
     address: IpAddr,
-    admitted: mpsc::UnboundedSender<ControlledPolicyAdmission>,
+    admitted: &mpsc::UnboundedSender<ControlledPolicyAdmission>,
 ) -> PeerHandle {
     let (commands, mut command_rx) = mpsc::channel(4);
+    let (publication, receiver) = watch::channel(None);
+    admitted.send((address, publication.clone())).unwrap();
     let task = tokio::spawn(async move {
         while let Some(command) = command_rx.recv().await {
-            match command {
-                rustbgpd_transport::PeerCommand::QueryImportPolicyTermHits { reply } => {
-                    let _ = admitted.send((address, reply));
-                }
-                rustbgpd_transport::PeerCommand::Shutdown => break,
-                other => panic!("unexpected peer command: {other:?}"),
+            if matches!(command, PeerCommand::Shutdown) {
+                break;
             }
         }
+        drop(publication);
         Ok(())
     });
-    PeerHandle::from_parts(commands, task)
+    PeerHandle::from_parts_with_import_policy_counters(commands, task, receiver)
 }
 
 fn disappearing_policy_query_handle(
     admitted: oneshot::Sender<()>,
     disappear: oneshot::Receiver<()>,
 ) -> PeerHandle {
-    let (commands, mut command_rx) = mpsc::channel(4);
+    let (commands, _command_rx) = mpsc::channel(4);
+    let (publication, receiver) = watch::channel(None);
     let task = tokio::spawn(async move {
-        let Some(command) = command_rx.recv().await else {
-            return Ok(());
-        };
-        match command {
-            rustbgpd_transport::PeerCommand::QueryImportPolicyTermHits { reply } => {
-                let _ = admitted.send(());
-                let _ = disappear.await;
-                drop(reply);
-                Ok(())
-            }
-            rustbgpd_transport::PeerCommand::Shutdown => Ok(()),
-            other => panic!("unexpected peer command: {other:?}"),
-        }
+        let _ = admitted.send(());
+        let _ = disappear.await;
+        drop(publication);
+        Ok(())
     });
-    PeerHandle::from_parts(commands, task)
+    PeerHandle::from_parts_with_import_policy_counters(commands, task, receiver)
 }
 
-fn controlled_policy_snapshot(address: IpAddr) -> rustbgpd_transport::ImportPolicyTermHits {
+fn controlled_policy_snapshot(address: IpAddr) -> Arc<InstalledImportPolicy> {
     let generation = match address {
         IpAddr::V4(address) => u64::from(address.octets()[3]),
         IpAddr::V6(_) => 0,
     };
-    rustbgpd_transport::ImportPolicyTermHits {
-        generation,
-        evals: generation,
-        eval_errors: 0,
-        last_error: None,
-        terms: Vec::new(),
+    let chain = PolicyChain::new(vec![]);
+    for _ in 0..generation {
+        let _ = chain.evaluate(&policy_counter_context());
     }
+    installed_policy(generation, Some(&chain))
 }
 
 async fn receive_controlled_policy_admissions(
@@ -174,7 +361,10 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     tokio::task::yield_now().await;
     tokio::time::advance(EXPLAIN_QUERY_TIMEOUT).await;
     assert!(
-        matches!(response.await.unwrap(), SessionQueryOutcome::TimedOut),
+        matches!(
+            response.await.unwrap(),
+            Err(ImportPolicyStatsError::TimedOut)
+        ),
         "a stalled term-hit query must fail the snapshot instead of being omitted"
     );
 
@@ -229,7 +419,7 @@ async fn import_policy_stats_omit_an_answered_chainless_peer() {
     .unwrap();
     let outcome = response.await.unwrap();
     assert!(
-        matches!(&outcome, SessionQueryOutcome::Reply(rows) if rows.is_empty()),
+        matches!(&outcome, Ok(rows) if rows.is_empty()),
         "a healthy session without an import chain must answer with no row, got {outcome:?}"
     );
 
@@ -297,7 +487,7 @@ async fn import_policy_stats_over_concurrency_cap_use_one_deadline_without_block
     tokio::time::advance(deadline - tokio::time::Instant::now()).await;
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::TimedOut
+        Err(ImportPolicyStatsError::TimedOut)
     ));
     assert_eq!(
         tokio::time::Instant::now() - started,
@@ -309,17 +499,13 @@ async fn import_policy_stats_over_concurrency_cap_use_one_deadline_without_block
     manager_task.await.unwrap();
 }
 
-/// LAN-661: bounded unordered collection admits exactly 64 queries, lets
-/// later-ready members of that wave open slots for the remainder, and
-/// completes every row under the original absolute deadline.
+/// Bounded unordered observation releases later-ready publications beyond the
+/// first wave while the first selected session remains pending. The existing
+/// cap stays 64; it is not a fleet memory or CPU bound.
 #[tokio::test(start_paused = true)]
-async fn import_policy_stats_concurrency_gate_is_64_and_makes_unordered_two_wave_progress() {
+async fn import_policy_stats_unordered_reads_release_ready_later_publications() {
     const EXPECTED_CONCURRENCY: usize = 64;
 
-    assert_eq!(
-        IMPORT_POLICY_QUERY_CONCURRENCY, EXPECTED_CONCURRENCY,
-        "the fleet collector's documented concurrency cap must remain 64"
-    );
     let (tx, rx) = mpsc::channel(4);
     let (rib_tx, _rib_rx) = mpsc::channel(4);
     let mut manager = PeerManager::new(
@@ -341,7 +527,7 @@ async fn import_policy_stats_concurrency_gate_is_64_and_makes_unordered_two_wave
         insert_test_managed_peer(
             &mut manager,
             address,
-            controlled_policy_query_handle(address, admitted_tx.clone()),
+            controlled_policy_query_handle(address, &admitted_tx),
             false,
         );
     }
@@ -365,58 +551,33 @@ async fn import_policy_stats_concurrency_gate_is_64_and_makes_unordered_two_wave
     .await
     .unwrap();
 
-    let mut first_wave =
-        receive_controlled_policy_admissions(&mut admitted_rx, EXPECTED_CONCURRENCY).await;
-    assert!(
-        matches!(
-            admitted_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
-        "the collector must admit exactly 64 initial queries, not a 65th"
-    );
-
-    let first_target_index = first_wave
+    tokio::task::yield_now().await;
+    let mut publications = receive_controlled_policy_admissions(&mut admitted_rx, peer_count).await;
+    let first_index = publications
         .iter()
         .position(|(address, _)| *address == first_target)
-        .expect("the source-order first target must be in the initial wave");
-    let held_first_target = first_wave.swap_remove(first_target_index);
-    // Keep the source-order first future pending while eight later futures
-    // complete. Only unordered buffering can use them to open eight slots.
-    for (address, reply) in first_wave.drain(..8) {
-        reply
-            .send(Some(controlled_policy_snapshot(address)))
+        .unwrap();
+    let (_, first_publication) = publications.swap_remove(first_index);
+    publication_selected(&first_publication).await;
+    // A pending first session must not prevent all later ready publications
+    // (including a second wave beyond the cap) from being observed/released.
+    for (address, publication) in &publications {
+        publication
+            .send(Some(controlled_policy_snapshot(*address)))
             .unwrap();
     }
-    // Give the single-threaded test runtime ample scheduling turns, then use
-    // nonblocking receives. An ordered buffer must fail here promptly rather
-    // than hanging the regression proof behind the fleet deadline.
-    for _ in 0..(EXPECTED_CONCURRENCY * 4) {
-        tokio::task::yield_now().await;
+    for (_, publication) in &publications {
+        publication_readers_released(publication).await;
     }
-    let second_wave: Vec<_> = (0..8)
-        .map(|_| {
-            admitted_rx
-                .try_recv()
-                .expect("later-ready replies must open second-wave slots without source ordering")
-        })
-        .collect();
-    assert!(
-        matches!(
-            admitted_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
-        "only the eight newly available slots may admit the remainder"
+    assert_eq!(
+        first_publication.receiver_count(),
+        2,
+        "only the pending target stays retained"
     );
-
-    for (address, reply) in std::iter::once(held_first_target)
-        .chain(first_wave)
-        .chain(second_wave)
-    {
-        reply
-            .send(Some(controlled_policy_snapshot(address)))
-            .unwrap();
-    }
-    let SessionQueryOutcome::Reply(rows) = response.await.unwrap() else {
+    first_publication
+        .send(Some(controlled_policy_snapshot(first_target)))
+        .unwrap();
+    let Ok(rows) = response.await.unwrap() else {
         panic!("all controlled sessions answered before the deadline");
     };
     let actual_addresses: Vec<_> = rows.into_iter().map(|(address, _)| address).collect();
@@ -430,9 +591,8 @@ async fn import_policy_stats_concurrency_gate_is_64_and_makes_unordered_two_wave
     manager_task.await.unwrap();
 }
 
-/// LAN-661: dropping the RPC reply before dispatch prevents session queries;
-/// dropping it with 64 in-flight queries cancels all of their reply futures
-/// promptly instead of retaining the fleet until the deadline.
+/// Cancellation before dispatch avoids publication ownership; cancellation
+/// during pending acquisition releases the whole selected roster promptly.
 #[tokio::test(start_paused = true)]
 async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries() {
     let (tx, rx) = mpsc::channel(4);
@@ -453,11 +613,14 @@ async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries(
         insert_test_managed_peer(
             &mut manager,
             address,
-            controlled_policy_query_handle(address, admitted_tx.clone()),
+            controlled_policy_query_handle(address, &admitted_tx),
             false,
         );
     }
 
+    let publications =
+        receive_controlled_policy_admissions(&mut admitted_rx, IMPORT_POLICY_QUERY_CONCURRENCY + 1)
+            .await;
     // Queue a request whose receiver is already gone before the actor starts.
     let (reply, response) = oneshot::channel();
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
@@ -478,11 +641,10 @@ async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries(
     .unwrap();
     assert!(barrier.await.unwrap());
     assert!(
-        matches!(
-            admitted_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
-        "a pre-cancelled request must not query the fleet"
+        publications
+            .iter()
+            .all(|(_, publication)| publication.receiver_count() == 1),
+        "a pre-cancelled request must not retain fleet publications"
     );
 
     let (reply, response) = oneshot::channel();
@@ -493,27 +655,136 @@ async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries(
     })
     .await
     .unwrap();
-    let mut admissions =
-        receive_controlled_policy_admissions(&mut admitted_rx, IMPORT_POLICY_QUERY_CONCURRENCY)
-            .await;
-    drop(response);
     tokio::time::timeout(Duration::from_millis(1), async {
-        for (_, reply) in &mut admissions {
-            reply.closed().await;
+        while publications
+            .iter()
+            .any(|(_, publication)| publication.receiver_count() != 2)
+        {
+            tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("caller cancellation must drop every in-flight reply receiver");
-    assert!(
-        matches!(
-            admitted_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ),
-        "caller cancellation must not admit the remaining target"
-    );
+    .expect("the collector selects the exact fleet");
+    drop(response);
+    for (_, publication) in &publications {
+        publication_readers_released(publication).await;
+    }
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_policy_stats_ready_fleet_cooperates_and_cancellation_releases_targets() {
+    let mut manager = test_peer_manager();
+    let (controls, mut control_rx) = mpsc::unbounded_channel();
+    for host in 1..=1000_u32 {
+        let address = IpAddr::V4(Ipv4Addr::from(0xc612_0000 + host));
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            controlled_policy_query_handle(address, &controls),
+            false,
+        );
+    }
+    let publications = receive_controlled_policy_admissions(&mut control_rx, 1000).await;
+    let chain = PolicyChain::new(vec![]);
+    for (_, publication) in &publications {
+        publication
+            .send(Some(installed_policy(0, Some(&chain))))
+            .unwrap();
+    }
+    let (reply, response) = oneshot::channel();
+    let collector = manager
+        .dispatch_import_policy_term_hits(
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            reply,
+        )
+        .unwrap();
+    let mut completed = 0;
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+        completed = publications
+            .iter()
+            .filter(|(_, publication)| publication.receiver_count() == 1)
+            .count();
+        if completed > 0 {
+            break;
+        }
+    }
+    assert!(
+        completed > 0 && completed < 1000,
+        "the real collector must yield after some ready reads, before finishing the fleet: {completed}"
+    );
+    drop(response);
+    collector.await.unwrap();
+    assert!(
+        publications
+            .iter()
+            .all(|(_, publication)| publication.receiver_count() == 1)
+    );
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn import_policy_stats_pins_at_most_64_active_descriptors() {
+    let mut manager = test_peer_manager();
+    let (controls, mut control_rx) = mpsc::unbounded_channel();
+    let mut chain = validation_policy_chain(ImportValidationDependency::Rpki);
+    let term = chain.policies[0].policy.entries[0].clone();
+    chain.policies[0].policy.entries = vec![term; 4096];
+    let mut descriptors = Vec::new();
+    for host in 1..=72 {
+        let address = IpAddr::V4(Ipv4Addr::new(198, 18, 0, host));
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            controlled_policy_query_handle(address, &controls),
+            false,
+        );
+        let (_, publication) = control_rx.try_recv().unwrap();
+        let descriptor = installed_policy(0, Some(&chain));
+        publication.send(Some(Arc::clone(&descriptor))).unwrap();
+        descriptors.push(descriptor);
+    }
+    let (reply, response) = oneshot::channel();
+    let collector = manager
+        .dispatch_import_policy_term_hits(
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            reply,
+        )
+        .unwrap();
+    let mut active = 0;
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+        // One reference belongs to this vector, one to the watch value;
+        // only an actually polled sampler can own the third reference.
+        active = descriptors
+            .iter()
+            .filter(|descriptor| Arc::strong_count(descriptor) > 2)
+            .count();
+        if active > 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        active, 64,
+        "the production buffer admits exactly its 64 active readers"
+    );
+    drop(response);
+    collector.await.unwrap();
+    assert!(
+        descriptors
+            .iter()
+            .all(|descriptor| Arc::strong_count(descriptor) == 2)
+    );
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
 }
 
 /// LAN-661: one successful fleet row followed by a stalled session fails the
@@ -539,7 +810,7 @@ async fn import_policy_stats_mixed_success_and_timeout_is_atomic() {
         insert_test_managed_peer(
             &mut manager,
             address,
-            controlled_policy_query_handle(address, admitted_tx.clone()),
+            controlled_policy_query_handle(address, &admitted_tx),
             false,
         );
     }
@@ -559,14 +830,14 @@ async fn import_policy_stats_mixed_success_and_timeout_is_atomic() {
     success
         .send(Some(controlled_policy_snapshot(address)))
         .unwrap();
-    let mut stalled = admissions.pop().unwrap().1;
+    let stalled = admissions.pop().unwrap().1;
 
     tokio::time::advance(deadline - tokio::time::Instant::now()).await;
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::TimedOut
+        Err(ImportPolicyStatsError::TimedOut)
     ));
-    stalled.closed().await;
+    publication_readers_released(&stalled).await;
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();
@@ -594,7 +865,7 @@ async fn import_policy_stats_all_peers_session_gone_after_admission_is_atomic() 
     insert_test_managed_peer(
         &mut manager,
         successful_peer,
-        controlled_policy_query_handle(successful_peer, admitted_tx),
+        controlled_policy_query_handle(successful_peer, &admitted_tx),
         false,
     );
     let disappearing_peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
@@ -626,7 +897,7 @@ async fn import_policy_stats_all_peers_session_gone_after_admission_is_atomic() 
 
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::SessionGone
+        Err(ImportPolicyStatsError::SessionGone)
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
@@ -663,7 +934,7 @@ async fn import_policy_stats_selected_session_gone_is_truthful() {
     .unwrap();
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::SessionGone
+        Err(ImportPolicyStatsError::SessionGone)
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
@@ -701,7 +972,7 @@ async fn import_policy_stats_expired_deadline_precedes_resolution_and_selected_s
     assert!(
         matches!(
             missing_response.await.unwrap(),
-            SessionQueryOutcome::TimedOut
+            Err(ImportPolicyStatsError::TimedOut)
         ),
         "deadline rejection must happen before selected-peer resolution"
     );
@@ -716,7 +987,7 @@ async fn import_policy_stats_expired_deadline_precedes_resolution_and_selected_s
     .unwrap();
     assert!(matches!(
         response.await.unwrap(),
-        SessionQueryOutcome::TimedOut
+        Err(ImportPolicyStatsError::TimedOut)
     ));
 
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
@@ -751,7 +1022,7 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
         insert_test_managed_peer(
             &mut manager,
             address,
-            controlled_policy_query_handle(address, admitted_tx),
+            controlled_policy_query_handle(address, &admitted_tx),
             false,
         );
         let (ack, ack_rx) = oneshot::channel();
@@ -780,6 +1051,7 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
             .await
             .unwrap();
         let (_, session_reply) = admitted_rx.recv().await.unwrap();
+        publication_selected(&session_reply).await;
         ack.send(()).unwrap();
         let (reply, ping) = oneshot::channel();
         readiness_tx
@@ -799,10 +1071,8 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
                 session_reply
                     .send(Some(controlled_policy_snapshot(address)))
                     .unwrap();
-                assert!(
-                    matches!(response.await.unwrap(), SessionQueryOutcome::Reply(rows)
-                    if rows.len() == 1 && rows[0].1.generation == 1)
-                );
+                assert!(matches!(response.await.unwrap(), Ok(rows)
+                    if rows.len() == 1 && rows[0].1.generation == 1));
             }
             "cancel" => {
                 drop(response);
@@ -812,7 +1082,7 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
                 tokio::time::advance(Duration::from_secs(2)).await;
                 assert!(matches!(
                     response.await.unwrap(),
-                    SessionQueryOutcome::TimedOut
+                    Err(ImportPolicyStatsError::TimedOut)
                 ));
             }
             _ => unreachable!(),
@@ -848,7 +1118,7 @@ async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
     insert_test_managed_peer(
         &mut manager,
         address,
-        controlled_policy_query_handle(address, admitted_tx),
+        controlled_policy_query_handle(address, &admitted_tx),
         false,
     );
     let task = tokio::spawn(manager.run());
@@ -876,8 +1146,8 @@ async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
             .unwrap()
             .unwrap()
     );
-    session_reply.send(None).unwrap();
-    assert!(matches!(response.await.unwrap(), SessionQueryOutcome::Reply(rows) if rows.is_empty()));
+    session_reply.send(Some(installed_policy(0, None))).unwrap();
+    assert!(matches!(response.await.unwrap(), Ok(rows) if rows.is_empty()));
     task.abort();
     let _ = task.await;
 }
@@ -891,6 +1161,7 @@ fn held_neighbor_query_handle(
     imports: Arc<AtomicUsize>,
 ) -> PeerHandle {
     let (commands, mut commands_rx) = mpsc::channel(4);
+    let (publication, receiver) = watch::channel(Some(controlled_policy_snapshot(address)));
     let session = tokio::spawn(async move {
         while let Some(command) = commands_rx.recv().await {
             match command {
@@ -901,16 +1172,23 @@ fn held_neighbor_query_handle(
                 }
                 PeerCommand::QueryImportPolicyTermHits { reply } => {
                     imports.fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Some(controlled_policy_snapshot(address)));
+                    let _ = reply.send(Some(rustbgpd_transport::ImportPolicyTermHits {
+                        generation: 1,
+                        evals: 1,
+                        eval_errors: 0,
+                        last_error: None,
+                        terms: Vec::new(),
+                    }));
                 }
                 PeerCommand::Stop { .. } => {}
                 PeerCommand::Shutdown => break,
                 other => panic!("unexpected peer command: {other:?}"),
             }
         }
+        drop(publication);
         Ok(())
     });
-    PeerHandle::from_parts(commands, session)
+    PeerHandle::from_parts_with_import_policy_counters(commands, session, receiver)
 }
 
 #[tokio::test(start_paused = true)]
@@ -1105,8 +1383,11 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
             "{lane} cancellation={cancel_snapshot}: import missed its remaining deadline; \
              dispatched={dispatched}, outcome={outcome:?}"
         );
-        assert_eq!(dispatched, 1);
-        assert!(matches!(outcome, SessionQueryOutcome::Reply(rows)
+        assert_eq!(
+            dispatched, 0,
+            "published reads do not send session commands"
+        );
+        assert!(matches!(outcome, Ok(rows)
             if rows.len() == 1 && rows[0].0 == "192.0.2.1".parse::<IpAddr>().unwrap()
                 && rows[0].1.generation == 1 && rows[0].1.evals == 1));
     }

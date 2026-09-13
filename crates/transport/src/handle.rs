@@ -695,6 +695,136 @@ pub struct ImportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
+/// Failure to observe a selected session's installed import counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportPolicyStatsError {
+    /// The original collection deadline expired.
+    TimedOut,
+    /// The selected session task exited.
+    SessionGone,
+    /// The live counter state is poisoned or has inconsistent metadata.
+    CountersUnavailable,
+}
+
+impl fmt::Display for ImportPolicyStatsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::TimedOut => "import policy counters deadline exceeded",
+            Self::SessionGone => "selected import policy session exited",
+            Self::CountersUnavailable => "installed import policy counters unavailable",
+        })
+    }
+}
+
+impl std::error::Error for ImportPolicyStatsError {}
+
+/// Identity and live counters of one actually installed import policy.
+///
+/// This retains counter allocations and immutable names, never a policy or
+/// compiled IR. Numeric fields are observed during collection, not cached.
+#[derive(Debug)]
+pub struct InstalledImportPolicy {
+    /// Identity of the session task that installed this policy.
+    pub session_identity: SessionIdentity,
+    generation: u64,
+    counters: Option<Arc<rustbgpd_policy::PolicyHitCounters>>,
+    labels: Vec<(Option<String>, Vec<Option<String>>)>,
+    #[cfg(test)]
+    test_error_busy: std::sync::atomic::AtomicBool,
+}
+
+impl InstalledImportPolicy {
+    /// Capture the installed identity, counter ownership and immutable names.
+    #[must_use]
+    pub fn new(
+        session_identity: SessionIdentity,
+        generation: u64,
+        chain: Option<&PolicyChain>,
+    ) -> Self {
+        Self {
+            session_identity,
+            generation,
+            counters: chain.map(|chain| Arc::clone(chain.hit_counters())),
+            labels: chain.map_or_else(Vec::new, |chain| {
+                chain
+                    .compiled()
+                    .policies
+                    .iter()
+                    .map(|policy| {
+                        (
+                            policy.name.as_ref().map(ToString::to_string),
+                            policy.terms.iter().map(|term| term.name.clone()).collect(),
+                        )
+                    })
+                    .collect()
+            }),
+            #[cfg(test)]
+            test_error_busy: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn observe(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
+        let Some(counters) = &self.counters else {
+            return Ok(None);
+        };
+        let (eval_errors, last_error) = loop {
+            if deadline <= tokio::time::Instant::now() {
+                return Err(ImportPolicyStatsError::TimedOut);
+            }
+            let error_snapshot = counters.try_snapshot_error();
+            #[cfg(test)]
+            let error_snapshot = if self
+                .test_error_busy
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                Err(std::sync::TryLockError::WouldBlock)
+            } else {
+                error_snapshot
+            };
+            match error_snapshot {
+                Ok(snapshot) => break snapshot,
+                Err(std::sync::TryLockError::WouldBlock) => tokio::task::yield_now().await,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(ImportPolicyStatsError::CountersUnavailable);
+                }
+            }
+        };
+        let mut terms = Vec::new();
+        for (policy_index, (policy, labels)) in self.labels.iter().enumerate() {
+            tokio::task::coop::consume_budget().await;
+            if deadline <= tokio::time::Instant::now() {
+                return Err(ImportPolicyStatsError::TimedOut);
+            }
+            for (term_index, term) in labels.iter().enumerate() {
+                tokio::task::coop::consume_budget().await;
+                if deadline <= tokio::time::Instant::now() {
+                    return Err(ImportPolicyStatsError::TimedOut);
+                }
+                let hits = counters
+                    .term_hits(policy_index, term_index)
+                    .ok_or(ImportPolicyStatsError::CountersUnavailable)?;
+                terms.push(rustbgpd_policy::TermHitRow {
+                    policy_index,
+                    policy: policy.clone(),
+                    term_index,
+                    term: term.clone(),
+                    hits,
+                });
+            }
+        }
+        Ok(Some(ImportPolicyTermHits {
+            generation: self.generation,
+            evals: counters.evals(),
+            eval_errors,
+            last_error: last_error.map(|error| error.to_string()),
+            terms,
+        }))
+    }
+}
+
 /// Outcome of a bounded read from a peer-session task.
 ///
 /// A deadline expiry is not evidence that the session is gone: the task may
@@ -945,6 +1075,7 @@ pub struct WarmCheckpointSessionState {
 pub struct PeerHandle {
     commands: mpsc::Sender<PeerCommand>,
     task: JoinHandle<Result<(), TransportError>>,
+    import_policy_counters: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
 }
 
 /// Channel buffer size for peer commands.
@@ -1034,7 +1165,78 @@ impl PeerHandle {
         commands: mpsc::Sender<PeerCommand>,
         task: JoinHandle<Result<(), TransportError>>,
     ) -> Self {
-        Self { commands, task }
+        Self {
+            commands,
+            task,
+            import_policy_counters: watch::channel(None).1,
+        }
+    }
+
+    /// Test fixture constructor with explicit session-owned counter publication.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_parts_with_import_policy_counters(
+        commands: mpsc::Sender<PeerCommand>,
+        task: JoinHandle<Result<(), TransportError>>,
+        import_policy_counters: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+    ) -> Self {
+        Self {
+            commands,
+            task,
+            import_policy_counters,
+        }
+    }
+
+    /// Select this exact session incarnation's publication for a fleet read.
+    #[must_use]
+    pub fn import_policy_counters(&self) -> watch::Receiver<Option<Arc<InstalledImportPolicy>>> {
+        self.import_policy_counters.clone()
+    }
+
+    /// Observe actual installed counters without requiring a session command.
+    /// Startup, acquisition and rendering share the caller's absolute deadline.
+    /// Dropping the future releases its publication and descriptor ownership.
+    ///
+    /// # Errors
+    ///
+    /// Reports deadline expiry, selected task closure, or unavailable counters.
+    pub async fn read_import_policy_counters(
+        mut publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
+        if deadline <= tokio::time::Instant::now() {
+            return Err(ImportPolicyStatsError::TimedOut);
+        }
+        let observed = tokio::time::timeout_at(deadline, async {
+            loop {
+                publication
+                    .has_changed()
+                    .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                // Release the watch guard before reading counters or yielding.
+                let installed = publication.borrow_and_update().clone();
+                if let Some(installed) = installed {
+                    let snapshot = installed.observe(deadline).await?;
+                    publication
+                        .has_changed()
+                        .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                    if deadline <= tokio::time::Instant::now() {
+                        return Err(ImportPolicyStatsError::TimedOut);
+                    }
+                    return Ok(snapshot);
+                }
+                publication
+                    .changed()
+                    .await
+                    .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+            }
+        })
+        .await
+        .unwrap_or(Err(ImportPolicyStatsError::TimedOut));
+        if deadline <= tokio::time::Instant::now() {
+            Err(ImportPolicyStatsError::TimedOut)
+        } else {
+            observed
+        }
     }
 
     /// Spawn a new peer session task and return a handle to control it.
@@ -1214,6 +1416,7 @@ impl PeerHandle {
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
+        let (import_publication, import_policy_counters) = watch::channel(None);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
         let peer_group = config.peer_group.clone().unwrap_or_default();
@@ -1236,6 +1439,7 @@ impl PeerHandle {
                     session_identity,
                     tcp_ao_generation,
                 );
+                session.set_import_policy_counters(import_publication);
                 if let Some(sink) = event_sink {
                     session.set_event_sink(sink);
                 }
@@ -1243,7 +1447,11 @@ impl PeerHandle {
             }
             .instrument(span),
         );
-        Self { commands: tx, task }
+        Self {
+            commands: tx,
+            task,
+            import_policy_counters,
+        }
     }
 
     /// Spawn a new peer session for an inbound (already-connected) TCP stream.
@@ -1437,6 +1645,7 @@ impl PeerHandle {
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
+        let (import_publication, import_policy_counters) = watch::channel(None);
         let peer_addr = config.remote_addr.ip();
         let remote_asn = config.peer.remote_asn;
         let peer_group = config.peer_group.clone().unwrap_or_default();
@@ -1462,6 +1671,7 @@ impl PeerHandle {
                     tcp_ao_selected_owner,
                     tcp_ao_generation,
                 );
+                session.set_import_policy_counters(import_publication);
                 if let Some(sink) = event_sink {
                     session.set_event_sink(sink);
                 }
@@ -1469,7 +1679,11 @@ impl PeerHandle {
             }
             .instrument(span),
         );
-        Self { commands: tx, task }
+        Self {
+            commands: tx,
+            task,
+            import_policy_counters,
+        }
     }
 
     /// Send a Start command to begin the BGP handshake.
@@ -2330,8 +2544,295 @@ impl PeerHandle {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::future::{Future, poll_fn};
     use std::sync::Barrier;
+    use std::task::Poll;
     use std::time::Instant;
+
+    fn import_counter_descriptor(generation: u64) -> Arc<InstalledImportPolicy> {
+        Arc::new(InstalledImportPolicy::new(
+            SessionIdentity::default(),
+            generation,
+            Some(&PolicyChain::new(vec![])),
+        ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn published_import_counters_pending_busy_deadline_and_closure_are_distinct() {
+        let (publication, receiver) = watch::channel(None);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        let pending = PeerHandle::read_import_policy_counters(receiver.clone(), deadline);
+        tokio::pin!(pending);
+        assert!(
+            poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        publication.send_replace(Some(Arc::new(InstalledImportPolicy::new(
+            SessionIdentity::default(),
+            0,
+            None,
+        ))));
+        assert!(
+            pending.await.unwrap().is_none(),
+            "started chainless is available"
+        );
+
+        let installed = import_counter_descriptor(1);
+        installed
+            .test_error_busy
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        publication.send_replace(Some(Arc::clone(&installed)));
+        let busy = PeerHandle::read_import_policy_counters(receiver.clone(), deadline);
+        tokio::pin!(busy);
+        assert!(
+            poll_fn(|cx| Poll::Ready(busy.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(matches!(
+            poll_fn(|cx| Poll::Ready(busy.as_mut().poll(cx))).await,
+            Poll::Ready(Err(ImportPolicyStatsError::TimedOut))
+        ));
+
+        let closing = PeerHandle::read_import_policy_counters(
+            receiver.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        tokio::pin!(closing);
+        assert!(
+            poll_fn(|cx| Poll::Ready(closing.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(publication);
+        installed
+            .test_error_busy
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            matches!(closing.await, Err(ImportPolicyStatsError::SessionGone)),
+            "closure after acquisition must prevent cached success"
+        );
+        assert!(
+            matches!(
+                PeerHandle::read_import_policy_counters(receiver, tokio::time::Instant::now(),)
+                    .await,
+                Err(ImportPolicyStatsError::TimedOut)
+            ),
+            "deadline precedes closure"
+        );
+
+        let (publication, receiver) = watch::channel(None);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        let waiting = PeerHandle::read_import_policy_counters(receiver, deadline);
+        tokio::pin!(waiting);
+        assert!(
+            poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        drop(publication);
+        tokio::time::advance(Duration::from_millis(50)).await;
+        assert!(
+            matches!(waiting.await, Err(ImportPolicyStatsError::TimedOut)),
+            "an already pending read preserves deadline precedence over closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_import_counters_retain_only_active_reader_generations() {
+        let (publication, receiver) = watch::channel(None);
+        let mut readers = Vec::new();
+        let mut generations = Vec::new();
+        for generation in 0..4 {
+            let installed = import_counter_descriptor(generation);
+            installed
+                .test_error_busy
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            generations.push(Arc::downgrade(&installed));
+            publication.send_replace(Some(Arc::clone(&installed)));
+            readers.push(tokio::spawn(PeerHandle::read_import_policy_counters(
+                receiver.clone(),
+                tokio::time::Instant::now() + Duration::from_secs(10),
+            )));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while Arc::strong_count(&installed) != 3 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reader pins the installed descriptor before replacement");
+        }
+        assert!(
+            generations
+                .iter()
+                .all(|generation| generation.upgrade().is_some())
+        );
+        for reader in readers {
+            reader.abort();
+            assert!(reader.await.unwrap_err().is_cancelled());
+        }
+        assert!(
+            generations[..3]
+                .iter()
+                .all(|generation| generation.upgrade().is_none()),
+            "cancellation releases every superseded descriptor and its counter ownership"
+        );
+        drop((publication, receiver));
+        assert!(
+            generations
+                .iter()
+                .all(|generation| generation.upgrade().is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn published_import_counter_out_of_range_metadata_index_is_unavailable() {
+        let mut installed = InstalledImportPolicy::new(
+            SessionIdentity::default(),
+            1,
+            Some(&PolicyChain::new(vec![])),
+        );
+        installed
+            .labels
+            .push((Some("missing".to_string()), vec![None]));
+        let (_publication, receiver) = watch::channel(Some(Arc::new(installed)));
+        assert!(matches!(
+            PeerHandle::read_import_policy_counters(
+                receiver,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await,
+            Err(ImportPolicyStatsError::CountersUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn published_import_counters_follow_real_task_start_exit_and_replacement() {
+        let (rib_tx, _rib_rx) = mpsc::channel(8);
+        let config = TransportConfig::new(
+            rustbgpd_fsm::PeerConfig::new(65001, 65002, "192.0.2.1".parse().unwrap()),
+            "192.0.2.2:179".parse().unwrap(),
+        );
+        let old = PeerHandle::spawn(
+            config.clone(),
+            BgpMetrics::new(),
+            rib_tx.clone(),
+            Some(PolicyChain::new(vec![])),
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        let old_publication = old.import_policy_counters();
+        assert!(
+            old_publication.borrow().is_none(),
+            "unpolled construction is pending"
+        );
+        let snapshot = PeerHandle::read_import_policy_counters(
+            old_publication.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.generation, 0);
+        old.commands_sender()
+            .send(PeerCommand::Shutdown)
+            .await
+            .unwrap();
+        while !old.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let successor = PeerHandle::spawn(
+            config,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert!(
+            matches!(
+                PeerHandle::read_import_policy_counters(
+                    old_publication,
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+                Err(ImportPolicyStatsError::SessionGone)
+            ),
+            "a completed but unreaped predecessor cannot become its successor"
+        );
+        assert!(
+            PeerHandle::read_import_policy_counters(
+                successor.import_policy_counters(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        old.task.await.unwrap().unwrap();
+        successor.shutdown().await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn published_import_counters_close_when_the_session_owner_panics() {
+        let (publication, receiver) = watch::channel(None);
+        let (commands, command_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(8);
+        let (fail, failure) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let config = TransportConfig::new(
+                rustbgpd_fsm::PeerConfig::new(65001, 65002, "192.0.2.1".parse().unwrap()),
+                "192.0.2.2:179".parse().unwrap(),
+            );
+            let mut session = PeerSession::new(
+                config,
+                BgpMetrics::new(),
+                command_rx,
+                rib_tx,
+                Some(PolicyChain::new(vec![])),
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            session.set_import_policy_counters(publication);
+            failure.await.unwrap();
+            // The real session owns the sole publisher when its task unwinds.
+            panic!("test: session owner panicked");
+        });
+        let handle = PeerHandle::from_parts_with_import_policy_counters(commands, task, receiver);
+        assert!(
+            PeerHandle::read_import_policy_counters(
+                handle.import_policy_counters(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        fail.send(()).unwrap();
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            PeerHandle::read_import_policy_counters(
+                handle.import_policy_counters(),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await,
+            Err(ImportPolicyStatsError::SessionGone)
+        ));
+        assert!(handle.task.await.unwrap_err().is_panic());
+    }
 
     fn gauge(metrics: &BgpMetrics, name: &str) -> f64 {
         metrics
@@ -2607,7 +3108,7 @@ mod tests {
     fn handle_with_full_command_channel() -> (PeerHandle, mpsc::Receiver<PeerCommand>) {
         let (tx, rx) = mpsc::channel::<PeerCommand>(1);
         let task = tokio::spawn(async { Ok::<(), TransportError>(()) });
-        (PeerHandle { commands: tx, task }, rx)
+        (PeerHandle::from_parts(tx, task), rx)
     }
 
     async fn fill_command_channel(handle: &PeerHandle) {
@@ -2645,10 +3146,10 @@ mod tests {
 
         let (gone_tx, gone_rx) = mpsc::channel(1);
         drop(gone_rx);
-        let gone = PeerHandle {
-            commands: gone_tx,
-            task: tokio::spawn(async { Ok::<(), TransportError>(()) }),
-        }
+        let gone = PeerHandle::from_parts(
+            gone_tx,
+            tokio::spawn(async { Ok::<(), TransportError>(()) }),
+        )
         .list_rejected_routes_timeout(Duration::from_millis(50))
         .await;
         assert!(
@@ -2665,12 +3166,9 @@ mod tests {
             let _ = reply.send(None);
             Ok::<(), TransportError>(())
         });
-        let chainless = PeerHandle {
-            commands: chainless_tx,
-            task: chainless_task,
-        }
-        .query_import_policy_term_hits_timeout(Duration::from_millis(50))
-        .await;
+        let chainless = PeerHandle::from_parts(chainless_tx, chainless_task)
+            .query_import_policy_term_hits_timeout(Duration::from_millis(50))
+            .await;
         assert!(
             matches!(chainless, SessionQueryOutcome::Reply(None)),
             "a healthy chainless session is an answered query"

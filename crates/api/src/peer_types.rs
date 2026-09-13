@@ -1225,16 +1225,21 @@ pub enum PeerManagerCommand {
     /// Snapshot the live import-chain per-term hit counters of peer
     /// sessions (ADR-0096 Decision 3.3, import direction). Read-only —
     /// no counter moves. Peers without an installed import chain are
-    /// omitted from a successful reply; timeout/task exit remain explicit.
+    /// omitted from a successful reply; deadline, task exit and unavailable
+    /// counter state remain explicit.
     QueryImportPolicyTermHits {
         /// Optional peer filter; `None` = every session.
         peer: Option<IpAddr>,
-        /// Absolute deadline shared by the fleet snapshot's asynchronous
-        /// waits. Every session send and reply uses this same instant, so
-        /// those waits do not multiply the timeout by peer count.
+        /// Original absolute RPC deadline, shared by publication acquisition
+        /// and counter observation across the selected session roster.
         deadline: tokio::time::Instant,
         /// Reply channel: successful rows are sorted by peer address.
-        reply: oneshot::Sender<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>>,
+        reply: oneshot::Sender<
+            Result<
+                Vec<(IpAddr, ImportPolicyTermHits)>,
+                rustbgpd_transport::handle::ImportPolicyStatsError,
+            >,
+        >,
     },
     /// Query a single named policy definition.
     GetPolicy {
@@ -1601,7 +1606,12 @@ pub enum PeerManagerOperatorQuery {
     QueryImportPolicyTermHits {
         peer: Option<IpAddr>,
         deadline: tokio::time::Instant,
-        reply: oneshot::Sender<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>>,
+        reply: oneshot::Sender<
+            Result<
+                Vec<(IpAddr, ImportPolicyTermHits)>,
+                rustbgpd_transport::handle::ImportPolicyStatsError,
+            >,
+        >,
     },
     /// Return the currently published policy dataset status.
     QueryPolicyDatasets {
