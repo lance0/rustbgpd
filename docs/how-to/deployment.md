@@ -40,6 +40,50 @@ note.
 
 ## Install
 
+### Verified installer
+
+The installer is available in this source checkout as
+[`packaging/install.sh`](../../packaging/install.sh). It will first be
+published as a release asset in v0.70.0; current published releases through
+v0.69.0 do not contain `install.sh`. It resolves `latest` once, then downloads
+the selected artifact and its matching per-architecture checksum manifest from
+that same tag. It refuses unknown architectures, non-glibc hosts, glibc below
+2.31, missing checksum rows, duplicate checksum rows, and checksum mismatches
+before installing.
+
+On Debian/Ubuntu it installs the verified native `.deb`; on RHEL, Rocky, and
+AlmaLinux 9+ it installs the verified native `.rpm`. The package keeps the
+existing non-replacing configuration behavior. The installer never enables or
+starts a service; edit the configuration and choose that step yourself.
+
+For a reproducible install from this checkout, inspect and run the installer
+with an explicit stable tag (`vMAJOR.MINOR.PATCH`):
+
+```sh
+less packaging/install.sh
+sh packaging/install.sh --tag v0.69.0
+```
+
+After v0.70.0 publishes the release asset, the same default path is available
+without a source checkout:
+
+```sh
+curl -fsSL https://github.com/lance0/rustbgpd/releases/latest/download/install.sh | sh
+```
+
+Other GNU/Linux distributions must use an explicit prefix or download-only
+mode. `--prefix` extracts the verified tarball's existing layout directly into
+an empty directory; it does not create users, write configuration, or install
+systemd units. `--download-only` writes the verified selected artifact and its
+manifest without installing either.
+
+```sh
+sh packaging/install.sh --tag v0.69.0 --prefix /opt/rustbgpd-0.69.0
+/opt/rustbgpd-0.69.0/rbgp doctor
+
+sh packaging/install.sh --tag v0.69.0 --download-only ./rustbgpd-v0.69.0
+```
+
 ### Pre-built binary tarball
 
 Tagged releases publish `rustbgpd-linux-amd64.tar.gz` and

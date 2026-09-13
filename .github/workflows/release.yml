@@ -320,6 +320,12 @@ jobs:
           echo "--- release-notes.md ---"
           cat release-notes.md
 
+      - name: Stage verified installer
+        # Publish the installer from the tagged checkout alongside the
+        # architecture-specific artifacts. It resolves one release tag before
+        # fetching an artifact and its matching checksum manifest.
+        run: cp packaging/install.sh artifacts/install.sh
+
       - name: Create GitHub Release
         # The only externally visible step in the workflow. Guarded on
         # the push event itself (not the dry_run input) so a dispatch

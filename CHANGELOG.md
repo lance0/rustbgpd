@@ -13,6 +13,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added a verified release installer that resolves one release tag, matches a
+  per-architecture checksum manifest, and supports explicit tags,
+  download-only, and tarball-prefix modes without starting a service.
+
 - The RIB logs one `post-commit first general query timing` record per
   committed export-policy transition that an operator read follows within
   ten seconds: the terminal commit poll's duration, the general queries and
