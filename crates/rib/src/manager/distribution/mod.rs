@@ -3523,7 +3523,7 @@ impl RibManager {
         peer: IpAddr,
         export_policy: Option<PolicyChain>,
     ) -> Result<(), RibCommandError> {
-        self.with_replacement_readiness(|manager| {
+        self.with_replacement_summary_reads("single", |manager| {
             if !manager.outbound_peers.contains_key(&peer) {
                 return Err(RibCommandError::not_found(format!(
                     "peer {peer} not registered for outbound updates"
@@ -3684,7 +3684,7 @@ impl RibManager {
         &mut self,
         mut replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<Vec<PeerExportPolicyRestoreReceipt>, RibCommandError> {
-        self.with_replacement_readiness(|manager| {
+        self.with_replacement_summary_reads("restore", |manager| {
             let readiness = manager.replacement_readiness.clone();
             let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
             checkpoint();
@@ -3768,7 +3768,7 @@ impl RibManager {
         &mut self,
         replacements: Vec<PeerExportPolicyReplacement>,
     ) -> Result<(), RibCommandError> {
-        self.with_replacement_readiness(|manager| {
+        self.with_replacement_summary_reads("apply", |manager| {
         let started = std::time::Instant::now();
         let mut r = AuthoritativeTransitionReceipt {
             input_peers: replacements.len(),
@@ -5092,6 +5092,9 @@ impl RibManager {
         };
 
         let peer = pending.peer();
+        // Include chunk construction as well as processing, separately from
+        // the drained-batch distribution and rejection retirement below.
+        let chunk_started = std::time::Instant::now();
         let Some(chunk) = pending.next_chunk() else {
             // Empty/exhausted batch — flush anything still accumulated
             // (defensive; normally the has_more() branch below flushes).
@@ -5144,6 +5147,10 @@ impl RibManager {
             }
         }
 
+        // Measured before the drained-batch tail so ingest is attributable
+        // separately from the coalesced outbound pass it triggers.
+        let ingest = chunk_started.elapsed();
+
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
@@ -5151,8 +5158,12 @@ impl RibManager {
             // across all its chunks in one coalesced outbound pass.
             self.flush_pending_distribute();
             let withdrawn = std::mem::take(&mut self.pending_exact_export_withdrawals);
+            let retire_started = std::time::Instant::now();
             self.retire_exact_export_rejections(withdrawn);
+            self.metrics
+                .observe_rib_actor_work("exact_export_retire", retire_started.elapsed());
         }
+        self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
     }
 
@@ -5170,7 +5181,12 @@ impl RibManager {
         }
         let changed = std::mem::take(&mut self.pending_distribute_changed);
         let affected = std::mem::take(&mut self.pending_distribute_affected);
+        // Measure the whole coalesced pass, which also services readiness at
+        // peer boundaries. Its total duration is not an uninterrupted stall.
+        let started = std::time::Instant::now();
         self.distribute_ingest_changes(&changed, &affected);
+        self.metrics
+            .observe_rib_actor_work("distribute_flush", started.elapsed());
     }
 
     /// Register `peer` as a unicast announcer for `prefix` in the reverse

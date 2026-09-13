@@ -4,6 +4,9 @@
 //! runtime listeners, extracts the JSON and CLI commands from the guide
 //! itself, and proves runtime apply plus durable persistence.
 
+#[path = "support/cargo.rs"]
+mod cargo;
+
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -121,8 +124,7 @@ fn rbgp(grpc_addr: &str, cwd: &Path, args: &[&str]) -> Output {
                 .current_dir(cwd)
                 .output()
         } else {
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let mut command = Command::new(cargo);
+            let mut command = cargo::command();
             command
                 .arg("run")
                 .arg("--quiet")

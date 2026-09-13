@@ -43,6 +43,7 @@ SYSTEMD_TEMPLATE = "examples/systemd/rustbgpd@.service"
 SYSTEMD_CONTAINER_UNIT = "examples/systemd/rustbgpd-container.service"
 COMPOSE_FILE = "examples/docker-compose/docker-compose.yml"
 LICENSE_MAP = "LICENSES.md"
+INSTALLER = "packaging/install.sh"
 SYSTEMD_DIRECTIVES = {
     ("Unit", "StartLimitIntervalSec"): "10min",
     ("Unit", "StartLimitBurst"): "5",
@@ -478,6 +479,15 @@ def check(root: Path) -> list[str]:
             if clause not in license_map:
                 errors.append(f"license map: missing CDLA clause {clause!r}")
         release = read(".github/workflows/release.yml")
+        read(INSTALLER)
+        select_script(
+            release,
+            "installer release asset",
+            "cp packaging/install.sh artifacts/install.sh",
+        )
+        workflow = read(".github/workflows/release-install-contract.yml")
+        if workflow.count("      - packaging/install.sh") != 2:
+            errors.append("release install workflow must trigger for packaging/install.sh")
         build_packages = read("scripts/build-packages.sh")
         require_patterns(
             errors,
@@ -557,14 +567,13 @@ def check(root: Path) -> list[str]:
         if template_mapping not in mappings:
             errors.append(f"native systemd template mapping missing {template_mapping!r}")
 
-        contract = read(".github/workflows/release-install-contract.yml")
         select_script(
-            contract,
+            workflow,
             "container systemd syntax verification",
             "systemd-analyze verify examples/systemd/rustbgpd-container.service",
         )
         native = select_script(
-            contract,
+            workflow,
             "real native package assertions",
             'dpkg-deb -x "$deb" extracted/deb',
         )
@@ -604,7 +613,7 @@ def check(root: Path) -> list[str]:
             errors.append("RPM extraction must populate extracted/rpm, not stdout")
 
         image_command = "docker run --rm --entrypoint birdwatcher-adapter rustbgpd:release-install-contract --help"
-        select_script(contract, "production image adapter assertion", image_command)
+        select_script(workflow, "production image adapter assertion", image_command)
     except (OSError, ValueError) as error:
         errors.append(str(error))
     return errors

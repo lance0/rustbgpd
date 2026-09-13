@@ -131,12 +131,11 @@ async fn handle_connection(
         },
         "/livez" => text_response("200 OK", "ok\n"),
         "/readyz" => {
-            // Hard bound on the response, not just the probe's internal
-            // waits: a runtime stall can hold the probe past the deadline
-            // and then complete it — on unpark the queued reply is polled
-            // before the expired timer, so without the elapsed guard a
-            // late success would be certified as a (contract-violating)
-            // late 200.
+            // Reject a successful probe observed after the shared deadline.
+            // After a runtime stall, a queued reply can be polled before the
+            // expired timer; the elapsed guard prevents certifying that late
+            // success. Scheduling and response delivery can still delay the
+            // HTTP response beyond the deadline.
             let started = std::time::Instant::now();
             match tokio::time::timeout(CORE_READINESS_DEADLINE, readiness_probe.check()).await {
                 Ok(Ok(())) if started.elapsed() <= CORE_READINESS_DEADLINE => {

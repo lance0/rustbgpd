@@ -256,8 +256,35 @@ const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
     0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
 ];
 
+/// The shared actor buckets plus the 2 s aggregate read deadline, so every
+/// operator-read caller budget (100 ms per-peer query, 500 ms explain, 2 s
+/// aggregate/read) is an exact edge and an over-budget share is a bucket
+/// subtraction. Kept separate so released actor families keep their layout.
+fn operator_query_wait_buckets() -> Vec<f64> {
+    let mut buckets = RIB_ACTOR_DURATION_BUCKETS.to_vec();
+    buckets.push(2.0);
+    buckets.sort_by(f64::total_cmp);
+    buckets
+}
+
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
+
+/// Closed labels for RIB ingest components. Distribution can serve readiness
+/// internally; these component durations do not bound readiness latency.
+const RIB_ACTOR_WORK_UNITS: [&str; 3] = ["route_chunk", "distribute_flush", "exact_export_retire"];
+
+/// Closed labels for the actor seam that served a readiness query.
+const RIB_READINESS_QUERY_SEAMS: [&str; 2] = ["actor_loop", "policy_transition_fence"];
+
+/// Closed labels for the current or latest completed command's operator-read policy marker.
+const PEER_MANAGER_OPERATOR_QUERY_SEAMS: [&str; 5] = [
+    "unfenced",
+    "prestage",
+    "forward_transition",
+    "commit_batches",
+    "rollback",
+];
 
 /// Closed outcome vocabulary for retained and dropped SIGHUP reload work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,6 +554,9 @@ struct BgpMetricsInner {
     rib_policy_transition_outcomes: IntCounterVec,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
+    rib_actor_work_duration_seconds: HistogramVec,
+    rib_readiness_query_wait_seconds: HistogramVec,
+    peer_manager_operator_query_wait_seconds: HistogramVec,
 
     // ── Update groups (shared outbound staging) ─────────────────
     update_groups: IntGauge,
@@ -1502,6 +1532,44 @@ impl BgpMetrics {
         .expect("valid metric definition");
         for operation in ["begin", "eorr", "timeout"] {
             rib_route_refresh_actor_duration_seconds.with_label_values(&[operation]);
+        }
+
+        let rib_actor_work_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_actor_work_duration_seconds",
+                "Wall-clock duration of RIB actor ingest components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, and `exact_export_retire` covers the following rejection retirement. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
+            )
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            &["work_unit"],
+        )
+        .expect("valid metric definition");
+        for work_unit in RIB_ACTOR_WORK_UNITS {
+            rib_actor_work_duration_seconds.with_label_values(&[work_unit]);
+        }
+
+        let rib_readiness_query_wait_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_rib_readiness_query_wait_seconds",
+                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
+            )
+            .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
+            &["seam"],
+        )
+        .expect("valid metric definition");
+        for seam in RIB_READINESS_QUERY_SEAMS {
+            rib_readiness_query_wait_seconds.with_label_values(&[seam]);
+        }
+        let peer_manager_operator_query_wait_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                "bgp_peer_manager_operator_query_wait_seconds",
+                "Wall-clock delay from send on the peer manager's operator-read lane until actor service begins, including bounded-channel admission wait. The seam is the current or latest completed command's policy marker: unfenced, prestage (preflight through session setup), forward_transition, commit_batches, or rollback. Markers include trailing command work; waits are recorded once, not split by cause. Observed after caller timeout if served; sends canceled before admission and reads never drained contribute no sample. Excludes work before send, service execution, and reply delivery.",
+            )
+            .buckets(operator_query_wait_buckets()),
+            &["seam"],
+        )
+        .expect("valid metric");
+        for seam in PEER_MANAGER_OPERATOR_QUERY_SEAMS {
+            peer_manager_operator_query_wait_seconds.with_label_values(&[seam]);
         }
 
         let update_groups = IntGauge::new(
@@ -2768,6 +2836,15 @@ impl BgpMetrics {
             .register(Box::new(rib_route_refresh_actor_duration_seconds.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rib_actor_work_duration_seconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_readiness_query_wait_seconds.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(peer_manager_operator_query_wait_seconds.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_groups.clone()))
             .expect("metric not already registered");
         registry
@@ -3212,6 +3289,9 @@ impl BgpMetrics {
             rib_policy_transition_outcomes,
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
+            rib_actor_work_duration_seconds,
+            rib_readiness_query_wait_seconds,
+            peer_manager_operator_query_wait_seconds,
             update_groups,
             update_group_members,
             peer_update_group,
@@ -5283,6 +5363,47 @@ impl BgpMetrics {
         self.0
             .rib_route_refresh_actor_duration_seconds
             .with_label_values(&[if timed_out { "timeout" } else { "eorr" }])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe one RIB actor ingest component.
+    ///
+    /// `work_unit` is one of the bounded `route_chunk`, `distribute_flush`, or
+    /// `exact_export_retire` labels. Components may service readiness internally
+    /// or run consecutively; their durations do not bound readiness latency.
+    pub fn observe_rib_actor_work(&self, work_unit: &str, duration: std::time::Duration) {
+        self.0
+            .rib_actor_work_duration_seconds
+            .with_label_values(&[work_unit])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe how long one readiness query waited between enqueue and service.
+    ///
+    /// `seam` is one of the bounded `actor_loop` or `policy_transition_fence`
+    /// values naming the drain that served the query.
+    pub fn observe_rib_readiness_query_wait(&self, seam: &str, duration: std::time::Duration) {
+        self.0
+            .rib_readiness_query_wait_seconds
+            .with_label_values(&[seam])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Observe how long one operator-lane read waited between send and
+    /// peer-manager service begins, including bounded-channel admission wait.
+    ///
+    /// `seam` is one of the bounded `unfenced`, `prestage`,
+    /// `forward_transition`, `commit_batches` or `rollback` values naming
+    /// the current or latest completed command's policy marker. It includes
+    /// trailing command work, not a causal split of the wait.
+    pub fn observe_peer_manager_operator_query_wait(
+        &self,
+        seam: &str,
+        duration: std::time::Duration,
+    ) {
+        self.0
+            .peer_manager_operator_query_wait_seconds
+            .with_label_values(&[seam])
             .observe(duration.as_secs_f64());
     }
 
@@ -7605,6 +7726,131 @@ mod tests {
                 "destructive break: route-refresh actor latency must retain the shared actor bucket contract"
             );
         }
+    }
+
+    /// Load-bearing break: dropping either the closed-label initialization or
+    /// the registry registration makes a fresh scrape omit a work unit, so a
+    /// soak could read "no long units" from a series that was never emitted.
+    #[test]
+    fn rib_actor_work_histogram_registers_closed_zeroed_labels_and_actor_buckets() {
+        let m = BgpMetrics::new();
+        let observed =
+            gathered_histogram_series(&m, "bgp_rib_actor_work_duration_seconds", "work_unit");
+        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["distribute_flush", "exact_export_retire", "route_chunk"]
+        );
+        for (work_unit, (sample_count, buckets)) in &observed {
+            assert_eq!(*sample_count, 0, "fresh {work_unit} series is zeroed");
+            assert_eq!(*buckets, expected_buckets, "actor buckets for {work_unit}");
+        }
+
+        // The 200 ms readiness deadline must be an exact bucket edge, or the
+        // over-deadline share can only be interpolated.
+        assert!(expected_buckets.contains(&0.200_f64.to_bits()));
+
+        m.observe_rib_actor_work("distribute_flush", std::time::Duration::from_millis(12));
+        let observed =
+            gathered_histogram_series(&m, "bgp_rib_actor_work_duration_seconds", "work_unit");
+        assert_eq!(observed["distribute_flush"].0, 1);
+        assert_eq!(observed["route_chunk"].0, 0);
+    }
+
+    #[test]
+    fn rib_readiness_query_wait_histogram_registers_closed_zeroed_labels() {
+        let m = BgpMetrics::new();
+        let observed =
+            gathered_histogram_series(&m, "bgp_rib_readiness_query_wait_seconds", "seam");
+        let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
+
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            RIB_READINESS_QUERY_SEAMS
+        );
+        for (seam, (sample_count, buckets)) in &observed {
+            assert_eq!(*sample_count, 0, "fresh {seam} series is zeroed");
+            assert_eq!(*buckets, expected_buckets, "actor buckets for {seam}");
+        }
+
+        m.observe_rib_readiness_query_wait("actor_loop", std::time::Duration::from_millis(250));
+        let observed =
+            gathered_histogram_series(&m, "bgp_rib_readiness_query_wait_seconds", "seam");
+        assert_eq!(observed["actor_loop"].0, 1);
+        assert_eq!(observed["policy_transition_fence"].0, 0);
+    }
+
+    #[test]
+    fn peer_manager_operator_query_wait_histogram_registers_closed_zeroed_labels() {
+        let m = BgpMetrics::new();
+        let family = "bgp_peer_manager_operator_query_wait_seconds";
+        let observed = gathered_histogram_series(&m, family, "seam");
+        let expected_buckets = operator_query_wait_buckets()
+            .into_iter()
+            .map(f64::to_bits)
+            .collect::<Vec<_>>();
+
+        let mut expected_seams = PEER_MANAGER_OPERATOR_QUERY_SEAMS.to_vec();
+        expected_seams.sort_unstable();
+        assert_eq!(
+            observed.keys().map(String::as_str).collect::<Vec<_>>(),
+            expected_seams
+        );
+        for (seam, (sample_count, buckets)) in &observed {
+            assert_eq!(*sample_count, 0, "fresh {seam} series is zeroed");
+            assert_eq!(*buckets, expected_buckets, "actor buckets for {seam}");
+        }
+        // The caller budgets are exact bucket edges, on top of the shared
+        // actor layout.
+        let buckets = operator_query_wait_buckets();
+        for edge in [0.1, 0.5, 2.0] {
+            assert!(buckets.contains(&edge), "{edge} s edge");
+        }
+        assert!(buckets.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            RIB_ACTOR_DURATION_BUCKETS
+                .iter()
+                .all(|edge| buckets.contains(edge))
+        );
+
+        m.observe_peer_manager_operator_query_wait("rollback", std::time::Duration::from_secs(3));
+        let observed = gathered_histogram_series(&m, family, "seam");
+        assert_eq!(observed["rollback"].0, 1);
+        assert_eq!(observed["unfenced"].0, 0);
+    }
+
+    /// Sample counts and bucket bounds per label value of one histogram family.
+    fn gathered_histogram_series(
+        metrics: &BgpMetrics,
+        family_name: &str,
+        label: &str,
+    ) -> std::collections::BTreeMap<String, (u64, Vec<u64>)> {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == family_name)
+            .unwrap_or_else(|| panic!("{family_name} is registered"))
+            .metric
+            .iter()
+            .map(|metric| {
+                let value = metric
+                    .get_label()
+                    .iter()
+                    .find(|candidate| candidate.name() == label)
+                    .unwrap_or_else(|| panic!("{label} label exists"))
+                    .value()
+                    .to_owned();
+                let histogram = metric.get_histogram();
+                let buckets = histogram
+                    .get_bucket()
+                    .iter()
+                    .map(|bucket| bucket.upper_bound().to_bits())
+                    .collect::<Vec<_>>();
+                (value, (histogram.sample_count(), buckets))
+            })
+            .collect()
     }
 
     #[test]

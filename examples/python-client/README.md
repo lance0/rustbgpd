@@ -33,6 +33,13 @@ with nothing to catch it — so `.gitignore` covers them. Regenerate after every
 proto change. Run the scripts from this directory so the generated modules are
 importable.
 
+VPN and EVPN `prefix_sid.services[].sids[]` preserve the advertised `sid_value`.
+Use `sid.HasField("reconstructed_sid")` before reading the optional Function
+reconstruction. It is absent for older servers, unavailable or ambiguous label
+inputs, and Argument-dependent composition. See the
+[Prefix-SID API reference](../../docs/reference/api.md#prefix-sid-inspection-on-vpn-and-evpn-routes)
+for the inspection boundary.
+
 ```bash
 python -m pip install -r requirements.txt
 ```

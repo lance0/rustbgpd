@@ -994,6 +994,48 @@ fn drain_route_chunks(manager: &mut RibManager) {
     while manager.process_next_route_chunk() {}
 }
 
+/// Load-bearing break: the coalesced outbound pass a drained route batch
+/// performs is bounded by changed prefixes times peers, while the chunk ahead
+/// of it is bounded by a prefix count. Fusing their timings back together —
+/// or observing the flush only on the defensive empty-batch path — would leave
+/// a soak unable to say which unit outlasted a readiness deadline.
+#[test]
+fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
+    let metrics = BgpMetrics::new();
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+
+    let counts = histogram_sample_counts_by_label(
+        &metrics,
+        "bgp_rib_actor_work_duration_seconds",
+        "work_unit",
+    );
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            ("route_chunk".to_owned(), 1),
+            ("distribute_flush".to_owned(), 1),
+            ("exact_export_retire".to_owned(), 1),
+        ]),
+        "one announce batch is one chunk plus one drained-batch tail"
+    );
+}
+
 /// Every peer-up with the RTC family triggers the lazy default origination,
 /// so the initial dump always carries at least the local default NLRI
 /// followed by the SAFI-132 `EoR`. Drain both.
@@ -1329,6 +1371,7 @@ mod outbound_prefix_limits;
 mod paged_query;
 mod per_client_best;
 mod policy;
+mod ready_drain;
 mod refresh;
 mod replay;
 mod rpki;

@@ -645,6 +645,34 @@ pub enum PeerCommand {
     },
 }
 
+impl PeerCommand {
+    /// Only abandoned snapshots may be discarded. A lost mutation acknowledgement
+    /// does not cancel the command or relinquish its place in the session FIFO.
+    pub(crate) fn is_canceled_read(&self) -> bool {
+        match self {
+            Self::QueryState { reply } => reply.is_closed(),
+            Self::QueryWarmCheckpointState { reply } => reply.is_closed(),
+            Self::ExplainImportPolicy { reply, .. } => reply.is_closed(),
+            Self::ListRejectedRoutes { reply } => reply.is_closed(),
+            Self::QueryImportPolicyTermHits { reply } => reply.is_closed(),
+            _ => false,
+        }
+    }
+
+    /// Wake shared-output consumers when their deferred snapshot is abandoned.
+    /// Commands outside the snapshot allowlist remain owned until execution.
+    pub(crate) async fn read_canceled(&mut self) {
+        match self {
+            Self::QueryState { reply } => reply.closed().await,
+            Self::QueryWarmCheckpointState { reply } => reply.closed().await,
+            Self::ExplainImportPolicy { reply, .. } => reply.closed().await,
+            Self::ListRejectedRoutes { reply } => reply.closed().await,
+            Self::QueryImportPolicyTermHits { reply } => reply.closed().await,
+            _ => std::future::pending().await,
+        }
+    }
+}
+
 /// Per-term hit-counter snapshot for one session's installed import
 /// chain (`PeerCommand::QueryImportPolicyTermHits`).
 #[derive(Debug, Clone)]
@@ -1682,15 +1710,7 @@ impl PeerHandle {
         &self,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
-        match tokio::time::timeout(deadline, async {
-            let (reply, result) = oneshot::channel();
-            self.commands
-                .send(PeerCommand::ReplayOutbound { reply })
-                .await
-                .map_err(|_| PeerCommandError::SessionExited)?;
-            result.await.map_err(|_| PeerCommandError::ReplyDropped)?
-        })
-        .await
+        match tokio::time::timeout(deadline, Self::replay_outbound_via(self.commands.clone())).await
         {
             Ok(result) => result,
             Err(_) => Err(PeerCommandError::TimedOut {
@@ -1698,6 +1718,23 @@ impl PeerHandle {
                 deadline,
             }),
         }
+    }
+
+    /// Schedule replay through an owned command sender. The caller owns the
+    /// deadline, including any work it interleaves with this round trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns a session refusal, delivery error, or dropped acknowledgement.
+    pub async fn replay_outbound_via(
+        commands: mpsc::Sender<PeerCommand>,
+    ) -> Result<(), PeerCommandError> {
+        let (reply, result) = oneshot::channel();
+        commands
+            .send(PeerCommand::ReplayOutbound { reply })
+            .await
+            .map_err(|_| PeerCommandError::SessionExited)?;
+        result.await.map_err(|_| PeerCommandError::ReplyDropped)?
     }
 
     /// Send a ROUTE-REFRESH command with a bounded deadline.

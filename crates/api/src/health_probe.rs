@@ -226,10 +226,14 @@ impl CoreReadinessProbe {
         timeout_until(deadline, CoreReadinessError::RibTimedOut, async {
             if let Some(readiness_tx) = &self.rib_readiness_tx {
                 let (reply_tx, reply_rx) = oneshot::channel();
-                readiness_tx
-                    .send(RibReadinessQuery::LocRibCount { reply: reply_tx })
+                let permit = readiness_tx
+                    .reserve()
                     .await
                     .map_err(|_| CoreReadinessError::RibUnavailable)?;
+                permit.send(RibReadinessQuery::LocRibCount {
+                    reply: reply_tx,
+                    enqueued: std::time::Instant::now(),
+                });
                 reply_rx
                     .await
                     .map_err(|_| CoreReadinessError::RibDroppedReply)?
@@ -498,7 +502,7 @@ mod tests {
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
             reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-            let RibReadinessQuery::LocRibCount { reply } =
+            let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply.send(Ok(11)).unwrap();
         });
@@ -511,6 +515,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readiness_timestamp_excludes_waiting_for_channel_admission() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (rib_query_tx, _rib_query_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (reply, _response) = oneshot::channel();
+        readiness_tx
+            .try_send(RibReadinessQuery::LocRibCount {
+                reply,
+                enqueued: std::time::Instant::now(),
+            })
+            .unwrap();
+        let probe = CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(readiness_tx);
+        let query = probe.query_rib(Instant::now() + CORE_READINESS_DEADLINE);
+        tokio::pin!(query);
+        tokio::select! {
+            biased;
+            result = &mut query => panic!("full readiness lane must wait: {result:?}"),
+            () = std::future::ready(()) => {},
+        }
+
+        let admission_after = std::time::Instant::now();
+        readiness_rx.try_recv().unwrap();
+        let (result, ()) = tokio::join!(query, async {
+            let RibReadinessQuery::LocRibCount { reply, enqueued } =
+                readiness_rx.recv().await.unwrap();
+            assert!(enqueued >= admission_after);
+            reply.send(Ok(11)).unwrap();
+        });
+        assert_eq!(result.unwrap(), 11);
+    }
+
+    #[tokio::test]
     async fn snapshot_maps_stalled_rib_transition_to_stable_readiness_error() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
@@ -520,7 +556,7 @@ mod tests {
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
             reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
-            let RibReadinessQuery::LocRibCount { reply } =
+            let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply
                 .send(Err(RibReadinessError::PolicyTransitionStalled))
@@ -566,7 +602,7 @@ mod tests {
                 panic!("expected Ping readiness query");
             };
             reply.send(()).unwrap();
-            let RibReadinessQuery::LocRibCount { reply } =
+            let RibReadinessQuery::LocRibCount { reply, .. } =
                 rib_readiness_rx.recv().await.expect("RIB readiness query");
             reply.send(Ok(0)).unwrap();
         });

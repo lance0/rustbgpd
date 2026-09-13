@@ -1009,8 +1009,20 @@ stub 0's deliberate max-prefix trip cannot create a false load failure. Each
 surface has its own monotonic schedule and a five-second timeout with no retry.
 The retained JSONL contains only timing, disposition, byte count, and SHA-256
 fields—not the potentially large responses. The load must outlive the complete
-measured window and finish with its atomic SIGTERM summary before analysis
-begins.
+measured window. At natural completion the engine holds its sessions at the
+existing final evidence barrier (`engine-finish/ready`). The runner ends the
+measured window, SIGTERMs the load and waits for every in-flight probe and its
+atomic summary before writing `engine-finish/ack`. Only then may the engine
+send its final Administrative Shutdown notifications. The existing 15-second
+engine evidence deadline and per-probe timeout remain in effect; an incomplete
+drain fails the run.
+
+`management_lifetime` requires the monotonic load/window/release ordering and
+checks the load summary's `completed_unix` against the first received
+Administrative Shutdown in the daemon log. Missing or reversed finish evidence
+fails closed, including when all probe results report success. Every operation
+still counts toward the management gates; teardown is no failure exemption.
+Older archived verdicts retain their original analyzer revision and result.
 
 A fifth schedule runs `rbgp doctor` every `MANAGEMENT_DOCTOR_INTERVAL_SEC`
 (default 600 s). This one is an assertion, not load: `doctor` is the shipped
@@ -1053,18 +1065,48 @@ Smokes may lengthen the probe schedules with
 in `run.json` and the terminal summary, and the analyzer requires them to
 match. The management-plane load itself is not optional.
 
+`samples.csv` extracts ten scalars per sample; every family the daemon
+exposes, including the RIB actor work and readiness-wait histograms that
+diagnose reload stalls, is retained by `metrics-snapshots.txt.gz`. The
+runner appends the full `/metrics` body it already scraped for the sample
+every `METRICS_SNAPSHOT_EVERY` samples (default `10`, so every 5 minutes at
+the default 30 s sample interval; `0` disables retention), each headed by a
+`# snapshot <UTC> elapsed_sec=<n>` line; `zcat` reads the file as one
+stream. A failed append is rolled back so it cannot corrupt later snapshots;
+a member interrupted by a hard crash is not recovered. At the 1000-peer
+shape one body is about 4.4 MiB raw and about 210 KiB gzipped, so a 24 h
+run keeps 288 snapshots in roughly 60 MB. Both flagship runners share this
+knob.
+
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
 file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`,
 `management-plane-load.jsonl`, `management-plane-load.log`,
-`doctor-bundle.tar.gz`, `run.json`,
+`doctor-bundle.tar.gz`, `metrics-snapshots.txt.gz`, `run.json`,
 `verdict.json`, `runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
 directory under `/tmp` is required by the gRPC UDS `sun_path` cap; the
 scenario is regenerated fresh per run and copied into the run dir.
+
+The RS readiness gate requires HTTP 200 within 250 ms and fails on three
+consecutive breaches, with a default 30-second sampling interval. Missing
+observations also fail the gate. Isolated breaches remain reported findings,
+but do not automatically block a release when all agreed acceptance gates pass.
+This is soak acceptance hysteresis; `/readyz` itself reports each current
+probe result using its unchanged shared 200 ms core-actor deadline. See
+[readiness acceptance and Kubernetes probes](../../docs/soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+for the observation rules and the different Kubernetes defaults and RR gate.
+
+For readiness diagnosis, retain timestamped Prometheus series or snapshots
+from the measured daemon through existing monitoring. `samples.csv` does not
+include the RIB actor-work or readiness-wait histograms, and
+`management-plane-load.jsonl` records probe timings and response hashes, not
+Prometheus payloads. The runner overwrites `.metrics.prom` as scrape scratch;
+it is not a complete history. Those files alone cannot establish the histogram
+correlation described in the [operations guide](../../docs/reference/operations.md).
 
 ---
 
@@ -1102,8 +1144,9 @@ Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
 file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rr-flagship-<UTC>/` (`samples.csv`,
-`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`, `verdict.json`,
-`runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rr-flagship.py` and the
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `metrics-snapshots.txt.gz`,
+`run.json`, `verdict.json`, `runner.identity`, `cleanup.complete`); the
+analyzer is `analyze-soak-rr-flagship.py` and the
 precommitted gates are scenario 11 in
 `docs/soaks/soak-acceptance-gates.md`. The same short-`/tmp`-scenario
 and fresh-per-run rules as the route-server flagship soak apply.

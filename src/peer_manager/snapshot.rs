@@ -665,10 +665,9 @@ impl PeerManager {
         tokio::time::timeout_at(deadline, rx).await.ok()?.ok()
     }
 
-    /// RFC 9069 Loc-RIB stats (types 8 + 10) for the emulated Loc-RIB
-    /// instance peer, emitted on the same periodic tick as the per-peer
-    /// stats. Skipped entirely unless some collector monitors `loc_rib`.
-    async fn emit_loc_rib_bmp_stats(&self, bmp_tx: &tokio::sync::mpsc::Sender<BmpEvent>) {
+    /// RFC 9069 Loc-RIB counts, omitted unless a collector monitors `loc_rib`.
+    /// As with peer counts, admission and reply share one sampling deadline.
+    pub(super) async fn query_bmp_loc_rib_stats(&self) -> Option<Vec<(u16, u8, u64)>> {
         let monitored = self.current_config.bmp.as_ref().is_some_and(|bmp| {
             bmp.collectors.iter().any(|collector| {
                 collector
@@ -677,21 +676,27 @@ impl PeerManager {
             })
         });
         if !monitored {
-            return;
+            return None;
         }
         let (reply, rx) = tokio::sync::oneshot::channel();
-        if self
-            .rib_tx
-            .send(rustbgpd_rib::RibUpdate::QueryBmpLocRibStats { reply })
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let Ok(Ok(per_family)) = tokio::time::timeout(PEER_QUERY_TIMEOUT, rx).await else {
-            // Unavailable this tick — omit rather than report a false zero.
-            return;
-        };
+        let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
+        tokio::time::timeout_at(
+            deadline,
+            self.rib_tx
+                .send(rustbgpd_rib::RibUpdate::QueryBmpLocRibStats { reply }),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        // Unavailable this tick: omit rather than report a false zero.
+        tokio::time::timeout_at(deadline, rx).await.ok()?.ok()
+    }
+
+    fn emit_loc_rib_bmp_stats(
+        &self,
+        bmp_tx: &tokio::sync::mpsc::Sender<BmpEvent>,
+        per_family: Vec<(u16, u8, u64)>,
+    ) {
         if let Err(e) = bmp_tx.try_send(BmpEvent::LocRibStats { per_family }) {
             let reason = match e {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
@@ -713,9 +718,17 @@ impl PeerManager {
         // Same fan-out pattern as `list_peers` — sequential awaits would let
         // any one TCP-back-pressured peer block the per-minute BMP tick and,
         // through it, every other admin command queued behind the BMP arm.
-        let states = collect_session_states(&self.peers).await;
-        let bmp_peer_stats = self.query_bmp_peer_stats().await;
-        self.emit_loc_rib_bmp_stats(bmp_tx).await;
+        // These independent reads observe the same managed peer set, but do
+        // not form one atomic cross-actor snapshot. Overlap their bounded waits
+        // instead of stacking three 100 ms budgets on the actor's timer arm.
+        let (states, bmp_peer_stats, loc_rib_stats) = tokio::join!(
+            collect_session_states(&self.peers),
+            self.query_bmp_peer_stats(),
+            self.query_bmp_loc_rib_stats(),
+        );
+        if let Some(per_family) = loc_rib_stats {
+            self.emit_loc_rib_bmp_stats(bmp_tx, per_family);
+        }
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
             let state = match states.get(peer) {

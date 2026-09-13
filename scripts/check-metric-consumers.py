@@ -664,8 +664,8 @@ def workspace_metric_inventory(
         if name in inventory:
             raise ValueError(f"process family duplicates workspace family {name}")
         inventory[name] = "ordinary"
-    if len(inventory) != 214:
-        raise ValueError(f"emitted metric roster changed: expected 214, got {len(inventory)}")
+    if len(inventory) != 217:
+        raise ValueError(f"emitted metric roster changed: expected 217, got {len(inventory)}")
     return dict(sorted(inventory.items()))
 
 

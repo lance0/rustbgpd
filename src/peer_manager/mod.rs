@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    OwnedHotUpdatePeerOutcome, OwnedNeighborMutation, OwnedNeighborMutationError,
-    OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerOperatorQuery, PeerManagerReadinessQuery, PeerReconcileAuthority,
-    PolicyDatasetStatusRow, PolicyEvent, RuntimeConfigTransactionPlanError, SessionEvent,
-    SessionLifecycleEvent,
+    ConfigEvent, DynamicNeighborInfo, EnqueuedOperatorQuery, OwnedCatalogMutation,
+    OwnedCatalogMutationOutcome, OwnedHotUpdatePeerOutcome, OwnedNeighborMutation,
+    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand,
+    PeerManagerNeighborConfig, PeerManagerOperatorQuery, PeerManagerReadinessQuery,
+    PeerReconcileAuthority, PolicyDatasetStatusRow, PolicyEvent, RuntimeConfigTransactionPlanError,
+    SessionEvent, SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -63,6 +63,35 @@ const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 const BGP_PORT: u16 = 179;
 const BMP_STATS_INTERVAL_SECS: u64 = 60;
 
+/// The current policy-transaction phase used to label operator-read waits.
+/// Labels `bgp_peer_manager_operator_query_wait_seconds{seam}`; the set is
+/// closed and every value is pre-registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OperatorReadSeam {
+    /// No marked policy command overlapped the read's send-to-service interval.
+    Unfenced,
+    /// Policy preflight, cohort selection, destination prestage and session setup.
+    Prestage,
+    /// A forward reload awaiting the cohort RIB transition.
+    ForwardTransition,
+    /// A reload's authoritative commit batches.
+    CommitBatches,
+    /// A rejected reload's rollback.
+    Rollback,
+}
+
+impl OperatorReadSeam {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Unfenced => "unfenced",
+            Self::Prestage => "prestage",
+            Self::ForwardTransition => "forward_transition",
+            Self::CommitBatches => "commit_batches",
+            Self::Rollback => "rollback",
+        }
+    }
+}
+
 /// Hard deadline for any single per-peer `query_state` request. Bounded so a
 /// session task that's parked on TCP write back-pressure can't hang an admin
 /// path (`ListPeers`, `GetPeerState`, periodic BMP stats). 100ms is well
@@ -103,11 +132,20 @@ const PEER_SHUTDOWN_CONCURRENCY: usize = 64;
 /// progress while still keeping the unchanged 200 ms end-to-end deadline.
 const READINESS_QUERY_BUDGET_PER_POLICY_STEP: usize = 1;
 
-/// Hard deadline for a RIB-manager reply awaited from the `PeerManager`
-/// actor (export-policy swap, per-peer outbound refresh). Generous — the
-/// RIB answers these inline and never legitimately takes seconds — but
-/// bounded so a wedged RIB task cannot park the peer-manager actor (and
-/// therefore SIGHUP reload / gRPC policy apply) forever.
+/// Hard deadline for RIB channel admission and reply on a single-peer policy
+/// edit. Also used by per-peer outbound refresh and other bounded RIB steps.
+/// Bounded so a wedged RIB task cannot park the
+/// peer-manager actor (and therefore SIGHUP reload / gRPC policy apply)
+/// forever.
+///
+/// It is not a claim that the RIB answers quickly. These commands queue on
+/// the RIB manager's primary lane, which is not polled while route chunks
+/// pend, and an export-policy replacement then performs a full Loc-RIB
+/// distribution pass of its own — seconds at route-server scale under load.
+/// Five seconds is therefore only defensible for one command whose latency
+/// an operator is waiting on directly. Every `O(peers)` policy walk shares
+/// one [`RIB_BATCH_REPLY_TIMEOUT`] budget across all of its steps instead,
+/// so the walk is bounded in total rather than per peer.
 const RIB_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hard deadline for the batched authoritative export-policy apply
@@ -125,6 +163,35 @@ const RIB_BATCH_REPLY_TIMEOUT: Duration = Duration::from_mins(2);
 /// peer-manager actor. The typed outcome prevents that timeout from
 /// masquerading as a missing session.
 const EXPLAIN_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Whether an actor-owned wait admits the bounded operator-read lane
+/// (`rbgp neighbor`, `rbgp policy stats`, dataset status) while it is driven.
+/// The dedicated readiness lane is always admitted; the ordinary command
+/// receiver never is, so mutations stay strictly behind the owner. Operator
+/// reads carry deadlines of 100 ms to 2 s, so any wait that can outlast them
+/// must justify fencing them at the site: a fenced wait names what bounds it
+/// or what a served read would observe, the same way a lint allowance names
+/// its reason.
+#[derive(Clone, Copy, Debug)]
+enum OperatorReadAdmission {
+    /// Serve each operator read as it arrives; the wait resumes after the
+    /// read completes.
+    Served,
+    /// Leave operator reads queued behind the wait.
+    Fenced {
+        #[expect(
+            dead_code,
+            reason = "the reason documents the fence at its call site; it is not runtime state"
+        )]
+        reason: &'static str,
+    },
+}
+
+impl OperatorReadAdmission {
+    const fn admits(self) -> bool {
+        matches!(self, Self::Served)
+    }
+}
 
 /// Maximum number of session-side import-policy snapshots in flight per
 /// collector/RPC. The cap bounds each collector's memory/work while every
@@ -390,12 +457,18 @@ pub struct PeerManager {
     /// commands remain on `rx` and therefore stay ordered behind a policy
     /// transaction until it either commits or rolls back.
     readiness_rx: Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
-    /// Operator snapshots are admitted only outside mutations or before a forward
-    /// reload has applied any session policy or published its candidate datasets.
-    operator_rx: Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
+    /// Operator snapshots use the normal loop and explicitly served transaction
+    /// wait sites. Mutations remain ordered on the separate command lane.
+    operator_rx: Option<mpsc::Receiver<EnqueuedOperatorQuery>>,
     /// Neighbor snapshots deferred while another normal snapshot services
     /// lightweight reads. Bounded by the operator channel's capacity.
-    deferred_operator_queries: VecDeque<PeerManagerOperatorQuery>,
+    deferred_operator_queries: VecDeque<EnqueuedOperatorQuery>,
+    /// Current command's policy phase. Reset before each command; ordinary
+    /// commands must not erase the last completed policy phase below.
+    operator_read_seam: OperatorReadSeam,
+    /// Last policy marker and enclosing command's completion instant. The
+    /// marker includes trailing command work, not a causal split of the wait.
+    completed_operator_seam: Option<(OperatorReadSeam, tokio::time::Instant)>,
     internal_rx: Option<mpsc::Receiver<InternalCommand>>,
     local_asn: u32,
     router_id: Ipv4Addr,
@@ -623,24 +696,53 @@ impl PeerManager {
     #[must_use]
     pub fn with_operator_queries(
         mut self,
-        operator_rx: mpsc::Receiver<PeerManagerOperatorQuery>,
+        operator_rx: mpsc::Receiver<EnqueuedOperatorQuery>,
     ) -> Self {
         self.operator_rx = Some(operator_rx);
         self
     }
 
-    async fn handle_operator_query(
-        &mut self,
-        query: PeerManagerOperatorQuery,
-        during_prestage: bool,
-    ) {
+    /// Latest completed marked command overlapping the read's queue wait.
+    fn seam_that_held(&self, enqueued: tokio::time::Instant) -> OperatorReadSeam {
+        match self.completed_operator_seam {
+            Some((seam, released)) if enqueued < released => seam,
+            _ => OperatorReadSeam::Unfenced,
+        }
+    }
+
+    fn finish_operator_seam(&mut self) {
+        if self.operator_read_seam != OperatorReadSeam::Unfenced {
+            self.completed_operator_seam =
+                Some((self.operator_read_seam, tokio::time::Instant::now()));
+        }
+    }
+
+    /// Record one operator read's send-to-service wait under `seam`.
+    /// Observed at service, so a read whose caller already gave up still
+    /// reports its queue wait. Service execution and reply delivery follow it.
+    fn observe_operator_query_wait(&self, enqueued: tokio::time::Instant, seam: OperatorReadSeam) {
+        self.metrics
+            .observe_peer_manager_operator_query_wait(seam.label(), enqueued.elapsed());
+    }
+
+    async fn handle_operator_query(&mut self, query: EnqueuedOperatorQuery, during_prestage: bool) {
+        let EnqueuedOperatorQuery { enqueued, query } = query;
         if during_prestage {
+            // A marked transaction wait owns the attribution. An unmarked
+            // admitting wait retains a completed policy seam that held this read.
+            let seam = if self.operator_read_seam == OperatorReadSeam::Unfenced {
+                self.seam_that_held(enqueued)
+            } else {
+                self.operator_read_seam
+            };
+            self.observe_operator_query_wait(enqueued, seam);
             // Finish the admitted snapshot before a prestage ACK can let
             // the reload advance any session's installed policy.
             if let Some(task) = self.answer_operator_query(query).await {
-                let _ = self.await_with_readiness(task).await;
+                let _ = self.finish_admitted_operator_read(task).await;
             }
         } else {
+            self.observe_operator_query_wait(enqueued, self.seam_that_held(enqueued));
             self.answer_normal_operator_query(query).await;
         }
     }
@@ -709,12 +811,19 @@ impl PeerManager {
                         match query {
                             Some(query) => {
                                 remaining -= 1;
-                                match query {
-                                    query @ (PeerManagerOperatorQuery::ListPeers { .. }
-                                        | PeerManagerOperatorQuery::GetPeerState { .. }) => {
-                                        deferred.push_back(query);
-                                    }
-                                    query => drop(self.answer_operator_query(query).await),
+                                if matches!(
+                                    query.query,
+                                    PeerManagerOperatorQuery::ListPeers { .. }
+                                        | PeerManagerOperatorQuery::GetPeerState { .. }
+                                ) {
+                                    deferred.push_back(query);
+                                } else {
+                                    let EnqueuedOperatorQuery { enqueued, query } = query;
+                                    self.observe_operator_query_wait(
+                                        enqueued,
+                                        self.seam_that_held(enqueued),
+                                    );
+                                    drop(self.answer_operator_query(query).await);
                                 }
                             }
                             None => disconnected = true,
@@ -831,9 +940,9 @@ impl PeerManager {
     }
 
     async fn receive_operator_query(
-        operator_rx: &mut Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
-        deferred: &mut VecDeque<PeerManagerOperatorQuery>,
-    ) -> Option<PeerManagerOperatorQuery> {
+        operator_rx: &mut Option<mpsc::Receiver<EnqueuedOperatorQuery>>,
+        deferred: &mut VecDeque<EnqueuedOperatorQuery>,
+    ) -> Option<EnqueuedOperatorQuery> {
         if let Some(query) = deferred.pop_front() {
             return Some(query);
         }
@@ -864,6 +973,23 @@ impl PeerManager {
         }
     }
 
+    /// Service queued reads when session policies and manager bookkeeping
+    /// agree. Bound each seam so a read flood cannot
+    /// prevent the owning transaction from advancing to its next step.
+    async fn drain_operator_queries(&mut self, admission: OperatorReadAdmission) {
+        if !admission.admits() {
+            return;
+        }
+        for _ in 0..READINESS_QUERY_BUDGET_PER_POLICY_STEP {
+            let query = self
+                .deferred_operator_queries
+                .pop_front()
+                .or_else(|| self.operator_rx.as_mut().and_then(|rx| rx.try_recv().ok()));
+            let Some(query) = query else { break };
+            Box::pin(self.handle_operator_query(query, true)).await;
+        }
+    }
+
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
             PeerManagerReadinessQuery::Ping { reply } => {
@@ -875,10 +1001,12 @@ impl PeerManager {
         }
     }
 
-    /// Drive one owned transaction step while servicing at most one read-only
-    /// readiness query at a time. The transaction future is biased first, so a
-    /// probe flood cannot delay a completed apply/rollback step.
-    async fn await_with_readiness<F>(&mut self, future: F) -> F::Output
+    /// Finish one admitted operator read while servicing only the readiness
+    /// lane. This is the one wait that takes no admission: the read it
+    /// drives was itself admitted by an [`Self::await_with_readiness`] wait,
+    /// which admits the next read once this one completes, so reads stay in
+    /// order and the admitting wait never nests.
+    async fn finish_admitted_operator_read<F>(&mut self, future: F) -> F::Output
     where
         F: Future,
     {
@@ -900,33 +1028,68 @@ impl PeerManager {
         }
     }
 
-    /// Like [`Self::await_with_readiness`], but bound the transaction step by
-    /// a budget that accrues only while the step itself is being driven. Wall
-    /// time spent servicing an interleaved readiness query is not charged: a
-    /// `tokio::time::timeout` inside the step would keep counting during that
-    /// servicing, so a probe flood (or any long servicing burst) would be
-    /// deducted from a healthy session command's deadline — the mechanism
-    /// behind the cohort-setup starvation. Returns `None` when the accrued
-    /// budget elapses before the future completes.
+    /// Drive one owned step while servicing at most one read-only readiness
+    /// query at a time and, when `admission` is [`OperatorReadAdmission::Served`],
+    /// the bounded operator-read lane as well. The step future is biased
+    /// first, so a probe flood cannot delay a completed apply/rollback step.
+    /// Each admitted operator read completes (through a fenced wait of its
+    /// own) before this wait resumes, and the ordinary command receiver is
+    /// never polled here, so mutations remain strictly behind the owner.
+    ///
+    /// A forward policy apply serves reads while it awaits the cohort's RIB
+    /// transition and while the same transaction's rollback awaits its
+    /// registered RIB aggregate. During the transition every cohort session
+    /// already runs its new chains, so a read observes the same mixed
+    /// per-session generation the destination prestage admits; during the
+    /// rollback reads report live session state after restoration has been
+    /// attempted, including failed restores. Neither wait pins a common
+    /// generation across sessions or the RIB, whose authoritative restore
+    /// still fences its general-query lane.
+    async fn await_with_readiness<F>(
+        &mut self,
+        future: F,
+        admission: OperatorReadAdmission,
+    ) -> F::Output
+    where
+        F: Future,
+    {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut future => return result,
+                query = Self::receive_readiness_query(&mut self.readiness_rx) => {
+                    match query {
+                        Some(query) => self.handle_readiness_query(query).await,
+                        None => self.readiness_rx = None,
+                    }
+                }
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if admission.admits() => {
+                    match query {
+                        // Boxed so the read's handler is not part of every
+                        // fenced wait's state machine; it allocates only
+                        // when a read is actually admitted.
+                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
+                        None => self.operator_rx = None,
+                    }
+                }
+            }
+        }
+    }
+
+    /// Like [`Self::await_with_readiness`], but bound the step by a budget
+    /// that accrues only while the step itself is being driven. Wall time
+    /// spent servicing an interleaved readiness or operator query is not
+    /// charged: a `tokio::time::timeout` inside the step would keep counting
+    /// during that servicing, so a probe flood (or any long servicing burst)
+    /// would be deducted from a healthy session command's deadline — the
+    /// mechanism behind the cohort-setup starvation. Returns `None` when the
+    /// accrued budget elapses before the future completes.
     async fn await_with_readiness_budget<F>(
         &mut self,
         future: F,
         budget: Duration,
-    ) -> Option<F::Output>
-    where
-        F: Future,
-    {
-        self.await_with_readiness_and_operator_budget(future, budget, false)
-            .await
-    }
-
-    /// Only a forward reload's initial destination prestage may admit operator
-    /// snapshots. All other transaction waits keep this lane fenced.
-    async fn await_with_readiness_and_operator_budget<F>(
-        &mut self,
-        future: F,
-        budget: Duration,
-        allow_operator_reads: bool,
+        admission: OperatorReadAdmission,
     ) -> Option<F::Output>
     where
         F: Future,
@@ -950,10 +1113,10 @@ impl PeerManager {
                         return None;
                     }
                 }
-                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if allow_operator_reads => {
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if admission.admits() => {
                     remaining = remaining.saturating_sub(attended.elapsed());
                     match query {
-                        Some(query) => self.handle_operator_query(query, true).await,
+                        Some(query) => Box::pin(self.handle_operator_query(query, true)).await,
                         None => self.operator_rx = None,
                     }
                     if remaining.is_zero() {
@@ -1030,6 +1193,8 @@ impl PeerManager {
             readiness_rx: None,
             operator_rx: None,
             deferred_operator_queries: VecDeque::new(),
+            operator_read_seam: OperatorReadSeam::Unfenced,
+            completed_operator_seam: None,
             internal_rx: Some(internal_rx),
             local_asn,
             router_id,
@@ -1320,6 +1485,7 @@ impl PeerManager {
                         debug!("peer manager channel closed");
                         return;
                     };
+                    self.operator_read_seam = OperatorReadSeam::Unfenced;
                     match cmd {
                         PeerManagerCommand::Ping { reply } => {
                             let _ = reply.send(());
@@ -1608,7 +1774,16 @@ impl PeerManager {
                             let _ = reply.send(self.current_config.effective_redacted_toml());
                         }
                         PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                            let result = self.apply_resolved_policy_snapshot(targets).await;
+                            // API publication rollback restores policy chains before the
+                            // staged config. Reads report each source's current values.
+                            let result = self
+                                .apply_resolved_policy_snapshot_with_prestage_reads(
+                                    targets,
+                                    false,
+                                    OperatorReadAdmission::Served,
+                                )
+                                .await
+                                .map_err(|failure| failure.message);
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ApplyPolicyImpactSnapshot {
@@ -1677,11 +1852,8 @@ impl PeerManager {
                             let result = self.refresh_outbound(peer).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::ReplayOutbound { peer, mut reply } => {
-                            tokio::select! {
-                                result = self.replay_outbound(peer) => { let _ = reply.send(result); }
-                                () = reply.closed() => {}
-                            }
+                        PeerManagerCommand::ReplayOutbound { peer, reply } => {
+                            self.replay_outbound(peer, reply).await;
                         }
                         PeerManagerCommand::SoftResetImportValidationDependents {
                             dependency,
@@ -2043,8 +2215,10 @@ impl PeerManager {
                             return;
                         }
                     }
+                    self.finish_operator_seam();
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
+                    self.operator_read_seam = OperatorReadSeam::Unfenced;
                     match internal {
                         Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
@@ -2177,6 +2351,7 @@ impl PeerManager {
                         }
                         None => {}
                     }
+                    self.finish_operator_seam();
                 }
                 notification = self.session_notify_rx.recv() => {
                     if let Some(notification) = notification {

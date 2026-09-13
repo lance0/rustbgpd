@@ -23,6 +23,81 @@ rather than committing.
 RIB compensation is one rollback-only exact batch with ordered receipts and
 the normal two-minute batch-reply bound.
 
+**Amended:** 2026-09-11 — operator reads are served during the cohort RIB
+transition instead of waiting for its commit. The forward reload owner
+admits its bounded operator-read lane (session snapshots, import-statistics
+collections, dataset status) while it awaits the batched RIB reply, on the
+same terms as the destination prestage: every cohort session already runs
+its new chains, so a read observes the same mixed per-session generation
+prestage admits, and the ordinary command receiver stays unpolled. The RIB
+run loop serves one bounded general-query budget between pre-commit
+transition polls from the primary state, which no pre-commit phase changes,
+so such a read returns exactly the pre-commit generation; the query lane
+carries only reads, mutations stay queued on the primary channel, and the
+`CommitMembers` batches keep the full fence. The terminal commit advances
+the advertised page generation so a route listing started before the commit
+cannot resume across it. Section 1's "only the readiness lane" wording and
+Section 5's "no general query is admitted" describe the design before this
+amendment. Rollback and standalone policy transactions are unchanged.
+
+**Amended:** 2026-09-12 — the rollback of a rejected cohort transition admits
+the same operator-read lane while the peer manager awaits enqueue or completion
+of its exact RIB compensation batch. Session restoration has been attempted,
+but an unsuccessful restore can leave a session on a different policy. Reads
+report live session state without a common generation pin. The RIB still
+executes the authoritative restore synchronously and fences general queries,
+so this admission alone does not guarantee completion of neighbor RPCs or
+export-policy statistics within their deadlines. The ordinary command receiver
+stays unpolled and the two-minute batch-reply bound is unchanged. Standalone
+policy transactions and a reload's later compensating replay keep the full fence.
+
+**Amended:** 2026-09-12 — forward API live-impact transactions and catalog
+refreshes use the same peer-manager operator-read admission as forward SIGHUP
+applies. API publication-failure compensation also admits these reads: policy
+chains restore before the staged configuration, and reads report each source's
+current values. This supersedes the API fence described in the earlier
+amendments. It does not choose admission for SIGHUP's separate generation-unwind
+path. Admitted reads remain live observations without a common generation across
+sessions or the RIB; caller budgets, mutation ordering, and individual session
+ACK/bookkeeping fences are unchanged.
+
+**Amended:** 2026-09-12 — forward policy transactions admit bounded live operator
+reads during read-only preflight, cohort selection, clean-state probes and retries, retained-route
+proofs, and authoritative per-peer RIB waits. Session policy acknowledgement
+remains fenced until the manager records the acknowledged chain. A bounded drain
+between completed policy steps prevents a serial fleet walk from accumulating
+one uninterrupted read fence.
+
+Generation unwind decides policy and dataset admission separately at their entry
+points. If every earlier restoration succeeded, compensation admits the same
+live reads, superseding the earlier full-fence claim for generation unwind.
+Any earlier restoration failure keeps those reads fenced. For example,
+a session can acknowledge its prior runtime settings before the restoring outbound
+RIB refresh fails; its manager metadata then still describes the candidate settings.
+A fresh session query combined with that metadata would misreport the installed
+settings without marking the row stale. This concrete inconsistency requires the
+conditional fence even though clean compensation does not require a generation pin.
+Reads use each peer's current managed handle, including a replacement created during
+compensation.
+
+Dataset generation reevaluation carries its owner's admission through both channel
+capacity and reply waits. Legacy dataset refresh uses that same bounded dispatch
+with the existing five-second capacity allowance, while retaining its five-second
+wall-clock reply deadline. Generation reply accounting still excludes admitted
+read servicing. The existing operator deadlines, transaction ownership, and
+individual session acknowledgement limits are unchanged; an admitted read settles
+before an expired owner resumes, and an expired capacity wait cannot dispatch late.
+
+**Amended:** 2026-09-12 — the SIGHUP `honor_graceful_shutdown` and `honor_blackhole`
+fan-outs admit the same live operator reads at completed policy steps and state
+probes. These edits change implicit import tails without changing the transport
+metadata reported alongside session state or the RFC 8212 explicit-policy verdict.
+Desired honor flags are read through the ordinary command lane, which remains
+queued until publication. Their ownership alone therefore does not require a
+fleet-wide operator-read fence. Each session ACK and its matching manager
+bookkeeping remain fenced; inline runtime-setting restoration keeps its separate
+fence against inconsistent session and manager metadata.
+
 ## Context
 
 A live policy reload can move hundreds of route-reflector or route-server
@@ -196,6 +271,21 @@ outcome. A timeout, lost reply, mismatch, or rejected batch retains conservative
 pending flags and makes exact compensation unprovable. The bound does not cover
 sequential session commands, Route Refresh acknowledgements, or the RIB actor's
 detached late repair work.
+
+The authoritative forward walk follows the same discipline. Its per-peer RIB
+commands and the RFC 8212 presence proofs that precede them share one lazy
+absolute `RIB_BATCH_REPLY_TIMEOUT` for the whole transaction, so a transition
+that falls back to the serial walk is bounded by the same total RIB time the
+batched cohort promises rather than by a fresh deadline per peer, which would
+scale with the fleet and therefore bound nothing. A per-peer command is not a
+cheap inline operation: it performs its own full distribution pass, so a single
+reply can legitimately take seconds under load. The forward and rollback
+deadlines anchor independently, so a slow walk cannot consume the budget its
+own compensation needs. The forward deadline starts at the first actual RIB
+command, after any session-only preflight, and covers both channel admission
+and the reply. Expiry cancels an unadmitted forward send; an admitted command
+remains ahead of its exact rollback in FIFO order. This bounds RIB waits, not
+all session and Route Refresh work in the transaction.
 
 ### 5. Readiness and observability
 

@@ -43,12 +43,16 @@ pub(crate) fn prefix_sid_json(view: &proto::PrefixSidView) -> serde_json::Value 
                             })
                         })
                         .collect();
-                    serde_json::json!({
+                    let mut value = serde_json::json!({
                         "sid_value": sid.sid_value,
                         "endpoint_behavior": sid.endpoint_behavior,
                         "flags": sid.flags,
                         "structures": structures,
-                    })
+                    });
+                    if let Some(reconstructed) = &sid.reconstructed_sid {
+                        value["reconstructed_sid"] = serde_json::json!(reconstructed);
+                    }
+                    value
                 })
                 .collect();
             serde_json::json!({ "tlv_type": service.tlv_type, "sids": sids })
@@ -78,6 +82,9 @@ pub(crate) fn prefix_sid_summary(view: &proto::PrefixSidView) -> String {
                 "sid-value={} behavior={} sid-flags={:#04x}",
                 sid.sid_value, sid.endpoint_behavior, sid.flags
             ));
+            if let Some(reconstructed) = &sid.reconstructed_sid {
+                parts.push(format!("reconstructed-sid={reconstructed}"));
+            }
             for structure in &sid.structures {
                 parts.push(format!(
                     "structure={}/{}/{}/{}/{}/{}",
@@ -1368,10 +1375,27 @@ mod tests {
             })
         );
         assert!(json.get("decode_error").is_none());
+        assert!(
+            json["services"][0]["sids"][0]
+                .get("reconstructed_sid")
+                .is_none()
+        );
         assert_eq!(
             prefix_sid_summary(&view),
             "prefix-sid flags=0xe0 tlv=5 sid-value=fc00:0:1:: behavior=65535 sid-flags=0x80 structure=40/24/16/0/16/64"
         );
+        view.services[0].sids[0].reconstructed_sid = Some("fc00:0:1:0:1::".into());
+        let reconstructed = prefix_sid_json(&view);
+        assert_eq!(
+            reconstructed["services"][0]["sids"][0]["reconstructed_sid"],
+            "fc00:0:1:0:1::"
+        );
+        assert_eq!(
+            reconstructed["services"][0]["sids"][0]["sid_value"],
+            "fc00:0:1::"
+        );
+        assert_eq!(reconstructed["raw_value"], json["raw_value"]);
+        assert!(prefix_sid_summary(&view).contains("reconstructed-sid=fc00:0:1:0:1::"));
         view.services.clear();
         view.decode_error = "malformed framing".into();
         assert_eq!(prefix_sid_json(&view)["decode_error"], "malformed framing");

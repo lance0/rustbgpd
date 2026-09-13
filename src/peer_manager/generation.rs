@@ -30,9 +30,9 @@ use crate::config::{
 };
 use crate::policy_admin;
 
-use super::PeerManager;
 use super::lifecycle::PeerReshapeSnapshotOutcome;
 use super::policy::{DatasetDependent, DatasetRefreshFailure, PolicySnapshotFailureKind};
+use super::{OperatorReadAdmission, PeerManager};
 
 /// Counts of the per-peer actions one generation applied.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -275,7 +275,11 @@ impl PeerManager {
         // 1. Policy chains through the rollback-capable snapshot. No session
         //    identity is at stake yet, so a failure here costs nothing.
         match self
-            .apply_resolved_policy_snapshot_with_prestage_reads(resolved.policy_targets, true, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(
+                resolved.policy_targets,
+                true,
+                OperatorReadAdmission::Served,
+            )
             .await
         {
             Ok(priors) => applied.policy_priors = Some(priors),
@@ -306,7 +310,10 @@ impl PeerManager {
         applied.dataset_dependents = dependents;
         applied.dataset_prior = Some(datasets.publish());
         if let Err(error) = self
-            .refresh_dataset_generation_dependents(&applied.dataset_dependents)
+            .refresh_dataset_generation_dependents(
+                &applied.dataset_dependents,
+                OperatorReadAdmission::Served,
+            )
             .await
         {
             let ambiguous = matches!(error, DatasetRefreshFailure::Ambiguous(_));
@@ -668,12 +675,30 @@ impl PeerManager {
             }
         }
         if let Some(priors) = applied.policy_priors
-            && let Err(error) = self.apply_resolved_policy_snapshot(priors).await
+            && let Err(error) = self.apply_resolved_policy_snapshot_with_prestage_reads(
+                priors,
+                false,
+                if failures.is_empty() {
+                    OperatorReadAdmission::Served
+                } else {
+                    OperatorReadAdmission::Fenced {
+                        reason: "a failed earlier restoration can leave session knobs and manager metadata inconsistent",
+                    }
+                },
+            ).await
         {
-            failures.push(format!("restore policy chains: {error}"));
+            failures.push(format!("restore policy chains: {}", error.message));
         }
         if let Err(error) = self
-            .refresh_dataset_generation_dependents(&applied.dataset_dependents)
+            .refresh_dataset_generation_dependents(&applied.dataset_dependents,
+                if failures.is_empty() {
+                    OperatorReadAdmission::Served
+                } else {
+                    OperatorReadAdmission::Fenced {
+                        reason: "a failed earlier restoration can leave session or policy metadata inconsistent",
+                    }
+                },
+            )
             .await
         {
             failures.push(format!("restore dataset dependents: {error}"));

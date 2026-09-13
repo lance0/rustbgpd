@@ -1,0 +1,11 @@
+established 1000 at 1.1s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=1000,total=400000,per_peer=400,expected=399600,completed=1000,min_unique=399600,max_unique=399600
+converged (>= 399600/observer) at 5.3s rss_mib=409
+reload 1 daemon_applied complete_before=0 complete_after=1
+reload 1 sessions_up 1000/1000
+reloadstall_csv,1,1000,1000,0,400000,2.518142,2.938286,2.953381,858.166,1463.279,1622.259,858.166,1463.279,1622.259,1502.736,2112.305,2273.624,413,452,0,1000,0
+reload 2 daemon_applied complete_before=1 complete_after=2
+reload 2 sessions_up 1000/1000
+reloadstall_csv,2,1000,1000,0,400000,2.145383,2.867157,2.927520,1311.359,2127.436,2225.885,1311.359,2127.436,2225.885,1993.642,2803.660,2904.290,428,467,0,1000,0
+done rss_mib=411

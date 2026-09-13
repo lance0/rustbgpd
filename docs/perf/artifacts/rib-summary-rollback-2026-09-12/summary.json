@@ -1,0 +1,391 @@
+{
+  "measurement_date": "2026-09-12",
+  "scope": "one qualifying baseline/candidate pair; both meet the 2 second CLI deadline; no reproduced baseline deadline failure or speedup claim",
+  "runs": {
+    "baseline": {
+      "source": {
+        "head": "122c0f40de79b6a12c2a237dd280e6136aa9eea6",
+        "profile": "release",
+        "features": [
+          "rustbgpd-rib/bench-internals"
+        ],
+        "binaries": {
+          "rustbgpd": "07eae63cfe464ff5336f897b0cb151ba03c0c1c61b7878d0cdf336ed4e69d04e",
+          "rbgp": "053f8461a620e1cd4e0db91c1693748f7ddda22ee0a7b9031787f8ebe8ffa37a",
+          "reloadstall": "5f2d05582126d859c4e2449859645fc59b6aad27ba4cdf01a4f0d180b5cbb1e2"
+        },
+        "toolchain": {
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+          "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)\n"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.69.0",
+          "rbgp": "rbgp 0.69.0"
+        },
+        "source_clean": false,
+        "source_patch_sha256": "bf5d915c5bc84488e628f965cc92d597486e44d5ff439e9238a94633bba11f8a",
+        "builds": [
+          {
+            "cargo_command": "cargo build --locked --release -p rustbgpd -p rustbgpctl --bin rustbgpd --bin rbgp --features rustbgpd-rib/bench-internals -j2",
+            "exit": 0,
+            "original_log_sha256": "eddc9b9ac1e03ba76072be3b47350a3afbc1bfd51f1c11389d1e6c468ce13681"
+          },
+          {
+            "cargo_command": "cargo build --locked --release --manifest-path bench/scale/Cargo.toml -p reloadstall -j2",
+            "exit": 0,
+            "original_log_sha256": "b26a45b80d7f4c341e655f78df232d00a99b0471be8565d8a3b8d040683d10e1"
+          }
+        ]
+      },
+      "shape": {
+        "sessions": 1000,
+        "base_prefixes": 400000,
+        "engine_peers": 999,
+        "python_peers_without_route_refresh": 1
+      },
+      "pass": true,
+      "receipt_complete": true,
+      "raw_peer": {
+        "wall": 1789235439.1450365,
+        "peer": "127.0.0.2",
+        "asn": 65511,
+        "capabilities": [
+          1,
+          65
+        ],
+        "announced_prefixes": 400
+      },
+      "trigger_wall": 1789235467.7203937,
+      "outcome_deltas": {
+        "rejected_no_effect": 1.0,
+        "task_failed": 0.0,
+        "known_partial": 0.0,
+        "complete": 0.0,
+        "ignored_in_flight": 0.0
+      },
+      "restore_events": [
+        {
+          "wall": 1789235469.390623,
+          "message": "replacement summary baseline scope",
+          "operation": "restore",
+          "phase": "enter"
+        },
+        {
+          "wall": 1789235470.49739,
+          "message": "replacement summary baseline scope",
+          "operation": "restore",
+          "phase": "exit"
+        }
+      ],
+      "operations": {
+        "neighbor": {
+          "all_phases": {
+            "count": 550,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 9.882359066978097,
+            "elapsed_ms_max": 960.5746029410511
+          },
+          "starts_inside_restore": {
+            "count": 1,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 960.5746029410511,
+            "elapsed_ms_max": 960.5746029410511
+          },
+          "overlaps_restore": {
+            "count": 1,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 960.5746029410511,
+            "elapsed_ms_max": 960.5746029410511
+          }
+        },
+        "policy_stats": {
+          "all_phases": {
+            "count": 548,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 8.182741003111005,
+            "elapsed_ms_max": 1124.8320960439742
+          },
+          "starts_inside_restore": {
+            "count": 1,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 1124.8320960439742,
+            "elapsed_ms_max": 1124.8320960439742
+          },
+          "overlaps_restore": {
+            "count": 2,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 424.82762201689184,
+            "elapsed_ms_max": 1124.8320960439742
+          }
+        }
+      },
+      "stages": {
+        "whole_restore": {
+          "duration_ms": 1106.766939163208,
+          "starting_probes": 2,
+          "sampled_rss_kib_min": 466616,
+          "sampled_rss_kib_max": 699752
+        }
+      },
+      "warnings_relative_to_last_probe": {
+        "through_last_probe": {
+          "failed to send route refresh": 2,
+          "route refresh failed during policy rollback; retained safe pending state": 1,
+          "reload generation policy snapshot failed": 1,
+          "reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction": 1,
+          "config reload stopped at this step; the prior runtime generation is retained": 1,
+          "SIGHUP reload rejected without runtime effect": 1
+        },
+        "after_last_probe": {
+          "outbound channel full or closed \u2014 marking dirty for resync": 11821,
+          "writer: write/flush failed": 918
+        }
+      },
+      "last_probe_completed_wall": 1789235584.6168878,
+      "cleanup": {
+        "owned_children_reaped": 5,
+        "exit_codes": [
+          0,
+          -15,
+          -15,
+          -15,
+          0
+        ],
+        "owned_ports_free": true
+      },
+      "authoritative_inventory_announces": 400016
+    },
+    "candidate": {
+      "source": {
+        "head": "fcd9dc87f33e1a3654e38351b2b300e32bb91bec",
+        "profile": "release",
+        "features": [
+          "rustbgpd-rib/bench-internals"
+        ],
+        "binaries": {
+          "rustbgpd": "3601e73253afd8932e4facb628b83900c7e39751aa50a4bbbf86bbefdc2e3303",
+          "rbgp": "9ad5b7a4e0becdefd2d4b65cbace564a2b41b8c9a9b317e473dadb47d3b43fba",
+          "reloadstall": "c4ce55db583697a665038a757155202b1a754176430f5c295ed96268a97f39b9"
+        },
+        "toolchain": {
+          "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+          "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)\n"
+        },
+        "versions": {
+          "rustbgpd": "rustbgpd 0.69.0",
+          "rbgp": "rbgp 0.69.0"
+        },
+        "source_clean": true,
+        "builds": [
+          {
+            "cargo_command": "cargo build --locked --release -p rustbgpd -p rustbgpctl --bin rustbgpd --bin rbgp --features rustbgpd-rib/bench-internals -j2",
+            "exit": 0,
+            "original_log_sha256": "be29b45c13305aee5da4c50eb963d9008f6e2c0d7697f414e32016a010d3cd0d"
+          },
+          {
+            "cargo_command": "cargo build --locked --release --manifest-path bench/scale/Cargo.toml -p reloadstall -j2",
+            "exit": 0,
+            "original_log_sha256": "346a52c62891c36835aa29f9c901726990980f2473712294e0e53e6aabb01b5d"
+          }
+        ]
+      },
+      "shape": {
+        "sessions": 1000,
+        "base_prefixes": 400000,
+        "engine_peers": 999,
+        "python_peers_without_route_refresh": 1
+      },
+      "pass": true,
+      "receipt_complete": true,
+      "raw_peer": {
+        "wall": 1789235612.411521,
+        "peer": "127.0.0.2",
+        "asn": 65511,
+        "capabilities": [
+          1,
+          65
+        ],
+        "announced_prefixes": 400
+      },
+      "trigger_wall": 1789235640.992064,
+      "outcome_deltas": {
+        "task_failed": 0.0,
+        "rejected_no_effect": 1.0,
+        "ignored_in_flight": 0.0,
+        "complete": 0.0,
+        "known_partial": 0.0
+      },
+      "restore_events": [
+        {
+          "wall": 1789235642.607292,
+          "message": "replacement summary scope",
+          "operation": "restore",
+          "phase": "enter"
+        },
+        {
+          "wall": 1789235642.609999,
+          "message": "replacement summary scope",
+          "operation": "restore",
+          "phase": "captured",
+          "capture_us": "2678",
+          "peer_count": 1000,
+          "policy_count": 1000,
+          "group_count": 1,
+          "term_count": 1000
+        },
+        {
+          "wall": 1789235643.721193,
+          "message": "replacement summary scope",
+          "operation": "restore",
+          "phase": "retirement_begin"
+        },
+        {
+          "wall": 1789235643.721886,
+          "message": "replacement summary scope",
+          "operation": "restore",
+          "phase": "exit",
+          "retirement_us": "689"
+        }
+      ],
+      "operations": {
+        "neighbor": {
+          "all_phases": {
+            "count": 553,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 9.951593005098403,
+            "elapsed_ms_max": 276.36145800352097
+          },
+          "starts_inside_restore": {
+            "count": 4,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 18.813500995747745,
+            "elapsed_ms_max": 35.63390392810106
+          },
+          "overlaps_restore": {
+            "count": 5,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 18.813500995747745,
+            "elapsed_ms_max": 276.36145800352097
+          }
+        },
+        "policy_stats": {
+          "all_phases": {
+            "count": 553,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 8.208948886021972,
+            "elapsed_ms_max": 411.8831349769607
+          },
+          "starts_inside_restore": {
+            "count": 4,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 21.271736943162978,
+            "elapsed_ms_max": 38.48916501738131
+          },
+          "overlaps_restore": {
+            "count": 5,
+            "failed": 0,
+            "over_2s": 0,
+            "elapsed_ms_min": 21.271736943162978,
+            "elapsed_ms_max": 411.8831349769607
+          }
+        }
+      },
+      "stages": {
+        "whole_restore": {
+          "duration_ms": 1114.5939826965332,
+          "starting_probes": 8,
+          "sampled_rss_kib_min": 465772,
+          "sampled_rss_kib_max": 667960
+        },
+        "capture": {
+          "duration_ms": 2.7070045471191406,
+          "starting_probes": 0,
+          "sampled_rss_kib_min": null,
+          "sampled_rss_kib_max": null
+        },
+        "interior": {
+          "duration_ms": 1111.194133758545,
+          "starting_probes": 8,
+          "sampled_rss_kib_min": 465772,
+          "sampled_rss_kib_max": 667960
+        },
+        "retirement": {
+          "duration_ms": 0.6928443908691406,
+          "starting_probes": 0,
+          "sampled_rss_kib_min": null,
+          "sampled_rss_kib_max": null
+        }
+      },
+      "warnings_relative_to_last_probe": {
+        "through_last_probe": {
+          "failed to send route refresh": 2,
+          "route refresh failed during policy rollback; retained safe pending state": 1,
+          "reload generation policy snapshot failed": 1,
+          "reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction": 1,
+          "config reload stopped at this step; the prior runtime generation is retained": 1,
+          "SIGHUP reload rejected without runtime effect": 1
+        },
+        "after_last_probe": {
+          "outbound channel full or closed \u2014 marking dirty for resync": 11406,
+          "writer: write/flush failed": 921
+        }
+      },
+      "last_probe_completed_wall": 1789235757.851564,
+      "cleanup": {
+        "owned_children_reaped": 5,
+        "exit_codes": [
+          0,
+          -15,
+          -15,
+          -15,
+          0
+        ],
+        "owned_ports_free": true
+      },
+      "authoritative_inventory_announces": 400048
+    }
+  },
+  "limits": [
+    "One paired local cell; both baseline and candidate pass. No baseline deadline failure reproduced.",
+    "Baseline markers surround readiness setup and terminal cleanup; candidate markers are inside those boundaries.",
+    "Capture/retirement are elapsed scopes including checkpoint/read service, not isolated allocation/free CPU.",
+    "RSS is sampled from /proc every 100 ms, not projection bytes or a guaranteed transient peak.",
+    "Engine contributes ordinary control churn in addition to 400000 base prefixes; instantaneous inventory differs.",
+    "Post-probe disconnect warnings belong to owned teardown, retained separately from the measurement interval."
+  ],
+  "matching_shape": {
+    "config_normalization": "Parse TOML, remove only global.runtime_state_dir and global.telemetry.grpc_uds.path, serialize sorted compact JSON; both runs match.",
+    "normalized_config_sha256": "97e129f7e151138562eec2ebca4863afcd3d2df6a6153c3bd22fcc0f27abfdab",
+    "identical_harness_and_policy_sha256": {
+      "run.py.used": "481c18b754b66136fbf91c3c5664918a3a344d009bc426f8585cb95f66cbe034",
+      "raw_peer.py.used": "17cb4a1cc79bc8b9877ac2f23a272b692b39ed2dc53362dd64954af35874ac5d",
+      "probe.py.used": "a07aa8593cb971273e2d1310ac0400a0a29e74d354693cfc658e636e753ec8b8",
+      "sample.py.used": "eeb8a6e72eb57aafade45fe66094b0e7939b9f1c6c9427d95b0fe48668c7090e",
+      "analyze.py.used": "514544070041293fba3984c2232ac898f7d5c34334ae6c2063e7dd2feb975805",
+      "scenario/gen-a.rpol": "21adb20cd35f2bd33564d258463e80548579aaa0597479b6cb8a0f068ddaecaa",
+      "scenario/gen-b.rpol": "e22db1d2cbe51b4abb9aa30396db80a115031a03b48e82174591476f217eb9e1"
+    },
+    "daemon_cpus": "2-3",
+    "engine_and_python_peer_cpus": "4-7",
+    "probe_cpus": "8-15",
+    "probe_seconds": 120,
+    "probe_spacing_after_completion_seconds": 0.2,
+    "probe_driver_cap_seconds": 5,
+    "engine_control_seconds": 900,
+    "engine_reload_count": 0,
+    "controller_sighup_count": 1,
+    "base_prefixes": 400000,
+    "prefixes_per_peer": 400
+  }
+}

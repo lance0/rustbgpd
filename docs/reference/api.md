@@ -1109,6 +1109,12 @@ confirm writer drain or remote receipt.
 Unknown peers return `NOT_FOUND`; managed peers without an active outbound RIB
 registration return `FAILED_PRECONDITION`.
 
+RIB queue admission and acknowledgement share a five-second budget. Readiness
+and operator reads remain admitted during that wait. A read already in
+progress finishes under its own deadline before the scheduling call returns;
+later mutations stay queued until both settle. A timeout does not prove that
+an admitted refresh had no effect.
+
 This is an O(table) operation for the selected peer and can create a full-table
 UPDATE burst on a production session. Serialize operational use; the API
 intentionally has no all-peer or batch form.
@@ -1153,6 +1159,12 @@ processing. Terminal BMP EoRs mark replay completion only after the session
 writer completes the preceding replay bytes and terminal wire EoRs. A caller
 disconnecting after scheduling does not cancel traffic already admitted.
 
+While scheduling waits, readiness and operator reads remain admitted. If the
+five-second scheduling budget expires or its caller disconnects, an already
+admitted read finishes under its own deadline before the peer manager moves
+on to later mutations. These reads report live state; a session that cannot
+answer still has the read's normal timeout and failure behavior.
+
 Unknown peers return `NOT_FOUND`. Unavailable sessions, another active replay,
 an empty or mixed-family session, a duplicate managed peer IP address,
 no eligible connected `rib_out_post` collector,
@@ -1160,8 +1172,8 @@ or an export gate that prevents complete replay return `FAILED_PRECONDITION`.
 Dispatch, timeout, or lost acknowledgement failures return an error rather
 than a successful scheduling response. Later writer, peer, or collector
 generation failures suppress terminal BMP completion for affected streams.
-The operation is bounded to five seconds; absence of terminal BMP EoRs is
-incomplete evidence, even if scheduling succeeded.
+Absence of terminal BMP EoRs is incomplete evidence, even if scheduling
+succeeded.
 
 This operation reannounces the selected peer's table on its live BGP session.
 Serialize full-table use and collect the complete BMP stream through its
@@ -1467,9 +1479,24 @@ in the order above. JSON includes a nonempty `decode_error` and no decoded
 services if stored raw data fails structural inspection; the raw bytes remain
 available. Routes without Prefix-SID keep their existing JSON shape.
 
-This is attribute inspection. It does not reconstruct a SID using NLRI label
-bits, validate endpoint behavior against the route family, select a service,
-originate SRv6 routes, or program forwarding. EVPN remains alpha.
+Each SID can also carry optional `reconstructed_sid` (field 5), restoring a
+Function from the high-order bits of the route's label: a single 20-bit VPN
+label or the corresponding 24-bit EVPN service field. MAC/IP L2 and L3
+services use label 1 and label 2 respectively; L3 requires an IP address.
+Ethernet A-D per EVI uses its L2 label, IP Prefix uses its L3 label, and IMET
+uses a single ingress-replication PMSI label. The raw `sid_value` stays unchanged.
+Text labels the derived value `reconstructed-sid`; JSON omits the field when
+it is unavailable, including when reading an older daemon or event record.
+
+Reconstruction requires exactly one SID Structure, a nonzero transposition
+wholly inside its Function, valid bounds, and zero advertised bits in the
+vacated slice. Missing or ambiguous labels/structures, no transposition, and
+nonzero Argument lengths leave it absent. Argument composition involving
+another route (such as Ethernet A-D per ES plus IMET) is outside this view.
+
+This is attribute inspection. It does not validate endpoint behavior against
+the route family, select a service, originate SRv6 routes, or program forwarding.
+EVPN remains alpha.
 
 ### Runtime observability surfaces
 
@@ -1784,6 +1811,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"afi_safi": "ADDRESS_FAMILY_IPV6_FLOWSPEC"}' \
   localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
 ```
+
+`rbgp --json flowspec` retains the legacy formatted `components` array and
+also emits ordered `component_details` records with the API component `type`,
+`prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
+IPv6 prefix-match semantics, including zero and nonzero values.
 
 ### List EVPN routes
 

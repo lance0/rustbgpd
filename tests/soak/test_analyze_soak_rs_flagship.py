@@ -58,6 +58,7 @@ def smoke_meta(**over):
         "measured_end_monotonic",
         meta["measured_start_monotonic"] + meta["soak_seconds"],
     )
+    meta.setdefault("engine_finish_release_monotonic", meta["measured_end_monotonic"] + 0.2)
     return meta
 
 
@@ -204,6 +205,7 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
             "record": "summary", "started_monotonic": start,
             "stop_requested_monotonic": end - 0.05,
             "completed_monotonic": end, "operation": "summary",
+            "completed_unix": T0.timestamp() + end,
             "duration_ms": (end - start) * 1000, "exit": 0,
             "result": "clean_sigterm", "bytes": 0,
             "sha256": hashlib.sha256(b"").hexdigest(),
@@ -221,14 +223,16 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
     return raw + (b'{"record":' if truncated else b"")
 
 
-def daemon_record(level="INFO", message="daemon ready", **fields):
+def daemon_record(level="INFO", message="daemon ready", *, elapsed=70, **fields):
     return (json.dumps({
-        "timestamp": ts(70), "level": level, "target": "rustbgpd",
+        "timestamp": ts(elapsed), "level": level, "target": "rustbgpd",
         "fields": {"message": message, **fields},
     }) + "\n").encode()
 
 
-CLEAN_DAEMON = daemon_record()
+FINAL_SHUTDOWN = daemon_record(message="BGP NOTIFICATION", elapsed=200000,
+                               direction="received", code=6, subcode=2)
+CLEAN_DAEMON = daemon_record() + FINAL_SHUTDOWN
 DAEMON_BANNER = (
     b"\n  rustbgpd 0.69.0 | AS 65000 | router-id 10.0.0.1\n"
     b"  |- 12 peers (12 eBGP)\n"
@@ -238,7 +242,8 @@ DAEMON_BANNER = (
 )
 
 
-def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEAN_DAEMON):
+def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEAN_DAEMON,
+                 shutdown_elapsed=None):
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
         with (run_dir / "samples.csv").open("w", newline="") as stream:
@@ -251,6 +256,9 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None, daemon=CLEA
         evidence = management_jsonl(meta) if management is None else management
         (run_dir / "management-plane-load.jsonl").write_bytes(evidence)
         if daemon is not None:
+            if shutdown_elapsed is not None:
+                daemon += daemon_record(message="BGP NOTIFICATION", elapsed=shutdown_elapsed,
+                                        direction="received", code=6, subcode=2)
             (run_dir / "rustbgpd.log").write_bytes(daemon)
         result = subprocess.run(
             ["python3", str(ANALYZER), str(run_dir)],
@@ -296,13 +304,14 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
     def test_daemon_banner_and_warnings_are_reported_without_failure(self):
         raw = (daemon_record() + DAEMON_BANNER
                + daemon_record("WARN", "max prefix exceeded", peer="127.1.0.1")
-               + daemon_record("WARN", "peer lagged, requesting resync") * 2)
+               + daemon_record("WARN", "peer lagged, requesting resync") * 2
+               + FINAL_SHUTDOWN)
         result, payload = run_analyzer(smoke_rows(), smoke_cycles(), smoke_meta(),
                                        daemon=raw)
         self.assertEqual(result.returncode, 0, result.stderr)
         gate = payload["gates"]["daemon_log"]
         self.assertTrue(gate["pass"])
-        self.assertEqual(gate["value"]["records"], 4)
+        self.assertEqual(gate["value"]["records"], 5)
         self.assertEqual(gate["value"]["warnings_by_message"], {
             "max prefix exceeded": 1, "peer lagged, requesting resync": 2,
         })
@@ -386,6 +395,136 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["msgs_sent_monotone"]["pass"])
+
+    def test_isolated_readyz_breaches_are_reported_and_pass(self):
+        # Isolated breaches pass this gate but retain their diagnostic detail.
+        rows = smoke_rows()
+        rows[1]["readyz_code"] = "503"
+        rows[1]["readyz_ms"] = "400.0"
+        rows[3]["readyz_ms"] = "900.0"
+        rows[7]["readyz_code"] = "503"
+        rows[7]["readyz_ms"] = "300.0"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["readyz"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["bad_samples"], 3)
+        self.assertEqual(gate["value"]["status_failures"], 2)
+        self.assertEqual(gate["value"]["latency_failures"], 1)
+        self.assertEqual(gate["value"]["longest_consecutive"], 1)
+        self.assertEqual(gate["value"]["limit_ms"],
+                         analyzer.READYZ_MS_LIMIT)
+        self.assertEqual(
+            [(s["elapsed_sec"], s["kind"]) for s in gate["value"]["first"]],
+            [(30.0, "status"), (90.0, "latency"), (210.0, "status")],
+        )
+
+    def test_three_consecutive_readyz_breaches_fail(self):
+        for start in (0, 3, 6):
+            with self.subTest(start=start):
+                rows = smoke_rows()
+                for index in range(start, start + 3):
+                    rows[index]["readyz_ms"] = "400.0"
+                result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["readyz"]
+                self.assertFalse(gate["pass"])
+                self.assertEqual(gate["value"]["bad_samples"], 3)
+                self.assertEqual(gate["value"]["longest_consecutive"], 3)
+                self.assertEqual(gate["value"]["latency_failures"], 3)
+                self.assertEqual(gate["value"]["limit_consecutive"],
+                                 analyzer.READYZ_CONSECUTIVE_LIMIT)
+
+    def test_two_consecutive_readyz_breaches_pass_and_stay_visible(self):
+        rows = smoke_rows()
+        for index in (2, 3, 6, 7):
+            rows[index]["readyz_code"] = "503"
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["readyz"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["bad_samples"], 4)
+        self.assertEqual(gate["value"]["status_failures"], 4)
+        self.assertEqual(gate["value"]["latency_failures"], 0)
+        self.assertEqual(gate["value"]["longest_consecutive"], 2)
+
+    def test_readyz_status_latency_boundary_and_evidence_cap(self):
+        rows = long_rows()
+        for row in rows:
+            row["readyz_ms"] = "250.1"
+        rows[0]["readyz_ms"] = "250.0"
+        rows[1].update(readyz_code="000", readyz_ms="0")
+        result, payload = run_analyzer(rows, long_cycles(), long_meta())
+        self.assertEqual(result.returncode, 1)
+        value = payload["gates"]["readyz"]["value"]
+        self.assertEqual(value["bad_samples"], 24)
+        self.assertEqual(value["longest_consecutive"], 24)
+        self.assertEqual(value["status_failures"], 1)
+        self.assertEqual(value["latency_failures"], 23)
+        self.assertEqual(len(value["first"]), 20)
+        self.assertEqual(value["first"][0]["kind"], "status")
+
+    def test_readyz_dropped_scrape_fails_even_at_window_edges(self):
+        for elapsed in (0, 120, 239):
+            with self.subTest(elapsed=elapsed):
+                cycles = smoke_cycles() + [
+                    cline(elapsed, "sample scrape failed (consecutive=1)")]
+                result, payload = run_analyzer(smoke_rows(), cycles, smoke_meta())
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["readyz"]
+                self.assertFalse(gate["pass"])
+                self.assertEqual(gate["value"]["sample_scrape_failures"], 1)
+
+    def test_readyz_observation_gap_fails_and_does_not_join_streaks(self):
+        rows = long_rows()
+        for index in (2, 3, 5):
+            rows[index]["readyz_ms"] = "400.0"
+        del rows[4]
+        result, payload = run_analyzer(rows, long_cycles(), long_meta())
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["min_samples"]["pass"])
+        gate = payload["gates"]["readyz"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["longest_consecutive"], 2)
+        self.assertEqual(gate["value"]["observation_gap_count"], 1)
+
+    def test_readyz_observation_gap_at_window_edges_fails(self):
+        for rows in (long_rows()[2:], long_rows()[:-2]):
+            result, payload = run_analyzer(rows, long_cycles(), long_meta())
+            self.assertEqual(result.returncode, 1)
+            self.assertTrue(payload["gates"]["min_samples"]["pass"])
+            self.assertFalse(payload["gates"]["readyz"]["pass"])
+
+    def test_readyz_cadence_allows_one_second_scheduling_drift(self):
+        rows = smoke_rows()
+        for index, row in enumerate(rows):
+            row["elapsed_sec"] = str(index * 31)
+        result, payload = run_analyzer(rows, smoke_cycles(), smoke_meta())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(payload["gates"]["readyz"]["pass"])
+
+    def test_readyz_missing_nonfinite_and_negative_inputs_are_errors(self):
+        for column in ("readyz_ms", "readyz_code"):
+            for invalid in ("", "NaN", "inf", "-inf", "-1"):
+                with self.subTest(column=column, invalid=invalid):
+                    rows = smoke_rows()
+                    rows[3][column] = invalid
+                    result, _ = run_analyzer(rows, smoke_cycles(), smoke_meta())
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(column, result.stderr)
+
+    def test_readyz_cadence_inputs_are_validated(self):
+        for interval in (0, -1, True):
+            result, _ = run_analyzer(smoke_rows(), smoke_cycles(),
+                                     smoke_meta(sample_interval_sec=interval))
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("sample_interval_sec", result.stderr)
+        for elapsed in ("60", "0"):
+            rows = smoke_rows()
+            rows[3]["elapsed_sec"] = elapsed
+            result, _ = run_analyzer(rows, smoke_cycles(), smoke_meta())
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("strictly increase", result.stderr)
 
     def test_rss_over_ceiling_fails(self):
         rows = smoke_rows()
@@ -540,6 +679,53 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_probe_after_engine_shutdown_fails_lifetime_even_when_result_is_ok(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            shutdown_elapsed=meta["measured_end_monotonic"] - 1,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+        self.assertTrue(payload["gates"]["management_failures"]["pass"])
+
+    def test_finish_ordering_evidence_is_required(self):
+        for missing in ("release", "load_wall_time", "shutdown"):
+            with self.subTest(missing=missing):
+                meta = smoke_meta()
+                records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+                daemon = CLEAN_DAEMON
+                if missing == "release":
+                    del meta["engine_finish_release_monotonic"]
+                elif missing == "load_wall_time":
+                    del records[-1]["completed_unix"]
+                else:
+                    daemon = daemon_record()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta, daemon=daemon,
+                    management=b"".join((json.dumps(r) + "\n").encode() for r in records),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_finish_release_cannot_precede_management_drain(self):
+        meta = smoke_meta()
+        meta["engine_finish_release_monotonic"] = meta["measured_end_monotonic"]
+        result, payload = run_analyzer(smoke_rows(), smoke_cycles(), meta)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_teardown_does_not_hide_a_failed_management_result(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            shutdown_elapsed=meta["measured_end_monotonic"] - 1,
+            management=management_jsonl(meta, failure=("rib_prefix", "route")),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+        self.assertFalse(payload["gates"]["management_failures"]["pass"])
 
     def test_management_load_missed_cadence_fails(self):
         meta = smoke_meta()

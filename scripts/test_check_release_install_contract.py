@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+import os
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -29,6 +31,7 @@ TAR_SIZE_ASSERT = (
 INPUTS = (
     WORKFLOW,
     RELEASE,
+    contract.INSTALLER,
     "packaging/nfpm.yaml",
     "scripts/build-packages.sh",
     "docs/grafana/rustbgpd-overview.json",
@@ -176,6 +179,18 @@ MUTATIONS = (
         TAR_SIZE_ASSERT,
         TAR_SIZE_ASSERT.replace("tar -xOzf", "echo 'tar -xOzf") + "'",
         "tarball active assertions",
+    ),
+    (
+        RELEASE,
+        "cp packaging/install.sh artifacts/install.sh",
+        "true",
+        "installer release asset",
+    ),
+    (
+        WORKFLOW,
+        "      - packaging/install.sh",
+        "      - packaging/removed-install.sh",
+        "release install workflow must trigger for packaging/install.sh",
     ),
     (
         contract.SYSTEMD_UNIT,
@@ -744,6 +759,301 @@ class ReleaseInstallContractTest(unittest.TestCase):
         self.assertTrue(
             any("tarball active assertions" in error for error in errors), errors
         )
+
+
+class VerifiedInstallerTest(unittest.TestCase):
+    """Exercise the released shell resolver against deterministic local assets."""
+
+    tag = "v0.69.0"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.assets = self.root / "assets"
+        self.fakebin = self.root / "bin"
+        self.assets.mkdir()
+        self.fakebin.mkdir()
+        self.curl_log = self.root / "curl.log"
+        self.package_log = self.root / "package.log"
+        self.os_release = self.root / "os-release"
+        self.curl_log.touch()
+        self.package_log.touch()
+        self.set_os_release("debian", "12")
+        self.create_assets()
+        self.create_shims()
+
+    def set_os_release(self, distribution: str, version: str) -> None:
+        self.os_release.write_text(f"ID={distribution}\nVERSION_ID={version}\n")
+
+    def write_program(self, name: str, body: str) -> None:
+        path = self.fakebin / name
+        path.write_text(textwrap.dedent(body))
+        path.chmod(0o755)
+
+    def sha256(self, path: Path) -> str:
+        return subprocess.check_output(
+            ["sha256sum", path.name], cwd=self.assets, text=True
+        ).split()[0]
+
+    def create_assets(self) -> None:
+        payload = self.root / "payload"
+        (payload / "share").mkdir(parents=True)
+        (payload / "rbgp").write_text("#!/bin/sh\necho rbgp\n")
+        (payload / "rbgp").chmod(0o755)
+        (payload / "share" / "release-note").write_text("verified payload\n")
+
+        for suffix, deb_arch, rpm_arch in (
+            ("linux-amd64", "amd64", "x86_64"),
+            ("linux-arm64", "arm64", "aarch64"),
+        ):
+            tarball = f"rustbgpd-{suffix}.tar.gz"
+            subprocess.run(
+                ["tar", "-C", str(payload), "-czf", str(self.assets / tarball), "rbgp", "share"],
+                check=True,
+            )
+            deb = f"rustbgpd_0.69.0_{deb_arch}.deb"
+            rpm = f"rustbgpd-0.69.0-1.{rpm_arch}.rpm"
+            (self.assets / deb).write_text(f"{deb}\n")
+            (self.assets / rpm).write_text(f"{rpm}\n")
+            manifest = "\n".join(
+                (
+                    f"{self.sha256(self.assets / tarball)}  {tarball}",
+                    f"{self.sha256(self.assets / deb)}  ./{deb}",
+                    f"{self.sha256(self.assets / rpm)}  ./{rpm}",
+                )
+            )
+            (self.assets / f"checksums-{suffix}.txt").write_text(manifest + "\n")
+
+    def create_shims(self) -> None:
+        real_sed = shutil.which("sed")
+        self.assertIsNotNone(real_sed)
+        self.write_program(
+            "sed",
+            f"""\
+            #!/bin/sh
+            if [ "$#" -eq 3 ] && [ "$3" = /etc/os-release ]; then
+                exec "{real_sed}" "$1" "$2" "$FAKE_OS_RELEASE"
+            fi
+            exec "{real_sed}" "$@"
+            """,
+        )
+        self.write_program(
+            "curl",
+            """\
+            #!/bin/sh
+            set -eu
+            out=''
+            effective=false
+            url=''
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    -o) out=$2; shift 2 ;;
+                    -w) effective=true; shift 2 ;;
+                    *) url=$1; shift ;;
+                esac
+            done
+            printf '%s\\n' "$url" >> "$FAKE_CURL_LOG"
+            if [ "$url" = 'https://github.com/lance0/rustbgpd/releases/latest' ]; then
+                [ "$effective" = true ] || exit 1
+                printf '%s\\n' "${FAKE_LATEST_URL:-https://github.com/lance0/rustbgpd/releases/tag/v0.69.0}"
+                exit 0
+            fi
+            asset=${url##*/}
+            test -n "$out"
+            cp "$FAKE_RELEASE_DIR/$asset" "$out"
+            """,
+        )
+        self.write_program(
+            "uname",
+            """\
+            #!/bin/sh
+            case "$1" in
+                -s) printf '%s\\n' "${FAKE_UNAME_S:-Linux}" ;;
+                -m) printf '%s\\n' "${FAKE_UNAME_M:-x86_64}" ;;
+                *) exit 2 ;;
+            esac
+            """,
+        )
+        self.write_program(
+            "getconf",
+            """\
+            #!/bin/sh
+            test "$1" = GNU_LIBC_VERSION
+            printf '%s\\n' "${FAKE_GLIBC:-glibc 2.31}"
+            """,
+        )
+        self.write_program(
+            "sudo",
+            """\
+            #!/bin/sh
+            exec "$@"
+            """,
+        )
+        for manager in ("apt-get", "dnf"):
+            self.write_program(
+                manager,
+                """\
+                #!/bin/sh
+                printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_PACKAGE_LOG"
+                """,
+            )
+
+    def run_installer(self, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.fakebin}:{env['PATH']}",
+                "FAKE_RELEASE_DIR": str(self.assets),
+                "FAKE_CURL_LOG": str(self.curl_log),
+                "FAKE_PACKAGE_LOG": str(self.package_log),
+                "FAKE_OS_RELEASE": str(self.os_release),
+            }
+        )
+        env.update(overrides)
+        return subprocess.run(
+            ["sh", str(ROOT / contract.INSTALLER), *args],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+            cwd=self.root,
+        )
+
+    def test_latest_installs_the_verified_debian_amd64_deb(self) -> None:
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "apt-get install -y -o Dpkg::Options::=--force-confold ",
+            self.package_log.read_text(),
+        )
+        self.assertIn("rustbgpd_0.69.0_amd64.deb", self.package_log.read_text())
+        self.assertIn("releases/latest", self.curl_log.read_text())
+        self.assertIn("releases/download/v0.69.0/", self.curl_log.read_text())
+
+    def test_rhel_family_installs_the_verified_rpm(self) -> None:
+        for distribution in ("rhel", "rocky", "almalinux"):
+            with self.subTest(distribution=distribution):
+                self.set_os_release(distribution, "9.4")
+                self.curl_log.write_text("")
+                self.package_log.write_text("")
+                result = self.run_installer("--tag", self.tag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self.package_log.read_text().split()[0],
+                    "dnf",
+                )
+                self.assertIn(
+                    "rustbgpd-0.69.0-1.x86_64.rpm",
+                    self.package_log.read_text(),
+                )
+
+    def test_explicit_tag_download_only_selects_arm64_package(self) -> None:
+        destination = self.root / "download"
+        result = self.run_installer(
+            "--tag", self.tag, "--download-only", str(destination), FAKE_UNAME_M="aarch64"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            {path.name for path in destination.iterdir()},
+            {"checksums-linux-arm64.txt", "rustbgpd_0.69.0_arm64.deb"},
+        )
+        self.assertNotIn("releases/latest", self.curl_log.read_text())
+        self.assertEqual(self.package_log.read_text(), "")
+
+    def test_prefix_extracts_the_verified_tarball_layout(self) -> None:
+        prefix = self.root / "prefix"
+        result = self.run_installer("--tag", self.tag, "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((prefix / "rbgp").is_file())
+        self.assertEqual((prefix / "share" / "release-note").read_text(), "verified payload\n")
+        self.assertIn(f"Next: {prefix}/rbgp doctor", result.stdout)
+        self.assertEqual(self.package_log.read_text(), "")
+
+    def test_relative_directory_starting_with_dash_is_safe(self) -> None:
+        prefix = self.run_installer("--tag", self.tag, "--prefix", "-prefix")
+        self.assertEqual(prefix.returncode, 0, prefix.stderr)
+        self.assertTrue((self.root / "-prefix" / "rbgp").is_file())
+
+        download = self.run_installer(
+            "--tag", self.tag, "--download-only", "-download"
+        )
+        self.assertEqual(download.returncode, 0, download.stderr)
+        self.assertTrue((self.root / "-download" / "rustbgpd_0.69.0_amd64.deb").is_file())
+        self.assertEqual(self.package_log.read_text(), "")
+
+    def test_checksum_mismatch_stops_before_download_destination(self) -> None:
+        (self.assets / "rustbgpd_0.69.0_amd64.deb").write_text("tampered\n")
+        destination = self.root / "download"
+        result = self.run_installer("--tag", self.tag, "--download-only", str(destination))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("checksum mismatch", result.stderr)
+        self.assertFalse(destination.exists())
+        self.assertEqual(self.package_log.read_text(), "")
+
+    def test_duplicate_checksum_row_stops_before_download_destination(self) -> None:
+        manifest = self.assets / "checksums-linux-amd64.txt"
+        manifest.write_text(manifest.read_text() + manifest.read_text().splitlines()[1] + "\n")
+        destination = self.root / "download"
+        result = self.run_installer("--tag", self.tag, "--download-only", str(destination))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exactly one digest", result.stderr)
+        self.assertFalse(destination.exists())
+
+    def test_unknown_architecture_stops_before_download(self) -> None:
+        result = self.run_installer(FAKE_UNAME_M="ppc64le")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported architecture", result.stderr)
+        self.assertEqual(self.curl_log.read_text(), "")
+
+    def test_non_glibc_or_old_glibc_stops_before_download(self) -> None:
+        for glibc in ("musl 1.2", "glibc 2.30", "glibc .31", "glibc 3."):
+            with self.subTest(glibc=glibc):
+                result = self.run_installer(FAKE_GLIBC=glibc)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.curl_log.read_text(), "")
+
+    def test_empty_option_values_stop_before_package_invocation(self) -> None:
+        for option in ("--tag", "--prefix", "--download-only"):
+            with self.subTest(option=option):
+                self.curl_log.write_text("")
+                self.package_log.write_text("")
+                result = self.run_installer(option, "")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.curl_log.read_text(), "")
+                self.assertEqual(self.package_log.read_text(), "")
+
+    def test_dangling_destinations_stop_before_download(self) -> None:
+        for option in ("--prefix", "--download-only"):
+            with self.subTest(option=option):
+                destination = self.root / option.removeprefix("--")
+                destination.symlink_to(self.root / "missing")
+                self.curl_log.write_text("")
+                result = self.run_installer("--tag", self.tag, option, str(destination))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.curl_log.read_text(), "")
+                destination.unlink()
+
+    def test_unsupported_or_old_native_distro_stops_before_download(self) -> None:
+        for distribution, version in (("fedora", "40"), ("rhel", "8")):
+            with self.subTest(distribution=distribution, version=version):
+                self.set_os_release(distribution, version)
+                self.curl_log.write_text("")
+                self.package_log.write_text("")
+                result = self.run_installer("--tag", self.tag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.curl_log.read_text(), "")
+                self.assertEqual(self.package_log.read_text(), "")
+
+    def test_non_stable_or_untrusted_tag_stops_before_artifact_download(self) -> None:
+        unsafe = self.run_installer("--tag", "v0.70.0-rc.1")
+        self.assertNotEqual(unsafe.returncode, 0)
+        self.assertEqual(self.curl_log.read_text(), "")
+
+        untrusted = self.run_installer(FAKE_LATEST_URL="https://example.invalid/tag/v0.69.0")
+        self.assertNotEqual(untrusted.returncode, 0)
+        self.assertIn("releases/latest", self.curl_log.read_text())
+        self.assertNotIn("releases/download/", self.curl_log.read_text())
 
 
 if __name__ == "__main__":

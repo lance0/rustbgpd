@@ -11,14 +11,34 @@ resolved.
 
 ## Open issues
 
+- **Reloads can produce transient readiness failures.** The current core probe
+  can return `/readyz` 503 during a policy reload, and observed HTTP latency can
+  exceed its shared 200 ms actor deadline. Timing instrumentation supports
+  investigation but does not establish that the underlying delay is fixed.
+  The [operator probe contract](operations.md#http-probes) distinguishes
+  instantaneous responses from consumer hysteresis. The
+  [route-server soak policy](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+  permits isolated breaches while retaining them as evidence; they do not
+  automatically block release when all agreed acceptance gates pass.
+
 - **Fleet policy stats can time out during reload.** The daemon's
   `GetPolicyStats` RPC shares one absolute 2 s deadline across peer validation,
   export counters, import counters, and dataset reads. Fleet calls such as
   `rbgp policy stats --direction both` can return `DEADLINE_EXCEEDED` during
   reload activity, with no partial rows. Check reload settlement before
-  retrying the read. Fleet stats responsiveness during reload remains under
-  investigation.
-  See the [policy stats contract](api.md#policyservice).
+  retrying the read. Typed admission reduces specific actor waits; the
+  [operator-read design](../adr/0132-operator-read-path.md) adds temporary RIB
+  summaries for synchronous policy replacement and dataset reevaluation,
+  plus read service between queued RIB work units. Final phase coverage and
+  qualifying soak remain outstanding. General RIB queries retain their
+  consistency fences, incomplete restoration can fence live peer-manager
+  reads, and import collection still depends on session tasks.
+  The paired native rollback cell passes on both baseline and candidate; it
+  does not establish a general deadline guarantee. This issue stays open
+  until the final phase coverage and qualifying soak pass on the final runtime
+  candidate. Retrying an operator command does not
+  turn a failed management-soak sample into a pass. See the
+  [policy stats contract](api.md#policyservice).
 
 ## Resolved
 

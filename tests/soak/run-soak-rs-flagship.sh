@@ -33,6 +33,7 @@
 #   - management-plane-load.jsonl  bounded HTTP/CLI load evidence
 #   - management-plane-load.log    load-driver stdout/stderr
 #   - doctor-bundle.tar.gz         latest `rbgp doctor` support bundle
+#   - metrics-snapshots.txt.gz     full /metrics body every METRICS_SNAPSHOT_EVERY samples
 #   - run.json         run metadata (analyzer input)
 #   - verdict.json     analyzer verdict
 
@@ -54,8 +55,8 @@ TRIP_LIMIT_MARGIN="${TRIP_LIMIT_MARGIN:-50}"
 TRIP_PREFIXES="${TRIP_PREFIXES:-64}"
 TRIP_RESTART_SECONDS="${TRIP_RESTART_SECONDS:-120}"
 TRIP_REESTABLISH_SEC="${TRIP_REESTABLISH_SEC:-300}"
-# Engine-side session hold after a final-cycle trip; the runner's final
-# evidence drain window is half of it, so the sessions always outlive it.
+# Engine-side session hold after a final-cycle trip, before the final
+# ready/ack barrier, so the runner can collect the recovery evidence.
 TRIP_FINAL_QUIESCE_SEC="${TRIP_FINAL_QUIESCE_SEC:-120}"
 CONVERGE_CAP_SEC="${CONVERGE_CAP_SEC:-900}"
 LISTEN_PORT="${LISTEN_PORT:-1790}"
@@ -69,6 +70,10 @@ MANAGEMENT_CLI_INTERVAL_SEC="${MANAGEMENT_CLI_INTERVAL_SEC:-5}"
 # that the daemon's run context is still sane, not load.
 MANAGEMENT_DOCTOR_INTERVAL_SEC="${MANAGEMENT_DOCTOR_INTERVAL_SEC:-600}"
 MANAGEMENT_TIMEOUT_SEC="${MANAGEMENT_TIMEOUT_SEC:-5}"
+# Retain the full /metrics body every Nth sample (0 disables). One body is
+# about 4.4 MiB raw / 210 KiB gzipped at 1000 peers, so 10 keeps a 24 h run
+# at 30 s sampling to 288 snapshots (about 60 MB compressed).
+METRICS_SNAPSHOT_EVERY="${METRICS_SNAPSHOT_EVERY:-10}"
 
 # Match reloadstall's base_prefix(idx) exactly for stub 1's first route:
 # own_slice(1) starts at global index SOAK_ROUTES_PER_PEER. Stub 1 is stable
@@ -128,6 +133,10 @@ if ((TRIP_FINAL_QUIESCE_SEC < 30)); then
     echo "TRIP_FINAL_QUIESCE_SEC must be >= 30 (the final-trip evidence drain runs inside it)" >&2
     exit 2
 fi
+if [[ ! $METRICS_SNAPSHOT_EVERY =~ ^[0-9]+$ ]]; then
+    echo "METRICS_SNAPSHOT_EVERY must be a non-negative integer (0 disables snapshots)" >&2
+    exit 2
+fi
 OVERALL_CAP_SEC="${OVERALL_CAP_SEC:-$((SOAK_SECONDS + RELOADS * 300 + PLANNED_TRIPS * (TRIP_RESTART_SECONDS + TRIP_REESTABLISH_SEC + 300) + 3600))}"
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -143,6 +152,7 @@ MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
 # One fixed path rewritten by every doctor attempt; a defaulted bundle name is
 # timestamped and would leave one tarball per attempt in the run directory.
 DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
+METRICS_SNAPSHOTS_GZ="$RUN_DIR/metrics-snapshots.txt.gz"
 PROM_TMP="$RUN_DIR/.metrics.prom"
 
 # shellcheck source=tests/soak/host-lock.sh
@@ -188,6 +198,7 @@ DAEMON_PID=""
 SCEN=""
 MEASURED_START_MONOTONIC=""
 MEASURED_END_MONOTONIC=""
+ENGINE_FINISH_RELEASE_MONOTONIC=""
 RUN_INTERRUPTED=0
 
 monotonic_now() {
@@ -299,6 +310,28 @@ prom_peer_scope() {
     awk -v m="$1" -v p="peer=\"$2\"" -v s="scope=\"$3\"" '
         $0 ~ "^"m"\\{" && index($0, p) && index($0, s) { print $NF; found=1; exit }
         END { if (!found) print "nan" }' <"$PROM_TMP"
+}
+
+# Append the current scrape body as one gzip member headed by a comment
+# line, so families the CSV never extracts (histograms, per-peer gauges)
+# reach the archive; `zcat` reads the members as a single stream. A failed
+# append is rolled back to the prior length so a partial member cannot break
+# every later read; a member cut short by a hard kill is not recovered.
+prom_snapshot() {
+    local before
+    before=$(stat -c %s "$METRICS_SNAPSHOTS_GZ" 2>/dev/null || echo 0)
+    # gzip is the writer and the last stage, so its status is the write
+    # status; pipefail (set above) also surfaces a producer failure.
+    if { printf '# snapshot %s elapsed_sec=%s\n' "$1" "$2"; cat "$PROM_TMP"; } |
+        gzip -c >>"$METRICS_SNAPSHOTS_GZ"; then
+        return 0
+    fi
+    if ((before == 0)); then
+        rm -f "$METRICS_SNAPSHOTS_GZ"
+    else
+        truncate -c -s "$before" "$METRICS_SNAPSHOTS_GZ"
+    fi
+    return 1
 }
 
 tree_rss_mb() {
@@ -427,6 +460,7 @@ process_log() {
 }
 
 SCRAPE_FAILS=0
+SAMPLE_ROWS=0
 sample_row() {
     local elapsed=$1
     # Sessions are held open by the engine; once it exits (or if it exits
@@ -472,6 +506,10 @@ sample_row() {
         "$code" \
         "$ms" \
         >>"$SAMPLES_CSV"
+    if ((METRICS_SNAPSHOT_EVERY > 0 && SAMPLE_ROWS % METRICS_SNAPSHOT_EVERY == 0)); then
+        prom_snapshot "$timestamp" "$elapsed" || cycle_log "metrics snapshot append failed"
+    fi
+    SAMPLE_ROWS=$((SAMPLE_ROWS + 1))
     local avail_kib
     avail_kib=$(df -Pk "$RUN_DIR" | awk 'NR==2 {print $4}')
     if ((avail_kib < 5 * 1024 * 1024)); then
@@ -553,6 +591,7 @@ write_run_json() {
         printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
         printf '  "measured_start_monotonic": %s,\n' "$measured_start"
         printf '  "measured_end_monotonic": %s,\n' "$measured_end"
+        printf '  "engine_finish_release_monotonic": %s,\n' "${ENGINE_FINISH_RELEASE_MONOTONIC:-null}"
         printf '  "nofile_soft": %s,\n' "$RUSTBGPD_NOFILE_SOFT_JSON"
         printf '  "designated_member": "%s"\n' "$DESIGNATED_ADDR"
         echo "}"
@@ -611,6 +650,7 @@ main() {
 
     write_run_json
 
+    [[ ! -e $RUN_DIR/engine-finish ]] || abort "engine finish evidence path already exists"
     "$DAEMON" "$SCEN/config.toml" >"$RUSTBGPD_LOG" 2>&1 &
     DAEMON_PID=$!
     log "daemon started pid=$DAEMON_PID"
@@ -632,6 +672,7 @@ main() {
         RELOADSTALL_TRIP_PREFIXES=$TRIP_PREFIXES \
         RELOADSTALL_TRIP_REESTABLISH_SECS=$TRIP_REESTABLISH_SEC \
         RELOADSTALL_FINAL_QUIESCE_SECS=$TRIP_FINAL_QUIESCE_SEC \
+        RELOADSTALL_EVIDENCE_DIR="$RUN_DIR/engine-finish" \
         "$HARNESS" "$SOAK_PEERS" "$TOTAL_PREFIXES" "$LISTEN_PORT" "$DAEMON_PID" \
         "$SCEN/member.rpol" "$SCEN/gen-a.rpol" "$SCEN/gen-b.rpol" \
         "$RELOADS" "$CONTROL_SECS" "$SOAK_PEERS" >"$RELOADSTALL_LOG" 2>&1 &
@@ -659,14 +700,26 @@ main() {
     while :; do
         now=$(date +%s)
         if ! pid_running "$H_PID"; then
-            MEASURED_END_MONOTONIC=$(monotonic_now)
-            process_log
-            break
+            abort "engine exited before final evidence acknowledgement"
         fi
         pid_running "$MANAGEMENT_LOAD_PID" || abort "management-plane load exited before engine"
         pid_running "$DAEMON_PID" || abort "daemon died mid-soak"
         process_log
         trip_evidence_tick
+        if [[ -f $RUN_DIR/engine-finish/ready ]]; then
+            # The engine holds every session until ack. Drain even an
+            # already-running probe before allowing its final Cease fan-out.
+            [[ -z $TRIP_N ]] || abort "final trip headroom evidence never settled"
+            MEASURED_END_MONOTONIC=$(monotonic_now)
+            if ! stop_management_load; then
+                abort "management-plane load did not terminate cleanly"
+            fi
+            pid_running "$H_PID" || abort "engine exited while draining management-plane load"
+            ENGINE_FINISH_RELEASE_MONOTONIC=$(monotonic_now)
+            write_run_json
+            printf 'ack\n' >"$RUN_DIR/engine-finish/ack"
+            break
+        fi
         if ((now >= next_sample)); then
             sample_row $((now - start_epoch))
             next_sample=$((now + SAMPLE_INTERVAL))
@@ -679,23 +732,7 @@ main() {
     wait "$H_PID" || hrc=$?
     H_PID=""
     ((hrc == 0)) || abort "engine exited non-zero: $hrc"
-    if ! stop_management_load; then
-        abort "management-plane load did not terminate cleanly"
-    fi
     write_run_json
-    if [[ -n $TRIP_N ]]; then
-        # Drain the last trip's headroom evidence (bounded). When the last
-        # trip rides the last reload, the engine holds every session up for
-        # TRIP_FINAL_QUIESCE_SEC after `trip N complete`, so the live loop
-        # above normally settles this before the engine exits; this drain
-        # (half the hold) is the fail-closed backstop.
-        local drain_deadline=$(($(date +%s) + TRIP_FINAL_QUIESCE_SEC / 2))
-        while [[ -n $TRIP_N ]]; do
-            (($(date +%s) < drain_deadline)) || abort "trip $TRIP_N headroom evidence never settled"
-            trip_evidence_tick
-            sleep 1
-        done
-    fi
     log "engine and management-plane load completed cleanly; running analyzer"
 
     terminate "$DAEMON_PID"

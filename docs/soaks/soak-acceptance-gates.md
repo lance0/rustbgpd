@@ -292,12 +292,64 @@ never as silent green.
 | RSS late-window slope | < 10 MB/h over the final 25 % of the run (evaluated only when that window ≥ 1 h; rationale above) | CSV `rss_mb` | Same. |
 | Intern-table late-window slope | < 100 entries/h over the same window (the scenario's attribute universe is fixed; reload re-interning must return to plateau) | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every reload re-interns per-chain attributes; GC reclaims after transition. |
 | Counter monotonicity (no restart) | `bgp_messages_sent_total` never decreases between samples | CSV `msgs_sent_total` | Advances with every keepalive/UPDATE across 1000 sessions; a decrease means a daemon restart (abort criterion). |
-| readyz availability | HTTP 200 within 250 ms on every sample (the route-server-1000 receipt enforces this bound during reloads at this exact shape) | CSV `readyz_code`, `readyz_ms` | Probed every sample, including mid-reload and mid-trip. |
-| Management-load lifetime and cadence | Load start ≤ measured-window start and load end ≥ measured-window end; all five operations present; each operation completes ≥ 90% of its scheduled attempts; zero missed cadence slots; terminal summary is the final complete JSONL record and its counts/configuration match independently observed records plus `run.json` | `management-plane-load.jsonl` start/operation/summary records + monotonic window bounds and exact intervals in `run.json` | The runner starts the load only after the engine convergence marker, aborts if it exits while the engine lives, then SIGTERMs and reaps it before analysis. Smoke interval knobs remain fail-closed because both evidence sources must agree. |
+| readyz availability | Fewer than 3 consecutive samples miss HTTP 200 within 250 ms. The failure count follows the [Kubernetes readiness-probe default](https://kubernetes.io/docs/concepts/workloads/pods/probes/#configuration-fields), but the 30 s sampling interval permits longer outages than its default 10 s interval: three samples span at least 60 s. Missing observations fail closed: any logged sample scrape failure, or a gap of at least two sampling intervals between rows or at the planned window edges, fails the gate. Gaps do not join breach streaks. The verdict reports complete counts and the longest consecutive run, plus the first 20 offending samples and observation gaps. Status failures include non-200 responses and the sampler's `000` curl-failure sentinel; latency failures are late 200 responses. Isolated breaches remain findings even when the gate passes | CSV `readyz_code`, `readyz_ms`, `elapsed_sec`; `cycles.log` scrape failures | Probed every sample, including mid-reload and mid-trip. |
+| Management-load lifetime and cadence | Load start ≤ measured-window start ≤ measured-window end ≤ stop request ≤ load end ≤ engine release; load end precedes the first received Administrative Shutdown; all five operations present; each operation completes ≥ 90% of its scheduled attempts; zero missed cadence slots; terminal summary is the final complete JSONL record and its counts/configuration match independently observed records plus `run.json` | `management-plane-load.jsonl` start/operation/summary records + monotonic window/release bounds and exact intervals in `run.json`, plus the terminal summary UTC timestamp and daemon shutdown log | The runner starts the load only after convergence, then ends measurement and SIGTERMs/drains it while the engine holds all sessions at its final ready/ack barrier. Missing or reversed finish ordering fails closed; no operation is excluded. Smoke interval knobs remain fail-closed because both evidence sources must agree. |
 | Management-load correctness | Zero non-`ok` results and zero invalid `ok` results | Every bounded JSONL operation record must be schema-valid, non-empty, and report `ok`; metrics must report HTTP 200, CLI operations must exit 0 (doctor may exit 2 when only excluded peer checks fail), neighbor cardinality must equal configured peers, the policy root must contain a `chains` array, and the route array must contain exactly the independently recomputed stub 1 first prefix | Every attempt validates the live response before discarding its payload. There is no enable/skip switch and no retry that can hide a failed attempt. |
 | Doctor configuration assertion | Every `doctor` attempt reports `ok`, and at least one attempt exists. A red check is detected without retaining the report: the driver accepts `doctor`'s documented exit 2 ("bundle written, at least one check red") as a report rather than a CLI failure, parses the `--json` line, and records the verdict as the bounded `doctor_check_failed` result before discarding the payload. Per-peer session and flap checks are excluded from that verdict — the scenario tears the designated member down on purpose, and the session-floor, flap-budget, and trip-accounting gates above measure peer health exactly; what `doctor` uniquely contributes is the host/daemon configuration verdict. The rlimit check covers every `rustbgpd` process on the host, so another daemon with a low descriptor limit also turns it red. A healthy second daemon does not; host isolation still relies on preflight and the shared host mutex | `management-plane-load.jsonl` `doctor` operation records + the retained `doctor-bundle.tar.gz` from the last attempt | Every attempt re-reads the live daemon's rlimits, state-directory space, listener reachability, and crash directory; the run's own fd-headroom guard sets the limit, and this re-asserts it from the daemon side for the whole window. |
 | Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
 | No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
+
+#### Readiness acceptance and Kubernetes probes
+
+The daemon's [`/readyz` endpoint](../reference/operations.md#http-probes)
+reports the result of the current core probe. Its shared 200 ms deadline covers
+the peer-manager and RIB checks; it is not a promise that every HTTP request
+finishes within 200 ms. Scheduling delays and HTTP delivery also affect the
+latency observed by the sampler. The endpoint applies no consecutive-failure
+filter of its own.
+
+The route-server flagship soak applies hysteresis: it requires repeated failed
+observations before failing the readiness gate. This follows Kubernetes's
+default failure-count policy, with different sampling and latency settings:
+
+| Setting | Kubernetes readiness-probe default | Route-server flagship soak |
+|---|---|---|
+| Consecutive failures to fail the check | 3 | 3 |
+| Probe interval | 10 seconds | 30 seconds by default; actual interval recorded in `run.json` |
+| Response limit | 1 second | HTTP 200 within 250 ms |
+
+Kubernetes defaults and HTTP success semantics are documented in its
+[probe reference](https://kubernetes.io/docs/concepts/workloads/pods/probes/#configuration-fields).
+The soak has a stricter per-response latency limit, but samples less often:
+three failures at its default interval span at least 60 seconds. It therefore
+permits longer outages than the default 10-second cadence. These are sampled
+observations, not proof of continuous failure between probes. A 503 fails an
+individual Kubernetes HTTP probe even when it arrives within one second;
+three consecutive failures are what fail its overall readiness check. A
+30-second archive cannot establish what intervening 10-second probes would
+have observed.
+
+Missing evidence is not a healthy sample. Logged scrape failures or gaps of
+at least two sample intervals, including planned window edges, fail the soak
+readiness gate. A gap resets the breach streak. The verdict preserves complete
+breach counts and the longest streak, with detailed lists capped at 20.
+This acceptance policy tolerates isolated breaches and rejects missing
+observations; it is neither uniformly stricter nor uniformly looser than the
+previous zero-breach gate.
+
+An isolated breach remains visible and can guide latency investigation, but
+does not automatically block a release when all agreed soak gates pass.
+Samples during reloads and trips are still counted; there is no reload-window
+exemption. A passing readiness gate does not excuse failed management, session,
+reload, memory, or evidence gates. Preserve earlier verdicts under their
+original analyzer and record any reanalysis separately.
+
+The [RIB timing histograms](../reference/operations.md#routing)
+support investigation; component durations do not bound full probe latency,
+and admitted-query wait is not the entire HTTP response time. A passing soak
+does not by itself demonstrate that the source of every latency spike was fixed.
+The [fixed-shape route-server receipt](../../bench/scale/route-server-1000/README.md)
+and scenario 11 below retain their own, different readiness gates.
 
 ### 11. Route-reflector flagship (reflection correctness under churn) — `run-soak-rr-flagship.sh` (`analyze-soak-rr-flagship.py`)
 

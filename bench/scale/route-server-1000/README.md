@@ -20,12 +20,17 @@ GiB `MemAvailable`. Lock contention exits 75.
 
 Runtime gates are also fixed: cold convergence within 60 seconds, overall
 completion within 600 seconds, daemon-tree RSS at most 2 GiB sampled each
-second, and `/readyz` sampled every 100 ms with every response HTTP 200 in at
-most 250 ms. Selected update-group and actor-poll metrics are scraped every
-250 ms. The run is accepted only with four exact delivery rows, all sessions
+second, and `/readyz` probed with a 100 ms delay between requests, with every
+response HTTP 200 in at most 250 ms. Selected update-group and actor-poll
+metrics are scraped every 250 ms. The run is accepted only with four exact delivery rows, all sessions
 up, no decode errors, one 1,000-member update group, no fallback peers, and at
 least four `finalize` polls. An advertised-route explanation additionally
 proves an actual prefix passes export policy through a non-null update group.
+
+This fixed-shape receipt deliberately rejects any readiness breach. Its
+per-sample gate is stricter than the flagship RS soak's consecutive-failure
+policy; see [readiness acceptance](../../../docs/soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
+Neither harness changes the daemon's shared 200 ms core-actor deadline.
 
 Run only on a quiet performance host, from the immutable commit to measure:
 

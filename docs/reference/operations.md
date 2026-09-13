@@ -608,10 +608,86 @@ The existing request deadlines still apply under sustained read load.
 During a forward generation's export-destination prestaging, neighbor inventory
 and policy-statistics reads can inspect the installed generation while the RIB
 prepares the candidate destination. These reads retain their existing deadlines.
-Once session policy application starts, operator reads wait for settlement;
-rollback and standalone policy transactions keep the same fence. Readiness
-queries remain available at their existing transaction seams. A congested backend
-or a later transaction stage can still exhaust an operator read's deadline.
+Once session policy application starts, operator reads wait for that
+per-session step to finish; while the daemon then awaits the batched RIB
+transition for the cohort, they are served again: the peer manager answers
+session snapshots and import-statistics collections (each cohort session
+already runs its new chains, so a per-session row may show either generation,
+exactly as during prestaging), and the RIB answers general queries between its
+pre-commit transition polls from the pre-commit state. Reads that arrive during
+the RIB's short commit batches wait for the commit, which remains the single
+switch point; a route listing started before the commit cannot be continued
+across it. Forward API policy transactions and their policy-only
+publication-failure compensation use these same admission points.
+`TestPolicy` also uses the operator lane for its live peer context; its route
+pages retain their version fence, without a shared generation pin across
+peer context and routes.
+
+When a reload's export-policy transition is rejected and rolled back, the peer
+manager serves session snapshots, import-statistics collections,
+and dataset status while it awaits enqueue or completion of the batched RIB
+restore. These are live reads: a failed session restore can leave different
+sessions on different policies, and peer-manager and RIB reads do not share
+a generation pin.
+
+The [operator-read design](../adr/0132-operator-read-path.md) also serves
+bounded batches between completed serial steps. Individual session
+acknowledgements remain fenced until corresponding manager bookkeeping is
+complete. SIGHUP compensation remains fenced after an earlier ambiguous
+restoration, such as
+session knobs restored before a failed RIB refresh leaves manager metadata
+unchanged. Successful earlier steps permit live reads during later policy and
+dataset restoration; compensation alone does not imply a full fence. During
+API publication compensation, chains restore before staged configuration;
+reads report the current values of each source. Honor-only SIGHUP changes to
+`honor_graceful_shutdown` and `honor_blackhole` use the same admission after
+each acknowledged import-chain update. Candidate classification keeps those
+setters outside policy/dataset generation unwind; hot-knob restoration keeps
+its existing fences. Desired configuration publication and ordinary mutations
+retain their command ordering.
+
+Forward RFC 8212 preflight, cohort selection, post-application state probes
+and their clean-state retries, retained-route proofs and per-peer RIB export
+replacement admit bounded reads. Dataset settlement inherits its owner's admission through
+capacity and reply waits. Legacy dataset refresh retains its absolute
+five-second reply deadline; generation settlement retains its existing reply
+budget that excludes read servicing.
+
+For synchronous RIB policy replacement and export-only dataset reevaluation,
+the daemon captures numeric export statistics and neighbor RIB summaries once
+before mutation. Bounded checkpoints serve those frozen values while ordinary
+RIB queries and mutations stay fenced. The RIB uses one outer executor
+handoff on the daemon's multi-thread runtime so independent RPC tasks can
+consume their replies. This is a temporary observation, not an atomic fleet
+snapshot or persistent cache. Capture cost and session collection can still
+exhaust a read deadline.
+
+The shared RIB backlog drain processes one existing route chunk or primary
+update, serves bounded reads where the transaction permits, then yields.
+Timer, destination-prestage and deferred-registration callers preserve
+route-before-EoR ordering while allowing reads between units. This removes
+a full-backlog drain fence; individual unit cost and sustained input can
+still delay a response or destination preparation.
+
+gNMI neighbor snapshots use the same live operator lane on listeners and
+dial-out, retaining their two-second budget and snapshot failure behavior.
+Periodic BMP sampling overlaps its independent session and RIB input waits;
+each retains its 100 ms bound, including RIB admission and reply. Missing
+inputs are omitted and output remains nonblocking, with existing drop counts.
+
+Readiness retains its live actor checks and existing transaction seams.
+Operator deadlines, complete-result requirements, and the clean transition's
+atomic commit remain unchanged. The [paired native rollback receipt](../perf/artifacts/rib-summary-rollback-2026-09-12/README.md)
+records successful baseline and candidate reads, including candidate calls
+inside restore. It establishes neither a baseline deadline failure nor final
+release qualification; the final phase sweep and qualifying soak remain required.
+
+The serial work still scales with fleet size: 1,000 individual 100 ms state
+probes have a theoretical 100-second ceiling, and 1,000 individual 500 ms
+hot-apply acknowledgements have a 500-second ceiling per changed direction,
+before outer ownership limits. These are component bounds, not measured
+healthy-fleet timings; read service between completed steps avoids one
+uninterrupted fleet-sized fence.
 
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves
@@ -1148,6 +1224,22 @@ configured peers, zero Established peers, or zero routes can still be ready.
 Event-history, EVPN, FIB, and peer-count health are surfaced through their own
 metrics and status commands rather than as v1 readiness gates.
 
+Each `/readyz` response reports the current probe result; the endpoint has no
+internal failure-count hysteresis. The shared 200 ms core-actor deadline is
+not a bound on total HTTP wall-clock time: runtime scheduling and response
+delivery can take longer, and a successful probe observed after the deadline
+is rejected.
+
+Consumers choose their own failure policy. Kubernetes defaults to three failed
+probes, a 10-second interval, and a one-second timeout; an HTTP 503 still fails
+that probe even when it arrives within one second. The flagship RS soak instead
+requires HTTP 200 within 250 ms and fails on three consecutive breaches at its
+default 30-second sampling interval. Missing observations fail its gate.
+Isolated breaches remain visible findings but do not automatically block a
+release when all agreed acceptance gates pass. See the
+[readiness acceptance and Kubernetes comparison](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
+for the precise observation rules and the separate RR gate.
+
 ### The `peer` label
 
 Every `peer`-labeled series — session, RIB, policy, max-prefix, BFD, BMP —
@@ -1286,11 +1378,14 @@ exactly under the floods these drops account for.
 | `bgp_rib_outbound_registration_failover_total{peer}` | Outbound registrations handed to another live session for the same address after the active session's `PeerDown`/GR-down (the symmetric collision interleaving: the loser's `PeerUp` replaced the winner's registration before the loser went down). The exact nonzero, unambiguous survivor enters `awaiting_refresh`, is re-registered, receives the staged initial table without EoR, and is asked for an inbound ROUTE-REFRESH; matching post-failback BoRR/EoRR completes convergence |
 | `bgp_rib_dirty_resync_total{outcome}` | Dirty-peer resync timer fires, by `cleared` / `still_dirty` |
 | `bgp_rib_ingest_channel_depth` | RIB manager ingest queue depth, sampled once per manager loop iteration; pegged at capacity means producers are parked on backpressure |
-| `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane remains responsive |
+| `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). Mutations remain fenced until the transition is terminal; general RIB queries are served from the pre-commit state between the pre-commit polls and wait only through the commit batches, while the dedicated core-readiness lane remains responsive throughout |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
 | `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
+| `bgp_rib_actor_work_duration_seconds{work_unit}` | Wall-clock duration of RIB actor ingest components. The closed `work_unit` set is `route_chunk` (construction and processing of one bounded route chunk, excluding its drained-batch tail), `distribute_flush` (the coalesced outbound pass across the peer set, including readiness servicing at peer boundaries), and `exact_export_retire` (retiring exact-export rejections after that pass). Compare the `le="0.2"` bucket against the series count to count components above 200 ms. These are component timings for correlation with readiness waits, not uninterrupted stalls, a bound on probe latency, or coverage of all actor work |
+| `bgp_rib_readiness_query_wait_seconds{seam}` | Wall-clock delay from admission to the dedicated RIB readiness lane until actor service. The closed `seam` set is `actor_loop` (ordinary drains, including in-pass ingest servicing) and `policy_transition_fence` (synchronous replacement checkpoints). Records service even after a caller times out, but queries canceled before admission or never served contribute no sample. Excludes channel admission wait, the prior peer-manager probe, and reply delivery; it is not full `/readyz` latency or a probe-timeout rate |
+| `bgp_peer_manager_operator_query_wait_seconds{seam}` | Wall-clock delay from send on the peer manager's operator-read lane until actor service begins, including bounded-channel admission wait. The closed `seam` set is `unfenced`, `prestage` (policy preflight, cohort selection, destination prestage and session setup), `forward_transition`, `commit_batches`, and `rollback`. The label is the current command's policy marker, or the latest completed marked command overlapping the wait; intervening ordinary commands preserve it. Markers include trailing command work. A wait spanning several phases is recorded once under one label, not split by cause. Fenced phases produce samples only when reads are eventually drained, so their counts depend on arrival timing and are not phase load. Service after caller timeout still counts; sends canceled before admission and reads never drained do not. Excludes work before the send, service execution, and reply delivery; this is not RPC latency or a timeout rate. The 0.1 s, 0.5 s, and 2 s edges match per-peer, explain, and aggregate budgets; `count - bucket{le="2"}` counts waits over 2 s |
 | `bgp_orr_input_objects{classification}` | Inputs considered by the ORR default-topology builder before NLRI deduplication. Exactly five classifications exist: `included_default`, `excluded_nondefault`, `malformed_topology`, `malformed_attribute_29`, and `default_with_ignored_flex_algo`. The Flex series is a subset of included default objects: its base object and classic metric remain usable. All series reset to zero when no vantage is configured |
 
 The shipped alert pack raises `BgpPolicyTransitionStalled` when
@@ -1479,6 +1574,13 @@ PeerSession/PeerManager→BmpManager path. `state_query_timeout` means the
 periodic statistics tick could not obtain a current session snapshot within
 its bounded deadline; the session may still be Established, so this is not a
 Peer Down signal and the report is retried on the next tick.
+
+The periodic sampler gathers session, peer-RIB, and Loc-RIB values concurrently
+under their existing 100 ms input budgets, including RIB channel admission.
+These are independent observations, not an atomic cross-actor snapshot.
+Unavailable RIB values are omitted for that tick; BMP output uses nonblocking
+sends, with the source-drop counters above recording output backpressure.
+
 The shipped alert pack
 ([`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml))
 fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, `BmpCollectorDrops`, and
@@ -2463,6 +2565,7 @@ for it.
 
 ### Check session status
 
+<!-- rbgp-cli-conformance -->
 ```bash
 rbgp neighbor          # summary table (alias: rbgp summary)
 rbgp neighbor --wide   # adds Source, MsgRcvd, MsgSent, Flaps, RRC, Slow, State/PfxRcd
