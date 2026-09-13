@@ -1,6 +1,9 @@
 //! The copyable MANRS Action 1 example stays daemon-valid and its embedded
 //! policy tests run through the real `rbgp policy check` command.
 
+#[path = "support/cargo.rs"]
+mod cargo;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -21,8 +24,7 @@ fn run_rbgp(args: &[&str]) -> Output {
             .expect("run rbgp");
     }
 
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    Command::new(cargo)
+    cargo::command()
         .args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
         .args(args)
         .current_dir(repo_root())
