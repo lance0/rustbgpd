@@ -174,10 +174,6 @@ async fn shared_group_consumer_answers_import_query_before_stream_terminal() {
     );
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "real actor proof keeps cancellation timing, held stream, snapshot replies, and cleanup together"
-)]
 async fn assert_shared_group_canceled_read_releases_snapshots<T>(
     command: PeerCommand,
     response: oneshot::Receiver<T>,
