@@ -136,7 +136,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   additive UPDATE error-context APIs and diagnostic refinements, alongside
   `rustbgpd-fsm` 0.8.0 and `rustbgpd-rpki` 0.3.0 for the matching public
   wire-type boundary. Registry examples remain on the last verified
-  published versions until those releases are published.
+  published versions until those releases are published. RPKI 0.3.0 also makes
+  `RtrPdu`, `RtrDecodeError`, `RtrEncodeError`, and `RtrError` non-exhaustive:
+  downstream exhaustive matches need a fallback. Existing constructors and
+  fields are unchanged; `ProviderAuth` and `VrpUpdate` remain exhaustive.
 
 - Import policy statistics read the selected session's installed live counters
   without waiting for its command queue. The shared two-second deadline,

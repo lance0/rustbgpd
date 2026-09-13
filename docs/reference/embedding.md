@@ -514,10 +514,17 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      acquisition layer.
    - The `0.1.x` compatibility boundary covers the crate-root facade and every
      public module path, including the raw RTR PDU codec. That first publish
-     froze those paths: breaking Rust API or an incompatible public wire-type
-     move now requires `0.2.0`. There was no earlier public RPKI line to bump
+     froze those paths: breaking Rust API changes or an incompatible public
+     wire-type move require the next `0.x` minor compatibility line. There was
+     no earlier public RPKI line to bump
      away from, so the first release, `0.1.0`, started directly on wire
      `0.19.0`. The RPKI `0.2.0` line pairs with wire `0.20.0`.
+   - Prepared `0.3.0` pairs with wire `0.21.0` and also marks `RtrPdu`,
+     `RtrDecodeError`, `RtrEncodeError`, and `RtrError` non-exhaustive.
+     Downstream exhaustive matches need a fallback; existing variant
+     constructors and fields remain available. `ProviderAuth` and `VrpUpdate`
+     remain exhaustive. See the crate's [enum policy](../../crates/rpki/README.md#enum-exhaustiveness)
+     for migration details. These changes add no variants or runtime behavior.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish

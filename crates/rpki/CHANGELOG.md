@@ -9,8 +9,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 - Prepared the wire dependency move to `0.21.0`. Public signatures expose
   wire types, so embedders exchanging those types must upgrade to the
-  corresponding compatibility line together. No direct RPKI API or
-  runtime behavior changes in this release.
+  corresponding compatibility line together.
+- Marked `RtrPdu`, `RtrDecodeError`, `RtrEncodeError`, and `RtrError`
+  non-exhaustive. Downstream exhaustive matches now require a fallback;
+  existing variant constructors and fields are unchanged. `ProviderAuth` and
+  `VrpUpdate` remain exhaustive. No variants or runtime behavior changed.
 
 ## 0.2.0 - 2026-09-07
 
