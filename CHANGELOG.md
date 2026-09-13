@@ -417,6 +417,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complete. Rejection or rollback fails that cycle before A/B alternation can
   turn it into a misleading later re-advertisement stall.
 
+- Canceled session diagnostics no longer hold later neighbor and import-counter
+  reads behind an unfinished shared update stream. Cancellation releases reads
+  already deferred by the session; queued mutations keep their FIFO position
+  even when their acknowledgement receiver has closed.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

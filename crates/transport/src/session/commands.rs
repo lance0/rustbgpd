@@ -1337,6 +1337,9 @@ impl PeerSession {
         reason = "command dispatch centralizes all external peer-session control paths"
     )]
     pub(super) async fn handle_command(&mut self, cmd: PeerCommand) -> ControlFlow<()> {
+        if cmd.is_canceled_read() {
+            return ControlFlow::Continue(());
+        }
         match cmd {
             PeerCommand::Start => {
                 self.stop_requested = false;

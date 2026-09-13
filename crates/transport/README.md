@@ -20,6 +20,9 @@ between encoding slices, between bounded chunk batches, and while waiting for
 shared chunks. A queued mutation keeps its place before later reads and waits
 for the current envelope to finish. This does not impose a wall-clock bound on
 initial sorting, an individual encoding slice, or other session work.
+Abandoned read-only snapshots are discarded, including deferred diagnostics
+whose callers leave while shared chunks are pending. Losing a mutation's
+acknowledgement receiver does not cancel that mutation or let later reads pass it.
 
 The transport layer intercepts UPDATEs (parse, validate, apply policy)
 before forwarding to the RIB — the FSM sees only payloadless events.

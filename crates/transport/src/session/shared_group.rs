@@ -418,9 +418,12 @@ pub(super) fn encode_shared_unicast_slice(
 }
 
 impl PeerSession {
-    /// Only small operator snapshots may interleave a shared envelope. Preserve
-    /// every other command and its FIFO successors until normal actor handling.
+    /// Only small operator snapshots may interleave a shared envelope. Discard
+    /// abandoned snapshots; preserve all other commands and their FIFO successors.
     fn handle_shared_group_command(&mut self, command: crate::PeerCommand) {
+        if command.is_canceled_read() {
+            return;
+        }
         match command {
             crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
             crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
@@ -432,6 +435,13 @@ impl PeerSession {
 
     /// One command per checkpoint bounds work under a continuous read stream.
     fn poll_shared_group_command(&mut self) {
+        if self
+            .deferred_command
+            .as_ref()
+            .is_some_and(crate::PeerCommand::is_canceled_read)
+        {
+            self.deferred_command = None;
+        }
         if self.deferred_command.is_none()
             && let Ok(command) = self.commands.try_recv()
         {
@@ -653,6 +663,12 @@ impl PeerSession {
                 None => {
                     tokio::select! {
                         biased;
+                        () = async {
+                            match self.deferred_command.as_mut() {
+                                Some(command) => command.read_canceled().await,
+                                None => std::future::pending().await,
+                            }
+                        } => self.deferred_command = None,
                         command = self.commands.recv(),
                             if commands_open && self.deferred_command.is_none() => {
                             match command {
