@@ -182,6 +182,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `GetPolicyStats` now returns `DEADLINE_EXCEEDED` when a backend reply is
+  observed at or after its shared two-second deadline, including a ready final
+  dataset reply. Stage audit status reflects the same deadline decision.
+
 - Canceling outbound replay now releases the session while BMP admission,
   enrollment, or RIB admission is blocked. Once the BMP queue accepts the
   replay-begin event, ordinary mirrored EoRs remain suppressed even if enrollment
