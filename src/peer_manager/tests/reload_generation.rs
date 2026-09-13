@@ -29,13 +29,19 @@ struct GenerationSessionCounters {
 
 fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounters>) {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let (publication, receiver) =
+        tokio::sync::watch::channel(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
     let counters = Arc::new(GenerationSessionCounters::default());
     let in_task = counters.clone();
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::UpdateImportPolicy { reply, .. } => {
-                    in_task.import_installs.fetch_add(1, Ordering::SeqCst);
+                PeerCommand::UpdateImportPolicy { policy, reply } => {
+                    let generation = in_task.import_installs.fetch_add(1, Ordering::SeqCst) + 2;
+                    publication.send_replace(Some(installed_policy(
+                        u64::from(generation),
+                        policy.as_deref(),
+                    )));
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::UpdateExportPolicy { policy, reply } => {
@@ -100,9 +106,13 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                 _ => {}
             }
         }
+        drop(publication);
         Ok(())
     });
-    (PeerHandle::from_parts(session_tx, task), counters)
+    (
+        PeerHandle::from_parts_with_import_policy_counters(session_tx, task, receiver),
+        counters,
+    )
 }
 
 /// A RIB stub that acknowledges every export-policy transition shape the
@@ -2809,13 +2819,13 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
             )
             .await
             .unwrap();
-        assert!(matches!(
+        assert!(
             tokio::time::timeout(Duration::from_secs(2), response)
                 .await
                 .unwrap()
-                .unwrap(),
-            SessionQueryOutcome::Reply(_)
-        ));
+                .unwrap()
+                .is_ok()
+        );
         assert!(matches!(
             mutation.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)

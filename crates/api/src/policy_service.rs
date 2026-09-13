@@ -352,6 +352,7 @@ impl PolicyService {
     /// Create a new policy service with the given channels and a private
     /// runtime-config lock (tests / embedded use).
     #[cfg(test)]
+    #[must_use]
     pub fn new(
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -370,6 +371,7 @@ impl PolicyService {
     /// Create a policy service sharing the daemon-wide runtime-config
     /// coordinator lock, so catalog mutations serialize with SIGHUP
     /// reload, neighbor / FIB-table CRUD, and config transactions.
+    #[must_use]
     pub fn with_runtime_config_coordinator(
         access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -1502,12 +1504,15 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 )
                 .await?;
                 match chains {
-                    SessionQueryOutcome::Reply(chains) => Ok(chains),
-                    SessionQueryOutcome::TimedOut => Err(Status::deadline_exceeded(
-                        "one or more peer sessions did not answer the import policy stats query in time",
+                    Ok(chains) => Ok(chains),
+                    Err(rustbgpd_transport::handle::ImportPolicyStatsError::TimedOut) => Err(Status::deadline_exceeded(
+                        "one or more installed import policy counter observations did not complete in time",
                     )),
-                    SessionQueryOutcome::SessionGone => Err(Status::unavailable(
+                    Err(rustbgpd_transport::handle::ImportPolicyStatsError::SessionGone) => Err(Status::unavailable(
                         "one or more peer sessions exited during the import policy stats query",
+                    )),
+                    Err(rustbgpd_transport::handle::ImportPolicyStatsError::CountersUnavailable) => Err(Status::unavailable(
+                        "installed import policy counters unavailable",
                     )),
                 }
             })
@@ -1804,6 +1809,7 @@ mod tests {
     use super::*;
     use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
     use crate::proto::policy_service_server::PolicyService as PolicyServiceRpc;
+    use rustbgpd_transport::handle::ImportPolicyStatsError;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::oneshot;
 
@@ -2444,7 +2450,7 @@ mod tests {
             };
             assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
             assert!(deadline > tokio::time::Instant::now());
-            reply.send(SessionQueryOutcome::Reply(Vec::new())).unwrap();
+            reply.send(Ok(Vec::new())).unwrap();
             let PeerManagerOperatorQuery::QueryPolicyDatasets { reply } =
                 operator_rx.recv().await.unwrap().query
             else {
@@ -3846,7 +3852,7 @@ policy customer-in(peer_lp: u32) {
                                 <= tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT,
                             "import collection must inherit the RPC aggregate deadline"
                         );
-                        let _ = reply.send(SessionQueryOutcome::Reply(vec![(
+                        let _ = reply.send(Ok(vec![(
                             "10.0.0.2".parse().unwrap(),
                             rustbgpd_transport::ImportPolicyTermHits {
                                 generation: 3,
@@ -3996,7 +4002,10 @@ policy customer-in(peer_lp: u32) {
     }
 
     async fn import_stats_outcome(
-        outcome: SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+        outcome: Result<
+            Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>,
+            ImportPolicyStatsError,
+        >,
         audit: GrpcAuditHandle,
     ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
         let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
@@ -4020,21 +4029,25 @@ policy customer-in(peer_lp: u32) {
         PolicyServiceRpc::get_policy_stats(&svc, request).await
     }
 
-    /// LAN-661 red proof: treating timeout or task exit as a successful empty
-    /// snapshot (or swapping the two status mappings) changes at least one
-    /// asserted status. This pins the RPC half of the typed manager outcome.
+    /// A deadline, session exit, or unavailable counter source must fail the
+    /// whole RPC, with a distinct message, rather than return empty success.
     #[tokio::test]
     async fn get_policy_stats_import_failures_are_not_empty_successes() {
         for (outcome, code, message) in [
             (
-                SessionQueryOutcome::TimedOut,
+                Err(ImportPolicyStatsError::TimedOut),
                 tonic::Code::DeadlineExceeded,
-                "one or more peer sessions did not answer the import policy stats query in time",
+                "one or more installed import policy counter observations did not complete in time",
             ),
             (
-                SessionQueryOutcome::SessionGone,
+                Err(ImportPolicyStatsError::SessionGone),
                 tonic::Code::Unavailable,
                 "one or more peer sessions exited during the import policy stats query",
+            ),
+            (
+                Err(ImportPolicyStatsError::CountersUnavailable),
+                tonic::Code::Unavailable,
+                "installed import policy counters unavailable",
             ),
         ] {
             let audit = GrpcAuditHandle::default();
@@ -4091,7 +4104,7 @@ policy customer-in(peer_lp: u32) {
             while let Some(command) = peer_rx.recv().await {
                 match command {
                     PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
-                        let _ = reply.send(SessionQueryOutcome::Reply(Vec::new()));
+                        let _ = reply.send(Ok(Vec::new()));
                     }
                     PeerManagerCommand::QueryPolicyDatasets { reply } => {
                         let _ = reply.send(Vec::new());
@@ -4234,7 +4247,7 @@ policy customer-in(peer_lp: u32) {
                         let _ = reply.send(true);
                     }
                     PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
-                        let _ = reply.send(SessionQueryOutcome::Reply(Vec::new()));
+                        let _ = reply.send(Ok(Vec::new()));
                     }
                     PeerManagerCommand::QueryPolicyDatasets { reply } => {
                         let _ = reply.send(Vec::new());

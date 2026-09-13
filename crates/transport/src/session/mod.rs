@@ -601,6 +601,10 @@ pub(crate) struct PeerSession {
     /// rather than a global registry counter so a policy edit to an
     /// unrelated peer can't false-`STALE` this peer's decisions.
     import_policy_generation: u64,
+    /// Sole publisher owned by the session task. `None` before a handle
+    /// attaches its initially pending publication, without an intervening await.
+    import_policy_counters:
+        Option<watch::Sender<Option<Arc<crate::handle::InstalledImportPolicy>>>>,
 }
 
 /// One exceeded max-prefix bound: the offending count, the configured
@@ -1958,6 +1962,7 @@ impl PeerSession {
                 reject_retention_capacity,
             ),
             import_policy_generation: 0,
+            import_policy_counters: None,
         }
     }
 
@@ -1979,6 +1984,28 @@ impl PeerSession {
     pub(super) fn install_import_policy(&mut self, policy: Option<PolicyChain>) {
         self.import_needs_as_path_string = Self::import_chain_needs_as_path_string(policy.as_ref());
         self.import_policy = policy;
+        // Every actual install, including a clear or equal reinstall, advances
+        // the local generation before publication and command acknowledgement.
+        self.import_policy_generation = self.import_policy_generation.saturating_add(1);
+        self.publish_import_policy_counters();
+    }
+
+    pub(crate) fn set_import_policy_counters(
+        &mut self,
+        publication: watch::Sender<Option<Arc<crate::handle::InstalledImportPolicy>>>,
+    ) {
+        self.import_policy_counters = Some(publication);
+        self.publish_import_policy_counters();
+    }
+
+    fn publish_import_policy_counters(&self) {
+        if let Some(publication) = &self.import_policy_counters {
+            publication.send_replace(Some(Arc::new(crate::handle::InstalledImportPolicy::new(
+                self.session_identity,
+                self.import_policy_generation,
+                self.import_policy.as_ref(),
+            ))));
+        }
     }
 
     fn build_bmp_peer_info(&self) -> BmpPeerInfo {

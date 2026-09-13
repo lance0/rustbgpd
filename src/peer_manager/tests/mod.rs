@@ -491,8 +491,23 @@ fn insert_test_managed_peer_for_key(
     mgr.register_session(session_id, peer_key);
 }
 
+pub(super) fn installed_policy(
+    generation: u64,
+    chain: Option<&PolicyChain>,
+) -> Arc<rustbgpd_transport::handle::InstalledImportPolicy> {
+    Arc::new(rustbgpd_transport::handle::InstalledImportPolicy::new(
+        rustbgpd_transport::SessionIdentity {
+            id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+        },
+        generation,
+        chain,
+    ))
+}
+
 fn stalled_policy_query_handle() -> PeerHandle {
     let (commands, mut command_rx) = mpsc::channel(4);
+    let (publication, receiver) = tokio::sync::watch::channel(None);
     let task = tokio::spawn(async move {
         let mut held_queries = Vec::new();
         while let Some(command) = command_rx.recv().await {
@@ -501,9 +516,10 @@ fn stalled_policy_query_handle() -> PeerHandle {
             }
             held_queries.push(command);
         }
+        drop(publication);
         Ok(())
     });
-    PeerHandle::from_parts(commands, task)
+    PeerHandle::from_parts_with_import_policy_counters(commands, task, receiver)
 }
 
 fn recording_runtime_config_handle() -> (PeerHandle, mpsc::UnboundedReceiver<u16>) {

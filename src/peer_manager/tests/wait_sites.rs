@@ -18,6 +18,7 @@ use rustbgpd_api::peer_types::{PeerInfo, PeerManagerOperatorQuery, ResolvedPeerP
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 use rustbgpd_rib::{ExportPolicyCohortOutcome, PeerExportPolicyRestoreReceipt};
 use rustbgpd_transport::ImportPolicyTermHits;
+use rustbgpd_transport::handle::{ImportPolicyStatsError, InstalledImportPolicy};
 
 /// Fresh caller budget used by this matrix (`PEER_MANAGER_READ_TIMEOUT` in
 /// the API crate). Prior queueing or other stages can consume that budget
@@ -186,13 +187,6 @@ fn fail_export_then_hold_state(command: &PeerCommand, index: usize) -> SessionAc
     }
 }
 
-fn hold_first_term_hits(command: &PeerCommand, index: usize) -> SessionAction {
-    match command {
-        PeerCommand::QueryImportPolicyTermHits { .. } if index == 0 => SessionAction::Hold,
-        _ => SessionAction::Answer,
-    }
-}
-
 fn hold_first_replay(command: &PeerCommand, index: usize) -> SessionAction {
     match command {
         PeerCommand::ReplayOutbound { .. } if index == 0 => SessionAction::Hold,
@@ -250,10 +244,10 @@ const QUERY_PROBE_REASON: &str = "one session state probe bounded by PEER_QUERY_
 const WAIT_SITES: &[WaitSite] = &[
     WaitSite {
         site: "mod.rs::handle_operator_query",
-        awaits: "the admitted operator read's collector task (term-hits fan-out)",
+        awaits: "the admitted operator read's collector task (Pending counter publication)",
         drive: FORWARD_COHORT,
         rib: RibHold::Reply(is_cohort_replace),
-        session: hold_first_term_hits,
+        session: answer_all,
         pre_read: true,
         additional_entry: None,
         window: HELD_FOREVER,
@@ -966,8 +960,19 @@ fn spawn_session(
     gate: Gate,
     script: SessionScript,
     parked: bool,
-) -> (PeerHandle, mpsc::Sender<PeerCommand>) {
+    pending_counters: bool,
+) -> (
+    PeerHandle,
+    mpsc::Sender<PeerCommand>,
+    tokio::sync::watch::Sender<Option<Arc<InstalledImportPolicy>>>,
+) {
     let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(if parked { 1 } else { 16 });
+    let (publication, receiver) = tokio::sync::watch::channel(
+        (!pending_counters).then(|| installed_policy(1, Some(&PolicyChain::new(vec![])))),
+    );
+    // Retained by the caller only for deliberately Pending-publication tests.
+    // Every ordinary fixture drops this extra sender at construction.
+    let control = publication.clone();
     let commands = session_tx.clone();
     let task = tokio::spawn(async move {
         if parked {
@@ -975,6 +980,7 @@ fn spawn_session(
         }
         let mut counts: HashMap<&'static str, usize> = HashMap::new();
         let mut stalled = Vec::new();
+        let mut import_generation = 1;
         while let Some(command) = session_rx.recv().await {
             if matches!(command, PeerCommand::Shutdown) {
                 break;
@@ -982,7 +988,15 @@ fn spawn_session(
             let index = counts.entry(command_kind(&command)).or_default();
             let seen = *index;
             *index += 1;
-            match script(&command, seen) {
+            let action = script(&command, seen);
+            if matches!(action, SessionAction::Answer)
+                && let PeerCommand::UpdateImportPolicy { policy, .. } = &command
+            {
+                import_generation += 1;
+                publication
+                    .send_replace(Some(installed_policy(import_generation, policy.as_deref())));
+            }
+            match action {
                 SessionAction::Answer => answer_session(command, addr, established, false),
                 SessionAction::Fail => answer_session(command, addr, established, true),
                 SessionAction::Stall => stalled.push(command),
@@ -995,9 +1009,30 @@ fn spawn_session(
                 }
             }
         }
+        drop(publication);
         Ok(())
     });
-    (PeerHandle::from_parts(session_tx, task), commands)
+    (
+        PeerHandle::from_parts_with_import_policy_counters(session_tx, task, receiver),
+        commands,
+        control,
+    )
+}
+
+/// Observe the selected publication pin, so the fence tests hold the actual
+/// collector wait rather than a legacy session command that stats no longer uses.
+async fn counter_reader_is_waiting(
+    publication: &tokio::sync::watch::Sender<Option<Arc<InstalledImportPolicy>>>,
+) {
+    assert!(publication.borrow().is_none(), "fixture must start Pending");
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while publication.receiver_count() == 1 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the admitted collector must pin the Pending publication");
+    assert_eq!(publication.receiver_count(), 2);
 }
 
 fn dataset_policy_chain() -> PolicyChain {
@@ -1329,7 +1364,7 @@ async fn list_peers(
 
 async fn term_hits(
     operator_tx: &mpsc::Sender<EnqueuedOperatorQuery>,
-) -> oneshot::Receiver<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>> {
+) -> oneshot::Receiver<Result<Vec<(IpAddr, ImportPolicyTermHits)>, ImportPolicyStatsError>> {
     let (reply, response) = oneshot::channel();
     operator_tx
         .send(
@@ -1390,10 +1425,17 @@ async fn run(row: &WaitSite) {
 
     let first_established = !matches!(row.drive, Drive::Rfc8212Transition { established: false });
     let parked = matches!(row.drive, Drive::MaxPrefixRestart);
-    let (handle, first_commands) =
-        spawn_session(first, first_established, gate.clone(), row.session, parked);
+    let (handle, first_commands, publication) = spawn_session(
+        first,
+        first_established,
+        gate.clone(),
+        row.session,
+        parked,
+        row.pre_read,
+    );
+    let publication = row.pre_read.then_some(publication);
     insert_test_managed_peer_with_asn(&mut manager, first, 65002, handle, false);
-    let (handle, _) = spawn_session(second, true, gate.clone(), answer_all, false);
+    let (handle, _, _) = spawn_session(second, true, gate.clone(), answer_all, false, false);
     insert_test_managed_peer_with_asn(&mut manager, second, 65003, handle, false);
     let _rpol_dir = match row.drive {
         Drive::CompensatingReplay => {
@@ -1405,7 +1447,8 @@ async fn run(row: &WaitSite) {
             .unwrap();
             manager.current_config = reload_config(dir.path(), false);
             let replaced = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 3));
-            let (handle, _) = spawn_session(replaced, true, gate.clone(), answer_all, false);
+            let (handle, _, _) =
+                spawn_session(replaced, true, gate.clone(), answer_all, false, false);
             insert_test_managed_peer_with_asn(&mut manager, replaced, 65004, handle, false);
             manager.inject_reconfigure_failures.insert(key(replaced), 0);
             Some(dir)
@@ -1426,7 +1469,7 @@ async fn run(row: &WaitSite) {
                 entry.export_policy = resolved.export_policy;
             }
             let third = IpAddr::V4(Ipv4Addr::new(10, 39, 0, 3));
-            let (handle, _) = spawn_session(third, true, gate.clone(), answer_all, false);
+            let (handle, _, _) = spawn_session(third, true, gate.clone(), answer_all, false, false);
             insert_test_managed_peer_with_asn(&mut manager, third, 65004, handle, false);
             if compensate {
                 manager.inject_reconfigure_failures.insert(key(third), 0);
@@ -1545,9 +1588,7 @@ async fn run(row: &WaitSite) {
     let mut admitted = None;
     if row.pre_read {
         admitted = Some(term_hits(&operator_tx).await);
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
-        }
+        counter_reader_is_waiting(publication.as_ref().unwrap()).await;
     }
     let read_deadline = tokio::time::Instant::now() + row.window;
     let mut infos = list_peers(&operator_tx).await;
@@ -1596,7 +1637,7 @@ async fn run(row: &WaitSite) {
                 })
                 .unwrap();
             assert!(
-                matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == expected),
+                matches!(rows, Ok(ref rows) if rows.len() == expected),
                 "{site}: {rows:?}"
             );
         }
@@ -1629,6 +1670,9 @@ async fn run(row: &WaitSite) {
         ),
         "{site}: queued mutation must remain behind its owner"
     );
+    if let Some(publication) = publication {
+        publication.send_replace(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
+    }
     gate.release();
     let (mut manager, result) = tokio::time::timeout(Duration::from_mins(5), transaction)
         .await
@@ -1801,9 +1845,12 @@ async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
     for index in 0..count {
         let address = IpAddr::V4(Ipv4Addr::new(10, 39, 1, u8::try_from(index + 1).unwrap()));
         let (commands, mut receiver) = mpsc::channel::<PeerCommand>(16);
+        let (publication, counters) =
+            tokio::sync::watch::channel(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
         let started = gate.held.clone();
         let installs = installs.clone();
         let task = tokio::spawn(async move {
+            let mut import_generation = 1;
             while let Some(command) = receiver.recv().await {
                 match command {
                     PeerCommand::Shutdown => break,
@@ -1821,17 +1868,25 @@ async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
                             tokio::time::sleep(Duration::from_millis(400)).await;
                         }
                         installs.fetch_add(1, Ordering::SeqCst);
+                        if let PeerCommand::UpdateImportPolicy { policy, .. } = &command {
+                            import_generation += 1;
+                            publication.send_replace(Some(installed_policy(
+                                import_generation,
+                                policy.as_deref(),
+                            )));
+                        }
                         answer_session(command, address, true, false);
                     }
                     command => answer_session(command, address, true, false),
                 }
             }
+            drop(publication);
             Ok(())
         });
         insert_test_managed_peer(
             &mut manager,
             address,
-            PeerHandle::from_parts(commands, task),
+            PeerHandle::from_parts_with_import_policy_counters(commands, task, counters),
             false,
         );
         if !preflight && !honor {
@@ -1930,7 +1985,7 @@ async fn serial_policy_walk_serves_reads(drive_kind: Drive, preflight: bool) {
         .await
         .expect("complete import stats finish during the walk")
         .unwrap();
-    assert!(matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == count));
+    assert!(matches!(rows, Ok(ref rows) if rows.len() == count));
     assert!(
         !transaction.is_finished(),
         "read must finish while the owner still walks"
@@ -2014,7 +2069,7 @@ async fn legacy_dataset_refresh_bounds_capacity_and_reports_every_export_failure
         }
         manager.rib_tx = rib_tx;
         for peer in peers {
-            let (handle, _) = spawn_session(peer, true, Gate::new(), answer_all, false);
+            let (handle, _, _) = spawn_session(peer, true, Gate::new(), answer_all, false, false);
             insert_test_managed_peer(&mut manager, peer, handle, false);
             manager.peers.get_mut(&key(peer)).unwrap().export_policy = Some(dataset_policy_chain());
         }
@@ -2091,7 +2146,8 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         manager.rib_tx = rib_tx;
         let (operator_tx, operator_rx) = mpsc::channel(4);
         manager = manager.with_operator_queries(operator_rx);
-        let (handle, _) = spawn_session(peer, true, gate.clone(), hold_first_term_hits, false);
+        let (handle, _, publication) =
+            spawn_session(peer, true, gate.clone(), answer_all, false, true);
         insert_test_managed_peer(&mut manager, peer, handle, false);
         let transaction = tokio::spawn(async move {
             let result = drive(&mut manager, drive_kind, [peer, peer]).await;
@@ -2102,7 +2158,7 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
         }
         tokio::time::advance(Duration::from_secs(4)).await;
         let rows = term_hits(&operator_tx).await;
-        gate.held().await;
+        counter_reader_is_waiting(&publication).await;
         tokio::time::advance(Duration::from_millis(1500)).await;
         for _ in 0..4 {
             tokio::task::yield_now().await;
@@ -2115,12 +2171,12 @@ async fn expired_capacity_wait_finishes_its_admitted_read_without_late_dispatch(
             rib_rx.try_recv(),
             Ok(RibUpdate::QueryPeerRetainedStale { .. })
         ));
-        gate.release();
+        publication.send_replace(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
         let rows = tokio::time::timeout(Duration::from_millis(400), rows)
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(rows, SessionQueryOutcome::Reply(ref rows) if rows.len() == 1));
+        assert!(matches!(rows, Ok(ref rows) if rows.len() == 1));
         let (mut manager, result) = transaction.await.unwrap();
         assert!(
             result.is_err(),
@@ -2146,7 +2202,8 @@ async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() 
         manager.rib_tx = rib_tx;
         let (operator_tx, operator_rx) = mpsc::channel(4);
         manager = manager.with_operator_queries(operator_rx);
-        let (handle, _) = spawn_session(peer, true, gate.clone(), hold_first_term_hits, false);
+        let (handle, _, publication) =
+            spawn_session(peer, true, gate.clone(), answer_all, false, true);
         insert_test_managed_peer(&mut manager, peer, handle, false);
         let transaction = tokio::spawn(async move {
             let result = manager
@@ -2165,14 +2222,14 @@ async fn dataset_reply_preserves_legacy_wall_and_generation_attention_budgets() 
         };
         tokio::time::advance(Duration::from_secs(4)).await;
         let rows = term_hits(&operator_tx).await;
-        gate.held().await;
+        counter_reader_is_waiting(&publication).await;
         tokio::time::advance(Duration::from_millis(1500)).await;
         assert!(
             !transaction.is_finished(),
             "owner waits for the admitted collector even after wall expiry"
         );
-        gate.release();
-        assert!(matches!(rows.await.unwrap(), SessionQueryOutcome::Reply(_)));
+        publication.send_replace(Some(installed_policy(1, Some(&PolicyChain::new(vec![])))));
+        assert!(rows.await.unwrap().is_ok());
         for _ in 0..4 {
             tokio::task::yield_now().await;
         }
