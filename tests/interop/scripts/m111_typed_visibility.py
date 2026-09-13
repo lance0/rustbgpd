@@ -54,6 +54,11 @@ def route(snapshot: list[dict], family: str, wire: dict, allocated: dict) -> dic
         "sid_value": wire["advertised_sid"], "endpoint_behavior": wire["endpoint_behavior"],
         "flags": 0, "structures": [structure],
     }]}]
+    # Historical receipts predate the additive field. If present, verify it
+    # against the independent capture/allocation oracle, never against itself.
+    services = view.get("services")
+    if services and services[0].get("sids") and "reconstructed_sid" in services[0]["sids"][0]:
+        expected_services[0]["sids"][0]["reconstructed_sid"] = wire["service_sid"]
     need(view.get("services") == expected_services, f"{family}: typed service differs from wire")
     # Reconstruct from the operator's advertised SID and 20-bit label, rather
     # than treating the advertised locator as the complete allocated SID.

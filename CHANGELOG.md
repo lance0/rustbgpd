@@ -118,6 +118,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry, and gRPC outcome for peer validation, export, import, and datasets.
   Debug tracing exposes the same stage timings for reload diagnostics.
 
+- VPN and EVPN Prefix-SID API, CLI JSON, and text views include an optional
+  `reconstructed_sid` alongside the raw advertised SID when a single route
+  supplies an unambiguous Function transposition. Missing labels, ambiguous
+  structures, invalid ranges, and Argument-dependent composition leave it
+  absent; raw attributes and route selection are unchanged.
+
 ### Changed
 
 - The route-server flagship soak analyzer now fails its `/readyz` gate on

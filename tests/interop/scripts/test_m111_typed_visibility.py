@@ -119,6 +119,20 @@ class TypedVisibilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.check(files)
 
+    def test_optional_reconstructed_sid_matches_independent_wire_oracle(self):
+        files = fixture()
+        for family in oracle.FAMILIES:
+            expected = files["wire.json"]["families"][family]["service_sid"]
+            for name in (f"baseline-{family}-rr.json", f"{family}-count-1-rr.json"):
+                files[name][0]["prefix_sid"]["services"][0]["sids"][0]["reconstructed_sid"] = expected
+        self.check(files)
+        for wrong in (None, "", "2001:db8:111:1::", "2001:db8:111:1:ffff::"):
+            with self.subTest(wrong=wrong):
+                changed = copy.deepcopy(files)
+                changed["baseline-vpnv4-rr.json"][0]["prefix_sid"]["services"][0]["sids"][0]["reconstructed_sid"] = wrong
+                with self.assertRaises(ValueError):
+                    self.check(changed)
+
     def test_missing_or_wrong_typed_service(self):
         for mutation in ("missing", "raw", "flags", "error", "type", "sid", "behavior",
                          "sid_flags", "structure", "extra_service"):

@@ -126,7 +126,8 @@ fn invalid_peer_view_arguments_fail_before_connecting() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn srv6_prefix_sid_survives_vpn_and_evpn_rpc_output() {
     let server = test_support::spawn_mock_server(None).await;
-    let view = test_support::mock_prefix_sid();
+    let mut view = test_support::mock_prefix_sid();
+    view.services[0].sids[0].reconstructed_sid = Some("fc00:0:1:0:1::".into());
     *server.state.list_vpn_response.lock().await = Some(proto::ListVpnRoutesResponse {
         routes: vec![proto::VpnRouteEntry {
             prefix_sid: Some(Box::new(view.clone())),
@@ -157,6 +158,14 @@ async fn srv6_prefix_sid_survives_vpn_and_evpn_rpc_output() {
         };
         assert_eq!(row["prefix_sid"]["raw_value"], "deadbeef");
         assert_eq!(
+            row["prefix_sid"]["services"][0]["sids"][0]["sid_value"],
+            "fc00:0:1::"
+        );
+        assert_eq!(
+            row["prefix_sid"]["services"][0]["sids"][0]["reconstructed_sid"],
+            "fc00:0:1:0:1::"
+        );
+        assert_eq!(
             row["prefix_sid"]["services"][0]["sids"][0]["endpoint_behavior"],
             65535
         );
@@ -168,5 +177,6 @@ async fn srv6_prefix_sid_survives_vpn_and_evpn_rpc_output() {
             "{text}"
         );
         assert!(text.contains("structure=40/24/16/0/16/64"), "{text}");
+        assert!(text.contains("reconstructed-sid=fc00:0:1:0:1::"), "{text}");
     }
 }

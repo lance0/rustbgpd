@@ -2966,6 +2966,7 @@ pub(crate) fn mock_prefix_sid() -> server_proto::PrefixSidView {
             tlv_type: 5,
             sids: vec![server_proto::Srv6SidInformation {
                 sid_value: "fc00:0:1::".into(),
+                reconstructed_sid: None,
                 endpoint_behavior: 65535,
                 flags: 0x80,
                 structures: vec![server_proto::Srv6SidStructure {

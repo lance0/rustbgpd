@@ -3351,6 +3351,11 @@ message Srv6SidInformation {
   uint32 flags = 3;
   // Every advertised SID Structure, including duplicates; no semantic checks.
   repeated Srv6SidStructure structures = 4;
+  // IPv6 SID after restoring an unambiguous Function from this route's label.
+  // Absent for no transposition, missing/ambiguous labels or structures,
+  // invalid bit ranges, and Argument-dependent reconstruction. Inspection
+  // only: does not establish service eligibility or forwarding support.
+  optional string reconstructed_sid = 5;
 }
 
 // All lengths and offsets are the advertised numbers of bits.

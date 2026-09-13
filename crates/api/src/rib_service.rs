@@ -2789,7 +2789,49 @@ fn vpn_family_label(route: &VpnRibRoute) -> &'static str {
     }
 }
 
-fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<Box<proto::PrefixSidView>> {
+/// Restore only a Function wholly determined by this route (RFC 9252 section 4).
+fn reconstruct_srv6_sid(
+    sid: &rustbgpd_wire::Srv6SidInformation,
+    label: Option<(u32, u8)>,
+) -> Option<String> {
+    let (label, width) = label?;
+    let [structure] = sid.structures.as_slice() else {
+        return None;
+    };
+    let locator =
+        u16::from(structure.locator_block_length) + u16::from(structure.locator_node_length);
+    let function_end = locator + u16::from(structure.function_length);
+    let offset = u16::from(structure.transposition_offset);
+    let length = u16::from(structure.transposition_length);
+    // Argument composition can need another route and its SID Structure
+    // (RFC 9819 section 3.3); this inspection view has no such association.
+    if structure.argument_length != 0
+        || function_end > 128
+        || length == 0
+        || length > u16::from(width)
+        || offset < locator
+        || offset + length > function_end
+        || label >= (1_u32 << width)
+    {
+        return None;
+    }
+    let shift = 128 - offset - length;
+    let mask = (u128::MAX >> (128 - length)) << shift;
+    let advertised = u128::from(sid.sid_value);
+    if advertised & mask != 0 {
+        return None;
+    }
+    // Verified errata 7652/7817: high-order label bits, with equality allowed
+    // at the end of the SID Structure and Function.
+    let function = u128::from(label >> (u16::from(width) - length));
+    Some(std::net::Ipv6Addr::from(advertised | (function << shift)).to_string())
+}
+
+fn prefix_sid_to_proto(
+    attributes: &[PathAttribute],
+    l3_label: Option<(u32, u8)>,
+    l2_label: Option<(u32, u8)>,
+) -> Option<Box<proto::PrefixSidView>> {
     let raw = attributes.iter().find_map(|attribute| match attribute {
         PathAttribute::Unknown(raw)
             if raw.type_code == rustbgpd_wire::constants::attr_type::PREFIX_SID =>
@@ -2813,6 +2855,14 @@ fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<Box<proto::Prefix
                         .sids
                         .into_iter()
                         .map(|sid| proto::Srv6SidInformation {
+                            reconstructed_sid: reconstruct_srv6_sid(
+                                &sid,
+                                match service.tlv_type {
+                                    5 => l3_label,
+                                    6 => l2_label,
+                                    _ => None,
+                                },
+                            ),
                             sid_value: sid.sid_value.to_string(),
                             endpoint_behavior: u32::from(sid.endpoint_behavior),
                             flags: u32::from(sid.flags),
@@ -2876,7 +2926,14 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
         stale: route.is_stale,
         llgr_stale: route.is_llgr_stale,
         path_id: route.path_id,
-        prefix_sid: prefix_sid_to_proto(&route.attributes),
+        prefix_sid: prefix_sid_to_proto(
+            &route.attributes,
+            match route.nlri.labels.as_slice() {
+                [label] => Some((label.label, 20)),
+                _ => None,
+            },
+            None,
+        ),
     }
 }
 
@@ -3135,7 +3192,32 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
         communities,
         extended_communities,
         tunnel_type,
-        prefix_sid: prefix_sid_to_proto(&route.attributes),
+        prefix_sid: prefix_sid_to_proto(
+            &route.attributes,
+            match &route.route {
+                EvpnRoute::MacIp(mac) if mac.ip.is_some() => mac.label2.map(|l| (l.value(), 24)),
+                EvpnRoute::IpPrefix(prefix) => Some((prefix.label.value(), 24)),
+                _ => None,
+            },
+            match &route.route {
+                EvpnRoute::EadPerEvi(ead) => Some((ead.label.value(), 24)),
+                EvpnRoute::MacIp(mac) => Some((mac.label1.value(), 24)),
+                EvpnRoute::Imet(_) => {
+                    let mut tunnels = route
+                        .attributes
+                        .iter()
+                        .filter_map(PathAttribute::pmsi_tunnel);
+                    tunnels
+                        .next()
+                        .filter(|pmsi| {
+                            pmsi.tunnel_type == rustbgpd_wire::PmsiTunnelType::IngressReplication
+                                && tunnels.next().is_none()
+                        })
+                        .map(|pmsi| (pmsi.mpls_label, 24))
+                }
+                _ => None,
+            },
+        ),
     }
 }
 
@@ -3515,12 +3597,16 @@ mod tests {
     }
 
     #[test]
-    fn prefix_sid_frr_transposition_exposes_advertised_value_without_reconstruction() {
+    fn prefix_sid_frr_transposition_matches_captured_vpn_allocations() {
+        use rustbgpd_wire::{MplsLabelEntry, VpnPrefix};
         // FRR 10.7.1 VPNv4/6 Prefix-SID values captured by the M111 lab.
         // The service functions 1 and 2 are in NLRI labels, not these SID bytes.
-        for (behavior, value) in [
+        for (behavior, label, prefix, expected, value) in [
             (
                 19,
+                16,
+                VpnPrefix::v4("198.51.111.0".parse().unwrap(), 24).unwrap(),
+                "2001:db8:111:1:1::",
                 &[
                     0x05, 0x00, 0x22, 0x00, 0x01, 0x00, 0x1e, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x01,
                     0x11, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -3529,6 +3615,9 @@ mod tests {
             ),
             (
                 18,
+                32,
+                VpnPrefix::v6("2001:db8:111:1000::".parse().unwrap(), 64).unwrap(),
+                "2001:db8:111:1:2::",
                 &[
                     0x05, 0x00, 0x22, 0x00, 0x01, 0x00, 0x1e, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x01,
                     0x11, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -3536,14 +3625,22 @@ mod tests {
                 ][..],
             ),
         ] {
-            let view = prefix_sid_to_proto(&[PathAttribute::Unknown(RawAttribute {
-                flags: 0xe0,
+            let (_, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+            vpn.nlri.prefix = prefix;
+            vpn.nlri.labels = vec![MplsLabelEntry::try_new(label, 0, true).unwrap()];
+            vpn.attributes = Arc::new(vec![PathAttribute::Unknown(RawAttribute {
+                flags: 0xc0,
                 type_code: 40,
                 data: Bytes::copy_from_slice(value),
-            })])
-            .unwrap();
+            })]);
+            let view = vpn_route_to_proto(&vpn).prefix_sid.unwrap();
+            assert_eq!(
+                view.services[0].sids[0].reconstructed_sid.as_deref(),
+                Some(expected)
+            );
             assert!(view.decode_error.is_empty());
             assert_eq!(view.raw_value, value);
+            assert_eq!(view.flags, 0xc0);
             let sid = &view.services[0].sids[0];
             assert_eq!(sid.sid_value, "2001:db8:111:1::");
             assert_eq!(sid.endpoint_behavior, behavior);
@@ -3553,8 +3650,269 @@ mod tests {
     }
 
     #[test]
+    fn prefix_sid_reconstruction_checks_function_boundaries_and_ambiguity() {
+        let PathAttribute::Unknown(raw) = transposed_service(5, false) else {
+            unreachable!()
+        };
+        let mut sid = rustbgpd_wire::decode_prefix_sid_services(&raw.data)
+            .unwrap()
+            .remove(0)
+            .sids
+            .remove(0);
+        for (fields, label, expected) in [
+            (
+                [40, 24, 16, 0, 16, 64],
+                Some((0x10, 20)),
+                Some("2001:db8:111:1:1::"),
+            ),
+            // Unused low label bits do not change the transposed Function.
+            (
+                [40, 24, 16, 0, 16, 64],
+                Some((0x1f, 20)),
+                Some("2001:db8:111:1:1::"),
+            ),
+            (
+                [40, 25, 7, 0, 7, 65],
+                Some((0x55 << 13, 20)),
+                Some("2001:db8:111:1:5500::"),
+            ),
+            (
+                [40, 24, 64, 0, 1, 127],
+                Some((1 << 19, 20)),
+                Some("2001:db8:111:1::1"),
+            ),
+            (
+                [40, 24, 24, 0, 24, 64],
+                Some((0x00ab_cdef, 24)),
+                Some("2001:db8:111:1:abcd:ef00::"),
+            ),
+            ([40, 24, 16, 0, 16, 64], None, None),
+            ([40, 24, 16, 0, 0, 0], Some((16, 20)), None),
+            ([40, 24, 24, 0, 21, 64], Some((16, 20)), None),
+            ([40, 24, 32, 0, 25, 64], Some((16, 24)), None),
+            ([40, 24, 16, 0, 1, 63], Some((16, 20)), None),
+            ([40, 24, 16, 0, 16, 65], Some((16, 20)), None),
+            ([40, 24, 65, 0, 16, 64], Some((16, 20)), None),
+            ([255; 6], Some((16, 20)), None),
+            ([40, 24, 16, 0, 16, 64], Some((1 << 20, 20)), None),
+            ([40, 24, 16, 0, 16, 64], Some((1 << 24, 24)), None),
+            ([40, 24, 16, 16, 16, 80], Some((16, 24)), None),
+            ([40, 24, 16, 16, 16, 64], Some((16, 24)), None),
+        ] {
+            let structure = &mut sid.structures[0];
+            structure.locator_block_length = fields[0];
+            structure.locator_node_length = fields[1];
+            structure.function_length = fields[2];
+            structure.argument_length = fields[3];
+            structure.transposition_length = fields[4];
+            structure.transposition_offset = fields[5];
+            assert_eq!(
+                reconstruct_srv6_sid(&sid, label).as_deref(),
+                expected,
+                "{fields:?} {label:?}"
+            );
+        }
+        sid.structures[0].argument_length = 0;
+        sid.sid_value = "2001:db8:111:1:1::".parse().unwrap();
+        assert!(reconstruct_srv6_sid(&sid, Some((16, 20))).is_none());
+        sid.sid_value = "2001:db8:111:1::".parse().unwrap();
+        sid.structures.push(sid.structures[0]);
+        assert!(reconstruct_srv6_sid(&sid, Some((16, 20))).is_none());
+        sid.structures.clear();
+        assert!(reconstruct_srv6_sid(&sid, Some((16, 20))).is_none());
+    }
+
+    #[test]
+    fn prefix_sid_duplicate_structures_remain_visible_without_reconstruction() {
+        let PathAttribute::Unknown(mut raw) = transposed_service(5, false) else {
+            unreachable!()
+        };
+        let mut data = raw.data.to_vec();
+        let structure = data[data.len() - 9..].to_vec();
+        data.extend(structure);
+        data[2] += 9;
+        data[6] += 9;
+        raw.data = data.into();
+        let view =
+            prefix_sid_to_proto(&[PathAttribute::Unknown(raw.clone())], Some((16, 20)), None)
+                .unwrap();
+        assert_eq!(view.raw_value, raw.data);
+        assert_eq!(view.services[0].sids[0].structures.len(), 2);
+        assert!(view.services[0].sids[0].reconstructed_sid.is_none());
+    }
+
+    fn transposed_service(kind: u8, argument: bool) -> PathAttribute {
+        let mut value = vec![kind, 0, 34, 0, 1, 0, 30, 0];
+        value.extend(
+            if argument {
+                Ipv6Addr::UNSPECIFIED
+            } else {
+                "2001:db8:111:1::".parse().unwrap()
+            }
+            .octets(),
+        );
+        value.extend(if argument {
+            [0, 0, 24, 0, 1, 0, 6, 40, 24, 16, 16, 16, 80]
+        } else {
+            [0, 0, 19, 0, 1, 0, 6, 40, 24, 16, 0, 16, 64]
+        });
+        PathAttribute::Unknown(RawAttribute {
+            flags: 0xe0,
+            type_code: 40,
+            data: value.into(),
+        })
+    }
+
+    #[test]
+    fn prefix_sid_evpn_reconstruction_uses_each_services_label() {
+        use rustbgpd_wire::{
+            EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, MacAddress, MplsLabel,
+        };
+        let (mut evpn, _, _, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        let PathAttribute::Unknown(mut raw) = transposed_service(6, false) else {
+            unreachable!()
+        };
+        let PathAttribute::Unknown(l3) = transposed_service(5, false) else {
+            unreachable!()
+        };
+        // Keep L2 then L3 order and an ignored duplicate service verbatim.
+        raw.data = [raw.data.as_ref(), l3.data.as_ref(), l3.data.as_ref()]
+            .concat()
+            .into();
+        evpn.attributes = Arc::new(vec![PathAttribute::Unknown(raw.clone())]);
+        let mut mac = EvpnMacIp {
+            rd: rustbgpd_wire::RouteDistinguisher::ZERO,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([0, 1, 2, 3, 4, 5]),
+            ip: Some("192.0.2.1".parse().unwrap()),
+            label1: MplsLabel::new(0x0012_3400),
+            label2: Some(MplsLabel::new(0x00ab_cd00)),
+        };
+        for (ip, label2, expected_l3) in [
+            (mac.ip, mac.label2, Some("2001:db8:111:1:abcd::")),
+            (mac.ip, None, None),
+            (None, mac.label2, None),
+        ] {
+            mac.ip = ip;
+            mac.label2 = label2;
+            evpn.route = EvpnRoute::MacIp(mac.clone());
+            let view = evpn_route_to_proto(&evpn).prefix_sid.unwrap();
+            assert_eq!(view.raw_value, raw.data);
+            assert_eq!(view.services.len(), 2);
+            assert_eq!(view.services[0].tlv_type, 6);
+            assert_eq!(view.services[1].tlv_type, 5);
+            assert_eq!(view.services[0].sids[0].sid_value, "2001:db8:111:1::");
+            assert_eq!(
+                view.services[0].sids[0].reconstructed_sid.as_deref(),
+                Some("2001:db8:111:1:1234::")
+            );
+            assert_eq!(
+                view.services[1].sids[0].reconstructed_sid.as_deref(),
+                expected_l3
+            );
+        }
+        evpn.route = EvpnRoute::EadPerEvi(rustbgpd_wire::EvpnEadPerEvi {
+            rd: mac.rd,
+            esi: mac.esi,
+            ethernet_tag: mac.ethernet_tag,
+            label: mac.label1,
+        });
+        assert_eq!(
+            evpn_route_to_proto(&evpn).prefix_sid.unwrap().services[0].sids[0]
+                .reconstructed_sid
+                .as_deref(),
+            Some("2001:db8:111:1:1234::")
+        );
+        evpn.route = EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+            rd: mac.rd,
+            esi: mac.esi,
+            ethernet_tag: mac.ethernet_tag,
+            prefix: rustbgpd_wire::EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+                "192.0.2.0".parse().unwrap(),
+                24,
+            )),
+            gateway: "0.0.0.0".parse().unwrap(),
+            label: mac.label1,
+        });
+        let view = evpn_route_to_proto(&evpn).prefix_sid.unwrap();
+        assert!(view.services[0].sids[0].reconstructed_sid.is_none());
+        assert_eq!(
+            view.services[1].sids[0].reconstructed_sid.as_deref(),
+            Some("2001:db8:111:1:1234::")
+        );
+    }
+
+    #[test]
+    fn prefix_sid_missing_labels_and_argument_only_remain_absent() {
+        use rustbgpd_wire::{EthernetTagId, PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
+        let (mut evpn, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        vpn.attributes = Arc::new(vec![transposed_service(5, false)]);
+        for labels in [vec![], vec![vpn.nlri.labels[0]; 2]] {
+            vpn.nlri.labels = labels;
+            assert!(
+                vpn_route_to_proto(&vpn).prefix_sid.unwrap().services[0].sids[0]
+                    .reconstructed_sid
+                    .is_none()
+            );
+        }
+        let pmsi = PathAttribute::PmsiTunnel(PmsiTunnel {
+            flags: 0,
+            tunnel_type: PmsiTunnelType::IngressReplication,
+            mpls_label: 0x0012_3400,
+            tunnel_identifier: PmsiTunnelIdentifier::Ipv6("2001:db8::1".parse().unwrap()),
+        });
+        for (tunnels, expected) in [
+            (vec![], None),
+            (vec![pmsi.clone()], Some("2001:db8:111:1:1234::")),
+            (vec![pmsi.clone(), pmsi], None),
+            (
+                vec![PathAttribute::PmsiTunnel(PmsiTunnel {
+                    flags: 0,
+                    tunnel_type: PmsiTunnelType::NoTunnelInfo,
+                    mpls_label: 0x0012_3400,
+                    tunnel_identifier: PmsiTunnelIdentifier::Empty,
+                })],
+                None,
+            ),
+        ] {
+            evpn.attributes = Arc::new([vec![transposed_service(6, false)], tunnels].concat());
+            assert_eq!(
+                evpn_route_to_proto(&evpn).prefix_sid.unwrap().services[0].sids[0]
+                    .reconstructed_sid
+                    .as_deref(),
+                expected
+            );
+        }
+        evpn.route = EvpnRoute::EadPerEs(rustbgpd_wire::EvpnEadPerEs {
+            rd: rustbgpd_wire::RouteDistinguisher::ZERO,
+            esi: rustbgpd_wire::EthernetSegmentIdentifier::new([1; 10]),
+            ethernet_tag: EthernetTagId::MAX_ET,
+            label: rustbgpd_wire::MplsLabel::new(0),
+        });
+        evpn.attributes = Arc::new(vec![
+            transposed_service(6, true),
+            PathAttribute::ExtendedCommunities(vec![rustbgpd_wire::ExtendedCommunity::esi_label(
+                false,
+                0x0012_3400,
+            )]),
+        ]);
+        let view = evpn_route_to_proto(&evpn).prefix_sid.unwrap();
+        assert_eq!(view.services[0].sids[0].sid_value, "::");
+        assert!(
+            view.services[0].sids[0].reconstructed_sid.is_none(),
+            "an Argument alone is not a complete destination SID"
+        );
+    }
+
+    #[test]
     fn pre_prefix_sid_route_bytes_decode_without_changing_their_encoding() {
         use prost::Message;
+        let old_sid = b"\x0a\x02::";
+        // A prior SID Information message carries only the advertised value.
+        let sid = proto::Srv6SidInformation::decode(old_sid.as_slice()).unwrap();
+        assert!(sid.reconstructed_sid.is_none());
+        assert_eq!(sid.encode_to_vec(), old_sid);
         // Produced with the preceding protobuf schema: next_hop field 6/11,
         // peer_address field 7/12, no Prefix-SID field on either route type.
         let vpn_bytes = b"\x32\x0b2001:db8::1\x3a\x09192.0.2.1";
@@ -3573,6 +3931,7 @@ mod tests {
     fn prefix_sid_views_preserve_raw_bytes_and_never_return_partial_decode() {
         use prost::Message;
         let (mut evpn, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        vpn.nlri.labels.clear();
         let vpn_before = vpn_route_to_proto(&vpn);
         let ethernet_before = evpn_route_to_proto(&evpn);
         assert!(vpn_before.prefix_sid.is_none());
@@ -3640,7 +3999,7 @@ mod tests {
             type_code: 40,
             data: Bytes::new(),
         });
-        let view = prefix_sid_to_proto(&[first, second]).unwrap();
+        let view = prefix_sid_to_proto(&[first, second], None, None).unwrap();
         assert_eq!(view.raw_value, [254, 0, 0]);
         assert_eq!(view.flags, 0xc0);
         assert!(view.services.is_empty());
