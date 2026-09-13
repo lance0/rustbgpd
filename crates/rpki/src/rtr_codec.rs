@@ -13,7 +13,35 @@ pub const RTR_VERSION: u8 = 1;
 pub const RTR_VERSION_2: u8 = 2;
 
 /// RTR PDU types (client perspective).
+///
+/// # Exhaustiveness
+///
+/// The protocol PDU set may grow as support is added.
+/// Since 0.3.0, downstream matches must include a wildcard arm. Existing
+/// variants remain directly constructible; their fields are unchanged.
+///
+/// Matching every currently known variant without a fallback is rejected:
+///
+/// ```compile_fail,E0004
+/// use rustbgpd_rpki::rtr_codec::RtrPdu;
+///
+/// fn handle(value: RtrPdu) {
+///     match value {
+///         RtrPdu::SerialNotify { .. }
+///         | RtrPdu::SerialQuery { .. }
+///         | RtrPdu::ResetQuery
+///         | RtrPdu::CacheResponse { .. }
+///         | RtrPdu::Ipv4Prefix { .. }
+///         | RtrPdu::Ipv6Prefix { .. }
+///         | RtrPdu::EndOfData { .. }
+///         | RtrPdu::CacheReset
+///         | RtrPdu::ErrorReport { .. }
+///         | RtrPdu::Aspa { .. } => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RtrPdu {
     /// Server → Client: cache has new data (type 0).
     SerialNotify {
@@ -98,7 +126,31 @@ pub enum RtrPdu {
 }
 
 /// RTR decode errors.
+///
+/// # Exhaustiveness
+///
+/// Additional decoding diagnostics may be added.
+/// Since 0.3.0, downstream matches must include a wildcard arm. Existing
+/// variants remain directly constructible; their fields are unchanged.
+///
+/// Matching every currently known variant without a fallback is rejected:
+///
+/// ```compile_fail,E0004
+/// use rustbgpd_rpki::rtr_codec::RtrDecodeError;
+///
+/// fn handle(value: RtrDecodeError) {
+///     match value {
+///         RtrDecodeError::Incomplete
+///         | RtrDecodeError::InvalidVersion(_)
+///         | RtrDecodeError::InvalidType(_)
+///         | RtrDecodeError::InvalidLength
+///         | RtrDecodeError::InvalidPrefix
+///         | RtrDecodeError::Utf8Error => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtrDecodeError {
     /// Need more bytes to complete the PDU.
     #[error("incomplete: need more bytes")]
@@ -121,7 +173,26 @@ pub enum RtrDecodeError {
 }
 
 /// RTR encode errors.
+///
+/// # Exhaustiveness
+///
+/// Additional encoding diagnostics may be added.
+/// Since 0.3.0, downstream matches must include a wildcard arm. Existing
+/// variants remain directly constructible; their fields are unchanged.
+///
+/// Matching every currently known variant without a fallback is rejected:
+///
+/// ```compile_fail,E0004
+/// use rustbgpd_rpki::rtr_codec::RtrEncodeError;
+///
+/// fn handle(value: RtrEncodeError) {
+///     match value {
+///         RtrEncodeError::LengthOverflow { .. } => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtrEncodeError {
     /// A variable-length PDU field exceeded RTR's 32-bit length field.
     #[error("{field} length {len} exceeds the RTR u32 length field")]

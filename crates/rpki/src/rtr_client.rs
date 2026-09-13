@@ -1423,7 +1423,38 @@ fn offending_pdu_bytes(parse_buf: &[u8]) -> Vec<u8> {
 }
 
 /// Errors from the RTR client.
+///
+/// # Exhaustiveness
+///
+/// Additional client failure diagnostics may be added.
+/// Since 0.3.0, downstream matches must include a wildcard arm. Existing
+/// variants remain directly constructible; their fields are unchanged.
+///
+/// Matching every currently known variant without a fallback is rejected:
+///
+/// ```compile_fail,E0004
+/// use rustbgpd_rpki::rtr_client::RtrError;
+///
+/// fn handle(value: RtrError) {
+///     match value {
+///         RtrError::Io(_)
+///         | RtrError::Decode(_)
+///         | RtrError::Encode(_)
+///         | RtrError::ConnectionClosed
+///         | RtrError::BufferOverflow
+///         | RtrError::VersionMismatch { .. }
+///         | RtrError::TransactionTimeout
+///         | RtrError::TransactionLimit(_)
+///         | RtrError::ProtocolViolation(_)
+///         | RtrError::Expired
+///         | RtrError::SessionIdMismatch { .. }
+///         | RtrError::AspaProviderList { .. }
+///         | RtrError::ServerError { .. } => {}
+///     }
+/// }
+/// ```
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RtrError {
     /// TCP or socket I/O failure.
     #[error("I/O error: {0}")]

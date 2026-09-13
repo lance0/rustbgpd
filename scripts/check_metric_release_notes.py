@@ -15,8 +15,8 @@ from types import ModuleType
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_RELEASE = "v0.69.0"
 BASELINE_COMMIT = "68f6654afc9d5a46013248219a45d78b0e29186f"
-WORKSPACE_RELEASE = "0.69.0"
-TARGET_CHANGELOG_SECTION = "Unreleased"
+WORKSPACE_RELEASE = "0.70.0"
+TARGET_CHANGELOG_SECTION = "0.70.0"
 BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.69.0.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 CARGO_MANIFEST = ROOT / "Cargo.toml"

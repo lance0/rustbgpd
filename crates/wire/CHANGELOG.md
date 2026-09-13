@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.21.0 - YYYY-MM-DD
+
 - `ExtendedCommunity::as_flowspec_action` interprets negative byte/packet
   traffic rates as zero per RFC 8955 sections 7.1 and 7.2, and
   `from_flowspec_action` encodes them as zero. Both helpers also canonicalize
@@ -27,6 +29,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   registry test checks labels and fallback coverage. The `description()`
   signature and numeric enum round trips are unchanged; reserved or unassigned
   subcodes no longer inherit generic FSM/timer descriptions.
+
+- Prepared the wire `0.21` boundary with FSM `0.8` and RPKI `0.3`;
+  embedders exchanging public wire types must use the matching dependency line.
 
 ## 0.20.0 - 2026-09-07
 

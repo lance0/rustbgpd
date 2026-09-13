@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.70.0] — YYYY-MM-DD
+
 ### Added
 
 - Added a verified release installer that resolves one release tag, matches a
@@ -129,6 +131,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   absent; raw attributes and route selection are unchanged.
 
 ### Changed
+
+- Prepare the independently versioned `rustbgpd-wire` 0.21.0 crate with
+  additive UPDATE error-context APIs and diagnostic refinements, alongside
+  `rustbgpd-fsm` 0.8.0 and `rustbgpd-rpki` 0.3.0 for the matching public
+  wire-type boundary. Registry examples remain on the last verified
+  published versions until those releases are published. RPKI 0.3.0 also makes
+  `RtrPdu`, `RtrDecodeError`, `RtrEncodeError`, and `RtrError` non-exhaustive:
+  downstream exhaustive matches need a fallback. Existing constructors and
+  fields are unchanged; `ProviderAuth` and `VrpUpdate` remain exhaustive.
 
 - Import policy statistics read the selected session's installed live counters
   without waiting for its command queue. The shared two-second deadline,
@@ -454,6 +465,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mutations and live diagnostics keep later commands behind them.
 
 ### Upgrade notes
+
+- Embedders using the prepared wire 0.21, FSM 0.8, or RPKI 0.3 source
+  versions must upgrade dependencies that exchange public wire types together.
+  The wire additions preserve existing parse and validation signatures, but
+  the new 0.x dependency line gives those types a different crate identity.
+
+- The container healthcheck now checks gRPC liveness with `rbgp health
+  --liveness`. Deployments that require core-actor readiness should override
+  it with `--health-cmd='rbgp health'`. Ordinary `rbgp health` retains its
+  readiness checks.
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed
   peer rows. The daemon no longer reports a `global` export fallback row.

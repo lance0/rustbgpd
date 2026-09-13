@@ -4,7 +4,7 @@ mod support;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -211,6 +211,7 @@ fn read_pipe(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<Vec<u8>
 struct Daemon {
     process: Process,
     log: PathBuf,
+    metrics: SocketAddr,
 }
 
 impl Daemon {
@@ -226,9 +227,26 @@ impl Daemon {
         if let Some(control) = control {
             command.env(CONTROL_ENV, control);
         }
+        let mut process = Process::spawn(&mut command);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let metrics = loop {
+            let logs = std::fs::read_to_string(&log).unwrap_or_default();
+            if let Some(addr) = bound_metrics_addr(&logs) {
+                break addr;
+            }
+            if let Some(status) = process.try_wait() {
+                panic!("rustbgpd exited early with {status}\n{logs}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon did not report its bound metrics endpoint\n{logs}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
         Self {
-            process: Process::spawn(&mut command),
+            process,
             log,
+            metrics,
         }
     }
 
@@ -384,7 +402,6 @@ struct Lab {
     root: RetainOnPanic,
     config: PathBuf,
     grpc: String,
-    metrics: SocketAddr,
     control: Control,
     base: String,
 }
@@ -399,12 +416,11 @@ impl Lab {
         let runtime = root.path().join("runtime");
         std::fs::create_dir(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let metrics = unused_loopback_addr();
-        // Let the child own its gRPC port instead of reusing a released metrics port.
+        // The daemon owns every ephemeral listener from its initial bind.
         let grpc_tcp = "127.0.0.1:0".parse().unwrap();
         let token = root.path().join("grpc-token");
         atomic_write(root.path(), "grpc-token", format!("{TOKEN}\n").as_bytes());
-        let base = config_text(&runtime, metrics, grpc_tcp, &token);
+        let base = config_text(&runtime, grpc_tcp, &token);
         let config = root.path().join("rustbgpd.toml");
         std::fs::write(&config, &base).unwrap();
         let control = Control::new(root.path(), ordinal);
@@ -412,7 +428,6 @@ impl Lab {
             grpc: format!("unix://{}", runtime.join("grpc.sock").display()),
             root: RetainOnPanic::new(root),
             config,
-            metrics,
             control,
             base,
         }
@@ -483,7 +498,7 @@ impl Lab {
 
     fn restart_and_assert_absent(&self, name: &str, command: &[&str]) {
         let mut daemon = self.spawn("restart", false);
-        wait_ready_and_idle(self.metrics, &mut daemon);
+        wait_ready_and_idle(daemon.metrics, &mut daemon);
         let output = self.run(command);
         assert!(
             !output.status.success(),
@@ -499,11 +514,19 @@ fn rbgp_command(grpc: &str, args: &[&str]) -> Command {
     command
 }
 
-fn unused_loopback_addr() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
+fn bound_metrics_addr(log: &str) -> Option<SocketAddr> {
+    log.lines().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let fields = &entry["fields"];
+        if fields["message"] != "metrics server listening" {
+            return None;
+        }
+        fields["addr"]
+            .as_str()?
+            .parse::<SocketAddr>()
+            .ok()
+            .filter(|addr| addr.ip().is_loopback() && addr.port() != 0)
+    })
 }
 
 fn bound_grpc_addr(log: &str) -> Option<SocketAddr> {
@@ -521,7 +544,7 @@ fn bound_grpc_addr(log: &str) -> Option<SocketAddr> {
     })
 }
 
-fn config_text(runtime: &Path, metrics: SocketAddr, grpc_tcp: SocketAddr, token: &Path) -> String {
+fn config_text(runtime: &Path, grpc_tcp: SocketAddr, token: &Path) -> String {
     format!(
         r#"[security.grpc]
 enforcement = "tier"
@@ -539,7 +562,7 @@ runtime_state_dir = "{}"
 
 [global.telemetry]
 log_format = "json"
-prometheus_addr = "{metrics}"
+prometheus_addr = "127.0.0.1:0"
 
 [global.telemetry.grpc_uds]
 path = "{}/grpc.sock"
@@ -686,11 +709,11 @@ fn wait_metrics(
     }
 }
 
-fn wait_fenced(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Instant {
+fn wait_fenced(row: MatrixRow, daemon: &mut Daemon) -> Instant {
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
-        if ready(lab.metrics) == Some(503)
-            && metrics(lab.metrics)
+        if ready(daemon.metrics) == Some(503)
+            && metrics(daemon.metrics)
                 .is_some_and(|text| exact_metrics(&text, row, "budget_expired", true))
         {
             return Instant::now();
@@ -816,7 +839,7 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     first.signal(Signal::SIGTERM);
     let status = first.wait_status(Duration::from_secs(1));
     assert!(!status.success());
-    wait_metrics(lab.metrics, MatrixRow::Apply, "none", false, daemon);
+    wait_metrics(daemon.metrics, MatrixRow::Apply, "none", false, daemon);
 
     let log = daemon.log();
     let address = bound_grpc_addr(&log)
@@ -824,7 +847,7 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     let queued = QueuedMutation::spawn(address);
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        let text = metrics(lab.metrics).unwrap();
+        let text = metrics(daemon.metrics).unwrap();
         let elapsed = metric_value(
             &text,
             "bgp_runtime_config_settlement_elapsed_seconds",
@@ -870,7 +893,7 @@ fn apply_confirmed(lab: &Lab, candidate: &Path) {
 fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     let candidate = lab.candidate("auto-candidate");
     apply_confirmed(lab, &candidate);
-    wait_metrics_idle(lab.metrics, daemon);
+    wait_metrics_idle(daemon.metrics, daemon);
     let locator = PathBuf::from(format!(
         "{}.commit-confirm-locator.json",
         lab.config.display()
@@ -880,7 +903,7 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     lab.control.arm(MatrixRow::AutoRevert.checkpoint());
     lab.control
         .wait_for_receipt(MatrixRow::AutoRevert.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab.metrics, MatrixRow::AutoRevert, "none", false, daemon);
+    wait_metrics(daemon.metrics, MatrixRow::AutoRevert, "none", false, daemon);
     assert!(locator.is_file(), "hold must retain rollback authority");
     lab.assert_disk("auto-candidate", true);
     // Auto-revert now durably stages the reverted config before the held
@@ -931,7 +954,7 @@ fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     ]);
     lab.control
         .wait_for_receipt(MatrixRow::PeerGroup.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab.metrics, MatrixRow::PeerGroup, "none", false, daemon);
+    wait_metrics(daemon.metrics, MatrixRow::PeerGroup, "none", false, daemon);
     wait_read_success(
         lab,
         &["--json", "peer-group", "get", "matrix-peer-group"],
@@ -960,7 +983,7 @@ fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     ]);
     lab.control
         .wait_for_receipt(MatrixRow::Policy.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(lab.metrics, MatrixRow::Policy, "none", false, daemon);
+    wait_metrics(daemon.metrics, MatrixRow::Policy, "none", false, daemon);
     wait_read_success(lab, &["--json", "policy", "get", "matrix-policy"], daemon);
     lab.assert_disk("matrix-policy", false);
     let staged = std::fs::read_to_string(lab.stage_path()).expect("policy stage");
@@ -969,7 +992,7 @@ fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
 }
 
 fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult) {
-    let fenced_at = wait_fenced(lab, row, daemon);
+    let fenced_at = wait_fenced(row, daemon);
     lab.control.assert_one_claim_without_release();
     daemon.assert_running();
     let requests = match result {
@@ -1000,7 +1023,7 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             lab.assert_disk("queued-second-owner", false);
             assert!(!lab.stage_path().exists());
             let mut restarted = lab.spawn("restart", false);
-            wait_ready_and_idle(lab.metrics, &mut restarted);
+            wait_ready_and_idle(restarted.metrics, &mut restarted);
             for name in ["apply-candidate", "queued-second-owner"] {
                 assert!(
                     !lab.run(&["--json", "peer-group", "get", name])
@@ -1018,7 +1041,7 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             ));
             assert!(locator.is_file(), "exit must retain rollback authority");
             let mut restarted = lab.spawn("restart", false);
-            wait_ready_and_idle(lab.metrics, &mut restarted);
+            wait_ready_and_idle(restarted.metrics, &mut restarted);
             lab.assert_disk("auto-candidate", false);
             assert!(
                 std::fs::read_to_string(lab.root.path().join("rustbgpd.toml.unconfirmed"))
@@ -1085,7 +1108,7 @@ fn runtime_config_settlement_matrix_four_rows_three_cycles() {
             let lab = Lab::new(row, cycle, ordinal);
             ordinal += 1;
             let mut daemon = lab.spawn("controlled", true);
-            wait_ready_and_idle(lab.metrics, &mut daemon);
+            wait_ready_and_idle(daemon.metrics, &mut daemon);
             assert!(lab.control.dir.join(SETTINGS).is_file());
 
             let requests = match row {
@@ -1158,5 +1181,36 @@ fn settlement_real_process_evidence_inventory_is_composed() {
     has(
         m58,
         &["SetFibTable adds", "Restart rustbgpd", "DeleteFibTable"],
+    );
+}
+
+#[test]
+fn metrics_endpoint_requires_bound_nonzero_loopback_listener_evidence() {
+    for log in [
+        "",
+        "not JSON",
+        r#"{"fields":{"message":"metrics server listening"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":42}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"invalid"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:0"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"192.0.2.1:12345"}}"#,
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:12345"}}"#,
+    ] {
+        assert_eq!(
+            bound_metrics_addr(log),
+            None,
+            "unexpected endpoint from {log}"
+        );
+    }
+    let log = concat!(
+        "startup banner\n",
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:54321"}}"#,
+        "\n",
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:12345"}}"#,
+        "\n",
+    );
+    assert_eq!(
+        bound_metrics_addr(log),
+        Some("127.0.0.1:12345".parse().unwrap())
     );
 }

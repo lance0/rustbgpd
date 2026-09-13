@@ -7,8 +7,11 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-The `0.2.0` compatibility line uses wire `0.20.0`. Its public wire types
-belong to that compatibility line; upgrade dependencies that exchange those types together.
+The source checkout prepares the `0.3.0` compatibility line with wire `0.21.0`.
+Upgrade dependencies that exchange public wire types together. This release also
+makes four RTR enums non-exhaustive; downstream exhaustive matches need a
+fallback, as described under [Enum exhaustiveness](#enum-exhaustiveness).
+These compatibility changes do not alter runtime behavior.
 
 ## What this crate provides
 
@@ -60,8 +63,8 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.2.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-rpki = { version = "0.3.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust
@@ -124,7 +127,7 @@ The crate-root facade exports the primary application surface:
   atomic accepted-epoch inventory when the optional attachment is used
 - `VrpManager`, `RpkiTableUpdate`, and `AspaTableUpdate`
 
-The public modules are also part of the `0.1.x` API. They expose the advanced
+The public modules are also part of the public API. They expose the advanced
 ASPA helpers (`ProviderAuth`, `verify`, `verify_detailed`, `verify_upstream`),
 the raw RTR PDU codec (`RtrPdu`, its version constants, `RtrDecodeError`, and
 `RtrEncodeError`), the client-side `RtrError`, and the module-qualified forms
@@ -134,12 +137,53 @@ details.
 
 ## Compatibility
 
-This is an alpha `0.x` crate. Its first public `0.1.x` line starts with
-`rustbgpd-wire 0.19`; no earlier `rustbgpd-rpki` release existed to preserve.
-Backward-compatible fixes and additions remain on that line. Removing or
-changing public items requires `0.2.0`, as does moving the public method
-signatures to an incompatible wire line, so shared types do not silently split
-in one dependency graph.
+This is an alpha `0.x` crate. Backward-compatible fixes and additions use patch
+releases within a compatibility line. Breaking public API changes or an
+incompatible public wire-type dependency require the next `0.x` minor version.
+The first `0.1.x` line used wire `0.19`; published `0.2.x` uses wire `0.20`.
+The prepared `0.3.x` line uses wire `0.21` and adopts the enum policy below.
+
+## Enum exhaustiveness
+
+Starting with `0.3.0`, these public enums have explicit evolution contracts:
+
+| Enum | Policy | Reason |
+|---|---|---|
+| `rtr_codec::RtrPdu` | `#[non_exhaustive]` | The protocol PDU set can grow. |
+| `rtr_codec::RtrDecodeError` | `#[non_exhaustive]` | Decoding diagnostics can grow. |
+| `rtr_codec::RtrEncodeError` | `#[non_exhaustive]` | Encoding diagnostics can grow. |
+| `rtr_client::RtrError` | `#[non_exhaustive]` | Client failure diagnostics can grow. |
+| `aspa::ProviderAuth` | Exhaustive | A lookup finds a provider, finds a non-provider, or lacks an attestation. |
+| `VrpUpdate` | Exhaustive | The legacy full-table, incremental-update, and server-down contract stays closed. |
+
+The four attributes are on enums, not their variants. Existing unit, tuple,
+and struct variants remain directly constructible, with the same field access.
+Downstream matches must include a fallback for future variants. For example:
+
+```rust
+use rustbgpd_rpki::rtr_codec::RtrDecodeError;
+
+fn needs_more_bytes(error: &RtrDecodeError) -> bool {
+    match error {
+        RtrDecodeError::Incomplete => true,
+        _ => false,
+    }
+}
+```
+
+Treat an unfamiliar error as an error, and give unfamiliar PDUs an explicit
+unsupported-case policy in a custom protocol consumer. A wildcard is not a
+reason to treat unknown data as valid. This release adds no variants and does
+not change decoding, encoding, or client error handling; Router Key PDUs remain
+unsupported.
+
+Adding these attributes breaks exhaustive matches accepted by `0.2.x`, including
+irrefutable destructuring of the single `RtrEncodeError` variant. The change is
+part of the `0.3.0` compatibility boundary. Future variants of these four enums
+can be added in a `0.3.x` patch release; changing existing variant fields still
+requires a breaking release. Adding variants to `ProviderAuth` or `VrpUpdate`
+also remains a breaking change. The optional cache-inventory attachment does
+not change the legacy `VrpUpdate` contract.
 
 ## License
 

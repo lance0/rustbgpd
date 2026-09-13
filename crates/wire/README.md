@@ -16,6 +16,28 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.21.0 compatibility note
+
+The source checkout prepares `rustbgpd-wire` 0.21.0 with FSM 0.8 and RPKI 0.3.
+Consumers exchanging wire types across these crates must move to the matching
+dependency lines together. Existing parse and validation signatures remain
+available; the new `DecodeError` variants extend a `#[non_exhaustive]` enum.
+
+- `UpdateMessage::parse_revised_observed_with_error_context` and
+  `validate::validate_update_attributes_with_context` retain offending
+  attribute types through `UpdateDecodeError` and `UpdateValidationError`.
+- `DecodeError::ProhibitedAsSet` supplies typed AS-set diagnostics while
+  retaining the malformed-AS_PATH NOTIFICATION code and data.
+  `DecodeError::TruncatedAttributeHeader` maps a truncated UPDATE attribute
+  header to Malformed Attribute List instead of a generic OPEN error.
+- FlowSpec action helpers treat negative byte/packet traffic rates as zero.
+  They also canonicalize NaN and negative zero to positive zero; raw attribute
+  decoding and re-encoding remain unchanged.
+- NOTIFICATION descriptions cover registered and deprecated allocations and
+  FSM state-specific errors. Reserved or unassigned subcodes keep explicit
+  fallbacks. Cease constants add Connection Rejected and Other Configuration
+  Change; numeric enum round trips remain unchanged.
+
 ### 0.20.0 compatibility note
 
 `rustbgpd-wire` 0.20.0 is released. The new public inspection
@@ -308,7 +330,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

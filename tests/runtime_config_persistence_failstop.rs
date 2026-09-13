@@ -4,7 +4,7 @@ mod support;
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -119,11 +119,35 @@ fn wait_until_serving(grpc_addr: &str, daemon: &mut Daemon) {
     panic!("daemon never served gRPC\n{}", daemon.log());
 }
 
-fn unused_loopback_addr() -> SocketAddr {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("read loopback port")
+fn bound_metrics_addr(log: &str) -> Option<SocketAddr> {
+    log.lines().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let fields = &entry["fields"];
+        if fields["message"] != "metrics server listening" {
+            return None;
+        }
+        fields["addr"]
+            .as_str()?
+            .parse::<SocketAddr>()
+            .ok()
+            .filter(|addr| addr.ip().is_loopback() && addr.port() != 0)
+    })
+}
+
+fn wait_for_metrics_addr(daemon: &mut Daemon) -> SocketAddr {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        if let Some(addr) = bound_metrics_addr(&daemon.log()) {
+            return addr;
+        }
+        daemon.assert_running();
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not report its bound metrics endpoint\n{}",
+            daemon.log()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn http_get(addr: SocketAddr, path: &str) -> Option<String> {
@@ -245,7 +269,7 @@ fn wait_output(mut child: Child, timeout: Duration, context: &str) -> Output {
     child.wait_with_output().expect("collect rbgp output")
 }
 
-fn config(runtime_dir: &Path, metrics: SocketAddr) -> String {
+fn config(runtime_dir: &Path) -> String {
     format!(
         r#"
 [security.grpc]
@@ -262,7 +286,7 @@ runtime_state_dir = "{}"
 
 [global.telemetry]
 log_format = "json"
-prometheus_addr = "{metrics}"
+prometheus_addr = "127.0.0.1:0"
 
 [global.telemetry.grpc_uds]
 path = "{}/grpc.sock"
@@ -280,8 +304,7 @@ fn exercise(fault: &str, published: bool) {
     std::fs::create_dir(&runtime_dir).unwrap();
     std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config_path = dir.path().join("rustbgpd.toml");
-    let metrics = unused_loopback_addr();
-    std::fs::write(&config_path, config(&runtime_dir, metrics)).unwrap();
+    std::fs::write(&config_path, config(&runtime_dir)).unwrap();
     let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
 
     let mut daemon = Daemon::spawn(
@@ -290,6 +313,7 @@ fn exercise(fault: &str, published: bool) {
         Some(fault),
     );
     wait_until_serving(&grpc_addr, &mut daemon);
+    let metrics = wait_for_metrics_addr(&mut daemon);
     wait_until_ready(metrics, &mut daemon, 200);
 
     let first = rbgp_command(
@@ -394,8 +418,7 @@ fn exercise_sighup_ack_loss(fault: &str) {
     std::fs::create_dir(&runtime_dir).unwrap();
     std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config_path = dir.path().join("rustbgpd.toml");
-    let metrics = unused_loopback_addr();
-    let initial = config(&runtime_dir, metrics);
+    let initial = config(&runtime_dir);
     std::fs::write(&config_path, &initial).unwrap();
     let grpc_addr = format!("unix://{}", runtime_dir.join("grpc.sock").display());
     let mut daemon = Daemon::spawn_with_fault(
@@ -404,6 +427,7 @@ fn exercise_sighup_ack_loss(fault: &str) {
         Some(("RUSTBGPD_TEST_SIGHUP_ACK_LOSS", fault)),
     );
     wait_until_serving(&grpc_addr, &mut daemon);
+    let metrics = wait_for_metrics_addr(&mut daemon);
     wait_until_ready(metrics, &mut daemon, 200);
 
     let operator_candidate =
@@ -479,6 +503,7 @@ fn exercise_sighup_ack_loss(fault: &str) {
         None,
     );
     wait_until_serving(&grpc_addr, &mut restarted);
+    let metrics = wait_for_metrics_addr(&mut restarted);
     wait_until_ready(metrics, &mut restarted, 200);
     assert!(
         rbgp(&grpc_addr, &["--json", "neighbor", FIRST_NEIGHBOR])
@@ -511,4 +536,35 @@ fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
         exercise_sighup_ack_loss("bridge");
     }
+}
+
+#[test]
+fn metrics_endpoint_requires_bound_nonzero_loopback_listener_evidence() {
+    for log in [
+        "",
+        "not JSON",
+        r#"{"fields":{"message":"metrics server listening"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":42}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"invalid"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:0"}}"#,
+        r#"{"fields":{"message":"metrics server listening","addr":"192.0.2.1:12345"}}"#,
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:12345"}}"#,
+    ] {
+        assert_eq!(
+            bound_metrics_addr(log),
+            None,
+            "unexpected endpoint from {log}"
+        );
+    }
+    let log = concat!(
+        "startup banner\n",
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:54321"}}"#,
+        "\n",
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:12345"}}"#,
+        "\n",
+    );
+    assert_eq!(
+        bound_metrics_addr(log),
+        Some("127.0.0.1:12345".parse().unwrap())
+    );
 }
