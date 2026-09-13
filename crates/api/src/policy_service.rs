@@ -79,6 +79,16 @@ async fn policy_stats_request<T>(
             })
     };
     let finished = tokio::time::Instant::now();
+    // Tokio polls a ready backend before its timer, including when a pending
+    // request resumes after expiry. Normalize the backend observation before
+    // recording its status; synchronous response shaping is outside this wait.
+    let result = if deadline <= finished {
+        Err(Status::deadline_exceeded(
+            "policy stats aggregate deadline exceeded",
+        ))
+    } else {
+        result
+    };
     let elapsed_ms = finished.duration_since(started).as_millis();
     let rpc_elapsed_ms = finished
         .saturating_duration_since(deadline - POLICY_STATS_AGGREGATE_TIMEOUT)
@@ -4229,6 +4239,94 @@ policy customer-in(peer_lp: u32) {
                 ..Default::default()
             }]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_final_ready_reply_obeys_aggregate_deadline() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for (elapsed_ms, close_reply) in [
+            (1_900, false),
+            (2_000, false),
+            (2_001, false),
+            (2_001, true),
+        ] {
+            let (peer_tx, _peer_rx) = mpsc::channel(1);
+            let (operator_tx, mut operator_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+                .with_operator_queries(operator_tx)
+                .with_rib_query(rib_tx);
+            let started = tokio::time::Instant::now();
+            let audit = GrpcAuditHandle::default();
+            let mut request = Request::new(policy_stats_rpc_request("", "export"));
+            request.extensions_mut().insert(audit.clone());
+            let read = PolicyServiceRpc::get_policy_stats(&svc, request);
+            tokio::pin!(read);
+            assert!(
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } =
+                rib_rx.try_recv().unwrap()
+            else {
+                panic!("expected export counters");
+            };
+            tokio::time::advance(Duration::from_millis(800)).await;
+            reply
+                .send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
+                    peer: None,
+                    evals: 7,
+                    eval_errors: 0,
+                    last_error: None,
+                    terms: Vec::new(),
+                }])
+                .unwrap();
+            assert!(
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            let PeerManagerOperatorQuery::QueryPolicyDatasets { reply } =
+                operator_rx.try_recv().unwrap().query
+            else {
+                panic!("expected final dataset lookup");
+            };
+
+            // Keep the RPC unpolled until the chosen observation time. In the
+            // expiry cases, both backend and timer are ready on resume.
+            tokio::time::advance(Duration::from_millis(elapsed_ms - 800)).await;
+            if close_reply {
+                drop(reply);
+            } else {
+                reply.send(Vec::new()).unwrap();
+            }
+            let result = read.await;
+            let code = if elapsed_ms < 2_000 {
+                let response = result.unwrap().into_inner();
+                assert_eq!(response.chains.len(), 1);
+                assert_eq!(response.chains[0].routes_evaluated, 7);
+                assert!(response.datasets.is_empty());
+                tonic::Code::Ok
+            } else {
+                let error =
+                    result.expect_err("an expired final backend read must discard all rows");
+                assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+                assert_eq!(error.message(), "policy stats aggregate deadline exceeded");
+                error.code()
+            };
+            assert_eq!(started.elapsed(), Duration::from_millis(elapsed_ms));
+            assert_eq!(
+                audit.summary().unwrap().as_str(),
+                format!(
+                    "stage=export elapsed_ms=800 budget_ms=2000 rpc_elapsed_ms=800 code=Ok; \
+                     stage=datasets elapsed_ms={} budget_ms=1200 rpc_elapsed_ms={elapsed_ms} code={code:?}",
+                    elapsed_ms - 800,
+                ),
+            );
+        }
     }
 
     /// LAN-661: explicit-peer validation, export, import, and dataset reads
