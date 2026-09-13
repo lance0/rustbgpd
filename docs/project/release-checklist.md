@@ -744,6 +744,10 @@ Before rolling any versions:
      selected by their own crate manifests and release steps; never align them
      to the daemon workspace bump. Retain both `path` and `version` so
      downstream publish dry-runs resolve from crates.io.
+   - [ ] Confirm each published library crate archive contains regular-file
+         `LICENSE-MIT` and `LICENSE-APACHE` entries whose contents match the
+         canonical repository-root license texts; the SPDX `MIT OR Apache-2.0`
+         metadata remains unchanged.
    - `crates/wire/Cargo.toml`: bump **only** if `crates/wire/src/` changed
      since the last wire publish (see semver rules in the next section).
      Land the wire bump in its **own commit** before the workspace bump so
