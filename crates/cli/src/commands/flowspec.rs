@@ -78,6 +78,12 @@ pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Re
             .map(|route| {
                 serde_json::json!({
                     "components": route.components.iter().map(format_component).collect::<Vec<_>>(),
+                    "component_details": route.components.iter().map(|component| serde_json::json!({
+                        "type": component.r#type,
+                        "prefix": component.prefix,
+                        "value": component.value,
+                        "offset": component.offset,
+                    })).collect::<Vec<_>>(),
                     "actions": route.actions.iter().map(format_action).collect::<Vec<_>>(),
                     "peer_address": route.peer_address,
                     "afi_safi": output::format_family(route.afi_safi),

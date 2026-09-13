@@ -288,6 +288,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp --json flowspec` now includes raw `extended_communities` as numeric
   values, preserving their order and duplicates alongside the curated actions.
 
+- `rbgp --json flowspec` now includes ordered `component_details` records with
+  the API component type, prefix, value, and offset. The existing formatted
+  `components` array is unchanged.
+
 - gNMI neighbor snapshots now use the operator-read lane on TLS and Unix
   listeners and for dial-out subscriptions. `Get` and subscription snapshots
   can complete during policy waits that admit operator reads, retaining live

@@ -1797,6 +1797,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
 ```
 
+`rbgp --json flowspec` retains the legacy formatted `components` array and
+also emits ordered `component_details` records with the API component `type`,
+`prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
+IPv6 prefix-match semantics, including zero and nonzero values.
+
 ### List EVPN routes
 
 `ListEvpnRoutes` retains its existing unpaginated best-route view. The additive

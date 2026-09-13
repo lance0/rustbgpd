@@ -218,7 +218,9 @@ rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv
 `rbgp --json flowspec` includes `extended_communities` as raw unsigned 64-bit
 integers in response order, including duplicates and values without a curated
 action. The field is an empty array when the route has none; `actions` retains
-its formatted summaries.
+its formatted summaries. `components` retains its legacy formatted component summaries;
+`component_details` preserves each component's API type, prefix, value, and
+offset, including zero offsets and unknown types.
 
 For large accepted unicast listings, use `rbgp --json-lines rib`,
 `rbgp --json-lines rib received 192.0.2.1`, or
