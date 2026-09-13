@@ -1605,8 +1605,8 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
 Where `policy test` counts hits over a one-shot dry run, `rbgp policy
 stats` reads the **live** counters of the chains actually installed on
 the daemon: every route evaluated on the import or export path bumps
-its matched terms' counters (relaxed atomics — no measurable eval
-cost), and the query snapshots them without resetting anything
+its matched terms' counters (relaxed atomics), and the query snapshots
+them without resetting anything
 (`SensitiveRead`).
 
 ```console
@@ -1633,8 +1633,12 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   `term_index` (`statement 0`, `statement 1`, ...).
 - `--direction` selects **export** (the default), **import**, or
   **both**. Export chains are read from the RIB manager; import chains
-  are read from each live session task, so a peer without a live
-  session reports no import chain.
+  are read from each session's published installed-counter state.
+  Chainless sessions contribute no row. Pending observations remain
+  bounded by the shared absolute deadline; a closed publication or
+  unavailable counter state fails the complete RPC as `UNAVAILABLE`,
+  without partial rows. Counter availability does not establish session
+  progress.
 - Import chains report their **install generation** (bumps on every
   chain install), so counters that reset to zero read as a chain
   replacement, not continuous history. A session's initial chain
