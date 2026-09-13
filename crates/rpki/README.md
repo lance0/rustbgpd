@@ -54,8 +54,8 @@ published versions:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = "0.2.0"
-rustbgpd-wire = "0.20.0"
+rustbgpd-rpki = "0.3.0"
+rustbgpd-wire = "0.21.0"
 ```
 
 When building against a source checkout instead, use matching versioned paths

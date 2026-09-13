@@ -167,7 +167,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.20.0"
+rustbgpd-wire = "0.21.0"
 bytes = "1"
 ```
 
@@ -227,8 +227,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.20.0"
-rustbgpd-fsm = "0.7.0"
+rustbgpd-wire = "0.21.0"
+rustbgpd-fsm = "0.8.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -292,8 +292,8 @@ verified published versions in §7.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.2.0"
-rustbgpd-wire = "0.20.0"
+rustbgpd-rpki = "0.3.0"
+rustbgpd-wire = "0.21.0"
 ```
 
 ```rust
@@ -604,9 +604,9 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.20.0` | `0.21.0` |
-| `rustbgpd-fsm` | `0.7.0` | `0.8.0` |
-| `rustbgpd-rpki` | `0.2.0` | `0.3.0` |
+| `rustbgpd-wire` | `0.21.0` | `0.21.0` |
+| `rustbgpd-fsm` | `0.8.0` | `0.8.0` |
+| `rustbgpd-rpki` | `0.3.0` | `0.3.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`
