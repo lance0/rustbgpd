@@ -7,6 +7,9 @@
 //! and the peer manager; the Shutdown RPC proof pins the intentional exit-0 path
 //! beside them.
 
+#[path = "support/cargo.rs"]
+mod cargo;
+
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
@@ -332,8 +335,7 @@ fn rbgp_command(grpc_addr: &str) -> Command {
         cmd.arg("--addr").arg(grpc_addr);
         cmd
     } else {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let mut cmd = Command::new(cargo);
+        let mut cmd = cargo::command();
         cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
             .arg(grpc_addr);

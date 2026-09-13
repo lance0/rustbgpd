@@ -28,6 +28,9 @@
 //! announcer's noexport view with the gate name and the synthesized
 //! noexport-reason community).
 
+#[path = "support/cargo.rs"]
+mod cargo;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt as _;
@@ -973,6 +976,98 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
 }
 
 #[test]
+fn nested_cargo_preserves_build_script_fingerprints() {
+    const TRACKED: [&str; 6] = [
+        "CARGO_MANIFEST_DIR",
+        "CARGO_PKG_NAME",
+        "CARGO_PKG_VERSION_MAJOR",
+        "CARGO_PKG_VERSION_MINOR",
+        "CARGO_PKG_VERSION_PATCH",
+        "CARGO_PKG_VERSION_PRE",
+    ];
+    assert!(
+        TRACKED.iter().any(|key| std::env::var_os(key).is_some()),
+        "run this regression through cargo test to supply parent package metadata"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    let target = temp.path().join("target");
+    std::fs::write(
+        &manifest,
+        "[package]\nname = \"cargo-environment-probe\"\nversion = \"0.0.0\"\n\
+         edition = \"2024\"\n[lib]\npath = \"lib.rs\"\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("lib.rs"), "").unwrap();
+    std::fs::write(
+        temp.path().join("build.rs"),
+        format!(
+            r#"fn main() {{
+    for key in {TRACKED:?} {{ println!("cargo:rerun-if-env-changed={{key}}"); }}
+    println!("cargo:rerun-if-changed=build.rs");
+    assert_eq!(std::env::var("CARGO_PKG_NAME").unwrap(), "cargo-environment-probe");
+    let count = std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("executions");
+    let previous: u32 = std::fs::read_to_string(&count).unwrap_or_default().parse().unwrap_or(0);
+    std::fs::write(count, (previous + 1).to_string()).unwrap();
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let run = |mut command: Command| {
+        let output = command
+            .args([
+                "build",
+                "--offline",
+                "--message-format=json",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .arg("--target-dir")
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let out_dir = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|message| message["reason"] == "build-script-executed")
+            .expect("Cargo reports the build script output directory")["out_dir"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        std::fs::read_to_string(Path::new(&out_dir).join("executions"))
+            .unwrap()
+            .parse::<u32>()
+            .unwrap()
+    };
+    // Model clean top-level Cargo independently of the helper under test.
+    let clean_control = || {
+        let mut command = cargo::command();
+        for key in TRACKED {
+            command.env_remove(key);
+        }
+        command
+    };
+    assert_eq!(run(clean_control()), 1);
+    assert_eq!(
+        run(cargo::command()),
+        1,
+        "nested Cargo must reuse the clean build-script fingerprint"
+    );
+    assert_eq!(
+        run(clean_control()),
+        1,
+        "returning to top-level Cargo must not rebuild the fixture"
+    );
+}
+
+#[test]
 fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_subset() {
     let temp = tempfile::tempdir().expect("create temp dir");
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
@@ -986,7 +1081,6 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "pb_0001_as65020=127.0.0.1@master4\npb_0002_as65030=127.0.0.2@master4\n",
     )
     .expect("write initial aliases");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
     let ars_context = temp.path().join("arouteserver-context.yml");
     let context =
@@ -995,7 +1089,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
             .replacen("192.0.2.11", "127.0.0.1", 1);
     std::fs::write(&ars_context, context).expect("write smoke renderer context");
     let ars_output = temp.path().join("arouteserver-render");
-    let rendered = Command::new(&cargo)
+    let rendered = cargo::command()
         .current_dir(workspace)
         .args(["run", "--quiet", "-p", "rs-config-render", "--"])
         .arg("--context")
@@ -1019,7 +1113,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     // the workspace build has usually compiled it already.
     let adapter_stderr = temp.path().join("adapter.stderr.log");
     let mut adapter = Proc {
-        child: Command::new(&cargo)
+        child: cargo::command()
             .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
             .arg("--grpc-addr")
             .arg(format!("unix://{}", grpc_socket.display()))
@@ -1836,7 +1930,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     // Exercise the real branch so file mode cannot accidentally replace it.
     let direct_stderr = temp.path().join("direct-adapter.stderr.log");
     let mut direct_adapter = Proc {
-        child: Command::new(&cargo)
+        child: cargo::command()
             .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
             .arg("--grpc-addr")
             .arg(format!("unix://{}", grpc_socket.display()))
@@ -1872,7 +1966,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         get_json(direct_port, "/protocol/pb_direct_as65020", "direct adapter")["protocol"]["protocol"],
         "pb_direct_as65020"
     );
-    let invalid_direct = Command::new(&cargo)
+    let invalid_direct = cargo::command()
         .args(["run", "--quiet", "-p", "birdwatcher-adapter", "--"])
         .env("NO_COLOR", "1")
         .arg("--grpc-addr")

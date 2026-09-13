@@ -17,6 +17,9 @@
 //! spawned: yes/no", which is queued under Phase 6's gRPC status
 //! work.
 
+#[path = "support/cargo.rs"]
+mod cargo;
+
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -120,8 +123,7 @@ fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
         let mut cmd = Command::new(path);
         cmd.arg("--addr").arg(grpc_addr).args(args).output()
     } else {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let mut cmd = Command::new(cargo);
+        let mut cmd = cargo::command();
         cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
             .arg(grpc_addr)
