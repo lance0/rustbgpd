@@ -111,6 +111,44 @@ fn valid_config_parses() {
     assert_eq!(config.neighbors[0].remote_asn, 65002);
 }
 
+#[test]
+fn marked_documentation_config_parses_with_the_real_schema() {
+    const MARKER: &str = "<!-- rustbgpd-config-conformance -->";
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let contents = fs::read_to_string(repository.join("docs/cookbook/rr-pair-day2.md"))
+        .expect("failed to read marked config example");
+    let lines: Vec<_> = contents.lines().collect();
+    let markers: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.trim() == MARKER).then_some(index))
+        .collect();
+    assert_eq!(
+        markers.len(),
+        1,
+        "config example must contain exactly one marker"
+    );
+    let marker = markers[0];
+    assert!(
+        lines
+            .get(marker + 1)
+            .is_some_and(|line| line.trim() == "```toml"),
+        "config marker must immediately precede its TOML fence"
+    );
+    let start = marker + 2;
+    let end = lines[start..]
+        .iter()
+        .position(|line| line.trim() == "```")
+        .map(|offset| start + offset)
+        .expect("marked config example must close before the next fence");
+    let snippet = lines[start..end].join("\n");
+    let config = parse(&format!("{}\n{}", valid_toml(), snippet)).unwrap();
+    let group = config.peer_groups.get("rr-clients").unwrap();
+    assert_eq!(group.graceful_restart, Some(true));
+    assert_eq!(group.gr_stale_routes_time, Some(120));
+    assert_eq!(group.llgr_stale_time, Some(300));
+}
+
 fn route_server_example_config() -> Config {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/route-server/config.toml");
     Config::load_with_diagnostics(path.to_str().expect("route-server example path is UTF-8"))

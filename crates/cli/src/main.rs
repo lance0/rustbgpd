@@ -4625,7 +4625,7 @@ mod tests {
             ("docs/tutorials/quickstart.md", 5),
             ("docs/cookbook/route-server.md", 3),
             ("docs/how-to/explain.md", 7),
-            ("docs/reference/operations.md", 2),
+            ("docs/reference/operations.md", 4),
         ];
 
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -4639,77 +4639,75 @@ mod tests {
                 .filter(|(_, line)| line.trim() == MARKER)
                 .map(|(index, _)| index)
                 .collect();
-            assert_eq!(
-                markers.len(),
-                1,
-                "{relative_path} must contain exactly one curated CLI block"
-            );
-            assert!(
-                lines
-                    .get(markers[0] + 1)
-                    .is_some_and(|line| line.trim().starts_with("```")),
-                "{relative_path} conformance marker must immediately precede its code fence"
-            );
-
-            let mut in_fence = false;
             let mut parsed = 0;
-            for (offset, line) in lines[(markers[0] + 1)..].iter().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("```") {
-                    if in_fence {
-                        break;
-                    }
-                    in_fence = true;
-                    continue;
-                }
-                if !in_fence {
-                    continue;
-                }
-
-                let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed);
-                if !command.starts_with("rbgp ") {
-                    continue;
-                }
+            for marker in markers {
                 assert!(
-                    !command.ends_with('\\'),
-                    "{relative_path}:{} curated rbgp command must stay on one line",
-                    markers[0] + offset + 2
+                    lines
+                        .get(marker + 1)
+                        .is_some_and(|line| line.trim().starts_with("```")),
+                    "{relative_path} conformance marker must immediately precede its code fence"
                 );
-                let command = command
-                    .split_once(" #")
-                    .map_or(command, |(command, _)| command);
-                let piped_to_jq = command.contains(" | jq ");
-                // Shell comments and pipelines remain documentation; this gate
-                // parses only the rbgp argv and never executes either suffix.
-                let command = command
-                    .split_once(" |")
-                    .map_or(command, |(command, _)| command);
-                if piped_to_jq {
-                    assert!(
-                        command
-                            .split_whitespace()
-                            .any(|arg| arg == "--json" || arg == "-j"),
-                        "{relative_path}:{} pipes rbgp output to jq without selecting JSON",
-                        markers[0] + offset + 2
-                    );
-                }
-                let arguments: Vec<_> = command
-                    .split_whitespace()
-                    .map(|argument| match argument {
-                        "<draining-peer>" | "<receiving-peer>" => "192.0.2.1",
-                        _ if argument.starts_with('<') && argument.ends_with('>') => {
-                            panic!("{relative_path}: add an explicit normalization for {argument}")
+                let mut in_fence = false;
+                for (offset, line) in lines[(marker + 1)..].iter().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("```") {
+                        if in_fence {
+                            break;
                         }
-                        _ => argument,
-                    })
-                    .collect();
-                Cli::try_parse_from(arguments).unwrap_or_else(|error| {
-                    panic!(
-                        "{relative_path}:{} does not parse as documented:\n{command}\n{error}",
-                        markers[0] + offset + 2
-                    )
-                });
-                parsed += 1;
+                        in_fence = true;
+                        continue;
+                    }
+                    if !in_fence {
+                        continue;
+                    }
+
+                    let command = trimmed.strip_prefix("$ ").unwrap_or(trimmed);
+                    if !command.starts_with("rbgp ") {
+                        continue;
+                    }
+                    assert!(
+                        !command.ends_with('\\'),
+                        "{relative_path}:{} curated rbgp command must stay on one line",
+                        marker + offset + 2
+                    );
+                    let command = command
+                        .split_once(" #")
+                        .map_or(command, |(command, _)| command);
+                    let piped_to_jq = command.contains(" | jq ");
+                    // Shell comments and pipelines remain documentation; this gate
+                    // parses only the rbgp argv and never executes either suffix.
+                    let command = command
+                        .split_once(" |")
+                        .map_or(command, |(command, _)| command);
+                    if piped_to_jq {
+                        assert!(
+                            command
+                                .split_whitespace()
+                                .any(|arg| arg == "--json" || arg == "-j"),
+                            "{relative_path}:{} pipes rbgp output to jq without selecting JSON",
+                            marker + offset + 2
+                        );
+                    }
+                    let arguments: Vec<_> = command
+                        .split_whitespace()
+                        .map(|argument| match argument {
+                            "<draining-peer>" | "<receiving-peer>" => "192.0.2.1",
+                            _ if argument.starts_with('<') && argument.ends_with('>') => {
+                                panic!(
+                                    "{relative_path}: add an explicit normalization for {argument}"
+                                )
+                            }
+                            _ => argument,
+                        })
+                        .collect();
+                    Cli::try_parse_from(arguments).unwrap_or_else(|error| {
+                        panic!(
+                            "{relative_path}:{} does not parse as documented:\n{command}\n{error}",
+                            marker + offset + 2
+                        )
+                    });
+                    parsed += 1;
+                }
             }
             assert_eq!(
                 parsed, *expected_commands,

@@ -2565,6 +2565,7 @@ for it.
 
 ### Check session status
 
+<!-- rbgp-cli-conformance -->
 ```bash
 rbgp neighbor          # summary table (alias: rbgp summary)
 rbgp neighbor --wide   # adds Source, MsgRcvd, MsgSent, Flaps, RRC, Slow, State/PfxRcd

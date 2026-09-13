@@ -289,6 +289,17 @@ names such as `add-mac-ip`; their existing paths remain compatible. Keep
 help examples close to the command definition and parse-test the displayed
 invocations. The detailed flag conventions live in `crates/cli/src/main.rs`.
 
+Maintained documentation may opt into the lightweight conformance fences with
+`<!-- rbgp-cli-conformance -->` or
+`<!-- rustbgpd-config-conformance -->`. The first parses marked `rbgp` argv
+through the real Clap tree; register each marked document and its total command
+count in `curated_documentation_commands_parse_with_the_real_cli` in
+`crates/cli/src/main.rs`. The second is currently the explicitly selected
+`rr-pair-day2.md` snippet in `marked_documentation_config_parses_with_the_real_schema`
+in `src/config/tests/mod.rs`. They check command and configuration syntax only,
+not daemon output, direction or policy intent, log literals, or protocol
+behavior.
+
 ### Postmortem artifacts
 
 Any postmortem doc that cites raw data — soak runs, scale tests,
