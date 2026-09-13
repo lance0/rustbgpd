@@ -84,13 +84,17 @@ Compact M36-M108 index (details and assertions stay in
 
 ## Soak receipts
 
-The two flagship runs below are the standing route-server and
-route-reflector operational proof (ADR-0125 evidence bar E2); the
-remaining receipts cover the EVPN and local-origination surfaces.
+The two passing flagship runs below are the standing route-server and
+route-reflector operational proof (ADR-0125 evidence bar E2). The later
+route-server flagship runs under management-plane load are published red
+beside them; the remaining receipts cover the EVPN and local-origination
+surfaces.
 
 | Receipt | Verdict | Key signals | Artifacts |
 |---------|---------|-------------|-----------|
 | [Route-server flagship 24h](soaks/soak-rs-flagship-24h.md) | PASS | 24h 17m; 1000 eBGP RS-client sessions × 400 routes with steady churn; 48/48 barrier-verified SIGHUP reloads; 6/6 max-prefix trip/timed-restart chains with exact breach/flap accounting; peak RSS 581.7 MB against a 3072 MB ceiling; late-window slope 0.0724 MB/h. | [`artifacts/soak/soak-rs-flagship-20260816T062037Z/`](artifacts/soak/soak-rs-flagship-20260816T062037Z) |
+| [Route-server flagship 24h, 2026-09-11](soaks/soak-rs-flagship-24h-2026-09-11.md) | FAIL | 24h 23m; same 1000 × 400 shape plus mandatory management-plane load; 48/48 reloads and 6/6 trip chains; failed management correctness (two unattributed CLI read timeouts in reload 42 plus one runner teardown-ordering result) and management cadence (43 missed 1 s metrics slots); peak RSS 691.5 MB. | [`artifacts/soak/soak-rs-flagship-20260911T184544Z/`](artifacts/soak/soak-rs-flagship-20260911T184544Z) |
+| [Route-server flagship 24h, 2026-09-12](soaks/soak-rs-flagship-24h-2026-09-12.md) | FAIL | 24h 23m; same shape and management-plane load; 48/48 reloads, 6/6 trip chains, zero management failures; failed management cadence only (46 missed 1 s metrics slots, about one per reload commit); one isolated readiness breach within policy; peak RSS 729.8 MB. | [`artifacts/soak/soak-rs-flagship-20260912T212113Z/`](artifacts/soak/soak-rs-flagship-20260912T212113Z) |
 | [Route-reflector flagship 24h](soaks/soak-rr-flagship-24h.md) | PASS | 24h 2m; 1000 iBGP RR-client sessions × 100 routes; 5,486,092 churn cycles; terminal reflected-delivery exact at 99,900 non-self prefixes per observer with 0 parse errors; zero flaps; peak RSS 342.5 MB against a 1024 MB ceiling. | [`artifacts/soak/soak-rr-flagship-20260817T063821Z/`](artifacts/soak/soak-rr-flagship-20260817T063821Z) |
 | [Gate 8b BUM-state 24h](soaks/soak-gate8b-24h-bum-state.md) | PASS | 24h 00m 32s; 71 complete DF-flip cycles; PE1 RSS steady-state slope 0.000 MB/h after settle; BUM-port flag triplet survived every sampled flip. | [`artifacts/soak/gate8b-20260510T152451Z/`](artifacts/soak/gate8b-20260510T152451Z) |
 | [Gate 8b MAC-churn 24h](soaks/soak-gate8b-mac-churn-24h.md) | PASS | 24h 0m 14s; 69 post-flip reconverges; zero WARN/FATAL/topology-link-loss events; PE1 peak RSS 18.93 MB and post-settle envelope about 0.08 MB/h. | [`artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z/`](artifacts/soak/gate8b-mac-churn-24h-20260515T214043Z) |

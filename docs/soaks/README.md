@@ -27,3 +27,5 @@ the run they describe.
 | [M67 link-drain churn 24-hour soak](soak-m67-link-drain-24h-evpn-leak.md) | Attribute-intern behavior under link drain and MAC mobility |
 | [Route-reflector flagship 24-hour soak](soak-rr-flagship-24h.md) | Route reflection under churn |
 | [Route-server flagship 24-hour soak](soak-rs-flagship-24h.md) | Reload and maximum-prefix behavior under sustained load |
+| [Route-server flagship 24-hour soak, 2026-09-11 (FAIL)](soak-rs-flagship-24h-2026-09-11.md) | Reload, maximum-prefix, and management-plane load; management read timeouts and missed metrics slots |
+| [Route-server flagship 24-hour soak, 2026-09-12 (FAIL)](soak-rs-flagship-24h-2026-09-12.md) | Reload, maximum-prefix, and management-plane load; missed metrics slots only |
