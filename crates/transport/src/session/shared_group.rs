@@ -418,9 +418,9 @@ pub(super) fn encode_shared_unicast_slice(
 }
 
 impl PeerSession {
-    /// Only small operator snapshots may interleave a shared envelope. Discard
+    /// Only small operator snapshots may interleave an owned wait. Discard
     /// abandoned snapshots; preserve all other commands and their FIFO successors.
-    fn handle_shared_group_command(&mut self, command: crate::PeerCommand) {
+    pub(super) fn handle_read_during_wait(&mut self, command: crate::PeerCommand) {
         if command.is_canceled_read() {
             return;
         }
@@ -445,7 +445,7 @@ impl PeerSession {
         if self.deferred_command.is_none()
             && let Ok(command) = self.commands.try_recv()
         {
-            self.handle_shared_group_command(command);
+            self.handle_read_during_wait(command);
         }
     }
 
@@ -672,7 +672,7 @@ impl PeerSession {
                         command = self.commands.recv(),
                             if commands_open && self.deferred_command.is_none() => {
                             match command {
-                                Some(command) => self.handle_shared_group_command(command),
+                                Some(command) => self.handle_read_during_wait(command),
                                 None => commands_open = false,
                             }
                         }

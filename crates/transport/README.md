@@ -24,6 +24,12 @@ Abandoned read-only snapshots are discarded, including deferred diagnostics
 whose callers leave while shared chunks are pending. Losing a mutation's
 acknowledgement receiver does not cancel that mutation or let later reads pass it.
 
+Explicit outbound replay scheduling also services state and import-counter
+snapshots while waiting for BMP queue admission, collector enrollment, or RIB
+queue admission. Deferred commands retain the same FIFO rules. These waits share
+one five-second replay deadline; the session resumes general input and timer
+handling after admission finishes or is canceled.
+
 The transport layer intercepts UPDATEs (parse, validate, apply policy)
 before forwarding to the RIB — the FSM sees only payloadless events.
 
