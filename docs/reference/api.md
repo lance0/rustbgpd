@@ -1479,9 +1479,24 @@ in the order above. JSON includes a nonempty `decode_error` and no decoded
 services if stored raw data fails structural inspection; the raw bytes remain
 available. Routes without Prefix-SID keep their existing JSON shape.
 
-This is attribute inspection. It does not reconstruct a SID using NLRI label
-bits, validate endpoint behavior against the route family, select a service,
-originate SRv6 routes, or program forwarding. EVPN remains alpha.
+Each SID can also carry optional `reconstructed_sid` (field 5), restoring a
+Function from the high-order bits of the route's label: a single 20-bit VPN
+label or the corresponding 24-bit EVPN service field. MAC/IP L2 and L3
+services use label 1 and label 2 respectively; L3 requires an IP address.
+Ethernet A-D per EVI uses its L2 label, IP Prefix uses its L3 label, and IMET
+uses a single ingress-replication PMSI label. The raw `sid_value` stays unchanged.
+Text labels the derived value `reconstructed-sid`; JSON omits the field when
+it is unavailable, including when reading an older daemon or event record.
+
+Reconstruction requires exactly one SID Structure, a nonzero transposition
+wholly inside its Function, valid bounds, and zero advertised bits in the
+vacated slice. Missing or ambiguous labels/structures, no transposition, and
+nonzero Argument lengths leave it absent. Argument composition involving
+another route (such as Ethernet A-D per ES plus IMET) is outside this view.
+
+This is attribute inspection. It does not validate endpoint behavior against
+the route family, select a service, originate SRv6 routes, or program forwarding.
+EVPN remains alpha.
 
 ### Runtime observability surfaces
 
