@@ -2,6 +2,244 @@ use super::*;
 use crate::session::replay::{PendingReplay, ReplayProgress, poll_completion};
 use rustbgpd_bmp::BmpReplay;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayAdmissionWait {
+    Bmp,
+    Enrollment,
+    Rib,
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_caller_cancellation_releases_bmp_admission() {
+    exercise_canceled_replay_admission(ReplayAdmissionWait::Bmp).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_caller_cancellation_releases_enrollment_wait() {
+    exercise_canceled_replay_admission(ReplayAdmissionWait::Enrollment).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_caller_cancellation_releases_rib_admission() {
+    exercise_canceled_replay_admission(ReplayAdmissionWait::Rib).await;
+}
+
+async fn enroll_replay_with_real_bmp_manager(
+    peer_up: BmpEvent,
+    begin: BmpEvent,
+) -> (
+    mpsc::Sender<rustbgpd_bmp::BmpControlEvent>,
+    tokio::task::JoinHandle<()>,
+    mpsc::Receiver<Bytes>,
+) {
+    use rustbgpd_bmp::{BmpControlEvent, BmpManager, BmpMonitorFilter, BmpVersion};
+
+    let (events, event_rx) = mpsc::channel(8);
+    let (control, control_rx) = mpsc::channel(8);
+    let (collector, mut collector_rx) = mpsc::channel(8);
+    let address = "127.0.0.1:11019".parse().unwrap();
+    let manager = BmpManager::new(
+        event_rx,
+        control_rx,
+        vec![(
+            address,
+            BmpMonitorFilter {
+                rib_in_pre: false,
+                rib_out_post: true,
+                ..BmpMonitorFilter::default()
+            },
+            BmpVersion::V3,
+        )],
+        BgpMetrics::new(),
+    );
+    let manager = tokio::spawn(manager.run());
+    let (bootstrap, initial) = oneshot::channel();
+    control
+        .send(BmpControlEvent::CollectorConnected {
+            collector_id: 0,
+            collector_addr: address,
+            sender: collector,
+            bootstrap,
+        })
+        .await
+        .unwrap();
+    let initial = initial.await.unwrap();
+    control
+        .send(BmpControlEvent::CollectorBootstrapComplete {
+            collector_id: 0,
+            generation: initial.generation,
+        })
+        .await
+        .unwrap();
+    // Let the manager consume its only queued control before publishing PeerUp.
+    while control.capacity() != control.max_capacity() {
+        tokio::task::yield_now().await;
+    }
+    events.send(peer_up).await.unwrap();
+    assert_eq!(collector_rx.recv().await.unwrap()[5], 3);
+    events.send(begin).await.unwrap();
+    assert_eq!(collector_rx.recv().await.unwrap()[5], 2);
+    assert_eq!(collector_rx.recv().await.unwrap()[5], 3);
+    (control, manager, collector_rx)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "three real admission waits retain cancellation, query recovery, exact token and wire/BMP EoR evidence"
+)]
+async fn exercise_canceled_replay_admission(wait: ReplayAdmissionWait) {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (mut session, mut old_rib_rx, mut old_bmp_rx) =
+        make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.bmp_rib_out = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    read_single_bgp_message(&mut server).await;
+    read_single_bgp_message(&mut server).await;
+    while old_rib_rx.try_recv().is_ok() {}
+    while old_bmp_rx.try_recv().is_ok() {}
+    let peer_up = session.build_bmp_peer_up_event();
+    session.install_import_policy(Some(rustbgpd_policy::PolicyChain::new(vec![])));
+    let generation = session.import_policy_generation;
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(1);
+    session.bmp_tx = Some(bmp_tx.clone());
+    if wait == ReplayAdmissionWait::Bmp {
+        bmp_tx
+            .try_send(BmpEvent::RouteMonitoring {
+                peer_info: session.build_bmp_peer_info(),
+                update_pdu: Bytes::from_static(b"held admission"),
+            })
+            .unwrap();
+    }
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    session.rib_tx = rib_tx.clone();
+    let (held, _held_reply) = oneshot::channel();
+    rib_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply: held })
+        .unwrap();
+
+    let (reply, response) = oneshot::channel();
+    let mut scheduling = Box::pin(session.handle_command(PeerCommand::ReplayOutbound { reply }));
+    assert!(
+        poll_fn(|cx| Poll::Ready(scheduling.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let mut manager = None;
+    let token = if wait == ReplayAdmissionWait::Bmp {
+        None
+    } else {
+        let begin = bmp_rx
+            .try_recv()
+            .expect("Begin admitted before enrollment wait");
+        let BmpEvent::OutboundReplayBegin { replay, .. } = &begin else {
+            panic!("expected the operation's exact Begin token");
+        };
+        let token = Arc::clone(replay);
+        if wait == ReplayAdmissionWait::Rib {
+            manager = Some(enroll_replay_with_real_bmp_manager(peer_up, begin).await);
+            // Enrollment is acknowledged; this poll reaches the full RIB queue.
+            assert!(
+                poll_fn(|cx| Poll::Ready(scheduling.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+        }
+        Some(token)
+    };
+    drop(response);
+    let released = tokio::time::timeout(Duration::from_secs(2), scheduling.as_mut())
+        .await
+        .is_ok();
+    drop(scheduling);
+    let canceled =
+        session.pending_replay.is_none() && token.as_ref().is_none_or(|token| !token.is_valid());
+    let suppressed = session.replay_eor_suppressed;
+
+    // These real handlers must run before either bounded downstream queue is
+    // released. They read the installed session, not a cached/fabricated reply.
+    let (state_reply, state) = oneshot::channel();
+    assert!(
+        session
+            .handle_command(PeerCommand::QueryState { reply: state_reply })
+            .await
+            .is_continue()
+    );
+    let state = state.await.unwrap();
+    let (counter_reply, counter_result) = oneshot::channel();
+    assert!(
+        session
+            .handle_command(PeerCommand::QueryImportPolicyTermHits {
+                reply: counter_reply
+            })
+            .await
+            .is_continue()
+    );
+    let counters = counter_result.await.unwrap().unwrap();
+    assert_eq!(rib_tx.capacity(), 0);
+    session.cancel_outbound_replay(); // Reap the pending operation on the red control too.
+    if wait == ReplayAdmissionWait::Bmp {
+        assert!(matches!(
+            bmp_rx.try_recv().unwrap(),
+            BmpEvent::RouteMonitoring { .. }
+        ));
+    }
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::QueryLocRibCount { .. }
+    ));
+    tokio::task::yield_now().await;
+    let no_late_admission = bmp_rx.try_recv().is_err() && rib_rx.try_recv().is_err();
+
+    let eor = session
+        .export_encoder
+        .snapshot()
+        .build_end_of_rib(Afi::Ipv4, Safi::Unicast)
+        .unwrap();
+    session.enqueue_bulk(&Message::Update(eor)).unwrap();
+    // A paused-time timeout may leave the writer's independent KEEPALIVE in
+    // front of the bulk EoR. It does not certify or replace the replay marker.
+    let eor = loop {
+        let message = read_single_raw_bgp_message(&mut server).await;
+        if message[18] != 4 {
+            break message;
+        }
+    };
+    assert_eq!(eor[18], 2, "ordinary BGP UPDATE still reaches the peer");
+    assert_eq!(&eor[19..], &[0, 0, 0, 0], "empty IPv4 unicast EoR");
+    let mirrored = bmp_rx.try_recv().is_ok();
+    let writer = session.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+    if let Some((control, manager, _collector)) = manager {
+        control
+            .send(rustbgpd_bmp::BmpControlEvent::Shutdown)
+            .await
+            .unwrap();
+        manager.await.unwrap();
+    }
+    assert!(
+        released,
+        "{wait:?}: canceled replay retained the session past the read budget"
+    );
+    assert!(canceled, "{wait:?}: exact replay token remains live");
+    assert_eq!(state.fsm_state, SessionState::Established);
+    assert_eq!(counters.generation, generation);
+    assert!(
+        no_late_admission,
+        "{wait:?}: canceled work admitted after capacity returned"
+    );
+    assert_eq!(
+        mirrored,
+        wait == ReplayAdmissionWait::Bmp,
+        "{wait:?}: ordinary BMP EoR mirroring must follow the Begin admission boundary"
+    );
+    assert_eq!(suppressed, wait != ReplayAdmissionWait::Bmp);
+}
+
 fn pending(session: &PeerSession, token: Arc<BmpReplay>) -> PendingReplay {
     PendingReplay {
         replay: token,

@@ -172,6 +172,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Canceling outbound replay now releases the session while BMP admission,
+  enrollment, or RIB admission is blocked. Once the BMP queue accepts the
+  replay-begin event, ordinary mirrored EoRs remain suppressed even if enrollment
+  is abandoned, preventing a partial capture from appearing complete; BGP EoR
+  transmission is unchanged.
+
 - Shared update-group consumers yield at their bounded chunk checkpoints even
   when the encoder has already completed, allowing other tasks to enqueue
   session-state and import-counter reads during the drain. Encoder election,
