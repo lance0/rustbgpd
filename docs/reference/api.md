@@ -675,6 +675,10 @@ whenever they are present. A true no-op remains `NOOP`; a pure
 committable because that executor substitutes only the targeted table set
 rather than adopting the full candidate config.
 `diff_json.reload_applied.datasets_changed` reports dataset binding/path edits.
+`diff_json.summary.declared_datasets_count` and
+`diff_json.reload_applied.declared_datasets_count` report how many datasets
+the candidate declares; the diff never compares their file contents, so a
+non-zero count means a reload re-reads files the preview did not evaluate.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
