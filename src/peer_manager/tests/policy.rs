@@ -1874,6 +1874,7 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
     mgr.peers.insert(
         key(addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,

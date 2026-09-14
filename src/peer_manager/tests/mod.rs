@@ -465,6 +465,7 @@ fn insert_test_managed_peer_for_key(
     mgr.peers.insert(
         peer_key.clone(),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id,
             remote_asn,
@@ -805,6 +806,7 @@ fn insert_test_scoped_managed_peer(
     mgr.peers.insert(
         peer_key.clone(),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id,
             remote_asn: 65002,
@@ -1244,6 +1246,7 @@ fn insert_test_dynamic_managed_peer(
     mgr.peers.insert(
         peer_key.clone(),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id,
             remote_asn: 65030,

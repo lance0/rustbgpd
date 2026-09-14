@@ -527,6 +527,7 @@ impl PeerManager {
                 };
 
                 let managed = ManagedPeer {
+                    policy_known_down: false,
                     handle,
                     session_id,
                     remote_asn,

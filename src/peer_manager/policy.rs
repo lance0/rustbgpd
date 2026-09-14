@@ -1347,7 +1347,7 @@ impl PeerManager {
                     pending_refresh: managed.pending_refresh,
                     pending_export_apply: managed.pending_export_apply,
                     adj_rib_in_may_have_moved: false,
-                    known_down: false,
+                    known_down: managed.policy_known_down,
                 }
             };
             applied.push(prior);
@@ -1394,22 +1394,13 @@ impl PeerManager {
                 };
             }
             applied[applied_idx].adj_rib_in_may_have_moved = true;
-            if let Some(managed) = self.peers.get(&peer_key) {
-                let state = self
-                    .await_with_readiness(
-                        rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                            managed.handle.commands_sender(),
-                            PEER_QUERY_TIMEOUT,
-                        ),
-                        context.operator_reads,
-                    )
-                    .await;
-                applied[applied_idx].known_down = matches!(
-                    state,
-                    StateQueryOutcome::State(ref state)
-                        if state.fsm_state != SessionState::Established
-                );
-            }
+            // The apply classified the peer (3544-3548); its verdict is
+            // authoritative for the convergence-debt scan and adds no extra
+            // session round trip.
+            applied[applied_idx].known_down = self
+                .peers
+                .get(&peer_key)
+                .is_some_and(|managed| managed.policy_known_down);
             self.drain_operator_queries(context.operator_reads).await;
         }
         Ok(applied)
@@ -1607,7 +1598,7 @@ impl PeerManager {
                     pending_refresh: false,
                     pending_export_apply: false,
                     adj_rib_in_may_have_moved: false,
-                    known_down: false,
+                    known_down: managed.policy_known_down,
                 }
             };
             // LAN-462: hot-apply a changed import chain through the same
@@ -2013,19 +2004,29 @@ impl PeerManager {
                     }));
                 }
             } else if require_clean_convergence {
-                // The owned sender keeps the three terminal observations
-                // distinct. Only TimedOut was eligible for the bounded retry;
-                // a positive non-Established reply, SessionGone, or retry
-                // exhaustion all require explicit compensation.
+                // A positively known-down member's refresh owes nothing to this
+                // transaction: AdjRibIn is empty until PeerUp installs the
+                // accepted session chain (policy.rs 3711-3720). Its pending
+                // flag is carried intent, not debt. Ambiguous observations
+                // (SessionGone / TimedOut) keep failing closed: they cannot
+                // prove the session kept the edit.
+                if matches!(
+                    state,
+                    StateQueryOutcome::State(ref state)
+                        if state.fsm_state != SessionState::Established
+                ) {
+                    captured[index].adj_rib_in_may_have_moved = true;
+                    continue;
+                }
                 let code = match state {
-                    StateQueryOutcome::State(_) => {
-                        RuntimeConfigPolicyFailureCode::StateNonEstablished
-                    }
                     StateQueryOutcome::SessionGone => {
                         RuntimeConfigPolicyFailureCode::StateSessionGone
                     }
                     StateQueryOutcome::TimedOut => {
                         RuntimeConfigPolicyFailureCode::StateRetryExhausted
+                    }
+                    StateQueryOutcome::State(_) => {
+                        RuntimeConfigPolicyFailureCode::StateNonEstablished
                     }
                 };
                 if let Some(managed) = self.peers.get_mut(peer_key) {
@@ -3540,6 +3541,12 @@ impl PeerManager {
             StateQueryOutcome::State(ref state)
                 if state.fsm_state != SessionState::Established
         );
+
+        // A positively known-down peer holds the accepted session chain for
+        // exempt it from the rollback scan.
+        if let Some(managed) = self.peers.get_mut(&peer_key) {
+            managed.policy_known_down = is_known_non_established;
+        }
 
         let needs_refresh = import_changed || had_pending_refresh;
         let needs_export_apply = export_changed || had_pending_export_apply;
