@@ -214,7 +214,11 @@ file contents. When the candidate declares datasets, `rbgp config diff` and
 For an IRR-only refresh where member prefix or origin lists change while the
 member roster and config text remain identical, the diff flags the uncompared
 datasets and omits `No changes.`; SIGHUP re-reads the updated dataset files
-on disk and applies the new filters as a generation.
+on disk and applies the new filters as a generation. The exit code is still
+`0` for such a refresh, so a cron must not gate `systemctl reload` on the
+diff's exit code when datasets are declared; reload on every rendered refresh,
+as the block above does.
+
 Without a reachable daemon, `rustbgpd --diff` prints the same report offline.
 It reads `/etc/rustbgpd/config.toml` as the current side and resolves each
 file's paths from that file's location:
