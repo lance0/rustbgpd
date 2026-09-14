@@ -283,7 +283,8 @@ to answer. The classification above is deliberately defensive ("when
 in doubt, raise the tier") so the ADR can negotiate a lower tier for a
 specific method if the model warrants it.
 
-1. **Tier vs. service granularity.** Every service has at least one
+1. **Tier vs. service granularity.** Every service except
+   `InjectionService` (uniformly `operator_only`) has at least one
    `sensitive_read` method. `CheckLiveness` is a `read` method;
    `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);
@@ -308,23 +309,32 @@ specific method if the model warrants it.
    per-message.** `WatchEvents` and `SubscribeFromEvent` open once and live
    for the connection lifetime. The enforcement model needs to
    reject at handshake, not pretend to filter per-event.
-5. **Credential ingress is narrow but not `AddNeighbor`.** The
-   gRPC-visible credential-bearing field today is
-   `PeerGroupDefinition.md5_password` through `SetPeerGroup` (group
-   creation only — changing it on an existing group is rejected because
-   the inbound listener key inventory is startup/SIGHUP-pinned); static
-   neighbor TCP-AO is TOML/runtime-only and is not exposed through
-   gRPC. Read paths never echo secret material back:
+5. **Credential ingress is bounded but not `AddNeighbor`.** Static
+   neighbor TCP-AO has no typed gRPC field. Credential material can
+   still arrive through:
+   - `PeerGroupDefinition.md5_password` through `SetPeerGroup` (group
+     creation only — changing it on an existing group is rejected because
+     the inbound listener key inventory is startup/SIGHUP-pinned). The
+     audit summary records only whether a password was present.
+   - gNMI `Set` on a peer group's `config/auth-password`, mapped to
+     native `md5_password` under the same change rule. The audit summary
+     records operation counts and masks all values.
+   - Candidate TOML that may contain `md5_password` or `tcp_ao.key`:
+     `DiffRuntimeConfig`, `PlanConfigTransaction`,
+     `ApplyConfigTransaction`, and `ApplyEvpnRuntime` log only the
+     candidate size (plus token, confirm, or validate-only state), and
+     `StreamPlanConfigTransaction` / `StreamApplyConfigTransaction` log
+     only frame version, chunk count, byte count, and outcome.
+     `ApplyConfigTransaction` also accepts a free-form comment that is
+     logged as presence only.
+
+   Read paths never echo secret material back:
    `ListPeerGroups` and `GetPeerGroup` redact `md5_password` instead
    of returning the stored value, while preserving a non-secret
    optional `has_md5_password` signal for safe read/modify/write
-   preservation. `DiffRuntimeConfig`, `PlanConfigTransaction`, and
-   `ApplyConfigTransaction` also accept candidate TOML that may contain
-   `md5_password` or `tcp_ao.key`; audit logging must omit or mask that
-   request body. `ApplyConfigTransaction` also accepts a free-form comment
-   that is not logged verbatim. The model does
-   not need a separate "credential-write" tier yet — `operator_only`
-   plus mandatory audit redaction covers the current surface.
+   preservation. The model does
+   not need a separate "credential-write" tier yet — the existing tiers
+   plus mandatory audit redaction cover the current surface.
 6. **Backwards compatibility.** Today's coarse listener access is
    what existing operators rely on. The ADR needs a migration mode
    (for example a `[security.grpc]` block that defaults to
@@ -345,9 +355,11 @@ specific method if the model warrants it.
    listeners still emit operator-controlled principal labels.
    In tier mode, `principal_unmapped` and `role_tier_denied`
    distinguish role-map denials from listener caps. `DiffRuntimeConfig`,
-   `PlanConfigTransaction`, `ApplyConfigTransaction`, and `SetPeerGroup`
-   request summaries mask credential-bearing fields, including candidate TOML
-   that may contain `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
+   `PlanConfigTransaction`, `ApplyConfigTransaction`,
+   `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`,
+   `ApplyEvpnRuntime`, `SetPeerGroup`, and gNMI `Set` request summaries mask
+   credential-bearing fields, including candidate TOML that may contain
+   `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
    v0.24.0; the external review still needs durable audit sink / retention
    guidance and optional proto credential markers.
 

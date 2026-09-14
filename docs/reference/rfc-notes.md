@@ -293,8 +293,10 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 
 ### §4.5 — NOTIFICATION Message
 
-- All error codes and subcodes per RFC 4271 Table 9 are defined as
-  typed enums, not raw integers.
+- Error codes are the typed `NotificationCode` enum: codes 1-6 and 8 have
+  named variants, and `Unknown(u8)` preserves any other byte (including 7
+  and 9). Subcodes are named `u8` constants per code, such as
+  `cease_subcode::OUT_OF_RESOURCES`.
 - On send: log structured event, then close the TCP connection.
 - On receive: log structured event, transition FSM to Idle.
 
@@ -406,6 +408,11 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 - AS 0 never participates in RFC 6793 reconstruction or canonical route
   state. Canonical encoding rejects it before deriving type 17/18
   compatibility attributes.
+- Policy cannot introduce AS 0: a TOML `set_as_path_prepend` with ASN 0 fails
+  config validation, a literal `.rpol` `prepend as 0` is a compile error, a
+  parameter that resolves to AS 0 in a prepend is rejected when the daemon
+  attaches the chain, and a computed prepend operand that evaluates to 0
+  denies the route. See [policy actions](rpol-language.md#actions).
 
 ## AS_PATH Element Ceiling (`max_as_path_length`)
 
@@ -485,15 +492,14 @@ matches FRR, BIRD, and most production implementations. Setting it on a value
 rustbgpd did parse and validate would be a false claim, which is why the
 recognized types carry the received bit through rather than OR one in.
 
-### Cease Subcode Fallback
+### Cease Subcode 8 (Out of Resources)
 
-When tearing down a session due to resource exhaustion (e.g., global
-route limit exceeded), rustbgpd sends NOTIFICATION Cease with subcode 8
-(Out of Resources) per RFC 4486 §3.
-
-**Fallback:** If interop testing reveals a peer that rejects unknown
-Cease subcodes, the fallback is generic Cease (code 6, subcode 0).
-Documented per-peer in INTEROP.md.
+rustbgpd sends NOTIFICATION Cease with subcode 8 (Out of Resources, RFC 4486
+§3) when one session's outbound path cannot continue: the bounded outbound
+writer queue saturates, or a committed outbound update cannot be sent exactly
+(a missing, incompatible, or foreign export snapshot, or structurally
+unsendable output). The session is torn down; the maximum-prefix limit uses
+Cease subcode 1 instead. There is no fallback to another subcode.
 
 ### Message Size Limits (RFC 4271 + RFC 8654)
 
@@ -579,8 +585,10 @@ retained opaquely regardless of how its flags and framing were encoded.
   are ignored on receipt and never retained, stored, or emitted, including on
   egress; the eleven optional transitive types (23, 25, 27, 34, 36-41, 128)
   are retained opaquely and re-advertised with the Partial bit.
-- **Structural framing.** Eight of the transitive types additionally get a
+- **Structural framing.** Ten of the transitive types additionally get a
   bounded, syntax-only walk of their outer framing before opaque propagation:
+  Tunnel Encapsulation (23) must carry at least one Tunnel TLV, and each
+  Tunnel TLV and its sub-TLV stream must frame exactly;
   IPv6 Address Specific Extended Community (25) must be a non-empty multiple
   of 20 octets; Community Container (34) walks container headers, its Type 1
   subtypes — which may not repeat — the atom TLV stream, and atom prefix
@@ -589,15 +597,18 @@ retained opaquely regardless of how its flags and framing were encoded.
   a Source IP TLV of length 4 or 16; NHC (39) walks the next hop and requires
   at least one characteristic; BGP Prefix-SID (40) length-checks the
   Label-Index and Originator SRGB TLVs and validates RFC 9252 Service
-  nesting; and BIER (41) must carry at least one TLV and walks its sub-TLV
-  nesting. Values that pass stay opaque bytes.
+  nesting; BIER (41) must carry at least one TLV and walks its sub-TLV
+  nesting; and ATTR_SET (128) requires its 4-octet Origin AS followed by an
+  exactly framed embedded attribute stream that contains no MP_REACH_NLRI or
+  MP_UNREACH_NLRI. Values that pass stay opaque bytes.
 - **Framing dispositions split by type.** A framing failure in BFD
   Discriminator (38), NHC (39), generic BGP Prefix-SID (40), or BIER (41) is
   attribute-discard: the malformed value cannot affect route selection, so
   the UPDATE's routes survive without it. Recognized SRv6 L3/L2 Service TLV
   malformation instead follows RFC 9252 §7 treat-as-withdraw. A framing failure
-  in IPv6 Address Specific Extended Community (25), Community Container (34), D-PATH (36), or
-  SFP (37) is treat-as-withdraw. A *class* conflict on any of the eight is
+  in Tunnel Encapsulation (23), IPv6 Address Specific Extended Community (25),
+  Community Container (34), D-PATH (36), SFP (37), or ATTR_SET (128) is
+  treat-as-withdraw. A *class* conflict on any of the ten is
   treat-as-withdraw regardless — §3 (h) takes the stronger of the two
   actions. Zero-length BIER is the case that changed disposition in v0.67.0:
   it was previously retained as though it held a valid TLV sequence, and is
@@ -644,6 +655,9 @@ Interpretation decisions:
   when DEBUG is disabled. `bgp_update_malformed_total{peer,disposition}` counts
   each malformed UPDATE once under the strongest applied disposition:
   `attribute_discard`, `treat_as_withdraw`, or `session_reset`.
+  `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}`
+  counts the individual reported causes, several of which can occur in one
+  UPDATE; see [ingress rejection metrics](operations.md#ingress-rejection--route-leak-detection).
 - AS4_PATH / AS4_AGGREGATOR are parsed as short-lived compatibility inputs and
   normalized into the typed path / aggregator model. Malformed type 17/18
   values are attribute-discard; conflicting Optional/Transitive flags remain
@@ -1183,6 +1197,12 @@ carries inactive (absent), unlimited (zero), or finite.
   ICMP, TCP flags, packet length, DSCP, fragment, flow label).
 - Actions via extended communities: traffic-rate, traffic-action,
   traffic-marking, redirect.
+- Typed byte- and packet-rate actions interpret and construct negative rates
+  as zero (RFC 8955 §7.1 and §7.2). As a local choice, NaN
+  and negative zero also become positive zero; positive rates, including
+  positive infinity, are preserved. This affects typed API views and
+  injection only; raw extended-community storage and reflection are
+  unchanged.
 - NH length = 0 in MP_REACH_NLRI for FlowSpec.
 - An IPv6 destination component with a non-zero offset (RFC 8956 §3.1)
   carries no destination prefix for policy, RPKI, or validation purposes:
@@ -1773,7 +1793,7 @@ implemented service procedures.
 | RFC | Status | Relevance |
 |-----|--------|-----------|
 | [RFC 9014](https://www.rfc-editor.org/rfc/rfc9014.html) | Not implemented | EVPN overlay interconnect gateway procedures, including overlay-to-MPLS interworking and Interconnect Ethernet Segments, are not implemented. Reflecting supported EVPN routes does not provide a DCI gateway. |
-| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, SID reconstruction, next-hop rewriting, and SRv6 forwarding are not implemented. This is not full RFC 9252 service support. |
+| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, next-hop rewriting, and SRv6 forwarding are not implemented; VPN and EVPN views may show an optional display-only [`reconstructed_sid`](api.md#prefix-sid-inspection-on-vpn-and-evpn-routes) from a single route's transposition, unused by selection. This is not full RFC 9252 service support. |
 | [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Not implemented, including reflection | Route Types 6–8 (SMET, Multicast Membership Report Synch, Multicast Leave Synch) are unrecognized and discarded on receive; they do not enter the RIB or propagate to other VTEPs. This follows [RFC 7606 §5.4](https://www.rfc-editor.org/rfc/rfc7606.html#section-5.4) typed-NLRI handling. There is no opaque route-type reflection or IGMP/MLD proxy implementation. |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
 | RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |
