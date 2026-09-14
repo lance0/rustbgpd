@@ -791,3 +791,29 @@ peer_group = "ix-members"
     );
     assert!(text.contains("[[dynamic_neighbors]] matcher rebuilt"));
 }
+
+#[test]
+fn dynamic_neighbor_limit_diff_marks_reload_applied() {
+    let old_toml = valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\ndynamic_neighbor_limit = 100",
+    );
+    let new_toml = valid_toml().replace(
+        "listen_port = 179",
+        "listen_port = 179\ndynamic_neighbor_limit = 200",
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    let json = config_diff_json_value(&diff);
+    let text = format_config_diff(&diff);
+
+    assert!(diff.dynamic_neighbor_limit_changed);
+    assert!(diff.has_reload_applied_changes());
+    assert!(!diff.has_restart_required_changes());
+    assert_eq!(
+        json["reload_applied"]["dynamic_neighbor_limit_changed"],
+        serde_json::Value::Bool(true)
+    );
+    assert!(text.contains("[global] dynamic_neighbor_limit updated"));
+}

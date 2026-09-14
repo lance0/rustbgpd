@@ -660,6 +660,59 @@ async fn replace_config_snapshot_rebuilds_dynamic_range_matcher() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn replace_config_snapshot_updates_dynamic_neighbor_limit_and_metrics() {
+    let mut config = make_dynamic_manager_config();
+    config.global.dynamic_neighbor_limit = Some(100);
+    let (tx, rx) = mpsc::channel(16);
+    let (internal_tx, internal_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        config.clone(),
+    );
+    let handle = tokio::spawn(manager.run());
+
+    assert_eq!(
+        process_global_metric(&metrics, "bgp_dynamic_neighbor_slots_limit"),
+        Some(100.0)
+    );
+    let mut replacement = config.clone();
+    replacement.global.dynamic_neighbor_limit = Some(25);
+
+    let (ack_tx, ack_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::ReplaceConfigSnapshot {
+            config: Box::new(replacement),
+            ack: Some(ack_tx),
+        })
+        .await
+        .unwrap();
+    ack_rx.await.unwrap();
+
+    assert_eq!(
+        process_global_metric(&metrics, "bgp_dynamic_neighbor_slots_limit"),
+        Some(25.0)
+    );
+    assert_eq!(
+        process_global_metric(&metrics, "bgp_dynamic_neighbor_slots_headroom"),
+        Some(25.0)
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
 /// Load-bearing producer-path proof: `peer_address` must survive
 /// `resolve_dynamic_neighbor` -> `peer_manager_config_from_resolved` ->
 /// `build_transport_config`. Dropping it at any hop leaves the knob parsing

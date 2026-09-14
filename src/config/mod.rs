@@ -2245,6 +2245,10 @@ pub struct ConfigDiff {
     /// The portion of a dynamic-neighbor edit that remains after startup-only
     /// TCP-AO ranges are pinned back to the live listener snapshot.
     pub dynamic_neighbors_reload_applied_changed: bool,
+    /// `[global].dynamic_neighbor_limit` changed. Reload-applied: the peer
+    /// manager adopts the new admission ceiling immediately and updates its
+    /// headroom metrics without dropping existing dynamic sessions.
+    pub dynamic_neighbor_limit_changed: bool,
     /// The startup-pinned dynamic TCP-AO protected range set changed. Any
     /// add/remove/move, protected-row edit, or key-material rotation requires
     /// a daemon restart before the listener and matcher can advance together.
@@ -2500,6 +2504,7 @@ impl ConfigDiff {
             || self.honor_graceful_shutdown_changed
             || self.honor_blackhole_changed
             || self.dynamic_neighbors_reload_applied_changed
+            || self.dynamic_neighbor_limit_changed
             || self.gnmi_dialout_changed
             || (self.fib_tables_changed && !self.fib_tables_requires_restart)
             || self.evpn_runtime_change_class.is_reload_applied()
@@ -3959,6 +3964,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
+            "dynamic_neighbor_limit_changed": diff.dynamic_neighbor_limit_changed,
             "gnmi_dialout_changed": diff.gnmi_dialout_changed,
             "fib_tables_changed": diff.fib_tables_changed && !diff.fib_tables_requires_restart,
             "evpn_runtime_changed": diff.evpn_runtime_change_class.is_reload_applied(),
@@ -4187,6 +4193,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             let _ = writeln!(
                 out,
                 "  {} [[dynamic_neighbors]] matcher rebuilt",
+                style.change_marker
+            );
+        }
+        if diff.dynamic_neighbor_limit_changed {
+            let _ = writeln!(
+                out,
+                "  {} [global] dynamic_neighbor_limit updated",
                 style.change_marker
             );
         }
@@ -4548,6 +4561,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,
         dynamic_neighbors_reload_applied_changed,
+        dynamic_neighbor_limit_changed: old.global.dynamic_neighbor_limit
+            != new.global.dynamic_neighbor_limit,
         dynamic_neighbor_tcp_ao_changed,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
@@ -5330,6 +5345,7 @@ fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
     new_global.blackhole_discard_install_rate_per_minute =
         old_global.blackhole_discard_install_rate_per_minute;
     new_global.blackhole_discard_install_burst = old_global.blackhole_discard_install_burst;
+    new_global.dynamic_neighbor_limit = old_global.dynamic_neighbor_limit;
 
     old_global != new_global
 }

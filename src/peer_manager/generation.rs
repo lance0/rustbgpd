@@ -325,6 +325,9 @@ impl PeerManager {
         // 2. The candidate becomes the snapshot every later session
         //    construction reads (explain settings, registry, groups).
         applied.prior_config = Some(std::mem::replace(&mut self.current_config, candidate));
+        self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
+        self.metrics
+            .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
 
         // 3. Hot updates in place: knobs only, policies already match.
         for (next, prior) in resolved.hot {
@@ -664,6 +667,11 @@ impl PeerManager {
         // Restore it before any re-add, including diagnostic retention knobs.
         if let Some(prior_config) = applied.prior_config {
             self.current_config = prior_config;
+            self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
+            self.metrics.set_dynamic_neighbor_capacity(
+                self.dynamic_peer_count,
+                self.dynamic_neighbor_limit,
+            );
         }
         let mut failures = Vec::new();
         for peer in applied.added.into_iter().rev() {

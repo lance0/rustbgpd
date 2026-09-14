@@ -2249,6 +2249,12 @@ impl PeerManager {
                         // correct — no merge/provenance needed.
                         self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
                         self.reconcile_stale_dynamic_max_prefix_restarts();
+                        self.dynamic_neighbor_limit =
+                            self.current_config.effective_dynamic_neighbor_limit();
+                        self.metrics.set_dynamic_neighbor_capacity(
+                            self.dynamic_peer_count,
+                            self.dynamic_neighbor_limit,
+                        );
                         // ADR-0110 freshness: every successful reload flows
                         // through this snapshot replacement — stamp the
                         // generation even when policy content is unchanged
@@ -2347,6 +2353,12 @@ impl PeerManager {
                             self.current_config = *rollback.previous;
                             self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
                             self.reconcile_stale_dynamic_max_prefix_restarts();
+                            self.dynamic_neighbor_limit =
+                                self.current_config.effective_dynamic_neighbor_limit();
+                            self.metrics.set_dynamic_neighbor_capacity(
+                                self.dynamic_peer_count,
+                                self.dynamic_neighbor_limit,
+                            );
                             self.config_snapshot_staged = false;
                             self.staged_policy_routes_prior = None;
                             self.metrics.record_policy_generation_loaded();

@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `[global].dynamic_neighbor_limit` is now reload-applied instead of
+  restart-required. Changing the limit in the configuration and reloading
+  updates the dynamic peer admission ceiling immediately without dropping
+  existing sessions or requiring a daemon restart. If the limit is lowered
+  below the current connected dynamic peer count, active sessions are
+  retained and new connections are refused until natural session departures
+  bring the count below the new ceiling. Capacity and headroom metrics
+  (`bgp_dynamic_neighbor_slots_limit`, `bgp_dynamic_neighbor_slots_headroom`)
+  update on reload.
+
 ### Fixed
 
 - SIGHUP now applies `[policy.datasets]` binding changes through the same
