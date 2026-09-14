@@ -205,7 +205,7 @@ release:
 - [ ] **Dataplane-programming guardrail.** Any *new* RPC that programs
       the kernel dataplane (FIB / VXLAN / FDB / L3VNI / nexthop groups)
       must have its tier **explicitly justified in review** — it must
-      not land in `mutating` by inattention. Three methods deliberately
+      not land in `mutating` by inattention. Four methods deliberately
       sit at `Mutating` despite touching the kernel dataplane, each
       guarded by a tier-pin test in `crates/api/src/authz.rs`:
       - `EvpnService/ApplyEvpnRuntime` — ADR-0063 v1 is a single
@@ -222,8 +222,14 @@ release:
         maps to it; `operator_only` would over-grant FIB automation). If
         their scope widens past back-filling learned routes, re-evaluate
         via an ADR-0074 update — not the pin.
+      - `EvpnService/ClearDuplicateMacQuarantine` — clearing a quarantined
+        key allows the EVPN dataplane supervisor to re-project remote-MAC
+        intent and the reconciler to reinstall FDB entries (the same
+        indirect pattern as `SetFibTable`). It stays `Mutating` because
+        it is a restorative, per-key clear rather than operator-authored
+        injection.
 
-      For any *fourth* such method, start from ADR-0074's split: a
+      For any *fifth* such method, start from ADR-0074's split: a
       validated, persisted config surface that directs already-learned
       routes may still fit `mutating`; operator-authored injection is
       `operator_only`. Reach for a dedicated `dataplane_mutating` tier

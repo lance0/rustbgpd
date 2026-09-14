@@ -32,6 +32,7 @@ HISTORICAL_DOCUMENTS = frozenset(
         "docs/operational-proof.md",
         "docs/receipts.md",
         "docs/how-to/evpn-alpha-soak.md",
+        "docs/project/evpn-enablement.md",
         "docs/project/milestones.md",
         "docs/project/upstream-findings.md",
     }

@@ -1413,6 +1413,14 @@ mod tests {
             method_authz("/rustbgpd.v1.EvpnService/GetEvpnRuntime").map(|m| m.tier),
             Some(AuthTier::SensitiveRead)
         );
+        // DELIBERATE PIN: ClearDuplicateMacQuarantine is the fourth `Mutating`
+        // method that touches the kernel dataplane (alongside ApplyEvpnRuntime,
+        // SetFibTable, and DeleteFibTable). Clearing a quarantined MAC allows the
+        // EVPN supervisor to re-project remote-MAC intent and reinstall FDB
+        // entries via the reconciler (the same indirect pattern as SetFibTable).
+        // It stays `Mutating` on purpose: it is a restorative, per-key clear,
+        // not operator-authored traffic steering or arbitrary injection. See the
+        // dataplane-programming RPC guardrail in docs/project/release-checklist.md.
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ClearDuplicateMacQuarantine").map(|m| m.tier),
             Some(AuthTier::Mutating)

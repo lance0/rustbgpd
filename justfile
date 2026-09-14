@@ -109,7 +109,7 @@ links:
         echo "  cargo install lychee --version 0.24.2 --locked" >&2
         exit 1
     fi
-    git ls-files '*.md' | lychee --files-from - --offline --include-fragments=none --no-progress
+    git ls-files '*.md' | lychee --files-from - --offline --include-fragments=anchor-only --no-progress
 
 # Compile the feature-gated RIB, transport, and API bench surfaces.
 gate-rib:
