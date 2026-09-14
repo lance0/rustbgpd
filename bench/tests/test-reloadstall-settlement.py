@@ -24,10 +24,17 @@ import urllib.request
 
 REPO = Path(__file__).resolve().parents[2]
 BARRIER = "reload 1 receiver_barriers_complete awaiting_daemon_settlement"
+ATTEMPTS = 3
 
 
-def wait_ready(process, address):
+class PortCollision(Exception):
+    """The daemon exited at startup because a probed port was taken meanwhile."""
+
+
+def wait_ready(process, address, log):
     for _ in range(200):
+        if process.poll() is not None and "Address already in use" in log.read_text():
+            raise PortCollision(f"daemon could not bind a probed port; see {log}")
         assert process.poll() is None, "daemon exited during startup; see daemon.log"
         try:
             with urllib.request.urlopen(f"http://{address}/readyz", timeout=0.5) as reply:
@@ -39,9 +46,20 @@ def wait_ready(process, address):
     raise AssertionError("daemon readiness deadline; see daemon.log")
 
 
-def run_case(args, name, *, dualstack=False, rejected=False, injected=False):
-    dest = args.artifact_dir / name
-    dest.mkdir()
+def run_case(args, name, **kind):
+    # Ports are probed by bind-and-close, so another socket can take one before the
+    # daemon binds it. Only that startup collision is retried, with fresh ports.
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            return run_attempt(args, name, attempt, **kind)
+        except PortCollision as collision:
+            print(f"{name}: attempt {attempt}/{ATTEMPTS}: {collision}", flush=True)
+    raise AssertionError(f"{name}: probed ports were taken on all {ATTEMPTS} attempts")
+
+
+def run_attempt(args, name, attempt, *, dualstack=False, rejected=False, injected=False):
+    dest = args.artifact_dir / name / f"attempt-{attempt}"
+    dest.mkdir(parents=True)
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("GEN_", "RELOADSTALL_"))}
     env.update(GEN_DUALSTACK=str(int(dualstack)), GEN_FILTER_COUNT="4" if dualstack else "0")
@@ -58,7 +76,13 @@ def run_case(args, name, *, dualstack=False, rejected=False, injected=False):
                             "12", str(scenario), bgp_port, "12"], env=env, check=True,
                            stdout=log, stderr=subprocess.STDOUT)
         config = scenario / "config.toml"
-        config.write_text(config.read_text().replace("127.0.0.1:9179", metrics_address))
+        rendered = config.read_text().replace("127.0.0.1:9179", metrics_address)
+        # One explicit IPv4 endpoint binds atomically: a taken port stops the daemon at
+        # startup instead of leaving it bound on [::] only, unreachable to IPv4 stubs.
+        pinned = rendered.replace(f"\nlisten_port = {bgp_port}\n",
+                                  f'\nlisten_port = {bgp_port}\nlisten_addresses = ["127.0.0.1"]\n')
+        assert pinned != rendered, "generated config has no listen_port line to pin"
+        config.write_text(pinned)
         with (dest / "check.log").open("w") as log:
             subprocess.run([str(args.daemon), "--check", str(config)], check=True,
                            stdout=log, stderr=subprocess.STDOUT, timeout=30)
@@ -67,7 +91,7 @@ def run_case(args, name, *, dualstack=False, rejected=False, injected=False):
                                       stderr=subprocess.STDOUT)
             fixture = None
             try:
-                wait_ready(daemon, metrics_address)
+                wait_ready(daemon, metrics_address, dest / "daemon.log")
                 env.update(RELOADSTALL_DUALSTACK=str(int(dualstack)),
                            RELOADSTALL_FILTER_COUNT="4" if dualstack else "0",
                            RELOADSTALL_CYCLE_QUIESCE_SECS="1",
@@ -111,7 +135,8 @@ def run_case(args, name, *, dualstack=False, rejected=False, injected=False):
                         str(args.harness), "12", "600", bgp_port, str(daemon.pid),
                         str(scenario / "member.rpol"), str(scenario / "gen-a.rpol"),
                         str(scenario / "gen-b.rpol"), "2", "1", "12"], env=env,
-                        stdout=log, stderr=subprocess.STDOUT, timeout=120)
+                        # Above the engine's 120 s connect window, so its own error surfaces.
+                        stdout=log, stderr=subprocess.STDOUT, timeout=180)
                 (dest / "engine.exit").write_text(f"{result.returncode}\n")
                 text = engine_log.read_text()
                 if rejected or injected:
@@ -151,7 +176,8 @@ def run_case(args, name, *, dualstack=False, rejected=False, injected=False):
                 assert runner.returncode == (1 if rejected or injected else 0), cycles
                 if rejected or injected:
                     assert "ABORT: reload 1 failed: daemon SIGHUP outcome rejected_no_effect" in cycles
-                summary = {"case": name, "engine_exit": result.returncode, "assertions": "pass",
+                summary = {"case": name, "attempts": attempt,
+                           "engine_exit": result.returncode, "assertions": "pass",
                            "metrics_injected_not_runtime_rollback": injected}
                 (dest / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
                 print(json.dumps(summary), flush=True)
