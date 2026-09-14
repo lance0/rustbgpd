@@ -35,6 +35,7 @@ rbgp global       # ASN, router ID, listen port, TCP-AO support
 rbgp health       # core-actor readiness and operational counts
 rbgp health --liveness # authenticated gRPC responsiveness only
 rbgp doctor       # triage checks + redacted support bundle (tar.gz)
+rbgp doctor --pre-upgrade config.toml # add read-only pre-upgrade checks for the config the upgraded daemon boots
 rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard
 ```
@@ -85,8 +86,8 @@ rbgp config status
 rbgp config confirm deploy-123
 rbgp config abort deploy-123
 rbgp config effective                       # dump running post-defaults config (redacted TOML; -j for JSON; bounded to 384 MiB)
-rbgp config history                         # list applied config transactions
-rbgp config rollback <n>                    # roll back to a prior history entry (1 = previous applied config)
+rbgp config history                         # list retained config-history rows, newest first
+rbgp config rollback <n>                    # roll back to an eligible history row (1 = previous applied config; metadata-only rows for oversized configs are not eligible)
 
 # Translate a BIRD 2/3 / FRR / GoBGP config (local, no daemon; policy is
 # never translated — skipped constructs are reported with line numbers
@@ -99,7 +100,7 @@ rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 
 ```bash
 rbgp neighbor
-rbgp neighbor --wide                        # add MsgRcvd/MsgSent/Flaps/RRC/Slow/PfxRcd columns
+rbgp neighbor --wide                        # add MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd columns
 rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
 rbgp neighbor <addr> --compare <NEIGHBOR>   # compare live update-group membership
@@ -135,7 +136,9 @@ not a neighbor subcommand.
 
 Experimental `replay-out` targets one Established peer that negotiates only
 IPv4/IPv6 unicast, with a unique IP address among managed peers. It requires a
-connected BMP collector with `rib_out_post = true` and `rib_in_pre = false`. Its response confirms scheduling only. See the
+connected BMP collector whose `monitor` list includes `rib_out_post` and omits
+`rib_in_pre` (for example `monitor = ["rib_out_post"]`; the default
+`["rib_in_pre"]` is not eligible). Its response confirms scheduling only. See the
 [replay contract](../../docs/reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors)
 for monitoring reset behavior, completion evidence, and the five-second bound.
 
@@ -188,7 +191,7 @@ rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 rbgp rib add <prefix> --next-hop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
 rbgp rib delete <prefix> [--path-id <n>]
-rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
+rbgp diff advertised --against <snapshot.ndjson>   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
 
 rbgp policy list
@@ -209,6 +212,8 @@ rbgp policy stats [--neighbor <addr>]                     # live per-term hit co
 rbgp policy counters [--neighbor <addr>]                  # alias
 
 rbgp flowspec
+rbgp flowspec add -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" --action drop
+rbgp flowspec delete -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80"
 rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
@@ -395,6 +400,7 @@ rbgp evpn es list [<esi>]                        # Ethernet Segments joined with
 rbgp evpn es drain <esi>                         # drain an ES before access-circuit maintenance
 rbgp evpn es undrain <esi>                       # undrain an ES
 rbgp evpn managed-netdevs                        # rustbgpd-managed netdev ownership/status (ADR-0091)
+rbgp evpn duplicate-mac-quarantines              # list active duplicate-MAC local-origin quarantines
 rbgp evpn clear-duplicate-mac --vni <n> --mac <addr>   # clear a duplicate-MAC local-origin quarantine
 rbgp evpn add-mac-ip ...
 rbgp evpn add-imet ...
