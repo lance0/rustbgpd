@@ -270,8 +270,8 @@ import side was the production filter set and its export side was deny.
 Refresh on the incumbent's cadence with the pipeline's cron loop, adding the
 overlay flags to its render step; a member joining or leaving applies on that
 loop's SIGHUP as one runtime generation
-([pipeline §3](ixp-filter-pipeline.md#3-validate-swap-reload)). The renderer refuses the overlay (exit 2, nothing written) if it ever
-names an unknown policy, collides with a generated name, or tries a
+([pipeline §3](ixp-filter-pipeline.md#3-validate-swap-reload)). The renderer
+refuses the overlay (exit 2, nothing written) if it ever names an unknown policy, collides with a generated name, or tries a
 modification the renderer will not carry (next-hop changes, AS prepends,
 community removals, BLACKHOLE-marker synthesis).
 
