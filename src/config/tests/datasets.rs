@@ -529,3 +529,63 @@ fn only_fib_transactions_avoid_full_candidate_snapshot_staging() {
         );
     }
 }
+
+#[test]
+fn config_diff_flags_dataset_contents_not_compared_when_content_changes() {
+    let dir = dataset_config_dir("64500\n");
+    let current = load_dir(&dir).expect("initial config with dataset loads");
+
+    // Modify dataset file on disk without changing config.toml (IRR-only refresh)
+    let list_path = dir.path().join("datasets").join("customers.list");
+    let mut content = fs::read_to_string(&list_path).expect("dataset file exists");
+    content.push_str("64501\n");
+    fs::write(&list_path, content).expect("dataset file updated");
+
+    let candidate = load_dir(&dir).expect("candidate config loads with updated dataset");
+    let diff = diff_config(&current, &candidate);
+
+    // The TOML config and bindings are unchanged.
+    assert!(!diff.has_any_changes());
+    assert!(!diff.policy.datasets_changed);
+    assert_eq!(diff.policy.declared_datasets_count, 1);
+
+    // Formatted diff flags that contents were not evaluated, and omits "No changes.".
+    let text = format_config_diff(&diff);
+    assert_eq!(
+        text,
+        "datasets: contents not compared (1 declared); a reload re-reads them\n"
+    );
+    assert!(!text.contains("No changes."));
+
+    // JSON output carries declared_datasets_count in summary and reload_applied.
+    let json = config_diff_json_value(&diff);
+    assert_eq!(json["summary"]["declared_datasets_count"], 1);
+    assert_eq!(json["reload_applied"]["declared_datasets_count"], 1);
+    assert_eq!(json["has_any_changes"], false);
+
+    // If candidate has an actionable change alongside declared datasets,
+    // the notice appears alongside the change plan.
+    let mut changed_candidate = candidate;
+    changed_candidate.neighbors[0].description = Some("edge-peer".to_string());
+    let changed_diff = diff_config(&current, &changed_candidate);
+    assert!(changed_diff.has_any_changes());
+    let changed_text = format_config_diff(&changed_diff);
+    assert!(
+        changed_text
+            .contains("datasets: contents not compared (1 declared); a reload re-reads them"),
+        "{changed_text}"
+    );
+    assert!(changed_text.contains("Plan: 1 to change"), "{changed_text}");
+}
+
+#[test]
+fn config_diff_emits_no_changes_only_when_no_datasets_declared() {
+    let mut old = parse(valid_toml()).expect("clean config");
+    old.policy.datasets.clear();
+    let new = old.clone();
+    let diff = diff_config(&old, &new);
+
+    assert_eq!(diff.policy.declared_datasets_count, 0);
+    assert!(!diff.has_any_changes());
+    assert_eq!(format_config_diff(&diff), "No changes.\n");
+}

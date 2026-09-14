@@ -2092,6 +2092,10 @@ pub struct PolicyDiff {
     /// contents live outside TOML; this flag describes only the binding
     /// surface visible in a config diff.
     pub datasets_changed: bool,
+    /// Number of datasets declared in the candidate's `[policy.datasets]`
+    /// section. Previews flag that dataset file contents are not compared
+    /// during a config diff.
+    pub declared_datasets_count: usize,
     /// Internal transaction-planning fence: either side of this diff
     /// references `.rpol` or dataset files. Kept out of serialized diff
     /// output; the public JSON surface exposes only actual changes.
@@ -3946,6 +3950,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "neighbors_removed": diff.neighbors.removed.len(),
             "sessions_will_reset": diff.session_reset_entries(),
             "restart_required": diff.has_restart_required_changes(),
+            "declared_datasets_count": diff.policy.declared_datasets_count,
         },
         "reload_applied": {
             "neighbors": &diff.neighbors,
@@ -3961,6 +3966,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "export_chain_changed": diff.policy.export_chain_changed,
             "rpol_changed": diff.policy.rpol_changed,
             "datasets_changed": diff.policy.datasets_changed,
+            "declared_datasets_count": diff.policy.declared_datasets_count,
             "honor_graceful_shutdown_changed": diff.honor_graceful_shutdown_changed,
             "honor_blackhole_changed": diff.honor_blackhole_changed,
             "dynamic_neighbors_changed": diff.dynamic_neighbors_reload_applied_changed,
@@ -4334,9 +4340,16 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
             diff.sighup_route.describe()
         );
     }
+    if diff.policy.declared_datasets_count > 0 {
+        let _ = writeln!(
+            out,
+            "datasets: contents not compared ({} declared); a reload re-reads them",
+            diff.policy.declared_datasets_count
+        );
+    }
     if diff.has_any_changes() {
         let _ = writeln!(out, "{}", plan_summary_line(diff));
-    } else {
+    } else if diff.policy.declared_datasets_count == 0 {
         let _ = writeln!(out, "{}", style.no_changes);
     }
     out
@@ -5956,6 +5969,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
             || old.rpol_max_graph_bytes != new.rpol_max_graph_bytes
             || old.rpol != new.rpol,
         datasets_changed: old.datasets != new.datasets,
+        declared_datasets_count: new.datasets.len(),
         external_inputs_present: !old.rpol_files.is_empty()
             || !new.rpol_files.is_empty()
             || !old.datasets.is_empty()
