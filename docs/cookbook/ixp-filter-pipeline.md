@@ -171,11 +171,10 @@ systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
 
 Before the first cutover — or any time you want to see what a refresh
-will change — compare the candidate with the installed configuration
-(`rustbgpd --diff` reads `/etc/rustbgpd/config.toml` as the current side):
+will change — compare the candidate with the running daemon:
 
 ```bash
-rustbgpd --diff "$STATE/candidate/config.toml"
+rbgp config diff "$STATE/candidate/config.toml"
 ```
 
 A joining member is listed under `Neighbors:` as `+ <address> (AS <asn>)`
@@ -184,18 +183,38 @@ session reset / restart required. The output ends with the route the reload
 will take:
 
 ```text
+Reload-applied changes:
+
+  Neighbors:
+    + 192.0.2.33 (AS 4242)
+
+  Policy:
+    ~ rpol_files / rpol_roots / rpol_max_graph_bytes / .rpol graph
+    ~ policy dataset bindings / paths
+
 SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)
 
 Plan: 1 to add · no session resets expected
 ```
 
+Exit code `2` means changes are present, `0` none, and `1` an error.
+
 The rendered configuration names its `.rpol` and dataset files relative to
-its own directory. `rustbgpd --diff` resolves them from each file's location;
-`rbgp config diff` sends only the TOML to the daemon, which cannot resolve
-them, so it fails on a rendered candidate. Because the candidate sits in a
-different directory from the installed copy, the diff also reports the `.rpol`
-and dataset path lines as changed on every run; read the `Neighbors:` section
-and the route line.
+its own directory. `rbgp config diff` resolves those paths from the candidate
+file's directory before sending the TOML, and the daemon then reads the files
+itself, so run it on the route-server host where the daemon can read the
+candidate tree; a file the daemon cannot read fails the diff with exit `1`.
+Because the candidate sits in a different directory from the installed copy,
+the diff also reports the `.rpol` and dataset path lines as changed on every
+run; read the `Neighbors:` section and the route line.
+
+Without a reachable daemon, `rustbgpd --diff` prints the same report offline.
+It reads `/etc/rustbgpd/config.toml` as the current side and resolves each
+file's paths from that file's location:
+
+```bash
+rustbgpd --diff "$STATE/candidate/config.toml"
+```
 
 A rendered refresh — changed IRR data, a member joining or leaving with its
 `[[neighbors]]` entry and its two datasets, or both — takes the generation
