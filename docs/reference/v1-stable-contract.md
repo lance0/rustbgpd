@@ -122,11 +122,31 @@ and series.
 
 Breaking changes to the inventoried surface require a new contract major, a
 CHANGELOG entry, a migration guide, and a consecutive-release fixture accepted
-by the new release. Once v1.0 is tagged, an inventoried surface deprecated in 1.x
-remains functional for the rest of 1.x and is removable no earlier than 2.0.
+by the new release.
 Migration compatibility covers the current and immediately previous minor
 release. Security fixes support the latest 1.x release; that is a separate
 promise and does not extend migration compatibility into security support.
+
+### Deprecation floors
+
+Two deprecation floors apply, each to a different set of surfaces:
+
+- **Inventoried v1 surface** (everything pinned in
+  [`v1-stable-surface.json`](v1-stable-surface.json)): once v1.0 is tagged, an
+  item deprecated in 1.x remains functional for the rest of 1.x and is
+  removable no earlier than 2.0
+  ([ADR-0125](../adr/0125-v1-stability-contract.md) DR7). DR7 supersedes the
+  earlier two-minor / 90-day window for inventoried surfaces; there is no
+  two-minor removal window for inventoried contracts.
+- **Uninventoried and alpha surfaces** (EVPN, the Linux dataplane, and RPCs,
+  fields, configuration keys, and CLI commands absent from the inventory): a
+  deprecated item remains functional for at least two minor releases and 90
+  days, during both 0.x and 1.x. The inventory's
+  `compatibility.deprecation_window` records this minimum
+  (`minimum_minor_releases = 2`, `minimum_days = 90`), and the release checker
+  rejects any shorter value.
+
+The [stability guide](stability.md) lists which surfaces are alpha.
 
 ## Mutation and reload model
 
@@ -197,4 +217,4 @@ cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 
 Updating a digest is not a mechanical fix. Review the compatibility policy,
 classify the change as additive or breaking, and add the required deprecation
-or migration evidence first.
+(see [Deprecation floors](#deprecation-floors)) or migration evidence first.
