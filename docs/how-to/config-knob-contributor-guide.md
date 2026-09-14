@@ -18,23 +18,44 @@ move with it.
      maps for convenience.
    - Choose an explicit default. Prefer a semantic default in the schema type
      over "missing means magic" in later runtime code.
+   - `Neighbor` and `PeerGroupConfig` have manual `Debug` impls in
+     `src/config/schema.rs` that redact credentials. Add the field there,
+     redacted if it carries a secret.
+   - Resolve it through `src/config/parse.rs` (policy and family parsing) or
+     `src/config/resolution.rs` (inherited per-peer resolution) when the
+     runtime consumes a resolved value rather than the raw field.
+   - Regenerate the published schema with
+     `cargo run --bin rustbgpd -- --dump-config-schema > docs/reference/rustbgpd.schema.json`;
+     `config_json_schema_committed_copy_is_fresh` fails on a stale copy.
 
 2. **Validation**
    - Add validation in `src/config/validation.rs` for ranges, mutually exclusive
      fields, unsupported combinations, and ownership boundaries.
-   - Add a negative test in `src/config/tests/mod.rs` that proves bad input is
-     rejected with an operator-actionable error.
+   - Add a negative test in the topic module under `src/config/tests/` (for
+     example `neighbor_validation.rs`, `datasets.rs`, or `telemetry.rs`) that
+     proves bad input is rejected with an operator-actionable error.
 
 3. **Reload / transaction class**
    - Decide whether the knob is live, restart-required, parse-time rejected, or
      transaction-supported.
    - Update `docs/reference/reload-matrix.md`.
-   - If the field is on `Neighbor` or `PeerGroupConfig`, update
+   - If the field is on `Neighbor` or `PeerGroupConfig`, add it to
      `RELOAD_MATRIX_NEIGHBOR_FIELDS` or `RELOAD_MATRIX_PEER_GROUP_FIELDS` in
-     `src/config/tests/mod.rs`. Those tests intentionally fail when a field is
-     accepted by the schema but missing from the reload matrix.
+     `src/config/tests/mod.rs`. These lists are maintained by hand, not derived
+     from the schema: the tests in `src/config/tests/diff.rs` fail only when a
+     listed field is missing from the matrix, so a new field left off the list
+     passes silently.
    - For load-bearing live-vs-restart claims, extend
      `reload_matrix_pins_load_bearing_field_classes`.
+   - Classify the field for diffs and reloads in `src/config/mod.rs`:
+     `config_field_impact` (the hot-applied / session-reset / restart-required
+     annotation), `neighbor_runtime_equal` (a neighbor field it omits never
+     registers as changed), and `resolved_session_change` (hot update in place
+     versus session replacement). A new top-level family also needs a
+     `SighupReloadFamilies` entry and a decision in `classify_sighup_reload`
+     (generation, sequential, or rejected route).
+   - A restart-required global field that SIGHUP must not advance belongs in
+     `pin_unreconciled_daemon_runtime_fields` in `src/reload.rs`.
 
 4. **Runtime behavior**
    - Wire the field through the runtime model that consumes it.
