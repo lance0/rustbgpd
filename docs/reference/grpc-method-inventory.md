@@ -140,9 +140,9 @@ shape itself does not raise the tier.
 | `DeleteNeighborSet` | `mutating` | Per-name. |
 | `GetGlobalPolicyChains` | `sensitive_read` | Global import/export chain structure. |
 | `SetGlobalImportChain` | `operator_only` | Affects every neighbor without a per-peer override. Inbound-policy at the daemon scope. |
-| `SetGlobalExportChain` | `operator_only` | Same shape, outbound side. |
-| `ClearGlobalImportChain` | `operator_only` | Same scope, removal direction. |
-| `ClearGlobalExportChain` | `operator_only` | Same. |
+| `SetGlobalExportChain` | `operator_only` | Same shape, outbound side. Positively-down sessions adopt the new chain at PeerUp; ambiguous sessions fail closed. |
+| `ClearGlobalImportChain` | `operator_only` | Same scope, removal direction. Positively-down sessions adopt the cleared chain at PeerUp. |
+| `ClearGlobalExportChain` | `operator_only` | Same. Positively-down sessions adopt the cleared chain at PeerUp. |
 | `GetNeighborPolicyChains` | `sensitive_read` | Per-neighbor chain readout. |
 | `SetNeighborImportChain` | `mutating` | Per-neighbor scope. |
 | `SetNeighborExportChain` | `mutating` | Per-neighbor. |
