@@ -146,7 +146,8 @@ lab-relevant paths (the rest of the matrix below runs on the hosted
 kernel-dataplane workflow or manual gates).
 
 A `classify_changes` job runs `scripts/classify_heavy_ci_paths.py` first and
-`prime_dev_image` — which every M-series topology job depends on — is gated on
+`prime_dev_image` — which every M-series topology job except M100 (a pinned
+released image) depends on — is gated on
 its `run_labs` output. Workflow path filters exclude documentation-only pull
 requests and pushes before any job starts. For a triggered pull request, a
 complete three-dot diff that is standalone-fuzz-only or
@@ -196,15 +197,19 @@ supports manual dispatch. Neither workflow has a scheduled trigger.
   one IPv6-only session each (**M107**).
 - **Core RR against incumbents** — RFC 4456 reflection + RFC 4724 GR helper-truth against BIRD 2.19.2 clients and OpenBGPD 9.1 clients, plus required-family OPEN enforcement against BIRD 2.19.2: **M85**, **M86**, **M93**.
 - **Live policy-presence safety** — ADR-0112 RFC 8212 import-presence transitions qualified for Route Refresh, rejected whole when one peer cannot converge, and converged on the wire when it can: **M95**.
-- **IXP Manager local activation** — pinned v7.4 Foil render, atomic publication, live settlement, and pre-effect restoration against MD5-authenticated FRR: **M96** (local).
-- **IXP Manager authenticated lifecycle** — pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles, with shared-fence, database, and MD5-FRR proof: **M97** (local).
-- **IXP Manager Nagios monitoring** — pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server, and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter: **M98** (`ixp-compat.yml`).
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 - **BLACKHOLE FIB discard** — RFC 7999 install/withdraw plus durable exact-prefix
-  crash ownership and an unreceipted `proto bgp` negative: **M41**, **M62**.
+  crash ownership and an unreceipted `proto bgp` negative: **M41** (the durable
+  crash-ownership receipt **M62** runs in the kernel-dataplane workflow below).
 - **gRPC/gNMI + EVPN injection** — ADR-0064 mTLS tier enforcement, ADR-0070 gNMI / OpenConfig telemetry + Set, gNMI Subscribe ON_CHANGE, and EVPN Type 5 control-plane injection: **M44**, **M54**, **M56**, **M45**.
 - **Inbound RIB backpressure** — ADR-0078 hold-timer survival under an artificially stalled RIB: **M63**.
 - **IPv6-only peering** — a session with `disable_ipv4_unicast` negotiating only IPv6 unicast against an FRR 10.7.1 peer: **M64**.
+
+The IXP Manager receipts run outside `interop.yml`:
+
+- **IXP Manager local activation** — pinned v7.4 Foil render, atomic publication, live settlement, and pre-effect restoration against MD5-authenticated FRR: **M96** (local).
+- **IXP Manager authenticated lifecycle** — pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles, with shared-fence, database, and MD5-FRR proof: **M97** (local).
+- **IXP Manager Nagios monitoring** — pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server, and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter: **M98** (`ixp-compat.yml`).
 
 Plus one **kernel-primitive** PR-CI gate that lives in `ci.yml`
 rather than `interop.yml` (no containerlab — single Docker
@@ -223,7 +228,8 @@ coverage that needs containerlab, kernel modules, or real netns route tables:
 **M36**,
 **M37**, **M37+IP**, **M38**, **M39**, **M39b**, **M40**, **M42**,
 **M47**, **M48**, **M50**, **M51**, **M52**, **M53**, **M58**, **M60**, **M61**, **M62**, **M65**, **M66**, **M67**, **M68**, **M69**, **M70**, **M71**, **M72**, **M108**, **M109**, **M110**, the conditional
-**M43** TCP-AO smoke, and the Docker netns selectors (such as
+**M43** TCP-AO live-rotation and crash-restart receipts, and the Docker netns
+selectors (such as
 `fdb_nhg` / `fib_runtime` / `bfd_runtime` / `dataplane_vlan_fdb` /
 `svd_fdb_vni` / … — see the `netns` job in `kernel-dataplane.yml` for the full
 set). Those jobs run on lab-relevant PRs, non-documentation pushes to `main`, and manual dispatch

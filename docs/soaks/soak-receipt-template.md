@@ -1,5 +1,7 @@
 # Soak Receipt — <scenario name> <duration>
 
+> **Document class: REFERENCE.** This maintained template defines the soak receipt procedure. Omit this line from a copied receipt.
+
 Copy this template for every soak run — **pass, fail, or aborted**. A
 red receipt is published with the same completeness as a green one.
 Gates and bounds come from `docs/soaks/soak-acceptance-gates.md` at the

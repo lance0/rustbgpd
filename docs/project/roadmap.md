@@ -57,7 +57,7 @@ those.
 | BFD async + RFC 5882 coupling | Partial | M51 receipt revalidated green on current main by #1093 (`8b8f76e8`); receive-work budgeting and remote-AdminDown coupling corrections shipped; RFC 5883 multihop shipped with the M108 routed-loopback FRR receipt; authentication remains demand/interoperability gated by ADR-0117 |
 | Observability & API: gRPC (13 services), Prometheus, structured logs, durable event history | Shipped | ADR-0072 outbox + `SubscribeFromEvent` |
 | gNMI / OpenConfig telemetry + Set subset | Partial | `Get` / `Subscribe`, BGP state subset; static numbered-neighbor `Set` + commit-confirmed; broader OpenConfig config/state deferred |
-| BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4/path-marking drafts, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; ADR-0097, M81 receipt |
+| BMP trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) + BMPv4 TLV draft, MRT dump (6396) | Shipped | Per-collector views + `version = 3\|4`; Path Marking temporarily unavailable pending a non-colliding TLV type; ADR-0097, M81 receipt |
 | FlowSpec (8955/8956, IPv4/IPv6) | Shipped | All 13 component types |
 | BGP-LS receive + reflection + API export (RFC 9552, SAFI 71/72) | Partial | Controller-feed / RR only; no local topology production (ADR-0077); RFC 9857 type-5 NLRI passes opaquely, while typed SR Policy state remains demand-gated (ADR-0116) |
 
@@ -115,9 +115,13 @@ The next product milestone is operational trust for the route-server / route-
 reflector beachhead, not another breadth sprint. Work in this section outranks
 new AFI/SAFI and EVPN dataplane expansion.
 
-For v0.70, the [release checklist](release-checklist.md#flagship-operating-proof)
-requires a qualifying 24-hour management-load soak on the selected candidate.
-Earlier archived soaks do not automatically qualify later runtime changes.
+v0.70.0 shipped on the
+[2026-09-12 route-server flagship run](../soaks/soak-rs-flagship-24h-2026-09-12.md),
+which failed only the `management_cadence` gate and ran a pre-release commit;
+its receipt records the release relationship. The
+[release checklist](release-checklist.md#flagship-operating-proof) calls for a
+qualifying 24-hour management-load soak on the selected candidate. Earlier
+archived soaks do not automatically qualify later runtime changes.
 The [current route-server readiness policy](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes)
 uses consecutive failures and rejects missing observations; isolated breaches
 remain visible without automatically blocking a release whose agreed gates pass.
@@ -988,8 +992,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   Also: verbose policy trace including non-match steps (the shipped trace
   reports the deciding statement per policy, not every statement consulted);
   route history / why-changed timeline;
-  looking-glass integration for explain; `rustbgpd --diff` output formatted by
-  reload class (cross-reference each diff line against `docs/reference/reload-matrix.md`).
+  looking-glass integration for explain; `rustbgpd --diff` output
+  cross-referenced line by line against `docs/reference/reload-matrix.md` (the
+  output already groups changes by reload class, annotates session resets,
+  and, since v0.70.0, prints the candidate's `SIGHUP reload route`).
 - **Allocator packaging decision (from the 2026-07-17 reload-RSS
   attribution probe).** The non-plateau RSS growth across policy-reload
   cycles seen in the reload-stall receipts is glibc-malloc retention of
@@ -1314,7 +1320,12 @@ These have explicit rationale and, where noted, are the roadmap counterpart of
 an ADR "Deferred" section that points back here. Tightened, not dropped.
 
 - **Peer-group persist-failure double-bounce removal (ADR-0081 decision 3
-  follow-up).** A persist failure after a successful targeted peer-group
+  follow-up) — shipped in v0.70.0.** Config transactions now stage the
+  candidate (temp write + fsync) next to the config file before any runtime
+  effect, so an ordinary disk failure returns `FAILED_PRECONDITION` with no
+  session churn. A rename that fails after a successful stage keeps the
+  compensation below, and an ambiguous publication still fences. The original
+  rationale follows. A persist failure after a successful targeted peer-group
   reshape rolls members back through the same atomic fan-out — apply
   forward, bounce; roll back, bounce again. Correct and loud, never silent,
   but noisy. Removing the second bounce requires inverting the shared
@@ -1407,9 +1418,11 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   errors. FlowSpec unknown component pass-through was investigated and rejected:
   RFC 8955 treats unknown component types as malformed NLRI. Inbound BoRR/EoRR
   channel-full retry was also investigated and rejected: the receive path already
-  backpressures with `send().await`. Remaining work also includes SIGHUP reconcile
-  rollback semantics (reports structured per-peer failures and keeps the prior
-  snapshot, but does not roll back already-applied runtime peer changes);
+  backpressures with `send().await`. Remaining work also includes rollback for
+  the sequential SIGHUP route (candidates with TCP-AO rotation or listener
+  MD5/GTSM changes, and non-generation changes), which still halts with a
+  known-partial receipt; the generation route has restored retained state
+  since v0.70.0;
   dynamic-neighbor `handle_inbound` split for readability; config snippets /
   examples in gRPC validation error detail.
 
@@ -1444,7 +1457,7 @@ branch is between features.
       t, off = f.read_text(), 0
       while (m := head.search(t, off)) and (end := c.find_attribute_end(t, m.start())):
           if "clippy::too_many_lines" in t[m.start() : end + 1]:
-              ../../n[m.group(1)] += 1
+              n[m.group(1)] += 1
           off = end + 1
   print(n)
   PY
@@ -1525,13 +1538,13 @@ If you need these features, combine rustbgpd with purpose-built tools.
   M0–M9 initial milestones plus the post-v0.1 feature history relocated from
   this roadmap).
 - **[docs/interop.md](../interop.md)** — the full M-NN interop test matrix.
-  The automated scripts cover the M-series against FRR 10.7.1, BIRD 2.0.12 /
-  3.3.1, GoBGP 3.37.0 / 4.6.0 / 4.7.0, and StayRTR; M0 (FRR, BIRD) are manual
-  smokes. Privileged kernel-dataplane smokes now run in the hosted
+  The automated scripts cover the M-series against the pinned FRR, BIRD,
+  GoBGP, OpenBGPD, and RTR-cache versions recorded there; M0 (FRR, BIRD) are
+  manual smokes. Privileged kernel-dataplane smokes now run in the hosted
   `kernel-dataplane` workflow for
   the EVPN VTEP / IRB / adoption / multihoming / VLAN / overlay-index receipts
   plus the FIB, BFD, TCP-AO, BGP-unnumbered, and BLACKHOLE kernel receipts; see
-  `INTEROP.md` for the current M36-M72 span. Large-scale churn (M33) is a
+  `INTEROP.md` for the current hosted list. Large-scale churn (M33) is a
   manual soak harness under `tests/soak/`.
 - **[docs/operational-proof.md](../operational-proof.md)** — the consolidated
   operator-facing receipt index for CI interop, hosted dataplane, benchmarks,
@@ -1552,5 +1565,5 @@ If you need these features, combine rustbgpd with purpose-built tools.
 GitHub Actions CI (fmt / clippy / test on every push/PR), nightly wire-decoder
 fuzz CI, a multi-stage Docker image, containerlab interop topologies, automated
 M-series interop scripts, cross-compiled linux-amd64/arm64 binary releases, and
-crates.io publishing for `rustbgpd-wire` and `rustbgpd-fsm` (other crates
-remain internal). Open infrastructure item: a Homebrew formula.
+crates.io publishing for `rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki`
+(other crates remain internal).

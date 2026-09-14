@@ -24,7 +24,7 @@ Options:
                           Odd attempts run base first, even attempts run head
                           first. Even N fully cancels first-vs-second bias.
   --out-dir PATH          Output directory (default: target/bench-compare)
-  --lan395-gate-out PATH  After the run, require the exact pinned LAN-395
+  --fanout-gate-out PATH  After the run, require the exact pinned fanout gate
                           matrix and write a sanitized fail-closed receipt to
                           this new path. This mode requires transport/fanout,
                           bench-internals, two attempts on CPU 5, taskset, and
@@ -82,7 +82,7 @@ harness_path=""
 core="0"
 attempts=1
 out_root="target/bench-compare"
-lan395_gate_out=""
+fanout_gate_out=""
 allow_dirty=0
 use_taskset=1
 require_performance=0
@@ -138,8 +138,9 @@ while [[ $# -gt 0 ]]; do
       out_root="${2:?missing value for --out-dir}"
       shift 2
       ;;
-    --lan395-gate-out)
-      lan395_gate_out="${2:?missing value for --lan395-gate-out}"
+    --fanout-gate-out|--lan395-gate-out)
+      # --lan395-gate-out is a retained, undocumented alias for historical invocations.
+      fanout_gate_out="${2:?missing value for $1}"
       shift 2
       ;;
     --allow-dirty)
@@ -249,7 +250,7 @@ head_installed_harness_blob=""
 head_installed_harness_sha256=""
 head_harness_overlay=""
 
-if [[ -n $lan395_gate_out ]]; then
+if [[ -n $fanout_gate_out ]]; then
   [[ $package == rustbgpd-transport \
     && $bench_name == fanout \
     && $filter == distribute_fanout \
@@ -263,12 +264,12 @@ if [[ -n $lan395_gate_out ]]; then
     && $regression_max_stddev_pct == 10 \
     && $verdict_min_attempts == 3 \
     && $harness_enabled == 0 ]] || {
-    echo "error: --lan395-gate-out requires rustbgpd-transport/fanout, filter distribute_fanout, feature bench-internals, two attempts on CPU 5, taskset, --require-performance, and the default generic verdict settings" >&2
-    echo "       fixed-harness overlays are not permitted in LAN-395 exact mode" >&2
+    echo "error: --fanout-gate-out requires rustbgpd-transport/fanout, filter distribute_fanout, feature bench-internals, two attempts on CPU 5, taskset, --require-performance, and the default generic verdict settings" >&2
+    echo "       fixed-harness overlays are not permitted in exact fanout gate mode" >&2
     exit 2
   }
-  [[ ! -e $lan395_gate_out && ! -L $lan395_gate_out ]] || {
-    echo "error: LAN-395 receipt path already exists: ${lan395_gate_out}" >&2
+  [[ ! -e $fanout_gate_out && ! -L $fanout_gate_out ]] || {
+    echo "error: fanout gate receipt path already exists: ${fanout_gate_out}" >&2
     exit 2
   }
   "$repo/bench/scale/compare-rrharness.sh" \
@@ -874,12 +875,12 @@ if fail_on_regression and regression_rows:
     sys.exit(1)
 PY
 
-if [[ -n $lan395_gate_out ]]; then
+if [[ -n $fanout_gate_out ]]; then
   python3 "$repo/bench/scale/rebaseline/validate_lan395_criterion.py" \
     --run-dir "$run_dir" \
     --pin "$repo/bench/scale/rebaseline/lan395-run-pin.env" \
-    --output-dir "$lan395_gate_out"
-  echo "LAN-395 sanitized receipt written to ${lan395_gate_out}"
+    --output-dir "$fanout_gate_out"
+  echo "Fanout gate sanitized receipt written to ${fanout_gate_out}"
 fi
 
 echo "Summary written to ${summary_file}"

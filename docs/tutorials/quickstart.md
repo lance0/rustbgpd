@@ -43,12 +43,12 @@ rustbgpd --version && rbgp --version
 ```
 <!-- release-install-contract:tarball:end -->
 
-The verified installer currently lives in the source checkout at
-[`packaging/install.sh`](../../packaging/install.sh) and will first ship as a
-release asset in v0.70.0. Current published releases through v0.69.0 do not
-contain it, so use the tarball commands above today. The
+Releases from v0.70.0 onward also publish a verified installer, `install.sh`,
+as a release asset (source:
+[`packaging/install.sh`](../../packaging/install.sh)); earlier releases do not
+include it. The tarball commands above remain the manual equivalent. The
 [deployment guide](../how-to/deployment.md#verified-installer) covers the
-installer's later release-asset path, explicit tags, and prefix mode.
+installer's release-asset path, explicit tags, and prefix mode.
 
 `rs-config-render` is the
 [IXP route-server config renderer](../../tools/rs-config-render/README.md);

@@ -2,8 +2,9 @@
 
 Every soak entrypoint in this directory acquires an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before
-doing real work. The `bench/compare-criterion.sh` script takes the same
-lock on the same path. When the soak host is also the bench host, this
+doing real work. `bench/compare-criterion.sh`, the other bench compare
+scripts, and the scale receipt runners take the same lock on the same path.
+When the soak host is also the bench host, this
 guarantees only one workload runs at a time — a bench run refuses to start
 while a soak is active, and a soak refuses to start while a bench is
 mid-attempt.
@@ -25,7 +26,7 @@ Precommitted per-scenario acceptance gates and abort criteria live in
 **sudo / $HOME trap.** When the soak runs under `sudo`, `$HOME` flips
 to `/root` and the default lock path becomes
 `/root/.local/state/rustbgpd-host.lock` — a different file from the
-bench runner's lock at `$HOME/.local/state/rustbgpd-host.lock`.
+non-root bench user's lock at `$HOME/.local/state/rustbgpd-host.lock`.
 The two workloads would not see each other. The convention on the
 shared host is:
 
@@ -955,7 +956,8 @@ per-cycle events recorded in `churn.log`.
   `crates/evpn-linux/src/linux/l3.rs`,
   `crates/evpn-linux/src/linux/routes.rs`,
   `crates/evpn-linux/src/linux/notify.rs` (route classifier),
-  or the `evpn_l3_originator` / `evpn_l3_installer` daemon tasks.
+  or the daemon's `evpn_l3_originator` task and the L3 intent projection in
+  `src/evpn_dataplane.rs`.
 - **Before tagging any release that touches the symmetric IRB
   packet path or the L3 owned-state model.**
 

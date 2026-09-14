@@ -1,5 +1,7 @@
 # Soak Acceptance Gates (precommitted)
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 Precommitted pass/fail criteria for every soak scenario shipped in
 `tests/soak/`. This document is written **before** a soak window opens;
 a soak receipt quotes the bounds from here (at the receipt's git SHA)
@@ -90,7 +92,7 @@ intern GC. Analyzer: `analyze-soak-gr-restart.py`.
 | Intern-table slope | < 1.0 entries/h | `bgp_rib_attr_intern_global_size` gauge → CSV `intern_size` | Re-announce after every peer restart re-interns attributes; `gc_intern_table` reclaims after stale-clear. The sampler also fires inside the restart routine at the GR-active and post-clear points, so the column moves every cycle. |
 | RSS slope (post-warmup) | < 1.0 MB/h | `/proc/<pid>/status` VmRSS → CSV `rss_mb` | Allocation churn on every restart/re-announce cycle. |
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
-| Restart cycles completed | ≥ 0.8 × (duration ÷ `RESTART_INTERVAL_SEC`) | CSV `restart_cycles` max | Incremented by the harness on every completed cycle. Analyzer floor is ≥ 1; the window floor (chosen here) rejects a run that silently stalled mid-window. 0.8× rather than 1.0× because per-cycle work (GR polling + re-establish, ~15–45 s) rides on top of the interval — a 72 h run at the 300 s default must show ≥ 691 cycles. |
+| Restart cycles completed | ≥ 0.8 × (duration ÷ `RESTART_INTERVAL_SEC`) | CSV `restart_cycles` max | Incremented by the harness on every completed cycle. Analyzer floor is ≥ 1; the window floor (chosen here) rejects a run that silently stalled mid-window. 0.8× rather than 1.0× because per-cycle work (GR polling + re-establish, ~15–45 s) rides on top of the interval — a 72 h run at the 300 s default must show ≥ 692 cycles. |
 | GR evidence ordered | positive `gr_active`+`stale` observed, then both clear, every cycle | `bgp_gr_active_peers`, `bgp_gr_stale_routes` → CSV columns | Set by GR entry on peer death; cleared by EoR + stale-clear. Harness fails closed mid-run if either phase is not observed within 30 s. |
 | Session recovered at end | Final CSV `bgp_established` == 1 | FRR `show bgp neighbors` → CSV `bgp_established` | Every restart flips it 1→0→1. |
 | Re-establish latency | ≤ 60 s after peer returns | harness `wait_established 60` (fail-closed), `cycles.log` | Checked every cycle. |

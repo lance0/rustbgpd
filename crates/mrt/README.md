@@ -21,8 +21,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **NH synthesis** — IPv4 routes get NEXT_HOP attribute, IPv6 get
   MP_REACH_NLRI, RFC 8950 IPv4-with-IPv6-NH get MP_REACH_NLRI
 - **TABLE_DUMP_V2 reader** — `SnapshotReader` parses `PEER_INDEX_TABLE` +
-  `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records into
-  `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
+  `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records, their RFC 8050 Add-Path
+  subtypes 8 and 10, and L2VPN/EVPN `RIB_GENERIC` records (NLRI kept as raw
+  bytes) into `SnapshotEntry` / `SnapshotNlri`; other MRT types and subtypes
+  are skipped and counted. Gzip is auto-detected
   (`decompress_if_gzip`). A RIB entry's `MP_REACH_NLRI` is accepted in both
   the RFC 6396 section 4.3.4 reduced form (next-hop length, next hop) and the
   full RFC 4760 form other collectors write (AFI, SAFI, next-hop length, next

@@ -42,10 +42,10 @@ note.
 
 ### Verified installer
 
-The installer is available in this source checkout as
-[`packaging/install.sh`](../../packaging/install.sh). It will first be
-published as a release asset in v0.70.0; current published releases through
-v0.69.0 do not contain `install.sh`. It resolves `latest` once, then downloads
+The installer ships as the `install.sh` release asset from v0.70.0 onward
+(earlier releases do not include it) and is also available in a source
+checkout as [`packaging/install.sh`](../../packaging/install.sh). It resolves
+`latest` once, then downloads
 the selected artifact and its matching per-architecture checksum manifest from
 that same tag. It refuses unknown architectures, non-glibc hosts, glibc below
 2.31, missing checksum rows, duplicate checksum rows, and checksum mismatches
@@ -61,11 +61,10 @@ with an explicit stable tag (`vMAJOR.MINOR.PATCH`):
 
 ```sh
 less packaging/install.sh
-sh packaging/install.sh --tag v0.69.0
+sh packaging/install.sh --tag v0.70.0
 ```
 
-After v0.70.0 publishes the release asset, the same default path is available
-without a source checkout:
+Without a source checkout, fetch the published asset:
 
 ```sh
 curl -fsSL https://github.com/lance0/rustbgpd/releases/latest/download/install.sh | sh
@@ -78,10 +77,10 @@ systemd units. `--download-only` writes the verified selected artifact and its
 manifest without installing either.
 
 ```sh
-sh packaging/install.sh --tag v0.69.0 --prefix /opt/rustbgpd-0.69.0
-/opt/rustbgpd-0.69.0/rbgp doctor
+sh packaging/install.sh --tag v0.70.0 --prefix /opt/rustbgpd-0.70.0
+/opt/rustbgpd-0.70.0/rbgp doctor
 
-sh packaging/install.sh --tag v0.69.0 --download-only ./rustbgpd-v0.69.0
+sh packaging/install.sh --tag v0.70.0 --download-only ./rustbgpd-v0.70.0
 ```
 
 ### Pre-built binary tarball
@@ -422,10 +421,8 @@ three tag flavors with `docker/metadata-action` in
 
 Major-minor is the usual operator default — auto-receives bug-fix
 releases but pins against minor-version churn. The examples in this
-document use `:latest` so the tag stays copy-pasteable across releases, but the
-current `:latest` is amd64-only. On arm64, use it only after it points to a
-release with an arm64 manifest. Substitute the major-minor tag of the series
-you standardize on:
+document use `:latest` so the tag stays copy-pasteable across releases.
+Substitute the major-minor tag of the series you standardize on:
 
 ```sh
 docker pull ghcr.io/lance0/rustbgpd:latest
@@ -793,7 +790,7 @@ baked into the image is owned by uid 999; a root daemon expects uid 0. The
 runtime-state owner guard treats that mismatch as unsafe, logs
 `runtime-state marker/checkpoint storage unavailable`, and continues with the
 graceful-restart marker and warm checkpoint storage disabled in the pinned
-`0.68.0` image above. Unreleased builds also reject the default gRPC UDS
+`0.68.0` image above. v0.69.0 and later images also reject the default gRPC UDS
 listener at startup. A root-owned, non-group/world-writable bind mount makes
 the authority match the running uid. The socket parent must allow the daemon
 read/write/search access, with no symlinks or untrusted writable ancestors;
@@ -877,7 +874,8 @@ sudo systemctl enable --now rustbgpd-container
 ```
 
 The image's declared healthcheck remains active under systemd supervision and
-runs `rbgp health` against the default state-directory UDS. An
+runs `rbgp health --liveness` (gRPC handler liveness, not core-actor readiness)
+against the default state-directory UDS. An
 `unhealthy` result remains observable with
 `docker inspect --format '{{.State.Health.Status}}' rustbgpd`, but Docker health
 status does not terminate the attached process and therefore does not drive
@@ -1316,7 +1314,8 @@ therefore own the graceful stop and the verification that follows it.
    to a different RFC 8212 epoch/posture than the live daemon runs, and
    whenever the evidence is unavailable or denied. It never confirms, aborts,
    rewrites, or stops anything. A green result is an observation at one
-   instant (`observed at unix <t>`), not a fence: a transaction can still
+   instant (human output says `Pre-upgrade observation as of unix <t>`; JSON
+   carries `observed_at_unix_seconds`), not a fence: a transaction can still
    start after it, which is why the stop in step 3 and the repeated checks in
    step 3 stay in the procedure. See
    [the check reference](../reference/operations.md#pre-upgrade-checks).

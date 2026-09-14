@@ -105,6 +105,10 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   GoBGP (uses `vrf`).
 - M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against
   GoBGP (uses `vrf`).
+- M109: EVPN L2 (Type 2 / Type 3, kernel FDB) over an IPv6-only VXLAN underlay
+  against FRR.
+- M110: EVPN Type 5 symmetric Interface-less IRB over an IPv6-only VXLAN
+  underlay against FRR (uses `vrf`).
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
   `bfd_runtime`, `dataplane_vlan_fdb`, `dataplane_remote_mac`,
   `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,

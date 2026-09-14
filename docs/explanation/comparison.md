@@ -22,7 +22,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | No | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
-| Latest release (verified 2026-09-01)[^versions] | v0.68.0 (2026-08-30) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
+| Latest release (verified 2026-09-14)[^versions] | v0.70.0 (2026-09-13) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
 
 [^versions]: Dates are the upstream release announcements: FRR
     [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
@@ -423,8 +423,9 @@ member individually.
     but keeps the target patches on a separate
     [`fuzz` branch](https://github.com/FRRouting/frr/tree/fuzz) rather than in
     the release tree — at `frr-10.7.0` that tree carries fuzz harnesses only
-    for `zlog` and the isisd TLV parser, not for bgpd. BIRD 3.3.1 and
-    OpenBGPD 9.1 ship no fuzz targets.
+    for `zlog` and the isisd TLV parser, not for bgpd. The BIRD 3.3.2 source
+    tree and the OpenBGPD 9.2 portable release archive ship no fuzz targets
+    (checked 2026-09-14).
 
 [^interop]: Every entry in this row means a suite that runs the daemon
     against a foreign BGP speaker; the breadth differs. rustbgpd runs
@@ -723,9 +724,10 @@ metric this market has actually selected on — and it is exactly what the
 [IXP receipt matrix](../perf/ixp-matrix-2026-07.md) measures head-to-head at
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
-policy-reload completion (p50 1.3–1.6 s at the v0.64.0 refresh, vs 64–85 s
-for BIRD 3.3.1 and 201–206 s for OpenBGPD 9.2 on the same host and wire
-inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
+policy-reload completion (rustbgpd p50 1.209–1.350 s in the v0.68.0
+source-equivalent refresh measured 2026-08-30, vs 64–85 s for BIRD 3.3.1
+measured 2026-08-08 and 201–206 s for OpenBGPD 9.2 measured 2026-08-30, on the
+same host and wire inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
 stall and its repeated-reconnect IdleHold pacing — published in the receipt.
 
 Reload speed is only half the operator concern; the other half is what an
@@ -747,7 +749,7 @@ operator-confirmation window with automatic boot-revert if confirmation
 never arrives.
 
 Migration between daemons remains the segment's unsolved problem: no
-open-source BGP daemon ships a config converter from any of the others, and
+incumbent open-source BGP daemon ships a config converter from any of the others, and
 IXP practice sidesteps conversion by generating configs for each daemon from
 a higher-level source such as
 [arouteserver](https://github.com/pierky/arouteserver). Tooling *around* the

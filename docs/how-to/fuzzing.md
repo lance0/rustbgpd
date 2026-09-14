@@ -148,7 +148,8 @@ Rust integration also documents AddressSanitizer as the only supported
 sanitizer, so the manual workflow does not claim unsupported coverage mode.
 
 `scripts/check_fuzz_target_inventory.py` gates the exact 22-target inventory in
-the ordinary PR/push `CI / check` job, before a manual ClusterFuzzLite build,
+the ordinary PR/push `CI / core` job (which feeds the aggregate `CI / check`
+result), before a manual ClusterFuzzLite build,
 and again inside the shared fuzzer build path. It compares cargo metadata and
 `fuzz_targets/*.rs` against an explicit globally-unique inventory, including
 both MRT targets. Its mutation tests remove every manifest target and every

@@ -14,4 +14,4 @@ Follow development plans, contribution guidance, and release history.
 - [Milestone history](milestones.md) — Archived build orders and exit criteria.
 - [Upstream findings](upstream-findings.md) — Dated observations from interoperability testing.
 
-See also [contribution guidance](../../CONTRIBUTING.md), the [current changelog](../../CHANGELOG.md), and [architecture decisions](../adr/README.md).
+See also [contribution guidance](../../CONTRIBUTING.md), [support](../../SUPPORT.md), [vulnerability reporting](../../SECURITY.md), the [current changelog](../../CHANGELOG.md), and [architecture decisions](../adr/README.md).

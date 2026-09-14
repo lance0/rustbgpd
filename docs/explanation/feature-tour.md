@@ -59,7 +59,11 @@ design. Optional per-collector BMPv4 framing follows
 draft-ietf-grow-bmp-tlv-21 (pre-IANA; default stays BMP v3). Path Marking is
 temporarily unavailable because its draft type 5 collides with the base
 draft's Sequence Number assignment. Validated against pmacct, gobmp, and
-tshark at once (M81).
+tshark at once (M81). The experimental `rbgp neighbor PEER replay-out`
+reannounces one Established peer's current exportable unicast routes with
+terminal End-of-RIB markers, so eligible `rib_out_post` collectors can rebuild
+that peer's outbound view without a session reset; see the
+[replay contract](../reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors).
 
 ## Operational visibility
 
@@ -109,7 +113,9 @@ substrate, not as unicast `Prefix` shortcuts or MPLS dataplane creep.
 
 ## Reusable wire codec and FSM
 
-`rustbgpd-wire` has zero internal dependencies and `rustbgpd-fsm`
-depends only on `wire`; both are published as daemon-independent crates
-for Rust BGP tooling that does not need the full router. See
+`rustbgpd-wire` has zero internal dependencies, and `rustbgpd-fsm` and
+`rustbgpd-rpki` (origin validation, ASPA verification, and an RTR client)
+depend only on `wire` among the workspace crates; all three are published as
+daemon-independent crates for Rust BGP tooling that does not need the full
+router. See
 [EMBEDDING.md](../reference/embedding.md).
