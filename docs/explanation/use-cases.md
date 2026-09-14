@@ -17,7 +17,11 @@ tables.
 
 Note: rustbgpd defaults to a local UDS gRPC listener. The `grpcurl` examples
 below that target `localhost:50051` require an authenticated TCP listener;
-complete opt-in `[global.telemetry.grpc_tcp]` recipes appear below.
+complete opt-in `[global.telemetry.grpc_tcp]` recipes appear below. The daemon
+does not serve gRPC reflection, so every `grpcurl` call passes the service
+definition with `-import-path . -proto proto/rustbgpd.proto`: run them from a
+source checkout, or point `-import-path` at a directory holding
+`proto/rustbgpd.proto`.
 
 ---
 
@@ -32,9 +36,10 @@ prefixd originally used GoBGP as its BGP backend — a separate container in
 the docker-compose stack, managed via gRPC. This worked but had real pain
 points:
 
-- **No config persistence** — if the GoBGP container restarted, all FlowSpec
+- **No state across restarts** — if the GoBGP container restarted, all FlowSpec
   rules were gone. prefixd needed a reconciliation loop to repair state drift
-  every 30 seconds.
+  every 30 seconds. (Injected routes are process-local in rustbgpd too, so an
+  integration still re-drives them after a daemon restart.)
 - **Extra failure domain** — a separate container that could crash, get OOM
   killed, or lose its gRPC connection independently.
 - **Performance overhead** — Go's GC adds latency jitter; under DDoS
@@ -56,9 +61,9 @@ Today:    Detector → prefixd → [gRPC] → GoBGP container → Routers
 Future:   Detector → prefixd (with embedded rustbgpd) → Routers
 ```
 
-This removes the separate container, the gRPC hop, the reconciliation loop, and
-the "what if GoBGP restarts" failure mode. A single binary that detects attacks
-and speaks BGP natively.
+This removes the separate container and the gRPC hop, and ties BGP state to the
+lifetime of the process that owns the mitigations. A single binary that detects
+attacks and speaks BGP natively.
 
 ---
 
@@ -88,7 +93,9 @@ Traffic dropped at line rate
 ```
 
 **Why rustbgpd over GoBGP/ExaBGP:**
-- Config persistence — injected FlowSpec rules survive daemon restart
+- Config persistence for neighbor and policy mutations — injected FlowSpec and
+  unicast routes are process-local; re-inject them after a restart (for example
+  from your mitigation platform's reconcile loop)
 - All 13 FlowSpec component types (destination, source, protocol, ports, ICMP,
   TCP flags, packet length, DSCP, fragment, flow label)
 - Single binary, no sidecar container needed
@@ -153,33 +160,35 @@ hold_time = 30
 **API workflow — inject a FlowSpec rate-limit rule:**
 
 ```bash
-# Rate-limit UDP traffic to 203.0.113.10 port 53 at 10 Mbps
-grpcurl -plaintext -d '{
-  "family": "ipv4_flowspec",
-  "rule": {
-    "destination_prefix": "203.0.113.10/32",
-    "protocols": [17],
-    "destination_ports": [53]
-  },
-  "actions": {
-    "traffic_rate_bytes": 1250000
-  }
+# Rate-limit UDP traffic to 203.0.113.10 port 53 at 10 Mbps (1,250,000 bytes/s).
+# Component types: 1 = destination prefix, 3 = IP protocol, 5 = destination port.
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
+  "afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+  "components": [
+    {"type": 1, "prefix": "203.0.113.10/32"},
+    {"type": 3, "value": "=17"},
+    {"type": 5, "value": "=53"}
+  ],
+  "actions": [{"traffic_rate": {"rate": 1250000}}]
 }' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddFlowSpec
 ```
 
 ```bash
-# Blackhole a /32 under attack (RTBH via unicast)
-grpcurl -plaintext -d '{
-  "prefix": "203.0.113.10/32",
+# Blackhole a /32 under attack (RTBH via unicast). Communities are 32-bit
+# integers: 65535:666 (BLACKHOLE) is 65535 * 65536 + 666 = 4294902426.
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
+  "prefix": "203.0.113.10",
+  "prefix_length": 32,
   "next_hop": "192.0.2.1",
-  "communities": ["65535:666"]
+  "communities": [4294902426]
 }' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddPath
 ```
 
 ```bash
 # Withdraw when the attack subsides
-grpcurl -plaintext -d '{
-  "prefix": "203.0.113.10/32"
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
+  "prefix": "203.0.113.10",
+  "prefix_length": 32
 }' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/DeletePath
 ```
 
@@ -216,8 +225,8 @@ IXP member C (AS 64503) ──┘
   path-hiding mitigation for members that cannot do Add-Path: when a
   member's export policy denies the best path, it receives the best
   *permitted* candidate instead of nothing (the BIRD-`secondary`
-  equivalent), and `rbgp rib advertised --explain` shows the per-candidate
-  verdict ladder
+  equivalent), and `rbgp rib --prefix <prefix> advertised <member> --explain`
+  shows the per-candidate verdict ladder
 - **RPKI validation** — drop RPKI-invalid routes, prefer valid over not-found
 - **Receive-side Prefix ORF** — let members push prefix filters that constrain
   what the route server advertises back to them
@@ -279,7 +288,8 @@ selected unicast best routes into explicit non-reserved kernel tables.
 - Customer signs up → automation calls `AddPath` → prefix is announced
   within seconds
 - Customer cancels → automation calls `DeletePath` → prefix is withdrawn
-- All injected routes persist across rustbgpd restarts (config persistence)
+- Injected routes are process-local: re-drive `AddPath` from provisioning after
+  a rustbgpd restart (neighbor and policy mutations do persist to TOML)
 - RPKI validation prevents announcing prefixes you don't own
 - Audit trail via BMP export to your collector
 - No config file edits, no SIGHUP, no restart
@@ -380,31 +390,42 @@ rustbgpd
 
 ```bash
 # Announce a prefix with traffic engineering communities
-grpcurl -plaintext -d '{
-  "prefix": "10.100.0.0/24",
+# (65100:1000 = 4266394600, 65100:2000 = 4266395600 as 32-bit integers)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{
+  "prefix": "10.100.0.0",
+  "prefix_length": 24,
   "next_hop": "10.255.0.1",
-  "communities": ["65100:1000", "65100:2000"],
+  "communities": [4266394600, 4266395600],
   "local_pref": 200
 }' localhost:50051 rustbgpd.v1.InjectionService/AddPath
 
 # Create an export policy that prepends to deprioritize a transit link
-grpcurl -plaintext -d '{
+# (the transit-b neighbor set must already exist)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{
   "name": "deprioritize-transit-b",
-  "default_action": "permit",
-  "statements": [{
-    "action": "permit",
-    "match_neighbor_set": "transit-b",
-    "set_as_path_prepend": {"asn": 65100, "count": 2}
-  }]
+  "definition": {
+    "default_action": "permit",
+    "statements": [{
+      "action": "permit",
+      "match_neighbor_set": "transit-b",
+      "set_as_path_prepend": {"asn": 65100, "count": 2}
+    }]
+  }
 }' localhost:50051 rustbgpd.v1.PolicyService/SetPolicy
 
 # Apply the policy to the export chain
-grpcurl -plaintext -d '{
-  "chain": ["deprioritize-transit-b"]
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{
+  "policy_names": ["deprioritize-transit-b"]
 }' localhost:50051 rustbgpd.v1.PolicyService/SetGlobalExportChain
 
 # Stream route changes in real time for the controller
-grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" \
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 ---
@@ -546,7 +567,10 @@ rbgp rib received 10.0.0.1
 rbgp rib --prefix 10.0.0.0/24 --explain
 
 # Stream all route changes (pipe to your analysis tool)
-grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" \
+  -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' \
+  localhost:50051 rustbgpd.v1.EventService/WatchEvents
 ```
 
 ---
@@ -769,8 +793,9 @@ measurement path.
   ADR-0055)** — rustbgpd subscribes to `RTNLGRP_NEIGH`, classifies
   bridge FDB events, and originates Type 2 routes per RFC 7432 §15.1
   with full mobility sequencing, plus one Type 3 IMET per L2VNI
-  carrying RFC 6514 §5 PMSI Tunnel. M37 validates the loop end-to-end
-  (4/4 PASS, FRR 10.3.1 on Linux 6.17). **Observable DF election +
+  carrying RFC 6514 §5 PMSI Tunnel. M37 validated the loop end-to-end
+  when it landed (4/4 PASS, FRR 10.3.1 on Linux 6.17); the topology now pins
+  FRR 10.7.1. **Observable DF election +
   Type 1/4 origination shipped with EVPN multi-homing (v0.17.0, ADR-0057)** and is
   validated by M38. **EVPN BUM-flood suppression + DF election (alpha)**
   followed with ESI-aware Type 2 origination, RFC 7432 §14 aliasing

@@ -29,7 +29,7 @@ RFC 5398, RFC 6793, RFC 6996, RFC 7300, RFC 7607.
 This page maps each element to the config that implements it and the
 surface that proves it. Every fragment below is drawn from a complete
 configuration that passes `rustbgpd --check --strict` (the
-[full example](#complete-example) is at the end).
+[full example](#copyable-example) is at the end).
 
 ## Requirement map
 
@@ -113,12 +113,19 @@ routes loudly instead of inheriting permit-all by omission:
 asn = 64500
 router_id = "192.0.2.1"
 ebgp_requires_policy = true
+
+# Transparent route-server export is explicit, not permit-by-omission.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
 ```
 
-Stated plainly: this is opt-in, not the daemon's out-of-the-box
-default. Turn it on for a MANRS route server. It is restart-required,
-and `--check` names every eBGP neighbor still resolving no explicit
-policy — `--strict` turns those warnings into a failing exit. See
+State it explicitly for a MANRS route server. With the key omitted,
+enforcement stays off for configs without `config_epoch` or with
+`config_epoch = 1`, and is on by default under `config_epoch = 2`
+([ADR-0119](../adr/0119-rfc-8212-secure-default-config-epoch.md),
+[`config_epoch`](../reference/configuration.md#config_epoch)). It is
+restart-required, and `--check` names every eBGP neighbor still resolving no
+explicit policy — `--strict` turns those warnings into a failing exit. See
 [ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md) and the
 [`ebgp_requires_policy` reference](../reference/configuration.md#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
 
@@ -136,6 +143,7 @@ remote_asn = 64501
 route_server_client = true
 role = "route_server"
 import_policy_chain = ["reject-rpki-invalid", "member-a-irr"]
+export_policy_chain = ["rs-transparent-export"]
 max_prefixes_ipv4 = 10000
 max_prefixes_ipv6 = 2000
 max_prefix_restart_seconds = 900

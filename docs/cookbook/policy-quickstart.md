@@ -27,17 +27,18 @@ prefix-set with per-peer local-pref, community bookkeeping, and tests.
 
 ```rpol
 prefix-set bogons {
-    10.0.0.0/8 le 32, 172.16.0.0/12 le 32, 192.168.0.0/16 le 32,
-    100.64.0.0/10 le 32, 0.0.0.0/8 le 32
+    10.0.0.0/8 le 32,
+    172.16.0.0/12 le 32,
+    192.168.0.0/16 le 32,
+    100.64.0.0/10 le 32,
+    0.0.0.0/8 le 32
 }
 prefix-set customers { 203.0.113.0/24 ge 25 le 28, 198.51.100.0/24 }
 community-set scrub-marks { 65000:666 }
 
 # Predicate policy: decides both ways so `apply()` is meaningful.
 policy bogon-filter {
-    term drop-bogons {
-        if route.prefix in bogons { reject }
-    }
+    term drop-bogons { if route.prefix in bogons { reject } }
     term clean { accept }
 }
 
@@ -45,9 +46,7 @@ policy bogon-filter {
 # local-pref. peer.group matching keeps one policy for the whole
 # customer fleet — note the update-group consequence in §6.
 policy customer-in(peer_lp: u32) {
-    term bogon-guard {
-        if !apply(bogon-filter) { reject }
-    }
+    term bogon-guard { if !apply(bogon-filter) { reject } }
     term transit-guard {
         # A customer must never send us a path through our transit.
         if route.as-path matches "_64620_" { reject }
@@ -70,10 +69,11 @@ policy customer-in(peer_lp: u32) {
 }
 
 policy edge-out {
-    term no-internal-leak {
-        if route.communities has 65000:900 { reject }
+    term no-internal-leak { if route.communities has 65000:900 { reject } }
+    term tag {
+        add community 65000:200;
+        accept
     }
-    term tag { add community 65000:200; accept }
 }
 
 # Tests live with the policy and run offline (`rbgp policy check`).
@@ -133,6 +133,8 @@ exit 1 with a diff when a file drifts. See "Formatting" in
 asn = 65000
 router_id = "192.0.2.1"
 listen_port = 179
+# RFC 8212: an eBGP direction without an explicit chain carries nothing.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -167,8 +169,9 @@ import_policy_chain = ["customer-in(200)"]   # same template, higher LP
 export_policy_chain = ["edge-out"]
 ```
 
-`rustbgpd --check config.toml` validates the whole thing — including
-compiling the `.rpol` file — before you restart or reload anything.
+`rustbgpd --check --strict config.toml` validates the whole thing — including
+compiling the `.rpol` file — before you restart or reload anything; `--strict`
+also fails on warnings, such as an eBGP direction left without policy.
 
 Before attaching a *candidate* policy on a running daemon, dry-run it
 against the live RIB — read-only, no route state or session touched:
@@ -214,10 +217,12 @@ $ rbgp rib --prefix 203.0.113.0/26 --explain
 ```
 
 And the live counters — which terms are actually doing work since the
-chain was installed (counters reset on chain replace):
+chain was installed (counters reset on chain replace). The command reports
+export chains unless you pick a direction, so ask for both to see
+`customer-in(200)` beside `edge-out`:
 
 ```console
-$ rbgp policy stats --neighbor 192.0.2.20
+$ rbgp policy stats --neighbor 192.0.2.20 --direction both
 ```
 
 ## 6. The update-group footnote

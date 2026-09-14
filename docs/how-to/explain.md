@@ -116,21 +116,34 @@ and all — so it cannot drift from what the wire does:
 $ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.2 --explain
 Advertise: 203.0.113.0/24 to 10.0.0.2
 Update group: 3 (shared staging; split horizon applied per member)
+Route peer: 10.0.0.9
+Route type: external
+Next hop:   10.0.0.9
 Gate ladder (live evaluation order):
-  [pass] best_route       Loc-RIB best exists
-  [pass] split_horizon    not the source peer
-  [pass] rr_reflection    eBGP peer
-  [pass] family           ipv4-unicast negotiated
-  [pass] llgr             no stale restriction
-  [pass] orf              no peer filter installed
-  [pass] export_policy    ix-egress:announce-members permit
-  [pass] adj_rib_out      staged_announce
+  [pass] best_route     best route was learned from an eBGP peer (Loc-RIB best from 10.0.0.9)
+  [pass] split_horizon  route did not originate from the target peer
+  [pass] rr_reflection  iBGP split-horizon / RFC 4456 reflection rules permit this route
+  [pass] family         peer negotiated ipv4 unicast
+  [pass] llgr           route is not LLGR-stale
+  [n/a ] orf            peer installed no Outbound Route Filter
+  [pass] export_policy  export policy "chain_default_permit" permitted this route
+  [n/a ] otc            RFC 9234 OTC egress suppression does not apply to this local role
+  [pass] adj_rib_out    prefix not yet advertised to this peer — would announce
+Reasons:
+- ebgp_route: best route was learned from an eBGP peer
+- policy_permitted: export policy "chain_default_permit" permitted this route
 ```
 
-(Values above are illustrative; the rung set and order are the live
-ones.) A denial shows `[STOP]` at the gate that held the route back,
-with per-term policy attribution for `.rpol` chains. `--rd <rd>`
-explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684
+This is the ladder for a plain single-best peer (no ORR vantage, Add-Path
+send, or per-client best); addresses and the group ID are illustrative. The
+rung set and order depend on the peer's selection shape. An ORR, Add-Path, or
+per-client-best peer runs `family` and `orf` first, then `best_route` for its
+own candidate, then `split_horizon`, `rr_reflection`, `llgr`, `export_policy`,
+`otc`, and `adj_rib_out`. Rungs that only appear when they stop a route —
+`no_advertise`, `no_export`, `rs_control`, and the Add-Path `add_path_send_max`
+limit — sit between `llgr` and `otc`. A denial shows `[STOP]` at the gate that
+held the route back, with per-term policy attribution for `.rpol` chains.
+`--rd <rd>` explains the VPNv4/VPNv6 (RD, prefix) ladder including the RFC 4684
 RT-Constrain membership gate; `--labeled` explains the RFC 8277
 labeled-unicast ladder. Rung-by-rung semantics:
 [OPERATIONS.md](../reference/operations.md#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y).
@@ -243,9 +256,9 @@ token:
 
 ```console
 $ rbgp rib received 198.51.100.2 --rejected
-Prefix                 PathId   Reason             Detail                       Next Hop           RPKI       AS Path
-------------------------------------------------------------------------------------------------------------------------
-203.0.113.0/24         0        policy_reject      member-import                198.51.100.2       invalid    64500 64501
+Prefix                 PathId   Reason             Detail                       Next Hop           RPKI       ASPA       AS Path
+-----------------------------------------------------------------------------------------------------------------------------------
+203.0.113.0/24         0        policy_reject      member-import                198.51.100.2       invalid    unknown    64500 64501
 ```
 
 Reason tokens: `policy_reject`, `otc_route_leak`,
@@ -292,6 +305,6 @@ comparison to look at next.
 | `rbgp policy test <file> --policy <p> --direction <d>` | Read-only dry run of a *candidate* policy against the live RIB: accepted/rejected/modified counts, term hits, per-attribute before/after diffs ([rpol-language.md](../reference/rpol-language.md)) |
 | `rbgp policy check <file>` | Offline parse/typecheck plus the file's in-language `test` blocks — no daemon needed |
 | `rbgp policy stats` (alias `counters`) | Live per-term hit counters: which policy terms actually fire |
-| `rbgp config diff <candidate>` / `rbgp config plan` | What a config change would touch, each field annotated hot-applied / session reset / restart required ([OPERATIONS.md](../reference/operations.md#config-diff-dry-run-reload)) |
+| `rbgp config diff <candidate>` / `rbgp config plan <candidate>` | What a config change would touch, each field annotated hot-applied / session reset / restart required ([OPERATIONS.md](../reference/operations.md#config-diff-dry-run-reload)) |
 | `rbgp diff advertised --against <snapshot>` | Live Adj-RIB-Out vs a recorded snapshot — the shadow-cutover gate ([ribdiff.md](ribdiff.md)) |
 | `rbgp doctor` | Red/green triage checks plus a redacted support bundle ([OPERATIONS.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor)) |

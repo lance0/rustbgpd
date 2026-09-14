@@ -22,8 +22,10 @@ sticky preservation), M32 (multi-homing Type 1 EAD / Type 4 ES
 reflection), M82 (VLAN-aware-bundle reflection with non-zero Ethernet
 Tags — including rustbgpd's first vendor-NOS leg, Nokia SR Linux
 25.10), and the M33 scale gate (50k reflected Type 2 routes + 60 s of
-1,000-rps churn). The config below is
-[`examples/rr-evpn-fabric/config.toml`](../../examples/rr-evpn-fabric/config.toml).
+1,000-rps churn). The config below is a trimmed form of
+[`examples/rr-evpn-fabric/config.toml`](../../examples/rr-evpn-fabric/config.toml),
+which also disables `[policy.explain]` explicitly and uses the implicit gRPC
+socket path.
 
 ## Config
 
@@ -115,11 +117,12 @@ as-is (`bgp_session_state_transitions_total`,
 EVPN metric families (`evpn_*`) are VTEP-mode surface and stay empty
 in the RR role — deliberately not on the overview dashboard.
 
-Route churn is the fabric health signal on an EVPN RR: watch
-`rbgp events watch --category route` (or the route-event history,
-`rbgp events --limit 200`) during rollouts. MAC-mobility wars show up
-as a tight add/withdraw loop on one MAC key with a climbing sequence
-number.
+Route churn is the fabric health signal on an EVPN RR. EVPN route events
+have their own category, which a default event stream does not include: watch
+`rbgp events watch --category evpn` (or the EVPN history,
+`rbgp events evpn --limit 200`, filterable with `--route-type 2`, `--rd`, and
+`--address`) during rollouts. MAC-mobility wars show up as a tight
+add/withdraw loop on one MAC key with a climbing sequence number.
 
 ## Failure modes
 

@@ -73,6 +73,9 @@ over gRPC as they join and leave the fabric.
 asn = 65500
 router_id = "198.51.100.1"
 listen_port = 179
+# RFC 8212: a member direction with no explicit policy carries nothing.
+# Startup-only; changing it takes a daemon restart.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -121,6 +124,11 @@ match_rpki_validation = "not_found"
 action = "permit"
 set_local_pref = 100
 
+# Transparent export (RFC 7947), declared rather than inherited: with
+# ebgp_requires_policy = true, a member with no export chain receives nothing.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
 [policy]
 rpol_files = ["hygiene.rpol"]
 import_chain = [
@@ -130,6 +138,7 @@ import_chain = [
     "reject-long-prefixes",
     "prefer-rpki-valid",
 ]
+export_chain = ["rs-transparent-export"]
 
 # --- Members ---
 
@@ -359,9 +368,9 @@ knowing the prefix in advance:
 
 ```console
 $ rbgp rib received 198.51.100.2 --rejected
-Prefix                 PathId   Reason             Detail                       Next Hop           RPKI       AS Path
-------------------------------------------------------------------------------------------------------------------------
-203.0.113.0/24         0        policy_reject      member-import                198.51.100.2       invalid    64500 64501
+Prefix                 PathId   Reason             Detail                       Next Hop           RPKI       ASPA       AS Path
+-----------------------------------------------------------------------------------------------------------------------------------
+203.0.113.0/24         0        policy_reject      member-import                198.51.100.2       invalid    unknown    64500 64501
 ```
 
 `--json` emits the same rows for a looking-glass or portal backend

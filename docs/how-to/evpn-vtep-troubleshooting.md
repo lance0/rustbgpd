@@ -394,7 +394,8 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    - `apply_aliasing_ecmp = false` on the `[[evpn_instances]]`
      entry for the VNI. Slice 3.5 added a per-L2VNI off-switch
      that routes multi-homed entries through the single-dst path.
-     Check the config + restart-required flip semantics in
+     Flipping it is a live L2VNI redefine (SIGHUP or
+     `ApplyEvpnRuntime`); see the off-switch behavior in
      `docs/reference/configuration.md`.
 
 The slice 4 / M40 smoke
@@ -420,13 +421,11 @@ flipped off the diff layer emits no `RemoveFdbNhg` (the FDB
 nexthop group path is gated off). The orphaned FDB row stays
 bound to the stale `nh_id` until something overwrites it.
 
-**Resolution**: slice 3.5 PR 2 (periodic `RTM_GETNEXTHOP` drift
-recovery) closes this gap as part of the 60 s reconcile cadence —
-the orphaned tagged rows are cleaned up within ≤ 60 s of daemon
-start. If you are on a build that predates PR 2 and need an
-immediate cleanup, `bridge fdb del <mac> dev vxlanNNN nhid <id>`
-the stale rows by hand, or flip the knob back to `true`, restart
-once to re-adopt cleanly, then flip back to `false`.
+**Resolution**: periodic `RTM_GETNEXTHOP` drift recovery closes this
+gap as part of the 60 s reconcile cadence — the orphaned tagged rows
+are cleaned up within ≤ 60 s of daemon start. For an immediate
+cleanup, `bridge fdb del <mac> dev vxlanNNN nhid <id>` the stale rows
+by hand.
 
 ## Single-active AC gate: port disabled (or not) unexpectedly
 
@@ -533,7 +532,9 @@ or installs remote prefixes.
    inspect the per-IP-VRF kernel route table: `ip route show
    table <table_id>`. The slice 6a classifier filters out
    routes installed by other routing daemons (any `proto` other
-   than `kernel`/`static`/`boot`/`zebra`-with-EVPN-marker),
+   than `kernel`, `static`, or `boot` — including `zebra`, `bird`,
+   `bgp`, and unrecognized protocols — counted under
+   `evpn_ip_vrf_observed_routes_filtered_total{reason="installed_by_routing_daemon"}`),
    non-forwardable types, and routes whose output device is the
    IP-VRF's own L3 VXLAN.
 4. If `installed_routes_count == 0` despite a remote PE

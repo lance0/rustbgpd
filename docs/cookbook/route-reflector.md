@@ -15,10 +15,11 @@ share one update group automatically.
 **Proven by:** [M14](../receipts.md#interop-labs--pr-gated-interopyml)
 (RFC 4456 reflection vs FRR), M76 (RFC 9107 Optimal Route Reflection),
 M77 (GR/LLGR stale preservation), and the
-[1000-peer scale receipt](../perf/scale-receipt-2026-07.md): 100k
-routes to 1,000 real transport sessions converge on the wire in 1.8 s
-at 419 MiB RSS, driven by the ADR-0098 update-group fanout (~28×
-faster than per-peer staging at 256 uniform clients). Config shape
+[1000-peer scale receipt](../perf/scale-receipt-2026-07.md) (2026-07-03,
+commit `b26ff11c`, in-process harness): 100k routes to 1,000 real transport
+sessions converged on the wire in 1.8 s at 419 MiB whole-process RSS, driven
+by the ADR-0098 update-group fanout (~28× faster than per-peer staging at 256
+uniform clients). Config shape
 derived from
 [`tests/interop/configs/rustbgpd-m76-orr-rr.toml`](../../tests/interop/configs/rustbgpd-m76-orr-rr.toml)
 and [`rustbgpd-m77-gr-rr.toml`](../../tests/interop/configs/rustbgpd-m77-gr-rr.toml).
@@ -31,6 +32,10 @@ asn = 65000
 router_id = "10.0.0.1"
 listen_port = 179
 cluster_id = "10.0.0.1"        # RFC 4456 cluster identifier
+# RFC 8212 posture, stated explicitly. It governs eBGP sessions only, so
+# these iBGP clients are unaffected; an eBGP neighbor added later needs
+# explicit import and export policy.
+ebgp_requires_policy = true
 dynamic_neighbor_limit = 1024  # cap for the auto-accept range below
 
 [global.telemetry]
@@ -186,8 +191,10 @@ update-group gauges):
 identical on the per-peer path — but at fleet scale you want to know
 why. The reasons ([full table](../reference/configuration.md#update-groups-automatic)):
 `policy_peer_context` (its export chain matches on peer
-address/ASN/group), `add_path_send`, `orr_vantage`, `orf_installed`.
-The first is the one you can usually fix: rewrite the chain so the
+address/ASN/group), `add_path_send`, `per_client_best` (only on sessions
+that also carry VPN or RT-Constrain), `orr_vantage`, `orf_installed`, and
+`slow_peer` (slow-peer isolation; the peer rejoins a group once its backlog
+clears). The first is the one you can usually fix: rewrite the chain so the
 peer-dependent match lives in a per-neighbor chain instead of a shared
 one.
 
@@ -199,12 +206,14 @@ update groups included:
 $ rbgp rib --prefix 203.0.113.0/24 advertised 10.0.0.12 --explain
 ```
 
-Each rung reports pass / STOP / n/a in live evaluation order
-(`best_route → split_horizon → rr_reflection → family → llgr → orf →
-export_policy → adj_rib_out`); a STOP names the gate holding the route
-back. `rr_reflection` STOPs are the classic RR misconfigurations:
-non-client → non-client reflection, or the client's own cluster id in
-CLUSTER_LIST.
+Each rung reports pass / STOP / n/a in live evaluation order; a STOP names
+the gate holding the route back. The rung set and order depend on the
+peer's selection shape. A plain single-best client runs `best_route →
+split_horizon → rr_reflection → family → llgr → orf → export_policy → otc →
+adj_rib_out`; an ORR or Add-Path client checks `family` and `orf` before
+selecting its candidate (see [Explain](../how-to/explain.md#export-explain)).
+`rr_reflection` STOPs are the classic RR misconfigurations: non-client →
+non-client reflection, or the client's own cluster id in CLUSTER_LIST.
 
 **Stale routes after a client restart.** Expected, and bounded: routes
 stay for the peer's advertised GR restart time, then carry

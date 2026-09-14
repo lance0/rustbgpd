@@ -31,7 +31,7 @@ Follow a procedure for a specific task.
 | [Settlement watchdog](how-to/settlement-watchdog.md) | Recover when configuration settlement cannot be proved. |
 | [EVPN VTEP setup](how-to/evpn-vtep-setup.md) | Prepare bridge, VXLAN, and VRF interfaces. |
 | [EVPN VTEP troubleshooting](how-to/evpn-vtep-troubleshooting.md) | Diagnose the bidirectional VTEP dataplane. |
-| [EVPN alpha-soak checklist](how-to/evpn-alpha-soak.md) | Run the VTEP confidence checks. |
+| [EVPN alpha-soak checklist](how-to/evpn-alpha-soak.md) | Historical: the VTEP confidence checklist from the gate-landing releases. |
 | [Grafana and alerting](how-to/grafana.md) | Import dashboards and load Prometheus alert rules. |
 | [Kernel dataplane runner](how-to/kernel-dataplane-runner.md) | Run the privileged Linux dataplane checks. |
 | [Fuzzing](how-to/fuzzing.md) | Build and run the parser fuzz targets. |
@@ -118,7 +118,7 @@ Follow development plans, contribution guidance, and release history.
 | Page | Scope |
 |------|-------|
 | [Roadmap](project/roadmap.md) | Current development direction and remaining work. |
-| [EVPN enablement](project/evpn-enablement.md) | The staged EVPN plan and its completion evidence. |
+| [EVPN enablement](project/evpn-enablement.md) | Historical: the staged EVPN plan and its completion evidence. |
 | [Release checklist](project/release-checklist.md) | Required checks for publishing a release. |
 | [Contributing](../CONTRIBUTING.md) | Build, test, and submit a change. |
 | [Support](../SUPPORT.md) | Get help and check platform support. |
