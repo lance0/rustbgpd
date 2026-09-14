@@ -202,6 +202,7 @@ impl GenerationHarness {
             mgr.peers.insert(
                 peer_key.clone(),
                 ManagedPeer {
+                    policy_known_down: false,
                     handle,
                     session_id,
                     remote_asn: resolved.transport_config.peer.remote_asn,

@@ -537,6 +537,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,
@@ -722,6 +723,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,
@@ -917,6 +919,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,
@@ -1131,6 +1134,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,
@@ -1375,6 +1379,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,
@@ -1559,6 +1564,7 @@ async fn stale_query_state_re_arms_pending_refresh() {
     mgr.peers.insert(
         key(task_addr),
         ManagedPeer {
+            policy_known_down: false,
             handle,
             session_id: 1,
             remote_asn: 65002,

@@ -319,29 +319,32 @@ async fn clean_state_session_gone_compensates_with_closed_code() {
 }
 
 #[tokio::test]
-async fn clean_state_non_established_compensates_with_closed_code() {
+async fn clean_state_non_established_carries_pending_intent_and_commits() {
     let (mut manager, mut rib_rx, peer, queries) =
         clean_state_test_manager(CleanStateReplyMode::NonEstablished);
-    let apply = manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
-    let rib = async {
-        let RibUpdate::RestorePeerExportPoliciesAuthoritatively { reply, .. } =
-            rib_rx.recv().await.unwrap()
-        else {
-            panic!("expected exact rollback RIB batch");
-        };
-        reply
-            .send(Ok(vec![
-                rustbgpd_rib::PeerExportPolicyRestoreReceipt::NotFound { peer },
-            ]))
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(apply, rib);
-    let failure = result.expect_err("non-Established state must compensate rather than commit");
-    assert_eq!(
-        failure.code,
-        RuntimeConfigPolicyFailureCode::StateNonEstablished
+    let apply_fut =
+        manager.apply_resolved_policy_snapshot_classified(one_export_target(peer), true);
+    let (result, ()) = tokio::join!(apply_fut, async {
+        // No exact-rollback RIB batch may be dispatched for a positively
+        // known-down member (both captures were fresh, so convergence-debt
+        // must not fire either).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rib_rx.recv())
+                .await
+                .err()
+                .is_some(),
+            "no RIB command may be dispatched for a positively known-down member"
+        );
+    });
+    result.expect("positively known-down member must commit with PeerUp-carried intent");
+    let live = manager.peers.get(&key(peer)).unwrap();
+    assert!(
+        !live.pending_refresh && !live.pending_export_apply,
+        "positively-known-down fresh export arms no retry marker (PeerUp installs it)"
     );
-    assert_eq!(queries.load(Ordering::SeqCst), 2);
+    assert_eq!(queries.load(Ordering::SeqCst), 1);
+    let live = manager.peers.remove(&key(peer)).unwrap();
+    live.handle.shutdown().await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]

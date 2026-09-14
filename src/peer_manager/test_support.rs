@@ -140,6 +140,7 @@ impl PeerManager {
         self.peers.insert(
             key.clone(),
             ManagedPeer {
+                policy_known_down: false,
                 handle,
                 session_id,
                 remote_asn,

@@ -372,6 +372,14 @@ struct ManagedPeer {
     /// and the symmetry with the import side guarantees both halves
     /// of a `SetPolicy` carry the same all-or-nothing semantics.
     pending_export_apply: bool,
+    /// A positively known-down peer classified during the authoritative
+    /// per-peer apply pass (Idle/Connect/Active). Its pending flags after that
+    /// apply represent deferred `PeerUp` adoption intent rather than
+    /// convergence debt, so it owes no Route Refresh to the transaction that
+    /// armed them. The classification is written by the per-peer apply state
+    /// query and retained across cohort captures so rollback compensation
+    /// does not treat a positively down member as convergence debt.
+    policy_known_down: bool,
     /// RFC 8326 graceful-shutdown initiator toggle — operator-driven
     /// desired state. When true, every outbound update gets
     /// `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`) attached.

@@ -1199,7 +1199,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `ListNeighborSets` / `GetNeighborSet` | List or fetch a named neighbor set |
 | `SetNeighborSet` / `DeleteNeighborSet` | Create/replace or delete a named neighbor set |
 | `GetGlobalPolicyChains` | Return global import/export chain assignments |
-| `SetGlobalImportChain` / `SetGlobalExportChain` | Replace global chain assignment |
+| `SetGlobalImportChain` / `SetGlobalExportChain` | Replace global chain assignment. Sessions positively down (Idle/Connect/Active) accept the new chain in memory and install it (plus RIB outbound registration) at `PeerUp`; retained Adj-RIB-In under an active GR/LLGR window remains evaluated under the prior chain until re-sync/EOR. Ambiguous sessions (`SessionGone` / state-query timeout) fail closed with `INTERNAL` and full compensation. IPv4/IPv6-unicast Route Refresh still requires an Established session with Route Refresh negotiated |
 | `ClearGlobalImportChain` / `ClearGlobalExportChain` | Remove the global chain assignment |
 | `GetNeighborPolicyChains` | Return one neighbor's import/export chain assignments |
 | `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |

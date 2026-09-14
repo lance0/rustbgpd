@@ -1927,6 +1927,7 @@ mod tests {
         manager.peers.insert(
             peer.clone(),
             ManagedPeer {
+                policy_known_down: false,
                 handle,
                 session_id,
                 remote_asn: 65_002,
