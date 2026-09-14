@@ -455,6 +455,29 @@ impl PeerManager {
         for name in &changed_datasets {
             self.metrics.record_policy_dataset_loaded(name);
         }
+        // Binding changes: an added dataset gets a loaded timestamp, a
+        // removed one has its series reaped, as the sequential path does.
+        for handle in self.current_config.policy.dataset_bindings.handles() {
+            if prior_config
+                .policy
+                .dataset_bindings
+                .get(handle.name())
+                .is_none()
+            {
+                self.metrics.record_policy_dataset_loaded(handle.name());
+            }
+        }
+        for handle in prior_config.policy.dataset_bindings.handles() {
+            if self
+                .current_config
+                .policy
+                .dataset_bindings
+                .get(handle.name())
+                .is_none()
+            {
+                self.metrics.reap_policy_dataset_series(handle.name());
+            }
+        }
         self.metrics.record_policy_generation_loaded();
         self.publish_reload_generation_events(&prior_config, receipt.policy_updated);
         info!(%receipt, "reload generation applied");

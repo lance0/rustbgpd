@@ -85,8 +85,10 @@ pub(crate) struct StagedDatasetCommit {
     updates: Vec<StagedDatasetUpdate>,
 }
 
-/// An unpublished content-only generation, with every rollback pin captured
-/// before the owner starts changing policy or runtime state.
+/// An unpublished dataset generation, with every rollback pin captured
+/// before the owner starts changing policy or runtime state. Content moves
+/// through the stable live handles; added and removed bindings ride in the
+/// candidate config the owner adopts and restores as a whole.
 #[derive(Default)]
 pub(crate) struct PreparedDatasetGeneration {
     commit: StagedDatasetCommit,
@@ -126,14 +128,21 @@ impl StagedDatasetCommit {
         prior: &Config,
         candidate: &Config,
     ) -> Result<PreparedDatasetGeneration, String> {
-        if prior.policy.datasets != candidate.policy.datasets
-            || prior.policy.dataset_bindings != candidate.policy.dataset_bindings
-        {
-            return Err(
-                "dataset generations require unchanged names, kinds, file mappings, and handles"
-                    .to_string(),
-            );
-        }
+        // Every staged update targets a live handle the candidate keeps;
+        // a handle the candidate adds carries its own loaded content and
+        // one it drops is left untouched for the retained prior config.
+        debug_assert!(self.updates.iter().all(|update| {
+            let handle = match update {
+                StagedDatasetUpdate::Refresh { handle, .. }
+                | StagedDatasetUpdate::Failure { handle, .. } => handle,
+            };
+            prior
+                .policy
+                .dataset_bindings
+                .get(handle.name())
+                .zip(candidate.policy.dataset_bindings.get(handle.name()))
+                .is_some_and(|(live, next)| Arc::ptr_eq(live, handle) && Arc::ptr_eq(next, handle))
+        }));
         let mut priors = Vec::with_capacity(self.updates.len());
         for update in &self.updates {
             let (handle, data) = match update {
@@ -3289,7 +3298,7 @@ pub enum SighupReloadRoute {
     /// list means the candidate has no generation-class change at all.
     Sequential { reasons: Vec<String> },
     /// Rejected before any runtime, credential, or catalog effect. Reasons
-    /// name incompatible families or dataset bindings requiring a restart.
+    /// name the incompatible families.
     Rejected { reasons: Vec<String> },
 }
 
@@ -3319,32 +3328,35 @@ impl SighupReloadRoute {
 
 /// Route a SIGHUP candidate by the families it touches.
 ///
-/// Dataset contents with unchanged bindings participate in generation
-/// compensation; dataset binding changes are rejected. A generation-class
-/// or dataset-content change combined with dynamic ranges, EVPN runtime,
-/// FIB tables, or the honor knobs is rejected because those families do not
-/// retain and restore priors. Dataset content combined with TCP-AO rotation
-/// or listener inbound-auth changes is also rejected. Without dataset
-/// changes, those authentication edits keep a generation-class candidate on
-/// the sequential path: they have separate ordered protocols and cannot be
-/// folded into the session reshape primitive. Candidates with no generation,
-/// dataset-content, or dataset-binding change keep the sequential path.
+/// Dataset contents and dataset bindings both participate in generation
+/// compensation: content moves through the stable live handles, while an
+/// added or removed binding rides in the candidate config the generation
+/// adopts and restores as a whole. A pure binding change is therefore a
+/// generation too: the new dataset must already have loaded cleanly, a
+/// removed one must no longer be declared, and the adopted candidate
+/// refreshes the referencing peers. A generation-class or dataset change
+/// combined with dynamic ranges, EVPN runtime, FIB tables, or the honor
+/// knobs is rejected because those families do not retain and restore
+/// priors. Dataset content or bindings combined with TCP-AO rotation or
+/// listener inbound-auth changes is also rejected. Without dataset changes,
+/// those authentication edits keep a generation-class candidate on the
+/// sequential path: they have separate ordered protocols and cannot be
+/// folded into the session reshape primitive. Candidates with no
+/// generation-class or dataset change keep the sequential path.
 #[must_use]
 pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
-    if !families.generation && !families.datasets && !families.dataset_bindings {
+    let datasets = families.datasets || families.dataset_bindings;
+    if !families.generation && !datasets {
         return SighupReloadRoute::Sequential {
             reasons: Vec::new(),
         };
     }
     let mut rejected = Vec::new();
-    if families.dataset_bindings {
-        rejected.push("[policy.datasets] names, kinds, file mappings, or handles".to_string());
+    if datasets && families.tcp_ao {
+        rejected.push("dataset changes with TCP-AO keyring rotation".to_string());
     }
-    if families.datasets && families.tcp_ao {
-        rejected.push("dataset content with TCP-AO keyring rotation".to_string());
-    }
-    if families.datasets && families.listener_auth {
-        rejected.push("dataset content with listener MD5/GTSM changes".to_string());
+    if datasets && families.listener_auth {
+        rejected.push("dataset changes with listener MD5/GTSM changes".to_string());
     }
     if families.dynamic_ranges {
         rejected.push("[[dynamic_neighbors]]".to_string());

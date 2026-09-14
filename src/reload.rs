@@ -4187,10 +4187,10 @@ mod tests {
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
             (concat!("explicit_tier", "_test_toml("), 4),
-            (concat!("write_tier", "_test_config("), 22),
+            (concat!("write_tier", "_test_config("), 25),
             (concat!("load_tier", "_test_config("), 29),
             (concat!("load_tier", "_test_toml("), 9),
-            (concat!("tier_authorized_uds", "_test_config("), 3),
+            (concat!("tier_authorized_uds", "_test_config("), 4),
             (concat!("assert_tier_authorized", "_test_config("), 13),
         ];
 
@@ -7153,14 +7153,14 @@ metric = 200
         std::fs::remove_file(&path).ok();
     }
 
-    /// Content and neighbor changes share a generation; binding changes and
-    /// malformed inputs reject before touching the live dataset handle.
+    /// Content, file-mapping, and neighbor changes share a generation;
+    /// malformed input rejects before touching the live dataset handle.
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
-        reason = "one file-backed fixture compares content, binding, and invalid-input candidates through the same reload caller"
+        reason = "one file-backed fixture compares content, mapping, and invalid-input candidates through the same reload caller"
     )]
-    async fn reload_dataset_neighbor_generation_rejects_only_binding_changes() {
+    async fn reload_dataset_neighbor_generation_accepts_mapping_changes() {
         let initial_toml = r#"
 [global]
 asn = 65001
@@ -7243,25 +7243,13 @@ import_policy_chain = ["origin-guard"]
             drop(internal_tx);
             assert!(mock.await.unwrap().is_empty());
             let calls = generation.await.unwrap();
-            if variant == "content" {
-                outcome.expect("content plus neighbor changes use the generation");
-                assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].actions.len(), 1);
-                assert_eq!(calls[0].actions[0].kind, config::ReloadPeerActionKind::Add);
-                assert_eq!(live.pin().generation, 2);
-                assert_eq!(live.pin().data.records(), 2);
-            } else {
+            if variant == "malformed" {
                 let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) =
                     &outcome
                 else {
-                    panic!("expected clean binding rejection: {outcome:?}")
+                    panic!("expected clean malformed-input rejection: {outcome:?}")
                 };
-                let expected_bucket = if variant == "binding" {
-                    "reload.preflight"
-                } else {
-                    "generation.datasets"
-                };
-                assert_eq!(failure.bucket, expected_bucket);
+                assert_eq!(failure.bucket, "generation.datasets");
                 assert_eq!(
                     live.status().last_error,
                     None,
@@ -7270,13 +7258,196 @@ import_policy_chain = ["origin-guard"]
                 assert!(calls.is_empty());
                 assert_eq!(live.pin().generation, 1);
                 assert_eq!(live.pin().data.records(), 1);
+            } else {
+                outcome.expect("content or mapping plus neighbor changes use the generation");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].actions.len(), 1);
+                assert_eq!(calls[0].actions[0].kind, config::ReloadPeerActionKind::Add);
+                assert!(
+                    Arc::ptr_eq(
+                        calls[0]
+                            .candidate
+                            .policy
+                            .dataset_bindings
+                            .get("customers")
+                            .unwrap(),
+                        &live
+                    ),
+                    "{variant}: a mapping change keeps the live handle"
+                );
+                assert_eq!(live.pin().generation, 2);
+                assert_eq!(live.pin().data.records(), 2);
             }
         }
     }
 
+    /// A route-server member join or leave is one neighbor plus its own
+    /// datasets. Both directions take the generation route with the
+    /// binding set carried in the adopted candidate; a newly declared
+    /// dataset that fails to load rejects at candidate load, before the
+    /// coordinator runs.
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one file-backed fixture drives the join, leave, and malformed-join candidates through the same reload caller"
+    )]
+    async fn reload_dataset_binding_add_and_remove_use_the_generation() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let member_toml = r#"
+[policy.datasets.client-99-origins]
+path = "datasets/client-99-origins.list"
+[policy.datasets.client-99-prefixes]
+path = "datasets/client-99-prefixes.list"
+[[neighbors]]
+address = "192.0.2.99"
+remote_asn = 65099
+import_policy_chain = ["client-99"]
+"#;
+        let member_rpol = r"
+dataset asn-set client-99-origins
+dataset prefix-set client-99-prefixes
+policy client-99 {
+    term origins { if route.origin-as in client-99-origins { accept } }
+    term prefixes { if route.prefix in client-99-prefixes { accept } }
+    term rest { reject }
+}
+";
+        let dir = dataset_reload_dir(initial_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let rpol_path = dir.path().join("policies/core.rpol");
+        let base_rpol = std::fs::read_to_string(&rpol_path).unwrap();
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        std::fs::write(
+            dir.path().join("datasets/client-99-origins.list"),
+            "65099\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("datasets/client-99-prefixes.list"),
+            "203.0.113.0/24\n",
+        )
+        .unwrap();
+
+        let run = |current: &Config| {
+            let config_path = config_path.clone();
+            let current = current.clone();
+            async move {
+                let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+                let mock = tokio::spawn(async move {
+                    let mut tags = Vec::new();
+                    while let Some(command) = peer_mgr_rx.recv().await {
+                        tags.push(cmd_tag(&command));
+                    }
+                    tags
+                });
+                let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+                let outcome = reload_config_generation(
+                    config_path.to_str().unwrap(),
+                    &current,
+                    current.global.telemetry.grpc_tcp.as_ref(),
+                    current.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    &internal_tx,
+                    None,
+                    None,
+                )
+                .await;
+                drop(peer_mgr_tx);
+                drop(internal_tx);
+                (outcome, mock.await.unwrap(), generation.await.unwrap())
+            }
+        };
+
+        // Join: one added neighbor and its two datasets.
+        std::fs::write(&rpol_path, format!("{base_rpol}{member_rpol}")).unwrap();
+        write_tier_test_config(&config_path, &format!("{initial_toml}{member_toml}"));
+        let (outcome, tags, calls) = run(&initial).await;
+        let joined = outcome.expect("member join settles as a generation");
+        assert!(tags.is_empty(), "{tags:?}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].actions.len(), 1);
+        assert_eq!(calls[0].actions[0].kind, config::ReloadPeerActionKind::Add);
+        let bindings = &calls[0].candidate.policy.dataset_bindings;
+        assert_eq!(bindings.len(), 3);
+        assert!(bindings.get("client-99-origins").is_some());
+        assert!(bindings.get("client-99-prefixes").is_some());
+        assert!(Arc::ptr_eq(bindings.get("customers").unwrap(), &live));
+        assert_eq!(joined.runtime.policy.dataset_bindings, *bindings);
+        assert_eq!(
+            live.pin().generation,
+            1,
+            "an unchanged bystander dataset is untouched"
+        );
+
+        // Leave: the same neighbor and datasets removed again.
+        std::fs::write(&rpol_path, &base_rpol).unwrap();
+        write_tier_test_config(&config_path, initial_toml);
+        let (outcome, tags, calls) = run(&joined.runtime).await;
+        let left = outcome.expect("member leave settles as a generation");
+        assert!(tags.is_empty(), "{tags:?}");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].actions.len(), 1);
+        assert_eq!(
+            calls[0].actions[0].kind,
+            config::ReloadPeerActionKind::Remove
+        );
+        assert_eq!(left.runtime.policy.dataset_bindings.len(), 1);
+        assert!(Arc::ptr_eq(
+            left.runtime
+                .policy
+                .dataset_bindings
+                .get("customers")
+                .unwrap(),
+            &live
+        ));
+
+        // Join with a malformed new dataset: rejected at candidate load.
+        std::fs::write(
+            dir.path().join("datasets/client-99-origins.list"),
+            "invalid ASN input",
+        )
+        .unwrap();
+        std::fs::write(&rpol_path, format!("{base_rpol}{member_rpol}")).unwrap();
+        write_tier_test_config(&config_path, &format!("{initial_toml}{member_toml}"));
+        let accepted = AcceptedConfigSnapshot::from_config_for_test(left.runtime.clone());
+        let Err(error) = AcceptedConfigSnapshot::load_for_reload(
+            &config_path,
+            &accepted,
+            &left.runtime.policy.dataset_bindings,
+        ) else {
+            panic!("a newly declared dataset must load cleanly");
+        };
+        assert!(
+            error.contains("client-99-origins") && error.contains("cannot load"),
+            "{error}"
+        );
+        assert_eq!(live.pin().generation, 1);
+        assert!(live.status().last_error.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            tier_authorized_uds_test_config(&format!("{initial_toml}{member_toml}")),
+            "the desired file stays for the operator"
+        );
+    }
+
     /// Dataset content changes, `.rpol` edits, and their combination use the
-    /// generation route. Binding changes and invalid datasets are rejected
-    /// separately before live effects.
+    /// generation route. Invalid datasets are rejected before live effects.
     #[tokio::test]
     async fn reload_routes_rpol_edits_by_dataset_content_identity() {
         let initial_toml = r#"

@@ -2127,32 +2127,276 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
 }
 
 /// The same bound handle feeds import, export, and the retained rollback pin.
-fn dataset_generation_fixture() -> RsFixture {
-    let fixture = RsFixture::new();
-    std::fs::write(fixture.dir.path().join("members.list"), "64500\n").unwrap();
-    std::fs::write(
-        fixture.dir.path().join("members.rpol"),
-        r"
+const DATASET_RPOL: &str = r"
 dataset asn-set members
 policy members-out {
     term allowed { if route.origin-as in members { accept } }
     term rest { reject }
-}",
+}";
+
+/// One route-server member with its own two datasets, the shape a rendered
+/// IXP member set produces per client.
+const MEMBER_RPOL: &str = r"
+dataset asn-set client-99-origins
+dataset prefix-set client-99-prefixes
+policy client-99 {
+    term origins { if route.origin-as in client-99-origins { accept } }
+    term prefixes { if route.prefix in client-99-prefixes { accept } }
+    term rest { reject }
+}";
+
+const MEMBER_TOML: &str = "
+[policy.datasets.client-99-origins]
+path = \"client-99-origins.list\"
+
+[policy.datasets.client-99-prefixes]
+path = \"client-99-prefixes.list\"
+
+[[neighbors]]
+address = \"10.0.0.99\"
+remote_asn = 65099
+import_policy_chain = [\"client-99\"]
+";
+
+/// The dataset fixture's `.rpol` and TOML, with the group `hold_time` and
+/// optionally the extra member and its datasets.
+fn write_dataset_member_fixture(fixture: &RsFixture, member: bool, hold_time: u32) {
+    let mut rpol = DATASET_RPOL.to_string();
+    let mut toml = fixture
+        .base_toml()
+        .replace(
+            "[peer_groups.members]",
+            "[policy.datasets.members]\npath = \"members.list\"\n\n[peer_groups.members]",
+        )
+        .replace(
+            "max_prefixes = 1000",
+            "max_prefixes = 1000\nimport_policy_chain = [\"members-out\"]",
+        )
+        .replace("hold_time = 90", &format!("hold_time = {hold_time}"));
+    if member {
+        rpol.push_str(MEMBER_RPOL);
+        toml.push_str(MEMBER_TOML);
+    }
+    std::fs::write(fixture.dir.path().join("members.rpol"), rpol).unwrap();
+    fixture.write_toml(&toml);
+}
+
+fn dataset_generation_fixture() -> RsFixture {
+    let fixture = RsFixture::new();
+    std::fs::write(fixture.dir.path().join("members.list"), "64500\n").unwrap();
+    std::fs::write(fixture.dir.path().join("client-99-origins.list"), "65099\n").unwrap();
+    std::fs::write(
+        fixture.dir.path().join("client-99-prefixes.list"),
+        "203.0.113.0/24\n",
     )
     .unwrap();
-    fixture.write_toml(
-        &fixture
-            .base_toml()
-            .replace(
-                "[peer_groups.members]",
-                "[policy.datasets.members]\npath = \"members.list\"\n\n[peer_groups.members]",
-            )
-            .replace(
-                "max_prefixes = 1000",
-                "max_prefixes = 1000\nimport_policy_chain = [\"members-out\"]",
-            ),
-    );
+    write_dataset_member_fixture(&fixture, false, 90);
     fixture
+}
+
+/// Load the fixture's current file as a reload candidate against `prior`'s
+/// live bindings, with its staged dataset generation and session plan.
+fn prepare_binding_candidate(
+    fixture: &RsFixture,
+    prior: &Config,
+) -> (
+    Config,
+    Vec<ReloadPeerAction>,
+    crate::config::PreparedDatasetGeneration,
+) {
+    let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+        fixture.config_path.to_str().unwrap(),
+        &prior.policy.dataset_bindings,
+    )
+    .unwrap();
+    let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(prior, &candidate).unwrap();
+    assert!(
+        prepared.changed_names().is_empty(),
+        "binding changes stage no content update"
+    );
+    let actions = plan_reload_peer_actions(prior, &candidate).unwrap();
+    (candidate, actions, prepared)
+}
+
+/// A member join with its own datasets and a group reshape, with a member
+/// replacement failing after the candidate config, and with it the new
+/// binding set, was adopted: the prior binding set, dataset contents, and
+/// sessions return, and the candidate file stays for an identical retry.
+#[tokio::test]
+async fn late_failure_after_dataset_binding_add_restores_prior_binding_set() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let bystander_session = harness.session_id("10.0.0.9");
+    write_dataset_member_fixture(&fixture, true, 60);
+    let candidate_bytes = std::fs::read(&fixture.config_path).unwrap();
+    let (candidate, actions, prepared) = prepare_binding_candidate(&fixture, &prior);
+    assert_eq!(candidate.policy.dataset_bindings.len(), 3);
+    assert!(Arc::ptr_eq(
+        candidate.policy.dataset_bindings.get("members").unwrap(),
+        &live
+    ));
+    assert_eq!(actions.len(), 3, "{actions:?}");
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    let ReloadGenerationOutcome::FullyCompensated(error) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(error.contains("prior generation restored"), "{error}");
+    assert_eq!(harness.mgr.current_config, prior);
+    let bindings = &harness.mgr.current_config.policy.dataset_bindings;
+    assert_eq!(
+        bindings.len(),
+        1,
+        "added bindings dropped with the candidate"
+    );
+    assert!(Arc::ptr_eq(bindings.get("members").unwrap(), &live));
+    assert_eq!(live.pin().generation, 1);
+    assert!(
+        !harness
+            .mgr
+            .peers
+            .contains_key(&key("10.0.0.99".parse().unwrap()))
+    );
+    for address in ["10.0.0.2", "2001:db8::3"] {
+        let managed = &harness.mgr.peers[&key(address.parse().unwrap())];
+        assert_eq!(managed.hold_time, Some(90), "{address}");
+    }
+    assert_eq!(harness.session_id("10.0.0.9"), bystander_session);
+    assert_eq!(
+        std::fs::read(&fixture.config_path).unwrap(),
+        candidate_bytes
+    );
+
+    harness.mgr.inject_reconfigure_failures.clear();
+    let (candidate, actions, prepared) =
+        prepare_binding_candidate(&fixture, &harness.mgr.current_config);
+    let outcome = Box::pin(harness.mgr.apply_reload_generation(
+        candidate.clone(),
+        actions,
+        prepared,
+    ))
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, candidate);
+    assert_eq!(harness.mgr.current_config.policy.dataset_bindings.len(), 3);
+    let member = &harness.mgr.peers[&key("10.0.0.99".parse().unwrap())];
+    assert!(
+        member
+            .import_policy
+            .as_ref()
+            .unwrap()
+            .references_dataset("client-99-origins")
+    );
+    harness.shutdown().await;
+}
+
+/// The symmetric leave: the member and its datasets are removed and a
+/// later replacement fails. The removed handles, still referenced by the
+/// retained prior config and the member's captured chain, return with it.
+#[tokio::test]
+async fn late_failure_after_dataset_binding_remove_reinstates_prior_binding_set() {
+    let fixture = dataset_generation_fixture();
+    write_dataset_member_fixture(&fixture, true, 90);
+    let prior = fixture.load();
+    let origins = Arc::clone(
+        prior
+            .policy
+            .dataset_bindings
+            .get("client-99-origins")
+            .unwrap(),
+    );
+    let prefixes = Arc::clone(
+        prior
+            .policy
+            .dataset_bindings
+            .get("client-99-prefixes")
+            .unwrap(),
+    );
+    let mut harness = GenerationHarness::new(&prior);
+    assert_eq!(harness.mgr.peers.len(), 4);
+    write_dataset_member_fixture(&fixture, false, 60);
+    let (candidate, actions, prepared) = prepare_binding_candidate(&fixture, &prior);
+    assert_eq!(candidate.policy.dataset_bindings.len(), 1);
+    assert_eq!(actions.len(), 3, "{actions:?}");
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    let bindings = &harness.mgr.current_config.policy.dataset_bindings;
+    assert_eq!(bindings.len(), 3);
+    assert!(Arc::ptr_eq(
+        bindings.get("client-99-origins").unwrap(),
+        &origins
+    ));
+    assert!(Arc::ptr_eq(
+        bindings.get("client-99-prefixes").unwrap(),
+        &prefixes
+    ));
+    assert_eq!(origins.pin().generation, 1);
+    let member = harness
+        .mgr
+        .peers
+        .get(&key("10.0.0.99".parse().unwrap()))
+        .expect("removed member re-added from its retained prior");
+    assert!(member.enabled);
+    assert_eq!(member.remote_asn, 65099);
+    assert!(
+        member
+            .import_policy
+            .as_ref()
+            .unwrap()
+            .references_dataset("client-99-origins")
+    );
+
+    harness.mgr.inject_reconfigure_failures.clear();
+    let (candidate, actions, prepared) =
+        prepare_binding_candidate(&fixture, &harness.mgr.current_config);
+    let outcome = Box::pin(harness.mgr.apply_reload_generation(
+        candidate.clone(),
+        actions,
+        prepared,
+    ))
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, candidate);
+    assert_eq!(harness.mgr.current_config.policy.dataset_bindings.len(), 1);
+    assert!(
+        !harness
+            .mgr
+            .peers
+            .contains_key(&key("10.0.0.99".parse().unwrap()))
+    );
+    harness.shutdown().await;
 }
 
 fn prepare_dataset_candidate(

@@ -301,8 +301,11 @@ fn dataset_generation_rejects_invalid_batch_without_publishing_first_input() {
     }
 }
 
+/// Mapping and binding changes ride in the candidate config the generation
+/// adopts and restores; the staged plan itself carries only the content
+/// updates that target live handles.
 #[test]
-fn dataset_generation_rejects_changed_mapping_or_handle_identity() {
+fn dataset_generation_accepts_changed_mapping_and_added_or_removed_bindings() {
     let dir = dataset_config_dir("64500\n");
     let initial = load_dir(&dir).unwrap();
     let mut candidate = initial.clone();
@@ -313,22 +316,67 @@ fn dataset_generation_rejects_changed_mapping_or_handle_identity() {
         .unwrap()
         .path
         .push_str(".next");
+    let prepared = StagedDatasetCommit {
+        updates: Vec::new(),
+    }
+    .prepare_generation(&initial, &candidate)
+    .expect("a file mapping change stages through the stable handle");
+    assert!(prepared.changed_names().is_empty());
+
+    let mut added = initial.clone();
+    added
+        .policy
+        .dataset_bindings
+        .insert(Arc::new(rustbgpd_policy::datasets::DatasetHandle::new(
+            "extra",
+            rustbgpd_policy::datasets::DatasetKind::Asn,
+            rustbgpd_policy::datasets::DatasetData::Asn(rustbgpd_policy::sets::AsnSet::new(
+                std::iter::empty(),
+            )),
+        )));
     assert!(
         StagedDatasetCommit {
             updates: Vec::new()
         }
-        .prepare_generation(&initial, &candidate)
-        .is_err()
+        .prepare_generation(&initial, &added)
+        .is_ok()
     );
-    candidate = initial.clone();
-    candidate.policy.dataset_bindings = initial.policy.dataset_bindings.detached_clone();
     assert!(
         StagedDatasetCommit {
             updates: Vec::new()
         }
-        .prepare_generation(&initial, &candidate)
-        .is_err()
+        .prepare_generation(&added, &initial)
+        .is_ok()
     );
+}
+
+/// A reload candidate that drops a binding its `.rpol` still declares is a
+/// load error against the live bindings, before any staging.
+#[test]
+fn staged_reload_rejects_removed_binding_still_declared() {
+    let dir = dataset_config_dir("64500\n");
+    let initial = load_dir(&dir).unwrap();
+    let live = Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+    let toml = fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        toml.replace(
+            "[policy.datasets.customers]\npath = \"datasets/customers.list\"\n",
+            "",
+        ),
+    )
+    .unwrap();
+    let err = Config::load_with_diagnostics_and_staged_datasets(
+        dir.path().join("config.toml").to_str().unwrap(),
+        &initial.policy.dataset_bindings,
+    )
+    .expect_err("declared dataset without a binding");
+    assert!(
+        err.contains("has no [policy.datasets.customers] entry"),
+        "{err}"
+    );
+    assert_eq!(live.pin().generation, 1);
+    assert!(live.status().last_error.is_none());
 }
 
 #[test]

@@ -557,7 +557,8 @@ What happens:
 2. **Generation route** — a candidate whose reload-applied changes are
    static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
    neighbor sets, global chains, changed `.rpol` content (imports included),
-   dataset contents with unchanged bindings, or outbound
+   dataset contents, dataset bindings (added, removed, or re-mapped
+   `[policy.datasets]` entries), or outbound
    prefix maxima settles as one owned runtime generation. The daemon resolves
    the complete candidate once and
    derives one action per static neighbor — unchanged, hot update in place,
@@ -573,6 +574,11 @@ What happens:
    failure restores them from memory, the reload reports a clean rejection,
    the candidate file stays on
    disk for correction, and an identical retry re-derives the same plan.
+   Dataset contents move through the stable live handles; an added or
+   removed binding rides in the candidate config, so a route-server member
+   join or leave with its own datasets applies on SIGHUP and a late failure
+   restores the prior binding set with the prior config. A newly declared
+   dataset must load cleanly or the candidate is rejected at load.
    `[policy.explain]` is carried with such a candidate; an explain-only change
    stays sequential.
 3. **Sequential route** — a candidate with no generation-class change
@@ -584,14 +590,13 @@ What happens:
    this path when dataset contents are unchanged, logged as running without
    generation compensation: the rotation is its own ordered protocol and
    the session reshape primitive refuses authentication changes.
-4. **Rejected changes** — dataset names, kinds, file mappings, and live
-   handles must stay unchanged. Dataset content changes combined with TCP-AO
-   rotation or listener MD5/GTSM authentication changes reject before any
-   effect. A generation-class change combined with `[[dynamic_neighbors]]`,
-   EVPN runtime tables, `[[fib_tables]]`, or
+4. **Rejected changes** — dataset content or binding changes combined with
+   TCP-AO rotation or listener MD5/GTSM authentication changes reject before
+   any effect. A generation-class or dataset change combined with
+   `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
    `honor_graceful_shutdown` / `honor_blackhole` also rejects: those families
    do not retain and restore priors. Apply independently reloadable families
-   in separate reloads; dataset binding changes require a restart.
+   in separate reloads.
 5. **Automatic Route Refresh on import-policy hot-apply** — when a
    peer's effective import chain changes (whether triggered by a
    SIGHUP reload or a gRPC mutation), the peer manager issues

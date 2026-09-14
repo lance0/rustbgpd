@@ -205,14 +205,6 @@ fn route_is_generation_for_pure_generation_class_changes() {
 fn route_rejects_generation_changes_combined_with_uncompensated_families() {
     for (name, families) in [
         (
-            "dataset bindings",
-            SighupReloadFamilies {
-                generation: true,
-                dataset_bindings: true,
-                ..SighupReloadFamilies::default()
-            },
-        ),
-        (
             "dynamic ranges",
             SighupReloadFamilies {
                 generation: true,
@@ -267,41 +259,37 @@ fn route_rejects_generation_changes_combined_with_uncompensated_families() {
 }
 
 #[test]
-fn route_compensates_dataset_content_and_rejects_binding_or_auth_changes() {
+fn route_compensates_dataset_content_and_bindings_and_rejects_auth_combinations() {
     for generation in [false, true] {
-        assert_eq!(
-            classify_sighup_reload(SighupReloadFamilies {
-                generation,
-                datasets: true,
-                ..SighupReloadFamilies::default()
-            }),
-            SighupReloadRoute::Generation
-        );
-        for (dataset_bindings, tcp_ao, listener_auth) in [
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
-        ] {
-            assert!(matches!(
+        for (datasets, dataset_bindings) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
                 classify_sighup_reload(SighupReloadFamilies {
                     generation,
-                    datasets: true,
+                    datasets,
                     dataset_bindings,
-                    tcp_ao,
-                    listener_auth,
                     ..SighupReloadFamilies::default()
                 }),
-                SighupReloadRoute::Rejected { .. }
-            ));
+                SighupReloadRoute::Generation,
+                "generation={generation} datasets={datasets} bindings={dataset_bindings}"
+            );
+            for (tcp_ao, listener_auth) in [(true, false), (false, true)] {
+                assert!(
+                    matches!(
+                        classify_sighup_reload(SighupReloadFamilies {
+                            generation,
+                            datasets,
+                            dataset_bindings,
+                            tcp_ao,
+                            listener_auth,
+                            ..SighupReloadFamilies::default()
+                        }),
+                        SighupReloadRoute::Rejected { .. }
+                    ),
+                    "generation={generation} datasets={datasets} bindings={dataset_bindings} tcp_ao={tcp_ao} listener_auth={listener_auth}"
+                );
+            }
         }
     }
-    assert!(matches!(
-        classify_sighup_reload(SighupReloadFamilies {
-            dataset_bindings: true,
-            ..SighupReloadFamilies::default()
-        }),
-        SighupReloadRoute::Rejected { .. }
-    ));
 }
 
 #[test]
@@ -329,6 +317,23 @@ fn diff_config_reports_the_sighup_route_and_listener_inventory() {
     assert!(text.contains("SIGHUP reload route: generation"), "{text}");
     let json = config_diff_json_value(&diff);
     assert_eq!(json["sighup_reload"]["route"], "generation");
+
+    let dir = dataset_config_dir("64500\n");
+    let bound = load_dir(&dir).unwrap();
+    let mut unbound = bound.clone();
+    unbound.policy.datasets.clear();
+    unbound.policy.dataset_bindings = rustbgpd_policy::datasets::DatasetBindings::new();
+    let diff = diff_config(&unbound, &bound);
+    assert!(diff.policy.datasets_changed);
+    assert_eq!(
+        diff.sighup_route,
+        SighupReloadRoute::Generation,
+        "a binding change reports the generation route"
+    );
+    assert_eq!(
+        config_diff_json_value(&diff)["sighup_reload"]["route"],
+        "generation"
+    );
 
     let md5 = rs(&RS_TOML.replace(
         "hold_time = 180",
