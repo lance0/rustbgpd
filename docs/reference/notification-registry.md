@@ -1,5 +1,7 @@
 # NOTIFICATION registry
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 Use this table to interpret BGP NOTIFICATION code/subcode pairs in session logs,
 neighbor last errors, and lifecycle events.
 
