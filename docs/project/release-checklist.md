@@ -46,8 +46,10 @@ diff actually ran before tagging.
       set, so check it rather than re-listing M-numbers here.
 - [ ] **Public docs contract** — `.github/workflows/public-docs-contract.yml`
       is green. It runs unfiltered on every pull request and main-branch push,
-      covering metric consumers, public tracker-ID and artifact-home-path
-      hygiene, pinned IXP Manager docs, and release-checklist source paths.
+      covering metric consumers and metric release notes, public tracker-ID and
+      artifact-home-path hygiene, site ingest sources, SIGHUP architecture route
+      coverage, pinned IXP Manager docs, release-checklist source paths, and
+      performance receipt provenance and freshness.
 - [ ] **Embedding docs contract** — the `embedding-doc-contract` matrix job in
       `.github/workflows/public-docs-contract.yml` is green. Its two
       seconds-cheap Python checks now run unfiltered beside the public-docs
@@ -105,8 +107,11 @@ convention in `CONTRIBUTING.md`:
 
 ## Flagship operating proof
 
-For v0.70, qualify the selected release candidate with the full 24-hour
-route-server management-load soak. Use the
+Qualify the selected release candidate with the full 24-hour route-server
+management-load soak. v0.70.0 shipped on the
+[2026-09-12 run](../soaks/soak-rs-flagship-24h-2026-09-12.md), which failed
+only the `management_cadence` gate on a pre-release commit; its receipt records
+that release relationship. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 
@@ -578,7 +583,7 @@ owner also crosses a drain boundary. If the release touches **Gate 9 /
 ADR-0059 / ADR-0087 / ADR-0090** (IP-VRF, Type 5, L3 FIB programming,
 overlay-index recursion/origination, aliasing ECMP, or FDB nexthop groups),
 run the hosted
-`Kernel Dataplane` workflow for M39, M40, M68, M71, and future M72 as
+`Kernel Dataplane` workflow for M39, M40, M68, M71, and M72 as
 appropriate. If it touches
 **ADR-0089 VLAN-aware bridge or SVD programming**, also require M70 plus
 the `dataplane_vlan_fdb` and `svd_fdb_vni` netns selectors. They can still be
@@ -836,6 +841,22 @@ Before rolling any versions:
     anyway, fix the CHANGELOG heading and either re-tag or edit the release
     body.
 
+After the tag publishes:
+
+13. **Freeze the released route-server fixture.** Copy the tagged
+    `examples/route-server/config.toml` and `hygiene.rpol` into a new
+    `route-server` directory for the release under `tests/fixtures/v1-stable/`,
+    and add the matching immutable parse test in `src/config/tests/mod.rs`.
+    The next release's consecutive upgrade exercise consumes this fixture.
+14. **Roll the metric release-note baseline** in the first change that adds a
+    `CHANGELOG.md` `[Unreleased]` entry, not in the tag commit: the checker
+    fails closed on an empty target section. In
+    `scripts/check_metric_release_notes.py` and its companion test, point the
+    baseline release and source commit at the new tag, add the released family
+    inventory as a JSON file named for the tag in
+    `scripts/fixtures/metric-release-notes/`, set the target section to
+    `Unreleased`, and remove the orphaned older fixture.
+
 ### Published-crate documentation refresh
 
 After changing crate versions and their workspace pins, run
@@ -850,6 +871,13 @@ all three manifest versions exist and are not yanked on crates.io before
 updating the published record, boundary table, and dependency examples. Publish
 wire before dependent crates. If a publish or registry check fails, retain the
 existing record and retry after resolving the failure.
+
+`--refresh` does not reword prose. In the same change, turn "prepared" or
+"source checkout prepares" wording for the released versions into released
+wording in `crates/wire/README.md`, `crates/fsm/README.md`,
+`crates/rpki/README.md`, and `docs/reference/embedding.md` §4; these READMEs
+are the crates.io landing pages. Past `CHANGELOG.md` sections keep their
+wording.
 
 Review the generated changes and run the offline checks before committing:
 

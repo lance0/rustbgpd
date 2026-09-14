@@ -1,5 +1,7 @@
 # Roadmap history
 
+> **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
+
 Completed roadmap records moved from [ROADMAP.md](roadmap.md) are preserved
 here in their original wording and order. Current work remains in
 [ROADMAP.md](roadmap.md), and shipped behavior is recorded in

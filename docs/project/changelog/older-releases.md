@@ -1,5 +1,7 @@
 # Older releases
 
+> **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
+
 Release history through 0.67.0; see the [current changelog](../../../CHANGELOG.md)
 for the current series and unreleased changes.
 
