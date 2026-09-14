@@ -520,6 +520,22 @@ mod unix {
         }
     }
 
+    fn inside_current(current: &Path, path: &toml::Value) -> AResult<toml::Value> {
+        let relative = path
+            .as_str()
+            .filter(|value| safe_relative(value))
+            .ok_or(Error::Refused(
+                "policy paths must stay inside the generation",
+            ))?;
+        Ok(toml::Value::String(
+            current
+                .join(relative)
+                .to_str()
+                .ok_or(Error::Refused("state path is not UTF-8"))?
+                .to_owned(),
+        ))
+    }
+
     pub(crate) fn normalized_toml(config: &[u8], state: &Path) -> AResult<Vec<u8>> {
         let current = fs::canonicalize(state)
             .map_err(|_| Error::Refused("state path is invalid"))?
@@ -538,16 +554,19 @@ mod unix {
             for key in ["rpol_files", "rpol_roots"] {
                 if let Some(paths) = policy.get_mut(key).and_then(toml::Value::as_array_mut) {
                     for path in paths {
-                        let relative = path.as_str().filter(|value| safe_relative(value)).ok_or(
-                            Error::Refused("policy paths must stay inside the generation"),
-                        )?;
-                        *path = toml::Value::String(
-                            current
-                                .join(relative)
-                                .to_str()
-                                .ok_or(Error::Refused("state path is not UTF-8"))?
-                                .to_owned(),
-                        );
+                        *path = inside_current(&current, path)?;
+                    }
+                }
+            }
+            // The daemon loads gRPC candidates without a base directory, so
+            // every relative dataset path must be rewritten like `rpol_files`.
+            if let Some(datasets) = policy
+                .get_mut("datasets")
+                .and_then(toml::Value::as_table_mut)
+            {
+                for (_, dataset) in datasets.iter_mut() {
+                    if let Some(path) = dataset.get_mut("path") {
+                        *path = inside_current(&current, path)?;
                     }
                 }
             }
@@ -1140,6 +1159,94 @@ mod unix {
         }
         guard.clear().map_err(host_error)?;
         result
+    }
+
+    #[cfg(test)]
+    mod normalized_toml_tests {
+        use super::*;
+
+        fn current(state: &tempfile::TempDir) -> String {
+            fs::canonicalize(state.path())
+                .expect("canonical state")
+                .join("current")
+                .display()
+                .to_string()
+        }
+
+        #[test]
+        fn dataset_paths_are_rewritten_into_current_like_rpol_files() {
+            let state = tempfile::tempdir().expect("temporary state");
+            let config = b"[policy]\nrpol_files = [\"policy/ixp-hygiene.rpol\", \"policy/client-1.rpol\"]\nrpol_roots = [\"policy\"]\n\n[policy.datasets.client-1-origins]\npath = \"datasets/client-1-origins.list\"\n\n[policy.datasets.client-1-prefixes]\npath = \"datasets/client-1-prefixes.list\"\n";
+
+            let normalized = normalized_toml(config, state.path()).expect("normalized");
+            let document: toml::Value =
+                toml::from_str(std::str::from_utf8(&normalized).expect("utf-8")).expect("toml");
+            let policy = document.get("policy").expect("policy table");
+            let current = current(&state);
+            let strings = |value: &toml::Value| -> Vec<String> {
+                value
+                    .as_array()
+                    .expect("array")
+                    .iter()
+                    .map(|entry| entry.as_str().expect("string").to_owned())
+                    .collect()
+            };
+
+            assert_eq!(
+                strings(&policy["rpol_files"]),
+                [
+                    format!("{current}/policy/ixp-hygiene.rpol"),
+                    format!("{current}/policy/client-1.rpol")
+                ]
+            );
+            assert_eq!(
+                strings(&policy["rpol_roots"]),
+                [format!("{current}/policy")]
+            );
+            let datasets = policy["datasets"].as_table().expect("datasets table");
+            assert_eq!(datasets.len(), 2);
+            for name in ["client-1-origins", "client-1-prefixes"] {
+                assert_eq!(
+                    datasets[name]["path"].as_str(),
+                    Some(format!("{current}/datasets/{name}.list").as_str()),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn dataset_paths_outside_the_generation_are_refused() {
+            let state = tempfile::tempdir().expect("temporary state");
+            for path in ["/etc/rustbgpd/datasets/a.list", "../datasets/a.list", ""] {
+                let config = format!(
+                    "[policy]\nrpol_files = [\"policy/a.rpol\"]\n\n[policy.datasets.a]\npath = \"{path}\"\n"
+                );
+                assert_eq!(
+                    normalized_toml(config.as_bytes(), state.path()),
+                    Err(Error::Refused(
+                        "policy paths must stay inside the generation"
+                    )),
+                    "{path:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn candidates_without_datasets_normalize_rpol_files_only() {
+            let state = tempfile::tempdir().expect("temporary state");
+            let normalized = normalized_toml(
+                b"[policy]\nrpol_files = [\"policy/a.rpol\"]\n",
+                state.path(),
+            )
+            .expect("normalized");
+            let document: toml::Value =
+                toml::from_str(std::str::from_utf8(&normalized).expect("utf-8")).expect("toml");
+            assert_eq!(
+                document["policy"]["rpol_files"][0].as_str(),
+                Some(format!("{}/policy/a.rpol", current(&state)).as_str())
+            );
+            assert!(document["policy"].get("datasets").is_none());
+        }
     }
 
     #[cfg(test)]

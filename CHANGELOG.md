@@ -24,6 +24,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   combined with TCP-AO rotation, listener MD5/GTSM changes,
   `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or the honor
   knobs still reject before any effect.
+- `rs-config-render activate` now rewrites `[policy.datasets.*].path` into the
+  activation `current/` tree for its `rbgp config diff` comparison, the same
+  way it already rewrites `rpol_files` and `rpol_roots`. The daemon resolves a
+  gRPC candidate without a base directory, so a candidate with relative
+  dataset paths previously failed the settle check with a missing-file error
+  and `activate` exited 5 against a healthy daemon. Every rendered IXP
+  candidate declares per-client datasets, so member joins and leaves through
+  `activate` now settle and exit 0.
 
 ## [0.70.0] — 2026-09-13
 
