@@ -110,7 +110,7 @@ channels to the PeerManager, FIB reconciler, and config persistence bridge.
    └──────────────────────────────────────────────┘
 ```
 
-Each peer session runs a `tokio::select!` loop over TCP socket I/O, protocol timers (hold, keepalive, connect-retry), and inbound commands. The RIB task processes updates sequentially — no locks, no contention. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>`. The sharding seam is at the channel boundary: if scale demands it, split to one RIB task per AFI/SAFI without changing session code.
+Each peer session runs a `tokio::select!` loop over TCP socket I/O, protocol timers (hold, keepalive, connect-retry), and inbound commands. The RIB task processes updates sequentially — no locks, no contention. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>`. The sharding seam is at the channel boundary: if scale demands it, split to prefix-range sharding across tasks without changing session code ([ADR-0100 §2(a)](../adr/0100-parallel-rib-manager.md), which rejected family sharding as primary).
 
 ---
 
@@ -438,4 +438,4 @@ ADR-0113 (released in v0.61.0) adds the outbound contract: distinct `max_prefixe
 
 ### Why no locks
 
-The RIB is the hottest data structure. Wrapping it in `Arc<RwLock>` would create contention under UPDATE storms and make reasoning about ordering difficult. Instead, the RIB runs as a single task with exclusive ownership. All access is serialized through the channel. This trades parallelism for simplicity and determinism — the right tradeoff at current scale. The sharding seam (channel boundary) is ready if scale demands splitting.
+The RIB is the hottest data structure. Wrapping it in `Arc<RwLock>` would create contention under UPDATE storms and make reasoning about ordering difficult. Instead, the RIB runs as a single task with exclusive ownership. All access is serialized through the channel. This trades parallelism for simplicity and determinism — the right tradeoff at current scale. The sharding seam (channel boundary) is ready if scale demands prefix-range sharding.
