@@ -8,7 +8,7 @@ parser, typechecker, in-language tests, and `rbgp policy check` — the
 daemon integration — `[policy] rpol_files` config references, mixed
 TOML/rpol chains, SIGHUP hot-apply, and the `rbgp policy test`
 live-RIB dry run — and the explain surfaces — per-term statement
-traces in `rbgp policy explain` / `rbgp rib advertised --explain` and
+traces in `rbgp policy explain` / `rbgp rib --prefix P advertised PEER --explain` and
 live per-term hit counters via `rbgp policy stats` — are all live
 (see "Using policies in the daemon" below). The M80 interop lab
 proves route-for-route parity against FRR route-maps expressing the
@@ -76,7 +76,7 @@ machine-readable report.
   subtraction requires whitespace — `route.med - 1` subtracts,
   `route.med-1` is an unknown-field error (with a did-you-mean note).
 - **Reserved keywords** (not usable as names): `prefix-set`,
-  `community-set`, `policy`, `term`, `test`, `if`, `else`, `set`,
+  `community-set`, `asn-set`, `policy`, `term`, `test`, `if`, `else`, `set`,
   `add`, `remove`, `prepend`, `accept`, `reject`, `apply`, `in`,
   `has`, `matches`, `contains`, `ge`, `le`, `route`, `peer`,
   `expect`, `with`, `as`, `self`, `u32`. Field names (`local-pref`,
@@ -109,8 +109,9 @@ machine-readable report.
 
 ## Types
 
-The type universe is fixed; there are no user-defined types, maps, or
-loops (ADR-0096 Decision 2/4), and inference is trivial: every field
+The type universe is fixed; there are no user-defined types, no maps, and
+no unbounded iteration (ADR-0096 Decision 2/4; bounded `for` loops are
+covered under "Loops"), and inference is trivial: every field
 has a known type and every operator a fixed signature.
 
 | Type | Values | Where |
@@ -300,15 +301,20 @@ semantics:
   so a SIGHUP with nothing changed touches nothing).
 - **Changed content swaps atomically** and bumps the generation, then
   refreshes only the referencing peers.
-- **A file that fails to load or parse keeps the prior snapshot.**
-  The reload still succeeds; the error is a WARN log, a
-  `bgp_policy_dataset_refresh_errors_total{dataset}` counter
-  increment, and a `last refresh FAILED` line in `rbgp policy stats`.
-  Empty data is never substituted — an empty snapshot requires an
-  explicitly empty file.
-- **Introducing a dataset** (a new declaration, or a kind change) is
-  a config transaction: its file must load cleanly or the whole
-  load/reload is rejected, like any other config error.
+- **A file that fails to load or parse rejects the whole reload.**
+  Every declared dataset must load before anything is published, so a
+  malformed or unreadable file leaves the prior snapshot serving, the
+  rest of the candidate unapplied, and the candidate file on disk. The
+  daemon increments `bgp_policy_dataset_refresh_errors_total{dataset}`
+  and logs `SIGHUP reload rejected without runtime effect`. Empty data
+  is never substituted — an empty snapshot requires an explicitly
+  empty file.
+- **Adding, removing, or re-mapping a dataset** (a declaration, a
+  kind change, or a file path) is reloadable in the same compensated
+  generation as the neighbor and policy changes that use it; see the
+  [reload routes](reload-matrix.md#sighup-reload-routes) for the
+  combinations that still reject. Its file must load cleanly or the
+  whole load/reload is rejected, like any other config error.
 - Superseded snapshots are retained only while in-flight walks still
   pin them; there is no generation history.
 
@@ -353,8 +359,8 @@ policy NAME[(param: u32, ...)] {
 ```
 
 - Terms evaluate in order. Statements inside a term are: bare
-  actions, `let` bindings (see "Bindings"), or `if <expr> {
-  actions... } [else { actions... }]`. `if` bodies are flat
+  actions, `let` bindings (see "Bindings"), `for` loops (see "Loops"),
+  or `if <expr> { actions... } [else { actions... }]`. `if` bodies are flat
   action/`let` lists — **no nested `if`** in V1 (split the condition
   with `&&` or use another term).
 - **Verdicts**: `accept` permits the route (with all modifications
@@ -1059,7 +1065,8 @@ Two consequences worth internalizing:
 Literal AS 0 is a compile error. A parameter that resolves to AS 0 in a
 prepend action is rejected when the daemon attaches the policy chain,
 including prepends inside loops. These checks reject invalid policy before
-evaluation; the wire encoder also rejects AS 0 under RFC 7607.
+the daemon evaluates routes with it; a computed operand that evaluates to 0
+denies the route, and the wire encoder also rejects AS 0 under RFC 7607.
 
 The kind keyword must match the literal's kind (`add community
 RT:...` is a compile error pointing at `add ext-community`). Within a
@@ -1383,8 +1390,9 @@ no-op: no chain reinstall, no Route Refresh.
 ## Grammar sketch
 
 ```text
-file        := (import-decl | prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
+file        := (import-decl | dataset-decl | prefix-set-def | community-set-def | asn-set-def | fn-def | policy-def | test-def)*
 import-decl := "import" STRING                    # contextual `import`
+dataset-decl := "dataset" ("prefix-set" | "asn-set" | "community-set") IDENT   # contextual `dataset`
 prefix-set-def    := "prefix-set" IDENT "{" [prefix-entry ("," prefix-entry)*] "}"
 prefix-entry      := PREFIX ["ge" INT] ["le" INT]
 community-set-def := "community-set" IDENT "{" [community ("," community)*] "}"
@@ -1392,7 +1400,8 @@ asn-set-def       := "asn-set" IDENT "{" [INT ("," INT)*] "}"
 fn-def      := "fn" IDENT "(" [param ("," param)*] ")" "->" "u32"
                "{" fn-let* value "}"               # contextual `fn`
 fn-let      := "let" IDENT "=" value [";"]
-policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" term* "}"
+policy-def  := "policy" IDENT ["(" param ("," param)* ")"] "{" [default-decl] term* "}"
+default-decl := "default-action" ("accept" | "reject") [";"]   # contextual; before all terms
 param       := IDENT ":" "u32"
 term        := "term" IDENT "{" stmt* "}"
 stmt        := if-stmt | let-stmt | for-stmt | action [";"]
@@ -1424,8 +1433,10 @@ atom        := INT | STD-COMMUNITY | IDENT | field | "(" value ")"   # IDENT: pa
              | IDENT "(" [value ("," value)*] ")"  # user-function call
 field       := ("route" | "peer") ("." IDENT)+
 u32arg      := INT | IDENT          # parameter reference
-test-def    := "test" IDENT "{" route-block [peer-block] expect+ "}"
-expect      := "expect" IDENT ["(" INT,* ")"] "==" ("accept"|"reject") ["with" assertion,*]
+test-def    := "test" IDENT "{" dataset-override* route-block [peer-block] expect+ "}"
+dataset-override := "dataset" IDENT "{" [member ("," member)*] "}"   # content for a declared dataset
+expect      := "expect" IDENT ["(" INT,* ")"] "=="
+               (("accept"|"reject") ["with" assertion,*] | "error" [IDENT])   # IDENT: error kind
 ```
 
 ## Diagnostics
@@ -1591,7 +1602,7 @@ surfaces (ADR-0073 / ADR-0096 Decision 3.3):
   Guards render with sets shown by their source name; terms after the
   deciding one were never evaluated and carry no line. A term that
   modified without a verdict shows as `... => set med 5; continue`.
-- **`rbgp rib advertised --explain`** (`ExplainAdvertisedRoute`,
+- **`rbgp rib --prefix P advertised PEER --explain`** (`ExplainAdvertisedRoute`,
   export): a Deny's policy attribution extends to `<chain-ref>:<term>` when
   the rejecting member is `.rpol` — e.g.
   `export policy "customer-in(200):transit-guard" denied this route`.
@@ -1634,10 +1645,12 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
 - `--direction` selects **export** (the default), **import**, or
   **both**. Export chains are read from the RIB manager; import chains
   are read from each session's published installed-counter state.
-  Chainless sessions contribute no row. Pending observations remain
-  bounded by the shared absolute deadline; a closed publication or
-  unavailable counter state fails the complete RPC as `UNAVAILABLE`,
-  without partial rows. Counter availability does not establish session
+  Chainless sessions contribute no row. Every backend wait shares one
+  absolute two-second deadline for the whole RPC; exhausting it fails the
+  RPC as `DEADLINE_EXCEEDED`. A departed session, closed publication, or
+  unavailable counter state fails the complete RPC as `UNAVAILABLE`, and a
+  listener without the policy-stats runtime returns `FAILED_PRECONDITION`,
+  all without partial rows. Counter availability does not establish session
   progress.
 - Import chains report their **install generation** (bumps on every
   chain install), so counters that reset to zero read as a chain
