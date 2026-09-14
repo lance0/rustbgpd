@@ -84,8 +84,9 @@ generation tree are the state; the receipt is not.
 
 The last two `status` lines are the helper's own settlement test. It runs
 `rbgp health` first and only when that explicitly reports healthy does it stage
-and run `rbgp config diff` against the `current` generation, with policy paths
-rewritten to the live `current/` prefix (exactly what the helper compares).
+and run `rbgp config diff` against the `current` generation, with policy and
+dataset paths rewritten to the live `current/` prefix (exactly what the helper
+compares).
 Read them together:
 
 | `daemon` | `runtime_equals_current` | Meaning |
@@ -332,14 +333,17 @@ grep -E '"(phase|callback|activation_outcome|error_class)"' $STATE/ixp-manager-l
 ```
 
 The settlement test by hand is `rbgp health` plus `rbgp config diff` against
-the candidate. The generation's `config.toml` names its policy files
-relatively, and the daemon resolves those against its own working directory,
-so diff a copy with the paths rewritten to the live `current/` prefix:
+the candidate. The generation's `config.toml` names its policy and dataset
+files relatively, and the daemon resolves those against its own working
+directory, so diff a copy with both kinds of path rewritten to the live
+`current/` prefix:
 
 ```bash
 rbgp --addr $UDS health
 umask 077
-sed 's#"policy/#"'"$STATE"'/current/policy/#' $STATE/current/config.toml > $STATE/.compare.toml
+sed -e 's#"policy/#"'"$STATE"'/current/policy/#' \
+    -e 's#"datasets/#"'"$STATE"'/current/datasets/#' \
+    $STATE/current/config.toml > $STATE/.compare.toml
 rbgp --addr $UDS config diff $STATE/.compare.toml; echo "rc=$?"
 rm $STATE/.compare.toml
 ```
@@ -365,6 +369,8 @@ Reload-applied changes:
   Neighbors:
     ~ 10.1.0.10:
         max_prefixes_ipv4: 900 → 1000  [hot-applied]
+
+SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)
 
 Plan: 1 to change · no session resets expected
 rc=2

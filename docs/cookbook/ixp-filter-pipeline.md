@@ -30,7 +30,7 @@ context.yml
 config.toml + policy/*.rpol + datasets/*.list + render-receipt.json
         │  rustbgpd --check --strict         (full config validation)
         ▼
-swap + SIGHUP                                (parse-then-swap reload)
+swap + SIGHUP                                (one runtime generation)
         │
         ▼
 rbgp verification  +  Alice-LG via the birdwatcher adapter
@@ -167,20 +167,51 @@ rustbgpd --check --strict "$STATE/candidate/config.toml"
 # The generated rpol resolves dataset paths relative to this tree. Install the
 # config, policy, and datasets together; never update only one directory.
 rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
-systemctl reload rustbgpd        # SIGHUP: parse-then-swap
+systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
 
 Before the first cutover — or any time you want to see what a refresh
-will change — preview the candidate against the running daemon:
+will change — compare the candidate with the installed configuration
+(`rustbgpd --diff` reads `/etc/rustbgpd/config.toml` as the current side):
 
 ```bash
-rbgp config diff /var/lib/rs/candidate/config.toml
+rustbgpd --diff "$STATE/candidate/config.toml"
 ```
 
-Each changed field is annotated hot-applied / session reset / restart
-required. The daemon's reload is itself parse-then-swap: a config that
-fails to parse or validate at SIGHUP leaves the running configuration
-untouched, so a bad swap can never evict working policy.
+A joining member is listed under `Neighbors:` as `+ <address> (AS <asn>)`
+and a leaving one as `-`; changed neighbor fields are annotated hot-applied /
+session reset / restart required. The output ends with the route the reload
+will take:
+
+```text
+SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)
+
+Plan: 1 to add · no session resets expected
+```
+
+The rendered configuration names its `.rpol` and dataset files relative to
+its own directory. `rustbgpd --diff` resolves them from each file's location;
+`rbgp config diff` sends only the TOML to the daemon, which cannot resolve
+them, so it fails on a rendered candidate. Because the candidate sits in a
+different directory from the installed copy, the diff also reports the `.rpol`
+and dataset path lines as changed on every run; read the `Neighbors:` section
+and the route line.
+
+A rendered refresh — changed IRR data, a member joining or leaving with its
+`[[neighbors]]` entry and its two datasets, or both — takes the generation
+route. SIGHUP applies it as one runtime generation: unchanged members keep
+their sessions, and a failure part-way restores the prior member set,
+policies, and datasets and rejects the reload (a restore that cannot be proven
+[fences the daemon](../how-to/settlement-watchdog.md) instead). A candidate whose TOML,
+policy, or dataset files fail to load at SIGHUP is rejected before any effect.
+Either way the daemon keeps serving its previous configuration while the
+candidate stays installed on disk, and the next refresh signals it again.
+The one rendered knob outside the generation is `honor_graceful_shutdown`
+(from `graceful_shutdown.enabled`): a refresh that flips it together with
+member or IRR-data changes is rejected before any effect, so make that site
+change when nothing else changes, or restart. The
+[SIGHUP reload routes](../reference/reload-matrix.md#sighup-reload-routes)
+table lists every combination.
 
 Run the loop at the cadence your IRR data actually changes —
 arouteserver deployments typically refresh every 6–24 hours, and the
