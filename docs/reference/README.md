@@ -26,3 +26,4 @@ Look up commands, configuration, and compatibility boundaries.
 - [RFC implementation notes](rfc-notes.md) — Protocol interpretations and deviations.
 - [ASPA conformance](aspa-conformance.md) — Verification procedures and route-server scope.
 - [Path-attribute registry](path-attribute-registry.md) — Implementation, propagation, and evidence by attribute.
+- [NOTIFICATION registry](notification-registry.md) — BGP NOTIFICATION code and subcode descriptions.

@@ -47,17 +47,19 @@ streaming mode. Each stable config definition's digest covers the selected
 property schemas, its complete (order-independent) required-field set, and its
 unknown-field policy. Unselected optional sibling properties and descriptive
 prose remain outside that digest, so additive optional siblings stay possible.
-The ten contextual defaults scoped by this contract update
+The twelve contextual defaults scoped by this contract update
 are pinned separately under `config.effective_defaults`. Their named resolver
 test loads real TOML and checks omission, peer-group inheritance, derived
 values, direct overrides, address-dependent family synthesis, and conditional
 route-reflector behavior. This is a deliberately scoped guard, not an exhaustive
-catalog of every config omission behavior. Eight values remain description-only
-in the JSON Schema. `Global.dynamic_neighbor_limit = null` and
-`Neighbor.families = []` are pinned separately as serialization/schema
-representations of omission; they are not the runtime defaults of 100 and the
-address- and inheritance-dependent family set. The Python release checker pins
-the exact inventory, those two representation values, the daemon's shared
+catalog of every config omission behavior. Nine values remain description-only
+in the JSON Schema. `Global.dynamic_neighbor_limit = null`,
+`Neighbor.families = []`, and `Neighbor.min_hold_time = null` are pinned
+separately as serialization/schema representations of omission; they are not
+the runtime behavior, which is a limit of 100, the address- and
+inheritance-dependent family set, and no minimum hold-time floor unless a peer
+group supplies one. The Python release checker pins
+the exact inventory, those three representation values, the daemon's shared
 dynamic-neighbor-limit accessor, and linkage to a live, non-ignored Rust test;
 the focused Cargo test executes that test and detects runtime resolver changes.
 Nested protobuf evolution follows the compatibility rules below. The
