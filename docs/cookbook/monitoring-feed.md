@@ -33,6 +33,10 @@ asn = 65000
 router_id = "10.255.0.1"
 listen_port = 179
 cluster_id = "10.255.0.1"
+# RFC 8212 posture, stated explicitly. It governs eBGP sessions only, so
+# these iBGP clients are unaffected; an eBGP neighbor added later needs
+# explicit import and export policy.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -63,9 +67,10 @@ sys_name = "rustbgpd-feed"
 sys_descr = "fabric RR monitoring feed"
 
 # Production collector: BMP v3 (the default), all three RIB views.
-# When a collector connects it receives a chunked dump of the current
-# table state followed by End-of-RIB, then deltas (RFC 9069 §"on
-# connect" behavior — no daemon restart needed to attach a collector).
+# On (re)connect the collector receives Initiation and the cached Peer Up
+# state; the loc_rib view also gets a chunked Loc-RIB dump closed by
+# End-of-RIB. rib_in_pre and rib_out_post have no reconnect dump and start
+# at the next UPDATE. No daemon restart is needed to attach a collector.
 [[bmp.collectors]]
 address = "10.20.0.10:1790"
 reconnect_interval = 5
@@ -107,10 +112,10 @@ $ rbgp health
 $ rbgp neighbor
 ```
 
-**BMP:** on the collector you should see Initiation, one PeerUp per
-established peer per view, the chunked table dump, End-of-RIB, then
-live RouteMonitoring deltas. From the daemon side the collector
-connection state is visible in the logs (`log_format = "json"`) and
+**BMP:** on the collector you should see Initiation, the Peer Ups, the
+chunked Loc-RIB dump and its End-of-RIB (`loc_rib` only), then live
+RouteMonitoring deltas for every selected view. From the daemon side the
+collector connection state is visible in the logs (`log_format = "json"`) and
 the BMP metrics below. Periodic peer Stats Reports also carry RFC 9972
 post-policy accepted-route gauges, exact type-22 IPv4/IPv6-unicast policy
 reject counts, and exact per-path RPKI Invalid/Valid/NotFound types 35/36/37.

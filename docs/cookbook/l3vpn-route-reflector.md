@@ -39,6 +39,10 @@ asn = 65000
 router_id = "10.0.0.1"
 listen_port = 179
 cluster_id = "10.0.0.1"
+# RFC 8212 posture, stated explicitly. It governs eBGP sessions only, so
+# these iBGP clients are unaffected; an eBGP neighbor added later needs
+# explicit import and export policy.
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -98,7 +102,8 @@ $ export RUSTBGPD_ADDR=unix:///var/lib/rustbgpd/grpc.sock
 $ rbgp neighbor
 ```
 
-All PEs `Established`. Note the update-group column: since
+All PEs `Established`. The per-peer detail view (`rbgp neighbor 10.0.0.11`)
+shows each PE's `Update Group` line: since
 [ADR-0099](../adr/0099-update-groups-v2.md), RTC negotiation is part
 of the group key, **not** a per-peer fallback — PEs with entirely
 different RT memberships still share one group and one staging pass;
@@ -111,12 +116,21 @@ $ rbgp rib vpn                          # VPNv4/VPNv6: RD, prefix, label, RTs
 $ rbgp rib vpn -a vpnv6                 # VPNv6 only
 $ rbgp rib rtc                          # RT-Constrain NLRIs per peer
 $ rbgp rib rtc --neighbor 10.0.0.11     # what pe-1 says it imports
-$ rbgp rib advertised 10.0.0.12 -a l3vpn_ipv4_unicast   # what pe-2 gets
 ```
 
-Expected shape: `rbgp rib advertised` toward an RTC peer shows only
-routes whose RTs intersect that peer's membership;
-toward `controller-feed` it shows every VPN route.
+There is no per-peer VPN advertised-route listing: `rbgp rib advertised`
+does not accept a VPN family. Check what a PE gets one route at a time with
+the VPN export ladder, which includes the RT-membership gate:
+
+```console
+$ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.12 --explain --rd 65000:1
+```
+
+Toward an RTC peer the route passes `rt_membership` only when its RTs
+intersect that peer's membership; toward `controller-feed`, which did not
+negotiate RT-Constrain, the gate reports `n/a` and export is unfiltered.
+For the full outbound view, capture a BMP `rib_out_post` stream
+([monitoring feed](monitoring-feed.md)).
 
 Refresh a PE's VPN view without touching the session (the stale
 lifecycle is BoRR/EoRR-bounded per RFC 7313):
@@ -154,9 +168,10 @@ RT-membership gate:
 $ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.11 --explain --rd 65000:1
 ```
 
-A STOP at `rt_membership` names exactly this condition; the ladder
-otherwise mirrors the unicast one
-(`best_route → … → rt_membership → export_policy → adj_rib_out`).
+A STOP at `rt_membership` names exactly this condition. The VPN ladder runs
+`best_route → llgr → rt_membership → split_horizon → rr_reflection →
+export_policy → adj_rib_out`; a well-known-community suppression stops
+before `export_policy`.
 
 **The controller feed receives "too much".** By design: no SAFI 132
 negotiated → full table. If the consumer should be filtered, negotiate
@@ -169,6 +184,7 @@ resumes without a blackout when the PE returns (M77). If a PE never
 returns, both the routes and its membership expire with LLGR.
 
 **A VRF is torn down on a PE but its routes linger on other PEs.**
-Check the withdraw actually arrived: `rbgp events --prefix <pfx>`
-shows the per-prefix route-event history, and `rbgp rib vpn --neighbor
-<pe>` shows what the RR still holds from that PE.
+Check what the RR still holds from that PE with `rbgp rib vpn --neighbor <pe>`
+(`-a vpnv4` or `-a vpnv6` to narrow). VPN routes have no route-event history,
+so confirm the withdraw arrived with a BMP `rib_in_pre` collector or the PE's
+logs.
