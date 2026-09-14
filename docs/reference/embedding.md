@@ -222,7 +222,7 @@ let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
 This is the "k8s sidecar / SDN controller / test harness" consumer. Links
 `rustbgpd-wire` + `rustbgpd-fsm`. The FSM is pure: it produces `Action`s from
 `Event`s; the *embedder* owns the TCP socket and the timers. This is the
-intentional split (ADR-0002: inherent methods, no I/O in the FSM).
+intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 
 ```toml
 # Cargo.toml
@@ -262,7 +262,7 @@ fn start_session() -> Result<Session, Box<dyn std::error::Error>> {
         }
     }
 
-    // 4. On peer OPEN received: feed Event::BgpOpen -> the FSM validates and
+    // 4. On peer OPEN received: feed Event::OpenReceived(open) -> the FSM validates and
     //    emits SendKeepalive. On KEEPALIVE in OpenConfirm: -> Established.
     //    The embedder maps Action::SendKeepalive to Message::Keepalive.
     assert_eq!(sm.state(), SessionState::Connect); // until TCP confirms
@@ -331,8 +331,9 @@ External consumers do **not** link `rustbgpd-api`. That crate is `publish =
 false` — it is the daemon's own generated server types and is not resolvable
 from outside this repository. The supported path is to generate a client from
 [`proto/rustbgpd.proto`](../../proto/rustbgpd.proto), which is self-contained: it
-declares package `rustbgpd.v1` and imports nothing, so no well-known-type
-include path is required.
+declares package `rustbgpd.v1` and imports only the well-known type
+`google/protobuf/field_mask.proto`, which protoc, `tonic-prost-build`, and
+`grpcio-tools` bundle, so no extra include path is normally required.
 
 - **Rust** — `tonic-prost-build` in a `build.rs` (`compile_protos`), the same
   codegen the daemon itself uses; `tonic` + `tokio` at runtime.
@@ -500,10 +501,14 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      is `#[non_exhaustive]` or gets a constructor/default path. The published
      crate already has the forward-compat boundary: `PeerConfig`,
      `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
-   The `0.7.0` line pairs with wire `0.20.0`, which changes the identity of
-   wire types exposed through the FSM, so an embedder still on `0.5.0` moves
-   both crates in one step. It also adds `Event::AdministrativeReset` to the
-   non-exhaustive event enum.
+   The `0.6.0` line pairs with wire `0.19.0` and adds
+   `Event::AdministrativeReset` to the non-exhaustive event enum. The `0.7.0`
+   line pairs with wire `0.20.0`, which changes the identity of wire types
+   exposed through the FSM, so an embedder on `0.6.0` moves both crates in one
+   step. It advertises the RFC 8950 1/128/2 tuple whenever VPNv4 is configured
+   and limits `add_path_families` / `extended_nexthop_families` to the
+   negotiated MultiProtocol intersection. The `0.8.0` line pairs with wire
+   `0.21.0` with no direct FSM API or behavior change.
 
 3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
    Why it is independent:
@@ -519,7 +524,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      no earlier public RPKI line to bump
      away from, so the first release, `0.1.0`, started directly on wire
      `0.19.0`. The RPKI `0.2.0` line pairs with wire `0.20.0`.
-   - Prepared `0.3.0` pairs with wire `0.21.0` and also marks `RtrPdu`,
+   - The RPKI `0.3.0` line pairs with wire `0.21.0` and also marks `RtrPdu`,
      `RtrDecodeError`, `RtrEncodeError`, and `RtrError` non-exhaustive.
      Downstream exhaustive matches need a fallback; existing variant
      constructors and fields remain available. `ProviderAuth` and `VrpUpdate`

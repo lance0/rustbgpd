@@ -7,7 +7,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-The source checkout prepares the `0.3.0` compatibility line with wire `0.21.0`.
+`rustbgpd-rpki` 0.3.0 is released on the `0.3` compatibility line with wire `0.21.0`.
 Upgrade dependencies that exchange public wire types together. This release also
 makes four RTR enums non-exhaustive; downstream exhaustive matches need a
 fallback, as described under [Enum exhaustiveness](#enum-exhaustiveness).
@@ -123,7 +123,8 @@ The crate-root facade exports the primary application surface:
   `MAX_COVERING_VRPS`, `AspaRecord`, and `AspaTable`
 - `AspaInvalidHop`, `AspaVerificationResult`, and `ValidationSnapshot`
 - `RtrClient`, `RtrClientConfig`, `VrpUpdate`, and `RTR_EXPIRE_MAX_SECS`
-- `CacheInventoryAttachment`, `CacheUpdateHandle`, and `CacheQueryHandle` for
+- `CacheInventoryAttachment`, `CacheUpdateHandle`, `CacheQueryHandle`,
+  `CacheList`, `CacheState`, `AcceptedCacheState`, and `CacheQueryError` for
   atomic accepted-epoch inventory when the optional attachment is used
 - `VrpManager`, `RpkiTableUpdate`, and `AspaTableUpdate`
 
@@ -140,8 +141,8 @@ details.
 This is an alpha `0.x` crate. Backward-compatible fixes and additions use patch
 releases within a compatibility line. Breaking public API changes or an
 incompatible public wire-type dependency require the next `0.x` minor version.
-The first `0.1.x` line used wire `0.19`; published `0.2.x` uses wire `0.20`.
-The prepared `0.3.x` line uses wire `0.21` and adopts the enum policy below.
+The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
+published `0.3.x` line uses wire `0.21` and adopts the enum policy below.
 
 ## Enum exhaustiveness
 

@@ -18,7 +18,7 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 ### 0.21.0 compatibility note
 
-The source checkout prepares `rustbgpd-wire` 0.21.0 with FSM 0.8 and RPKI 0.3.
+`rustbgpd-wire` 0.21.0 is released and pairs with FSM 0.8 and RPKI 0.3.
 Consumers exchanging wire types across these crates must move to the matching
 dependency lines together. Existing parse and validation signatures remain
 available; the new `DecodeError` variants extend a `#[non_exhaustive]` enum.
@@ -158,7 +158,7 @@ are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
 | 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
 | 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
-| 4486 | NOTIFICATION subcodes |
+| 4486 | NOTIFICATION subcodes: Cease subcode constants, and `notification::description` labels for registered and deprecated code/subcode pairs, with explicit fallbacks for reserved or unassigned values |
 | 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
@@ -187,14 +187,17 @@ are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
 | 8538 | Notification GR (N-bit) |
 | 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
 | 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
+| 8669 | BGP Prefix-SID attribute (type 40): generic TLV framing validation with attribute-discard on malformed framing; values are retained opaquely |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes |
 | 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
 | 9135 | EVPN integrated routing for IRB |
 | 9136 | EVPN Type 5: IP Prefix advertisement |
 | 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer(u32)` and `PathAttribute::OnlyToCustomerPartial(u32)`). Valid OTC stays typed and preserves Partial; Extended Length input canonicalizes on emission. The legacy decoder reports malformed flags/length with the RFC 4271 subcode and offending attribute data, while revised decoding omits the attribute and records RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
+| 9252 §7 | SRv6 L3/L2 Service TLV framing inside Prefix-SID, with treat-as-withdraw for recognized service malformation; `decode_prefix_sid_services` returns the first L3/L2 services, advertised SIDs, behavior codes, flags, and SID Structure fields. No SID reconstruction, eligibility decision, origination, or forwarding |
+| 9384 | Cease subcode 10, BFD Down (`cease_subcode::BFD_DOWN`) |
 | 9494 | Long-lived graceful restart capability |
 | 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
 | 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
@@ -474,6 +477,9 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   §4.3.4 `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (reduced
   and full RFC 4760 forms; returns the next hop plus the RFC 2545 link-local
   half of a 32-octet next hop)
+- **`decode_prefix_sid_services`** / **`Srv6Service`** / **`Srv6SidInformation`** /
+  **`Srv6SidStructure`** — structural RFC 9252 SRv6 service inspection of a raw
+  Prefix-SID value, without SID reconstruction or forwarding interpretation
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried by `PathAttribute::PmsiTunnel` or `PmsiTunnelPartial` on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and
   VPNv4/v6. Implements `Display` + `FromStr` for the structured `asn:val` /

@@ -10,7 +10,7 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-The source checkout prepares the `0.8.0` compatibility line with wire `0.21.0`.
+`rustbgpd-fsm` 0.8.0 is released on the `0.8` compatibility line with wire `0.21.0`.
 Upgrade dependencies that exchange public wire types together. This dependency
 move introduces no direct FSM API or runtime behavior changes.
 
@@ -100,11 +100,24 @@ wire release is API-additive and retains existing decoder result shapes; review
 the itemized "0.19.0 compatibility note" in the wire README for its new
 observation surfaces and framing refinements.
 
+`rustbgpd-fsm 0.7.0` moves the exposed wire-type boundary to
+`rustbgpd-wire 0.20.0`; an embedder on `0.6.0` upgrades both crates in one
+step. Existing signatures are unchanged, but negotiation behavior changes in
+two places: `PeerConfig::local_capabilities` and
+`extended_nexthop_capabilities` advertise the RFC 8950 tuple 1/128/2 whenever
+VPNv4 is configured, and `validate_open` limits
+`NegotiatedSession::add_path_families` and `extended_nexthop_families` to the
+negotiated MultiProtocol intersection.
+
+`rustbgpd-fsm 0.8.0` moves the exposed wire-type boundary to
+`rustbgpd-wire 0.21.0` with no direct FSM API or runtime behavior change; see
+the "0.21.0 compatibility note" in the wire README.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
 - **`SessionState`** — `Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`, `Established`
-- **`Event`** — `ManualStart`, `TcpConnectionConfirmed`, `BgpOpen`, `KeepAliveTimerExpires`, etc.
+- **`Event`** — `ManualStart`, `TcpConnectionConfirmed`, `OpenReceived`, `KeepaliveTimerExpires`, etc.
 - **`Action`** — `SendOpen`, `SendKeepalive`, `SendNotification`, `StartTimer`, `StopTimer`, etc.
 - **`NegotiatedSession`** — post-OPEN capabilities: families, Add-Path modes,
   `peer_paths_limits` / `effective_add_path_send_limits`, GR state, extended
