@@ -790,9 +790,81 @@ fn effective_to_json(toml_text: &str) -> Result<serde_json::Value, CliError> {
     })
 }
 
+fn resolve_candidate_path(base_dir: &std::path::Path, value: &str) -> Result<String, CliError> {
+    let p = std::path::Path::new(value);
+    if p.is_absolute() {
+        Ok(value.to_string())
+    } else {
+        let joined = base_dir.join(p);
+        joined.to_str().map(|s| s.to_string()).ok_or_else(|| {
+            CliError::Argument(format!("candidate path is not valid UTF-8: {value}"))
+        })
+    }
+}
+
+pub(crate) fn normalize_candidate_paths(
+    raw: &str,
+    candidate_file: &std::path::Path,
+) -> Result<String, CliError> {
+    let mut document: toml::Value = match toml::from_str(raw) {
+        Ok(doc) => doc,
+        Err(_) => return Ok(raw.to_string()),
+    };
+
+    let abs_candidate = std::path::absolute(candidate_file).map_err(|error| {
+        CliError::Argument(format!("failed to resolve candidate path: {error}"))
+    })?;
+    let base_dir = abs_candidate
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut changed = false;
+
+    if let Some(policy) = document
+        .get_mut("policy")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for key in ["rpol_files", "rpol_roots"] {
+            if let Some(paths) = policy.get_mut(key).and_then(toml::Value::as_array_mut) {
+                for path in paths {
+                    if let Some(s) = path.as_str()
+                        && std::path::Path::new(s).is_relative()
+                    {
+                        *path = toml::Value::String(resolve_candidate_path(&base_dir, s)?);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if let Some(datasets) = policy
+            .get_mut("datasets")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (_, dataset) in datasets.iter_mut() {
+                if let Some(path) = dataset.get_mut("path")
+                    && let Some(s) = path.as_str()
+                    && std::path::Path::new(s).is_relative()
+                {
+                    *path = toml::Value::String(resolve_candidate_path(&base_dir, s)?);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        toml::to_string(&document).map_err(|error| {
+            CliError::Argument(format!("failed to serialize normalized candidate: {error}"))
+        })
+    } else {
+        Ok(raw.to_string())
+    }
+}
+
 fn read_candidate_toml(from_file: &str) -> Result<String, CliError> {
-    std::fs::read_to_string(from_file)
-        .map_err(|error| CliError::Argument(format!("failed to read {from_file}: {error}")))
+    let raw = std::fs::read_to_string(from_file)
+        .map_err(|error| CliError::Argument(format!("failed to read {from_file}: {error}")))?;
+    normalize_candidate_paths(&raw, std::path::Path::new(from_file))
 }
 
 fn preflight_config_request(request: &impl Message, from_file: &str) -> Result<(), CliError> {
@@ -2677,5 +2749,113 @@ mod tests {
         });
         assert!(value["confirmation"].is_null());
         assert_eq!(value["human_text"], "No confirmed config transaction.\n");
+    }
+
+    #[test]
+    fn normalize_candidate_paths_rewrites_relative_rpol_and_dataset_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate_path = dir.path().join("candidate.toml");
+        let canonical_dir = std::path::absolute(dir.path()).unwrap();
+        let raw = r#"[policy]
+rpol_files = ["policy/ixp.rpol"]
+rpol_roots = ["policy"]
+
+[policy.datasets.client-origins]
+path = "datasets/client-origins.list"
+"#;
+        let normalized = normalize_candidate_paths(raw, &candidate_path).unwrap();
+        let doc: toml::Value = toml::from_str(&normalized).unwrap();
+        let policy = doc.get("policy").unwrap();
+        let rpol_files = policy.get("rpol_files").unwrap().as_array().unwrap();
+        assert_eq!(
+            rpol_files[0].as_str().unwrap(),
+            canonical_dir.join("policy/ixp.rpol").to_str().unwrap()
+        );
+        let rpol_roots = policy.get("rpol_roots").unwrap().as_array().unwrap();
+        assert_eq!(
+            rpol_roots[0].as_str().unwrap(),
+            canonical_dir.join("policy").to_str().unwrap()
+        );
+        let datasets = policy.get("datasets").unwrap().as_table().unwrap();
+        assert_eq!(
+            datasets["client-origins"]["path"].as_str().unwrap(),
+            canonical_dir
+                .join("datasets/client-origins.list")
+                .to_str()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn normalize_candidate_paths_preserves_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate_path = dir.path().join("candidate.toml");
+        let raw = r#"[policy]
+rpol_files = ["/etc/rustbgpd/policy/ixp.rpol"]
+rpol_roots = ["/etc/rustbgpd/policy"]
+
+[policy.datasets.client-origins]
+path = "/var/lib/rustbgpd/datasets/client-origins.list"
+"#;
+        let normalized = normalize_candidate_paths(raw, &candidate_path).unwrap();
+        assert_eq!(normalized, raw);
+    }
+
+    #[test]
+    fn normalize_candidate_paths_preserves_symlinked_base_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_dir = temp.path().join("gen-1");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let symlink_dir = temp.path().join("current");
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        let candidate_path = symlink_dir.join("config.toml");
+        let raw = r#"[policy]
+rpol_files = ["policy/ixp.rpol"]
+rpol_roots = ["policy"]
+
+[policy.datasets.client-origins]
+path = "datasets/client-origins.list"
+"#;
+        let normalized = normalize_candidate_paths(raw, &candidate_path).unwrap();
+        let doc: toml::Value = toml::from_str(&normalized).unwrap();
+        let policy = doc.get("policy").unwrap();
+        let rpol_files = policy.get("rpol_files").unwrap().as_array().unwrap();
+
+        let expected_prefix = std::path::absolute(&symlink_dir).unwrap();
+        let expected_prefix_str = expected_prefix.to_str().unwrap();
+
+        assert!(
+            rpol_files[0]
+                .as_str()
+                .unwrap()
+                .starts_with(expected_prefix_str),
+            "expected prefix {expected_prefix_str}, got {}",
+            rpol_files[0].as_str().unwrap()
+        );
+        assert!(
+            !rpol_files[0].as_str().unwrap().contains("gen-1"),
+            "path must not dereference the symlink to gen-1: {}",
+            rpol_files[0].as_str().unwrap()
+        );
+        assert_eq!(
+            rpol_files[0].as_str().unwrap(),
+            expected_prefix.join("policy/ixp.rpol").to_str().unwrap()
+        );
+        let datasets = policy.get("datasets").unwrap().as_table().unwrap();
+        assert_eq!(
+            datasets["client-origins"]["path"].as_str().unwrap(),
+            expected_prefix
+                .join("datasets/client-origins.list")
+                .to_str()
+                .unwrap()
+        );
+    }
+    #[test]
+    fn normalize_candidate_paths_leaves_invalid_toml_untouched() {
+        let path = std::path::Path::new("some/path.toml");
+        let raw = "not valid toml ::: [[]]";
+        let normalized = normalize_candidate_paths(raw, path).unwrap();
+        assert_eq!(normalized, raw);
     }
 }

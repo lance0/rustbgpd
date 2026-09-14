@@ -24,6 +24,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   update on reload.
 
 ### Fixed
+- `rbgp config diff`, `plan`, and `apply` now resolve relative `rpol_files`,
+  `rpol_roots`, and `[policy.datasets.*].path` references against the candidate
+  file's parent directory before sending the candidate TOML to the daemon. The
+  daemon evaluates gRPC configuration candidates without an inherited working
+  directory, so relative policy and dataset paths previously failed with
+  missing-file errors when comparing or planning candidates outside the daemon's
+  working directory.
 
 - SIGHUP now applies `[policy.datasets]` binding changes through the same
   compensated runtime generation as dataset contents instead of rejecting
