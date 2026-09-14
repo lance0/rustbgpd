@@ -23,6 +23,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`bgp_dynamic_neighbor_slots_limit`, `bgp_dynamic_neighbor_slots_headroom`)
   update on reload.
 
+- **Operator-visible:** `rbgp config diff` and `rustbgpd --diff` now print
+  `datasets: contents not compared (N declared); a reload re-reads them`
+  whenever the candidate declares `[policy.datasets]`, and no longer print
+  `No changes.` for such a candidate, because previews compare configuration
+  and bindings but never dataset file contents. The JSON output adds
+  `declared_datasets_count` under both `summary` and `reload_applied`. Exit
+  codes are unchanged: an IRR-only refresh that changes dataset files while
+  the TOML stays identical still exits 0, so reload on every rendered refresh
+  rather than gating the reload on the diff's exit code.
+
 ### Fixed
 - `rbgp config diff`, `plan`, and `apply` now resolve relative `rpol_files`,
   `rpol_roots`, and `[policy.datasets.*].path` references against the candidate

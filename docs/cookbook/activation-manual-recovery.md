@@ -355,9 +355,12 @@ Status:  healthy
 Uptime:  00:00:05
 Peers:   0
 Routes:  0
-No changes.
+datasets: contents not compared (4 declared); a reload re-reads them
 rc=0
 ```
+
+Every rendered generation declares two datasets per client, so the diff
+never prints `No changes.` here; `rc=0` is the settlement signal.
 
 **Live but still on the previous generation** (`runtime_equals_current: no`);
 the diff lists exactly what the daemon is missing:
@@ -378,8 +381,8 @@ rc=2
 
 Confirm by diffing the previous generation from the receipt the same way
 (`sed … $STATE/generations/<previous_generation>/config.toml`, still rewriting
-to the `current/` prefix): `No changes.` / `rc=0` means the daemon runs the
-previous generation.
+to the `current/` prefix): `rc=0` (with only the `datasets: contents not
+compared` notice printed) means the daemon runs the previous generation.
 
 **Down** (`daemon: unreachable`):
 

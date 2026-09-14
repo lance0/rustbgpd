@@ -511,13 +511,13 @@ kill -HUP $(pidof rustbgpd)
 ```
 
 `rustbgpd --diff` calls into the same `ConfigDiff` machinery and route
-classifier the reload path uses. It cannot see live runtime conditions: SIGHUP
-also checks staged dataset contents and loader errors when it picks the route,
-and actor availability, convergence, or a late failure are runtime outcomes.
-`rbgp config diff` sends only the candidate TOML to the daemon, which resolves
-relative `.rpol` and dataset paths against its own working directory rather
-than the candidate's; use absolute paths or `rustbgpd --diff` for such a
-candidate.
+classifier the reload path uses. Previews evaluate configuration and bindings,
+not dataset file contents: when datasets are declared, `rustbgpd --diff` and
+`rbgp config diff` report `datasets: contents not compared (N declared); a reload re-reads them`
+rather than claiming `No changes.` SIGHUP re-reads the staged dataset files and
+evaluates loader errors when it executes the generation route. `rbgp config diff`
+resolves relative `.rpol` and dataset paths from the candidate file's directory
+before sending the configuration to the daemon.
 
 ## Related
 

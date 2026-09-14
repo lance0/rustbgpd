@@ -208,6 +208,17 @@ Because the candidate sits in a different directory from the installed copy,
 the diff also reports the `.rpol` and dataset path lines as changed on every
 run; read the `Neighbors:` section and the route line.
 
+Previews compare configuration and bindings; they do not evaluate dataset
+file contents. When the candidate declares datasets, `rbgp config diff` and
+`rustbgpd --diff` report `datasets: contents not compared (N declared); a reload re-reads them`.
+For an IRR-only refresh where member prefix or origin lists change while the
+member roster and config text remain identical, the diff flags the uncompared
+datasets and omits `No changes.`; SIGHUP re-reads the updated dataset files
+on disk and applies the new filters as a generation. The exit code is still
+`0` for such a refresh, so a cron must not gate `systemctl reload` on the
+diff's exit code when datasets are declared; reload on every rendered refresh,
+as the block above does.
+
 Without a reachable daemon, `rustbgpd --diff` prints the same report offline.
 It reads `/etc/rustbgpd/config.toml` as the current side and resolves each
 file's paths from that file's location:
