@@ -3548,7 +3548,7 @@ impl PeerManager {
         // A positively known-down peer holds the accepted session chain
         // for the new import/export policy, so it owes no Route Refresh
         // and no convergence-debt rollback; record the classification
-        // so the debt scan seats it out.
+        // so the debt scan skips it.
         if let Some(managed) = self.peers.get_mut(&peer_key) {
             managed.policy_known_down = is_known_non_established;
         }
