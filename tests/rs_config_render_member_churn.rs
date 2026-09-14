@@ -24,8 +24,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
@@ -214,7 +214,12 @@ impl Drop for DaemonKiller {
 }
 
 struct PeerHandle {
+    /// Set once the daemon's first KEEPALIVE arrives (its OPEN was already
+    /// read during the handshake); cleared when the peer task exits.
     established: Arc<AtomicBool>,
+    /// `(code, subcode)` of a NOTIFICATION received from the daemon, so a
+    /// daemon-initiated teardown is attributable rather than a later socket close.
+    notification: Arc<Mutex<Option<(u8, u8)>>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
 }
@@ -224,11 +229,38 @@ impl PeerHandle {
         self.established.load(Ordering::Acquire)
     }
 
+    fn notification(&self) -> Option<(u8, u8)> {
+        *self.notification.lock().expect("notification lock")
+    }
+
     async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
         let _ = self.join.await;
+    }
+}
+
+/// Decode every complete inbound message: the first KEEPALIVE marks the
+/// session established on the peer side; a NOTIFICATION is recorded.
+fn drain_inbound(
+    read_buf: &mut BytesMut,
+    established: &AtomicBool,
+    notification: &Mutex<Option<(u8, u8)>>,
+) {
+    while let Ok(Some(total)) = peek_message_length(read_buf, MAX_MESSAGE_LEN) {
+        if read_buf.len() < usize::from(total) {
+            break;
+        }
+        let mut body = read_buf.split_to(usize::from(total)).freeze();
+        match decode_message(&mut body, MAX_MESSAGE_LEN) {
+            Ok(Message::Keepalive) => established.store(true, Ordering::Release),
+            Ok(Message::Notification(n)) => {
+                *notification.lock().expect("notification lock") =
+                    Some((n.code.as_u8(), n.subcode));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -276,6 +308,7 @@ async fn spawn_ebgp_peer(
         .map_err(|e| format!("open write: {e}"))?;
 
     let mut buf = BytesMut::with_capacity(4096);
+    let mut early_keepalive = false;
     loop {
         if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN)
             && buf.len() >= usize::from(total)
@@ -289,6 +322,7 @@ async fn spawn_ebgp_peer(
                         n.code, n.subcode
                     ));
                 }
+                Ok(Message::Keepalive) => early_keepalive = true,
                 Ok(_) => continue,
                 Err(e) => return Err(format!("decode error during open: {e}")),
             }
@@ -311,8 +345,10 @@ async fn spawn_ebgp_peer(
         .await
         .map_err(|e| format!("keepalive write: {e}"))?;
 
-    let established = Arc::new(AtomicBool::new(true));
+    let established = Arc::new(AtomicBool::new(early_keepalive));
     let est_flag = Arc::clone(&established);
+    let notification = Arc::new(Mutex::new(None));
+    let notification_slot = Arc::clone(&notification);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (mut reader, mut writer) = stream.into_split();
@@ -322,8 +358,11 @@ async fn spawn_ebgp_peer(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await;
 
-        let mut read_buf = BytesMut::with_capacity(4096);
+        // Bytes read past the daemon's OPEN during the handshake may already
+        // hold its first KEEPALIVE.
+        let mut read_buf = buf;
         let mut tmp = [0u8; 4096];
+        drain_inbound(&mut read_buf, &est_flag, &notification_slot);
 
         loop {
             tokio::select! {
@@ -340,12 +379,7 @@ async fn spawn_ebgp_peer(
                     let Ok(n) = read_res else { break };
                     if n == 0 { break; }
                     read_buf.extend_from_slice(&tmp[..n]);
-                    while let Ok(Some(total)) = peek_message_length(&read_buf, MAX_MESSAGE_LEN) {
-                        if read_buf.len() < usize::from(total) {
-                            break;
-                        }
-                        let _ = read_buf.split_to(usize::from(total));
-                    }
+                    drain_inbound(&mut read_buf, &est_flag, &notification_slot);
                 }
             }
         }
@@ -354,6 +388,7 @@ async fn spawn_ebgp_peer(
 
     Ok(PeerHandle {
         established,
+        notification,
         shutdown_tx: Some(shutdown_tx),
         join,
     })
@@ -491,9 +526,6 @@ fi
         .await
         .expect("peer 2 establishes");
 
-    assert!(peer1.is_established(), "peer 1 must be established");
-    assert!(peer2.is_established(), "peer 2 must be established");
-
     // Wait until daemon gRPC reports both peers in state Established
     let both_established = wait_until(Duration::from_secs(5), || {
         let list = rbgp_json(&rbgp_addr, &["--json", "neighbor"]);
@@ -504,11 +536,25 @@ fi
             && neighbors
                 .iter()
                 .all(|n| n["state"] == "Established" && n["flap_count"] == 0)
+            && peer1.is_established()
+            && peer2.is_established()
     })
     .await;
     assert!(
         both_established,
         "both initial neighbors must appear Established with 0 flaps in rbgp"
+    );
+    assert!(peer1.is_established(), "peer 1 must be established");
+    assert!(peer2.is_established(), "peer 2 must be established");
+    assert_eq!(
+        peer1.notification(),
+        None,
+        "peer 1 must not receive a NOTIFICATION"
+    );
+    assert_eq!(
+        peer2.notification(),
+        None,
+        "peer 2 must not receive a NOTIFICATION"
     );
 
     // Record initial session statistics
@@ -543,6 +589,7 @@ fi
     let pre_diff = rbgp(
         &rbgp_addr,
         &[
+            "--json",
             "config",
             "diff",
             candidate.join("config.toml").to_str().unwrap(),
@@ -553,10 +600,19 @@ fi
         Some(2),
         "pre-activation diff must exit 2 indicating pending candidate changes"
     );
-    let pre_diff_stdout = String::from_utf8_lossy(&pre_diff.stdout);
-    assert!(
-        pre_diff_stdout.contains("generation") || pre_diff_stdout.contains("client-3"),
-        "pre-activation diff must report generation route or member 3 changes:\n{pre_diff_stdout}"
+    let pre_diff_json: serde_json::Value =
+        serde_json::from_slice(&pre_diff.stdout).expect("parse pre-activation diff JSON");
+    assert_eq!(
+        pre_diff_json["has_any_changes"], true,
+        "pre-activation diff must report changes:\n{pre_diff_json:#}"
+    );
+    assert_eq!(
+        pre_diff_json["summary"]["neighbors_added"], 1,
+        "pre-activation diff must add exactly member 3:\n{pre_diff_json:#}"
+    );
+    assert_eq!(
+        pre_diff_json["sighup_reload"]["route"], "generation",
+        "member join with dataset bindings must route through the generation executor:\n{pre_diff_json:#}"
     );
 
     // Activate the 3-member candidate
@@ -632,12 +688,29 @@ fi
     );
     assert_eq!(n1_after["flap_count"], 0, "member 1 flap count must stay 0");
     assert_eq!(n2_after["flap_count"], 0, "member 2 flap count must stay 0");
+    assert!(
+        peer1.is_established(),
+        "peer 1 must remain established after join reload"
+    );
+    assert!(
+        peer2.is_established(),
+        "peer 2 must remain established after join reload"
+    );
+    assert_eq!(
+        peer1.notification(),
+        None,
+        "peer 1 must not receive a NOTIFICATION"
+    );
+    assert_eq!(
+        peer2.notification(),
+        None,
+        "peer 2 must not receive a NOTIFICATION"
+    );
 
     // Now connect Member 3
     let peer3 = spawn_ebgp_peer(&MEMBER_3, daemon_bgp_addr)
         .await
         .expect("peer 3 establishes");
-    assert!(peer3.is_established(), "peer 3 must be established");
 
     let all_three_established = wait_until(Duration::from_secs(5), || {
         let list = rbgp_json(&rbgp_addr, &["--json", "neighbor"]);
@@ -648,11 +721,18 @@ fi
             && neighbors
                 .iter()
                 .all(|n| n["state"] == "Established" && n["flap_count"] == 0)
+            && peer3.is_established()
     })
     .await;
     assert!(
         all_three_established,
         "all three neighbors must be Established with 0 flaps"
+    );
+    assert!(peer3.is_established(), "peer 3 must be established");
+    assert_eq!(
+        peer3.notification(),
+        None,
+        "peer 3 must not receive a NOTIFICATION"
     );
 
     // =========================================================================
@@ -734,6 +814,24 @@ fi
     assert_eq!(n2_final["state"], "Established");
     assert_eq!(n1_final["flap_count"], 0);
     assert_eq!(n2_final["flap_count"], 0);
+    assert!(
+        peer1.is_established(),
+        "peer 1 must remain established after leave reload"
+    );
+    assert!(
+        peer2.is_established(),
+        "peer 2 must remain established after leave reload"
+    );
+    assert_eq!(
+        peer1.notification(),
+        None,
+        "peer 1 must not receive a NOTIFICATION"
+    );
+    assert_eq!(
+        peer2.notification(),
+        None,
+        "peer 2 must not receive a NOTIFICATION"
+    );
 
     // Cleanly shutdown peers 1 and 2
     peer1.shutdown().await;
