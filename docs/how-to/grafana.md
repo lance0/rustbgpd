@@ -95,7 +95,8 @@ the query scan can grow even though the displayed result is aggregated.
 
 ## Alert rules
 
-A ready-to-load Prometheus alert-rule pack (session down/flapping,
+A ready-to-load Prometheus alert-rule pack (rules include daemon down and
+restarted, slow runtime-config settlement, session down/flapping,
 empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
@@ -104,8 +105,10 @@ dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
 send-hold teardown, session event source loss, live event-stream
-lag/desynchronization, BMP feed loss,
-stale MRT dumps, and daemon down)
+lag/desynchronization, BMP feed loss and stream divergence, BMP
+control-event and Loc-RIB source drops, policy evaluation errors, BLACKHOLE
+discard install activity and admission limits, RPKI cache End-of-Data
+readiness, and stale MRT dumps)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
@@ -295,8 +298,8 @@ outbound-blocking axis and exclusion, and dynamic-neighbor capacity/rejection
 semantics. Descriptions, layout, row collapsed state, and particular unique IDs
 are intentionally presentation choices rather than validation contracts.
 
-For the EVPN Alpha dashboard, the checker additionally freezes all 38 current
-`evpn_*` family names, metric kinds, and constructor labels. Counter panels must
+For the EVPN Alpha dashboard, the checker additionally freezes every current
+`evpn_*` family name, metric kind, and constructor label. Counter panels must
 use `rate` or `increase` before aggregation; gauges must remain raw. It rejects
 unknown selector labels, unsafe retention of MAC/ESI/name-style dimensions,
 non-regex use of multi-value variables, metric typos, missing Alpha or operator
