@@ -60,7 +60,10 @@ The recipes intentionally expose their direct commands:
   docs, in that order.
   This is the broad local baseline and can take several minutes on a cold
   target directory. It is composed from the tiered recipes below and runs the
-  same commands in the same order as before the split.
+  same commands in the same order as before the split. It holds the repository
+  build lock (`scripts/build-lock.sh`) for its whole run, so a second gate or a
+  compiling commit or push hook that shares the target directory waits for it
+  instead of building alongside it.
 - `just check-fast` runs formatting and the cheap repository contracts in
   seconds without compiling anything. `just check-contracts` runs the slower
   contract checkers (public tracker identifiers, documentation paths, metric
@@ -106,6 +109,14 @@ The recipes intentionally expose their direct commands:
 - `just netns [selector]` runs the privileged network-namespace tests in
   Docker through `crates/evpn-linux/tests/docker/run-netns-tests.sh`; the
   selector defaults to `all` and the harness header lists the others.
+- `just lab <name> <phase>` drives a guided local lab from `labs/`: `name` is
+  `quickstart`, `ixp`, `rr`, or `monitoring`, and `phase` is `up`, `verify`,
+  `break`, `explain`, or `down`.
+- `just fuzz-list` prints every cargo-fuzz `<crate> <target>` pair from the
+  fail-closed inventory in `scripts/check_fuzz_target_inventory.py`.
+  `just fuzz <crate> <target> [args]` runs one listed target from its owning
+  crate on the pinned nightly toolchain and passes any extra arguments to
+  libFuzzer.
 
 Hosted checks remain authoritative and cover more than these recipes: the
 declared MSRV, platform and workflow contracts, receipt classifiers, and
