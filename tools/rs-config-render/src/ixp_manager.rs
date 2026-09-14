@@ -125,6 +125,8 @@ struct Router {
     rfc1997_passthru: bool,
     rpki: bool,
     skip_md5: bool,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -498,6 +500,7 @@ fn validate(
         || router.asn == 0
         || router.vlan_id == 0
         || router.router_id.parse::<Ipv4Addr>().is_err()
+        || router.listen_port == Some(0)
     {
         return Err(Error::Refused("invalid route-server identity"));
     }
@@ -796,11 +799,12 @@ fn render_config(
 ) -> String {
     let router = &document.router;
     let mut out = format!(
-        "# GENERATED candidate from IXP Manager {}.\n[global]\nasn = {}\nrouter_id = {}\nruntime_state_dir = {}\nlisten_port = 179\nlisten_addresses = [{}]\nebgp_requires_policy = true\n\n[global.telemetry]\nlog_format = \"json\"\n\n[global.telemetry.grpc_uds]\npath = {}\nmode = 0o600\n",
+        "# GENERATED candidate from IXP Manager {}.\n[global]\nasn = {}\nrouter_id = {}\nruntime_state_dir = {}\nlisten_port = {}\nlisten_addresses = [{}]\nebgp_requires_policy = true\n\n[global.telemetry]\nlog_format = \"json\"\n\n[global.telemetry.grpc_uds]\npath = {}\nmode = 0o600\n",
         document.ixp_manager.version,
         router.asn,
         quoted(&router.router_id),
         quoted(runtime),
+        router.listen_port.unwrap_or(179),
         quoted(&router.peering_ip),
         quoted(&format!("{runtime}/grpc.sock"))
     );
