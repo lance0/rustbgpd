@@ -136,11 +136,11 @@ rbgp evpn diagnose
 
 - Create Linux bridge or VXLAN netdevs for you: it declares no
   `[managed_netdevs]` rows, so the ADR-0091 lifecycle is off here.
-- Enforce RFC 7432 §15 duplicate-MAC quarantine beyond what ships today:
-  detect-only quarantine (detection metrics exposed) plus the optional
-  `action = "suppress_local"` enforcement both ship. The M/N detector
-  withdraws and suppresses local Type 2 originations for the duplicate MAC
-  until recovery, clearable via `rbgp evpn clear-duplicate-mac`.
+- Suppress local originations for a duplicate MAC: every L2VNI here runs the
+  RFC 7432 §15.1 detector with `action = "detect"` (explicit or by default),
+  which only records threshold crossings. The daemon also ships
+  `action = "suppress_local"`, which withdraws and suppresses local Type 2
+  originations for the duplicate MAC until recovery; `rbgp evpn clear-duplicate-mac` clears a quarantine early.
 - Configure an IP-VRF / L3VNI tenant. Gate 9 Type 5 origination and
   symmetric Interface-less IRB dataplane programming ship in the main daemon
   (`[[evpn_ip_vrfs]]`, `rbgp evpn vrfs`, M39), but this example is kept
@@ -150,5 +150,5 @@ rbgp evpn diagnose
 
 - [`../rr-evpn-fabric/`](../rr-evpn-fabric/) — RR-side counterpart
 - [`../../docs/adr/0052-evpn-vtep-foundation.md`](../../docs/adr/0052-evpn-vtep-foundation.md) — boundaries between this slice and the future dataplane crate
-- [`../../docs/project/evpn-enablement.md`](../../docs/project/evpn-enablement.md) — Gate 7a / 7b roadmap
+- [`../../docs/project/evpn-enablement.md`](../../docs/project/evpn-enablement.md) — historical Gate 7a / 7b roadmap
 - [`../../docs/reference/known-issues.md`](../../docs/reference/known-issues.md) — `[[evpn_instances]]` SIGHUP semantics
