@@ -1935,6 +1935,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     let restart_current_global = current.global.clone();
     restart_new_global.honor_graceful_shutdown = restart_current_global.honor_graceful_shutdown;
     restart_new_global.honor_blackhole = restart_current_global.honor_blackhole;
+    restart_new_global.dynamic_neighbor_limit = restart_current_global.dynamic_neighbor_limit;
     if restart_new_global != restart_current_global {
         error!("[global] changed — requires full restart to take effect");
     }
@@ -2177,13 +2178,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
         new_config.global.honor_blackhole = current.global.honor_blackhole;
         honor_blackhole_changed = false;
     }
-    if new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit {
-        error!(
-            "[global].dynamic_neighbor_limit differs from the live config: dynamic-neighbor \
-             admission capacity is allocated once at startup. Restart rustbgpd to change it. \
-             The runtime snapshot keeps the startup limit for this reload."
+    let dynamic_neighbor_limit_changed =
+        new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit;
+    if dynamic_neighbor_limit_changed {
+        info!(
+            prior = current.effective_dynamic_neighbor_limit(),
+            next = new_config.effective_dynamic_neighbor_limit(),
+            "reload: [global].dynamic_neighbor_limit changed"
         );
-        new_config.global.dynamic_neighbor_limit = current.global.dynamic_neighbor_limit;
     }
     if config::pin_rfc8212_posture_startup_only(&mut new_config, current) {
         error!(
@@ -2604,6 +2606,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
                  (restart-required per peer). Existing sessions keep their current \
                  import-explain behaviour until they re-establish."
             );
+        } else if dynamic_neighbor_limit_changed {
+            info!(
+                limit = new_config.effective_dynamic_neighbor_limit(),
+                "config reloaded — [global].dynamic_neighbor_limit updated"
+            );
         } else {
             info!("config reloaded — no neighbor / policy / peer-group changes detected");
         }
@@ -2732,6 +2739,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
             "reload: [[dynamic_neighbors]] updated; accept-matcher rebuilds on the \
              config snapshot swap"
         );
+    }
+    if dynamic_neighbor_limit_changed {
+        working_config.global.dynamic_neighbor_limit = new_config.global.dynamic_neighbor_limit;
     }
 
     // ADR-0073: `working_config` starts from `current` and only absorbs
@@ -8886,7 +8896,7 @@ tcp_ao = [
     }
 
     #[tokio::test]
-    async fn reload_pins_dynamic_neighbor_limit_and_preserves_desired_value() {
+    async fn reload_updates_dynamic_neighbor_limit() {
         let desired = baseline_toml().replace(
             "listen_port = 179",
             "listen_port = 179\ndynamic_neighbor_limit = 17",
@@ -8897,26 +8907,27 @@ tcp_ao = [
 
         assert!(
             tags.is_empty(),
-            "restart-required limit edit must not send peer-manager commands: {tags:?}"
+            "limit edit alone requires no peer-manager actor commands: {tags:?}"
         );
         assert_eq!(
-            returned.global.dynamic_neighbor_limit, None,
-            "runtime snapshot must preserve the omitted startup value exactly"
+            returned.global.dynamic_neighbor_limit,
+            Some(17),
+            "runtime snapshot must adopt the edited dynamic neighbor limit"
         );
         assert_eq!(
             returned.effective_dynamic_neighbor_limit(),
-            100,
-            "pinning must not materialize the effective default into runtime config"
+            17,
+            "effective limit must reflect the edited value"
         );
         assert_eq!(
             returned.desired.global.dynamic_neighbor_limit,
             Some(17),
-            "desired snapshot must preserve the edited value for restart"
+            "desired snapshot must match the edited value"
         );
     }
 
     #[tokio::test]
-    async fn mixed_reload_applies_neighbor_edit_but_pins_dynamic_neighbor_limit() {
+    async fn mixed_reload_applies_neighbor_edit_and_updates_dynamic_neighbor_limit() {
         let initial = baseline_toml().replace(
             "listen_port = 179",
             "listen_port = 179\ndynamic_neighbor_limit = 100",
@@ -8940,8 +8951,8 @@ tcp_ao = [
             assert_eq!(returned.neighbors[0].hold_time, Some(45));
             assert_eq!(
                 returned.global.dynamic_neighbor_limit,
-                Some(100),
-                "mixed reload must not advance the startup-pinned admission limit"
+                Some(17),
+                "mixed reload must advance the admission limit"
             );
             assert_eq!(
                 returned.desired.global.dynamic_neighbor_limit,
@@ -8952,7 +8963,7 @@ tcp_ao = [
     }
 
     #[tokio::test]
-    async fn repeated_identical_reload_keeps_dynamic_neighbor_limit_delta_observable() {
+    async fn repeated_identical_reload_retains_updated_dynamic_neighbor_limit() {
         let initial = baseline_toml().replace(
             "listen_port = 179",
             "listen_port = 179\ndynamic_neighbor_limit = 100",
@@ -8968,13 +8979,13 @@ tcp_ao = [
             let returned = returned.expect("limit-only reload should return a config");
             assert_eq!(
                 returned.global.dynamic_neighbor_limit,
-                Some(100),
-                "each runtime snapshot must retain the startup admission limit"
+                Some(17),
+                "each runtime snapshot must retain the adopted admission limit"
             );
             assert_eq!(
                 returned.desired.global.dynamic_neighbor_limit,
                 Some(17),
-                "the unapplied edit must remain observable as desired drift"
+                "desired snapshot must match"
             );
         }
     }
