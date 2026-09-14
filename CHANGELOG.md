@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- SIGHUP now applies `[policy.datasets]` binding changes through the same
+  compensated runtime generation as dataset contents instead of rejecting
+  them. Adding, removing, or re-mapping a dataset, together with the matching
+  `[[neighbors]]` change, applies without a daemon restart, so a route-server
+  member join or leave with its own datasets no longer flaps every other
+  member. A late failure restores the prior binding set, dataset contents,
+  policy chains, and sessions and rejects cleanly; a newly declared dataset
+  that fails to load rejects the candidate before any effect. Binding changes
+  combined with TCP-AO rotation, listener MD5/GTSM changes,
+  `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or the honor
+  knobs still reject before any effect.
+
 ## [0.70.0] — 2026-09-13
 
 ### Added

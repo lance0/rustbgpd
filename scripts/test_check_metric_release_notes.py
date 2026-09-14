@@ -25,16 +25,8 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
-        self.assertEqual(len(baseline), 213)
-        self.assertEqual(
-            added,
-            {
-                "bgp_peer_manager_operator_query_wait_seconds",
-                "bgp_rib_actor_work_duration_seconds",
-                "bgp_rib_readiness_query_wait_seconds",
-                "bgp_update_malformed_causes_total",
-            },
-        )
+        self.assertEqual(len(baseline), 217)
+        self.assertEqual(added, set())
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
@@ -114,7 +106,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
 - Other change.
 
-## [0.69.0] - 2026-09-07
+## [0.70.0] - 2026-09-13
 
 - Rename `bgp_old_name` to `bgp_new_name`; remove `bgp_removed`.
 """
@@ -174,21 +166,21 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
     def test_baseline_metadata_ordering_and_names_fail_closed(self):
         cases = (
             (
-                '{"release":"v0.67.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.69.0","source_commit":"x","families":["bgp_a"]}',
                 "release must be",
             ),
             (
-                '{"release":"v0.69.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.70.0","source_commit":"x","families":["bgp_a"]}',
                 "commit must be",
             ),
             (
-                '{"release":"v0.69.0","source_commit":"'
+                '{"release":"v0.70.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["bgp_b","bgp_a"]}',
                 "sorted and unique",
             ),
             (
-                '{"release":"v0.69.0","source_commit":"'
+                '{"release":"v0.70.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["not a metric"]}',
                 "invalid family name",
