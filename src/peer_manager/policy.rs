@@ -3600,7 +3600,17 @@ impl PeerManager {
             .into());
         }
 
-        if require_clean_state && (needs_refresh || needs_export_apply) && !is_established {
+        // A positively known-down peer has no AdjRibIn to refresh and no RIB
+        // outbound registration: the session actor accepted the new session
+        // chain in memory, and 3711-3720 below deliberately leaves PeerUp in
+        // charge of installing it and re-registering with the RIB without a
+        // retry marker. Ambiguous observations (TimedOut / SessionGone) keep
+        // failing closed: they cannot prove the session kept the edit.
+        if require_clean_state
+            && !is_known_non_established
+            && (needs_refresh || needs_export_apply)
+            && !is_established
+        {
             if let Some(managed) = self.peers.get_mut(&peer_key) {
                 if needs_refresh {
                     managed.pending_refresh = true;
