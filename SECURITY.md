@@ -191,8 +191,10 @@ Integrators documenting rustbgpd's upstream open-source handling can point at:
   `tls_key_file`, and `tls_client_ca_file` together on
   `[global.telemetry.grpc_tcp]` (partial config is rejected at config
   load). SIGHUP re-reads credential bytes from unchanged startup-captured
-  paths and publishes one atomic generation across all listeners before later
-  config reconciliation. New RPCs, including on existing HTTP/2 connections,
+  paths and, once the runtime config reload is acknowledged, publishes one
+  atomic credential generation across all listeners. A candidate that is
+  rejected or restored has no credential effect, and a rotation failure keeps
+  the last-known-good generation. New RPCs, including on existing HTTP/2 connections,
   use the new bearer token; new TLS accepts use the new mTLS material, while
   existing streams and TLS connections survive. Listener, path, auth-mode,
   principal, role, and access changes remain restart-required. An mTLS proxy

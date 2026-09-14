@@ -360,24 +360,31 @@ resolved.
   restarted, and reload emits an explicit `error!` log so the drift is visible.
   The credential *material* behind those unchanged paths does rotate: SIGHUP
   re-reads the bytes, validates the complete token / server identity / client CA
-  for every listener, and atomically publishes one process-wide generation.
+  for every listener, and, once the runtime config reload is acknowledged,
+  atomically publishes one process-wide generation. A rejected or restored
+  reload has no credential effect.
   Existing TLS connections and admitted streams continue; new TLS accepts and
   new bearer-authenticated RPCs use the new generation; a malformed or partial
   rotation retains the last-known-good generation. UDS listener config
   (`grpc_uds`) shape has the same restart-required semantics.
 
-- **SIGHUP reconcile is not transactional.** Reload now applies
-  named-policy / neighbor-set / peer-group / global-chain edits in
-  addition to `[[neighbors]]` deltas. On any step failure, reload
-  halts and returns the partial-state snapshot — the daemon's
-  in-memory config matches what the peer manager actually applied,
-  rather than the previous behavior of lying that the prior config
-  is still in effect. The operator converges by editing the failing
-  TOML and reloading again; the next diff runs against the half-
-  applied state, so only the remaining steps fire. True rollback
-  (replaying reverse commands to undo successful steps) is still
-  out of scope — peer-group changes flap sessions, and unwinding
-  flap them again.
+- **SIGHUP rollback covers only the generation route.** A candidate
+  whose changes are static `[[neighbors]]`, `[peer_groups]`, inline
+  policy, `.rpol` content, or `[policy.datasets]` contents or bindings
+  settles as one runtime generation: a later failure restores the prior
+  config, policies, datasets, and sessions and rejects the reload with no
+  partial result (a restore that cannot be proven recovery-fences the
+  daemon). Sequential-route candidates — those without generation-class
+  changes (for example `[[dynamic_neighbors]]`, EVPN runtime tables,
+  `[[fib_tables]]`, or the honor knobs alone), and generation-class
+  changes combined with TCP-AO rotation or listener MD5/GTSM changes while
+  dataset contents are unchanged — still halt at the
+  first step failure with an authoritative known-partial receipt; the
+  operator fixes the TOML and reloads again, and reverse replay of the
+  successful steps is not implemented. Generation-class or dataset changes
+  mixed with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`,
+  or `honor_graceful_shutdown` / `honor_blackhole` are rejected before any
+  effect. See [SIGHUP reload routes](reload-matrix.md#sighup-reload-routes).
 - **MRT snapshot attribute synthesis still allocates per entry.** The
   dominant allocation cost — millions of exact-capacity output-buffer
   reallocations on full-table dumps — was removed by bounded geometric

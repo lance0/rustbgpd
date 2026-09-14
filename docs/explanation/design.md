@@ -95,7 +95,7 @@ and mirrors internal architecture.
 
 ```protobuf
 // Abridged — proto/rustbgpd.proto is authoritative; NeighborService has
-// 13 RPCs and RibService 21, only representative subsets are shown here.
+// 14 RPCs and RibService 24, only representative subsets are shown here.
 
 // Global daemon configuration and identity
 service GlobalService {
@@ -144,6 +144,7 @@ service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neig
 // Daemon control and health
 service ControlService {
   rpc Shutdown(ShutdownRequest)     returns (ShutdownResponse);
+  rpc CheckLiveness(CheckLivenessRequest) returns (CheckLivenessResponse);
   rpc GetHealth(HealthRequest)      returns (HealthResponse);
   rpc GetMetrics(MetricsRequest)    returns (MetricsResponse);
   rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);
@@ -236,7 +237,7 @@ The boot config file (TOML) provides initial state. At startup, the daemon loads
 **The contract:**
 - Peers can be added, removed, enabled, and disabled at runtime via gRPC. Zero restarts required.
 - Neighbor add/delete mutations made via gRPC are persisted back to the config file via atomic write (temp file + rename).
-- `SIGHUP` triggers a config reload: `diff_neighbors()` computes the delta and `ReconcilePeers` applies structured per-peer add/delete operations.
+- `SIGHUP` triggers a config reload: the candidate is classified into a generation, sequential, or rejected route before any effect; static-neighbor, peer-group, policy, and dataset changes normally settle as one owned runtime generation that restores the prior state in memory on failure. See [Config Reload (SIGHUP)](architecture.md#config-reload-sighup).
 - If the file changes on disk, a restart picks up the new file state.
 
 ### Minimal Config Example
@@ -742,7 +743,6 @@ Bounded channels, prefix limits, and backpressure behavior are detailed in [docs
 | Limit | Default | Notes |
 |---|---|---|
 | Max message size | 4096 bytes (65535 with RFC 8654) | 4096 by default; raised per-session only when Extended Messages is negotiated |
-| Max attributes per UPDATE | 256 | Safety bound |
 | Max prefixes per neighbor | none (unbounded) | `max_prefixes` (aggregate) and the independent `max_prefixes_ipv4` / `max_prefixes_ipv6` per-family caps (ADR-0108) default to `None`. Under the default `max_prefix_action = "shutdown"`, exceeding a cap latches the peer down; the row below covers the non-teardown actions. Without negotiated Notification GR, the daemon sends RFC 4486 Cease/1: aggregate violations retain an empty data field, while per-family violations carry AFI (2 octets), SAFI (1 octet), and the upper bound (4 octets). When Notification GR was negotiated, RFC 8538 Cease/9 encapsulates that Cease/1 code, subcode, and data. The pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6` bounds count announced prefixes before import policy under the same teardown contract. |
 | Max advertised prefixes per neighbor (outbound) | none (unbounded) | `max_prefixes_out_ipv4` / `max_prefixes_out_ipv6` (ADR-0113) bound one peer's advertised-state growth: excess net-new prefixes are withheld while the session stays Established — nothing already advertised is withdrawn and no NOTIFICATION is sent. Blocking state plus usage/limit/headroom are on neighbor detail, JSON, and Prometheus (`bgp_outbound_prefix_{usage,limit,headroom,blocking,blocked_total}`) |
 | Max-prefix action | `"shutdown"` | `max_prefix_action` selects the response to a crossed inbound bound, per neighbor or peer group and hot-applied on reload. `"shutdown"` is the teardown contract above. `"block"` withholds net-new prefixes beyond a full bound while the session stays Established — nothing already accepted is withdrawn — and requests one route refresh per affected family when usage falls back under, so the peer replays what was withheld. `"warning"` warns once per crossing and keeps accepting. `"block"` applies to the per-family accepted and pre-policy bounds and requires the aggregate `max_prefixes` to be unset; `"block"` and `"warning"` exclude `max_prefix_restart_seconds`. `max_prefix_warning_percent` (1..=100) adds a sub-bound warning threshold under any action, one warn line, session event, and counter increment per crossing per scope, re-armed when usage falls back under |
