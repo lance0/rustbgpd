@@ -1,6 +1,8 @@
 # EVPN Enablement Roadmap
 
-> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+> **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
+
+For current EVPN guidance, see the [EVPN fabric route reflector recipe](../cookbook/evpn-fabric-rr.md), [EVPN VTEP setup](../how-to/evpn-vtep-setup.md), and the EVPN alpha boundary in the [stability guide](../reference/stability.md).
 
 For release-by-release feature history, see [CHANGELOG.md](../../CHANGELOG.md).
 
@@ -395,7 +397,7 @@ later phases consume:
 | `[[evpn_instances]]` schema + parse + validation | `src/config/schema.rs` + `src/config/mod.rs` | landed (slice) |
 | `EvpnService.ListEvpnInstances` (read-only gRPC) | `crates/api/src/evpn_service.rs` | landed (slice) |
 | `rbgp evpn instances` CLI | `crates/cli/src/commands/evpn.rs` | landed (slice) |
-| Example TOML + ADR | `examples/evpn-vtep-leaf/`, `docs/adr/0052-...` | landed (slice) |
+| Example TOML + ADR | `examples/evpn-vtep-leaf/`, `docs/adr/0052-evpn-vtep-foundation.md` | landed (slice) |
 
 #### Gate 7b — Kernel reconciliation + origination
 
@@ -873,8 +875,8 @@ Closed arcs and remaining bounds:
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M47 / M48 /
 M60 / M61 / M65 / M66 / M67 / M68 / M69 / M70 / M71 / M72 — #130 closed. Non-EVPN kernel
-dataplane, BFD, and TCP-AO coverage is cataloged in `INTEROP.md` and
-`kernel-dataplane-runner.md`.)
+dataplane, BFD, and TCP-AO coverage is cataloged in `docs/interop.md` and
+`docs/how-to/kernel-dataplane-runner.md`.)
 
 ### Standards-tail map
 

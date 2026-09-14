@@ -12,7 +12,7 @@ Follow a procedure for a specific task.
 - [Settlement watchdog](settlement-watchdog.md) — Recover when configuration settlement cannot be proved.
 - [EVPN VTEP setup](evpn-vtep-setup.md) — Prepare bridge, VXLAN, and VRF interfaces.
 - [EVPN VTEP troubleshooting](evpn-vtep-troubleshooting.md) — Diagnose the bidirectional VTEP dataplane.
-- [EVPN alpha-soak checklist](evpn-alpha-soak.md) — Run the VTEP confidence checks.
+- [EVPN alpha-soak checklist](evpn-alpha-soak.md) — Historical: the VTEP confidence checklist from the gate-landing releases.
 - [Grafana and alerting](grafana.md) — Import dashboards and load Prometheus alert rules.
 - [Kernel dataplane runner](kernel-dataplane-runner.md) — Run the privileged Linux dataplane checks.
 - [Fuzzing](fuzzing.md) — Build and run the parser fuzz targets.

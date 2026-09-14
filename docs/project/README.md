@@ -7,7 +7,7 @@ Follow development plans, contribution guidance, and release history.
 [All documentation](../README.md)
 
 - [Roadmap](roadmap.md) — Current development direction and remaining work.
-- [EVPN enablement](evpn-enablement.md) — The staged EVPN plan and its completion evidence.
+- [EVPN enablement](evpn-enablement.md) — Historical: the staged EVPN plan and its completion evidence.
 - [Release checklist](release-checklist.md) — Required checks for publishing a release.
 - [Older releases](changelog/older-releases.md) — Archived release notes.
 - [Roadmap history](roadmap-history.md) — Completed development phases.
