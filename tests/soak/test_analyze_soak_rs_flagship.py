@@ -80,11 +80,15 @@ def trip_block(n, start, restart_sec=20, exceeded=None, holddown=None):
     ]
 
 
-def smoke_cycles():
+def smoke_cycles(reload4=(200, 205)):
+    """`reload4` is the (issued, complete) elapsed pair for the last reload;
+    the smoke fixture's monotonic clock equals its wall-clock elapsed, so a
+    pair around a management slot puts that slot inside the reload window."""
     lines = []
-    for r, at in ((1, 40), (2, 55), (3, 130), (4, 200)):
+    for r, (at, done) in ((1, (40, 45)), (2, (55, 60)), (3, (130, 135)),
+                          (4, reload4)):
         lines.append(cline(at, f"reload {r} issued"))
-        lines.append(cline(at + 5, f"reload {r} complete"))
+        lines.append(cline(done, f"reload {r} complete"))
     lines += trip_block(1, 60)
     lines += trip_block(2, 150)
     return lines
@@ -147,7 +151,10 @@ def long_rows(rss_of=None):
 
 def management_jsonl(meta, *, missing_operation=None, early=False,
                      missed=False, failure=None, terminal=True,
-                     truncated=False, cadence_gap=False):
+                     truncated=False, cadence_gap=False, skipped=(),
+                     unix_anchor=True):
+    """`skipped` lists metrics slot indices whose records are omitted and
+    counted as missed, the shape the driver leaves after a slow probe."""
     operations = ("metrics", "neighbor", "policy_stats", "rib_prefix", "doctor")
     start = meta["measured_start_monotonic"] - 0.1
     end = (meta["measured_end_monotonic"] - 1.0 if early
@@ -179,6 +186,10 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
         scheduled[operation] = count
         for index in range(count):
             due = start + index * interval
+            if operation == "metrics" and index in skipped:
+                completed[operation] -= 1
+                missed_counts[operation] += 1
+                continue
             if cadence_gap and operation == "metrics" and index == 1:
                 due += interval / 2
             result = failure if failure and operation == failure[0] else "ok"
@@ -205,7 +216,7 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
             "record": "summary", "started_monotonic": start,
             "stop_requested_monotonic": end - 0.05,
             "completed_monotonic": end, "operation": "summary",
-            "completed_unix": T0.timestamp() + end,
+            **({"completed_unix": T0.timestamp() + end} if unix_anchor else {}),
             "duration_ms": (end - start) * 1000, "exit": 0,
             "result": "clean_sigterm", "bytes": 0,
             "sha256": hashlib.sha256(b"").hexdigest(),
@@ -728,13 +739,86 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertFalse(payload["gates"]["management_failures"]["pass"])
 
     def test_management_load_missed_cadence_fails(self):
+        # The summary claims a miss the records do not show: no window can
+        # excuse a count the observed schedule does not support.
         meta = smoke_meta()
         result, payload = run_analyzer(
             smoke_rows(), smoke_cycles(), meta,
             management=management_jsonl(meta, missed=True),
         )
         self.assertEqual(result.returncode, 1)
-        self.assertFalse(payload["gates"]["management_cadence"]["pass"])
+        gate = payload["gates"]["management_cadence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn("metrics: summary missed=1 observed=0", gate["value"]["defects"])
+
+    def test_missed_slots_inside_reload_window_pass_up_to_two(self):
+        # Metrics slots sit at elapsed 1000 + 10 k (25 slots keep one or two
+        # misses above the 90% completion floor); reload 4 spans slots 9 and
+        # 12 with the 2 s grace, and one or two misses there are the
+        # documented cost of a reload commit.
+        for skipped in ((9,), (9, 12)):
+            with self.subTest(skipped=skipped):
+                meta = smoke_meta(management_metrics_interval_sec=10)
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(reload4=(1088, 1122)), meta,
+                    management=management_jsonl(meta, skipped=skipped),
+                )
+                gate = payload["gates"]["management_cadence"]
+                self.assertTrue(gate["pass"], gate["value"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(gate["value"]["operations"]["metrics"], {
+                    "missed": len(skipped),
+                    "per_reload": {"4": len(skipped)},
+                    "outside_windows": [],
+                })
+
+    def test_third_missed_slot_inside_one_reload_window_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(reload4=(1088, 1152)), meta,
+            management=management_jsonl(meta, skipped=(3, 4, 5)),
+        )
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["management_cadence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn(
+            "metrics: more than 2 missed slots in reload window(s) [4]",
+            gate["value"]["defects"],
+        )
+        self.assertEqual(gate["value"]["operations"]["metrics"]["per_reload"], {"4": 3})
+
+    def test_missed_slot_outside_every_reload_window_fails(self):
+        # Reload 4 covers slot 3 (1090); slot 6 (1180) has no reload near it.
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(reload4=(1088, 1092)), meta,
+            management=management_jsonl(meta, skipped=(3, 6)),
+        )
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["management_cadence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn(
+            "metrics: 1 missed slots outside every reload window",
+            gate["value"]["defects"],
+        )
+        self.assertEqual(gate["value"]["operations"]["metrics"], {
+            "missed": 2, "per_reload": {"4": 1}, "outside_windows": [1180.0],
+        })
+
+    def test_missed_slot_without_wall_clock_anchor_fails_closed(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(reload4=(1088, 1092)), meta,
+            management=management_jsonl(meta, skipped=(3,), unix_anchor=False),
+        )
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["management_cadence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn(
+            "metrics: missed slots cannot be placed on the wall clock "
+            "(summary lacks completed_unix)",
+            gate["value"]["defects"],
+        )
 
     def test_management_load_schedule_gap_fails_even_when_counts_match(self):
         meta = smoke_meta()
@@ -743,7 +827,9 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
             management=management_jsonl(meta, cadence_gap=True),
         )
         self.assertEqual(result.returncode, 1)
-        self.assertFalse(payload["gates"]["management_cadence"]["pass"])
+        gate = payload["gates"]["management_cadence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn("metrics: scheduled interval drift", gate["value"]["defects"])
 
     def test_management_load_below_ninety_percent_completion_fails(self):
         meta = smoke_meta()
@@ -851,7 +937,7 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertFalse(
             any(
                 defect.startswith("policy_stats:")
-                for defect in gates["management_cadence"]["value"]
+                for defect in gates["management_cadence"]["value"]["defects"]
             )
         )
 

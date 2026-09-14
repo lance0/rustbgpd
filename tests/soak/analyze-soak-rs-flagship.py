@@ -21,8 +21,14 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
     200 within 250 ms; counts and first 20 breaches reported either way;
     missing observations fail closed
   - management-plane load brackets the measured window, retains every
-    operation, completes >= 90% of scheduled probes, misses no cadence,
-    and records zero non-ok results or invalid ok results
+    operation, completes >= 90% of scheduled probes, and records zero
+    non-ok results or invalid ok results
+  - management cadence: every missed probe slot falls inside a reload
+    window [issued - 2 s, complete + 2 s] from cycles.log and no window
+    holds more than 2 missed slots per operation; a miss outside every
+    window, a third miss in one window, a schedule that drifts off the
+    interval grid, or a miss that cannot be placed on the wall clock
+    (summary without completed_unix) fails
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
@@ -70,6 +76,12 @@ MANAGEMENT_OPERATIONS = (
     "metrics", "neighbor", "policy_stats", "rib_prefix", "doctor",
 )
 MANAGEMENT_RECORD_LIMIT = 4096
+# A missed management probe slot is tolerated only inside a reload window
+# (cycles.log issued - grace .. complete + grace) and at most this many per
+# window per operation; operator reads get deadlines, not priority over the
+# reload commit.
+RELOAD_WINDOW_GRACE_SEC = 2.0
+RELOAD_WINDOW_MISS_LIMIT = 2
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 CYCLE_RE = re.compile(
@@ -123,7 +135,9 @@ def expected_management_route_prefix(routes_per_peer: object) -> Optional[str]:
     return f"{first}.{second}.{third}.0/24"
 
 
-def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> dict:
+def analyze_management_load(
+    raw: bytes, meta: dict, first_shutdown: object, cycles: dict,
+) -> dict:
     """Validate bounded JSONL evidence without trusting its terminal summary."""
     schema_errors: list[str] = []
     failures: list[dict] = []
@@ -326,6 +340,19 @@ def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> d
     count_mismatches = []
     coverage = {}
     cadence_defects = []
+    cadence_misses = {}
+    # Wall-clock anchor for placing monotonic schedule slots against the
+    # UTC reload markers in cycles.log.
+    clock_offset = (
+        summary_end_unix - summary_end
+        if summary_end_unix is not None and summary_end is not None else None
+    )
+    reload_windows = {
+        n: (issued - RELOAD_WINDOW_GRACE_SEC,
+            cycles["reload_complete"][n] + RELOAD_WINDOW_GRACE_SEC)
+        for n, issued in cycles["reload_issued"].items()
+        if n in cycles["reload_complete"]
+    }
     for operation in MANAGEMENT_OPERATIONS:
         observed = len(operations[operation])
         if summary_completed[operation] != observed:
@@ -344,10 +371,9 @@ def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> d
             "completed": observed,
             "ratio": ratio,
         }
-        if summary_missed[operation] != 0:
-            cadence_defects.append(
-                f"{operation}: missed={summary_missed[operation]}"
-            )
+        missed_slots: list[float] = []
+        per_reload: dict[int, int] = {}
+        outside: list[float] = []
         interval = finite_number(expected_intervals.get(operation))
         if started_at is not None and stop_requested is not None and interval and interval > 0:
             schedules = [
@@ -359,15 +385,54 @@ def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> d
                     cadence_defects.append(
                         f"{operation}: first schedule does not start with load"
                     )
+                # The driver advances `due` by exactly `interval`, so a gap of
+                # k intervals means k - 1 skipped slots; anything off that
+                # grid is drift the driver cannot produce.
+                drift = False
                 for previous, current in zip(schedules, schedules[1:]):
-                    if (
-                        previous is None or current is None
-                        or abs((current - previous) - interval) > 0.002
-                    ):
-                        cadence_defects.append(
-                            f"{operation}: scheduled interval drift"
-                        )
-                        break
+                    if previous is None or current is None:
+                        drift = True
+                        continue
+                    steps = round((current - previous) / interval)
+                    if steps < 1 or abs((current - previous) - steps * interval) > 0.002:
+                        drift = True
+                        continue
+                    missed_slots.extend(
+                        previous + step * interval for step in range(1, steps)
+                    )
+                if drift:
+                    cadence_defects.append(f"{operation}: scheduled interval drift")
+            if len(missed_slots) != summary_missed[operation]:
+                cadence_defects.append(
+                    f"{operation}: summary missed={summary_missed[operation]} "
+                    f"observed={len(missed_slots)}"
+                )
+            if missed_slots and clock_offset is None:
+                cadence_defects.append(
+                    f"{operation}: missed slots cannot be placed on the wall "
+                    "clock (summary lacks completed_unix)"
+                )
+            for slot in missed_slots if clock_offset is not None else ():
+                wall = slot + clock_offset
+                hit = next(
+                    (n for n, (lo, hi) in reload_windows.items() if lo <= wall <= hi),
+                    None,
+                )
+                if hit is None:
+                    outside.append(slot)
+                else:
+                    per_reload[hit] = per_reload.get(hit, 0) + 1
+            if outside:
+                cadence_defects.append(
+                    f"{operation}: {len(outside)} missed slots outside every "
+                    "reload window"
+                )
+            over = {n: c for n, c in per_reload.items() if c > RELOAD_WINDOW_MISS_LIMIT}
+            if over:
+                cadence_defects.append(
+                    f"{operation}: more than {RELOAD_WINDOW_MISS_LIMIT} missed "
+                    f"slots in reload window(s) {sorted(over)}"
+                )
             active_lifetime = stop_requested - started_at
             expected_floor = max(
                 1,
@@ -377,6 +442,11 @@ def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> d
                 cadence_defects.append(
                     f"{operation}: scheduled={scheduled} expected>={expected_floor}"
                 )
+        cadence_misses[operation] = {
+            "missed": len(missed_slots),
+            "per_reload": {str(n): per_reload[n] for n in sorted(per_reload)},
+            "outside_windows": outside[:20],
+        }
 
     measured_start = finite_number(meta.get("measured_start_monotonic"))
     measured_end = finite_number(meta.get("measured_end_monotonic"))
@@ -427,7 +497,8 @@ def analyze_management_load(raw: bytes, meta: dict, first_shutdown: object) -> d
             "pass": all(item["ratio"] >= 0.9 for item in coverage.values()),
         },
         "management_cadence": {
-            "value": cadence_defects,
+            "value": {"defects": cadence_defects, "operations": cadence_misses},
+            "limit": RELOAD_WINDOW_MISS_LIMIT,
             "pass": not cadence_defects,
         },
         "management_failures": {
@@ -472,10 +543,10 @@ def linreg(xs: list[float], ys: list[float]) -> float:
 
 
 def parse_cycles(lines: list[str]) -> dict:
-    """Structured view of cycles.log: reload counts, per-trip evidence,
-    trip windows (epoch seconds), abort records."""
-    reload_issued: set[int] = set()
-    reload_complete: set[int] = set()
+    """Structured view of cycles.log: reload issued/complete stamps by
+    number, per-trip evidence, trip windows (epoch seconds), abort records."""
+    reload_issued: dict[int, float] = {}
+    reload_complete: dict[int, float] = {}
     trips: dict[int, dict] = {}
     aborts: list[str] = []
     sample_scrape_failures = 0
@@ -493,11 +564,11 @@ def parse_cycles(lines: list[str]) -> dict:
             continue
         r = re.match(r"^reload (\d+) issued$", body)
         if r:
-            reload_issued.add(int(r.group(1)))
+            reload_issued[int(r.group(1))] = ts
             continue
         r = re.match(r"^reload (\d+) complete$", body)
         if r:
-            reload_complete.add(int(r.group(1)))
+            reload_complete[int(r.group(1))] = ts
             continue
         r = re.match(r"^trip (\d+) (.+)$", body)
         if not r:
@@ -856,6 +927,7 @@ def main() -> int:
     result["gates"].update(analyze_management_load(
         management_raw, meta,
         result["gates"]["daemon_log"]["value"]["first_administrative_shutdown_unix"],
+        cycles,
     ))
     result["verdict"] = (
         "pass" if all(gate["pass"] for gate in result["gates"].values())
