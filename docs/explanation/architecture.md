@@ -172,7 +172,7 @@ These types define the contracts between crates. They are the key interfaces to 
 | `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutesPage`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
 | `OutboundRouteUpdate` | `rib::update` | RIB → Transport. Announces + withdrawals + FlowSpec changes for a single peer, after export policy. |
 | `PeerKey` | `api::peer_types` | API ↔ PeerManager. Stable peer identity: `address` plus an optional `interface` for scoped IPv6 link-local peers (RFC 4007 — a `fe80::/10` address is not globally unique). Numbered peers carry `interface: None`; renders as `fe80::x%ifname` (ADR-0069). |
-| `PeerManagerCommand` | `api::peer_types` | API → PeerManager. Enum: `AddPeer`, `DeletePeer`, `EnablePeer`, `DisablePeer`, `QueryState`, `ReconcilePeers`, etc. |
+| `PeerManagerCommand` | `api::peer_types` | API → PeerManager. Enum: `AddPeer`, `DeletePeer`, `EnablePeer`, `DisablePeer`, `GetPeerState`, `ReconcilePeers`, etc. |
 | `NegotiatedSession` | `fsm::action` | FSM → Transport. Capabilities, peer ASN/ID, negotiated families, GR state, Add-Path modes. Produced on `Established`. |
 | `PathAttribute` | `wire::attribute` | Wire → everything. Typed + raw hybrid enum. Known attrs decoded to Rust types; unknown optional-transitive preserved as `RawAttribute` for byte-exact re-emission. |
 | `PolicyChain` | `policy::engine` | Config → Transport/RIB. Wraps `Vec<Policy>` with chain evaluation semantics (permit=continue, deny=stop). |
@@ -371,13 +371,21 @@ Daemon restart-required fields stay pinned to their live values on every route.
 
 ### Graceful Shutdown
 
-1. SIGTERM or `Shutdown` gRPC RPC triggers shutdown.
-2. Writes GR restart marker file (if any peer has GR enabled) with expiry.
-3. Sends NOTIFICATION/Cease (Administrative Shutdown) to all established peers.
-4. Signals BMP manager to send Termination messages to collectors (bounded
-   ~2s for the BMP send-and-drain step).
-5. Drains all peer sessions through the peer manager.
-6. Flushes final telemetry.
+1. SIGINT, SIGTERM, the `Shutdown` gRPC RPC, or an unexpected supervised
+   component exit triggers shutdown. Mutation admission closes and any owned
+   runtime-config operation settles first.
+2. The optional warm checkpoint and GR restart marker are published.
+3. EVPN originators drain and locally originated IMET routes are swept while
+   BGP sessions are still up.
+4. The PeerManager `Shutdown` command sends NOTIFICATION/Cease (Administrative
+   Shutdown) and tears the peer sessions down.
+5. BLACKHOLE discard routes, general FIB routes, BFD sessions, and the EVPN
+   Linux dataplane drain.
+6. The BMP manager sends Termination messages to collectors and drains.
+7. The gRPC server stops, then the durable event-history outbox flushes.
+
+[Coordinated Shutdown](design.md#coordinated-shutdown) covers the bounds and
+ordering rationale.
 
 ### Graceful Restart (receiving)
 
@@ -412,6 +420,11 @@ All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 
 | BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
 
 The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the `session_notify` channel used for TCP collision detection remains intentionally unbounded because a bounded send would deadlock with synchronous `QueryState` peer-state queries during collision resolution. Its domain wrapper accounts from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications; the exported high-water mark is monotonic for the daemon lifetime and is not a per-flap or per-round peak.
+
+Operator reads (neighbor and policy-statistics snapshots, RIB queries) also
+have their own bounded lanes ([ADR-0132](../adr/0132-operator-read-path.md)),
+so the peer manager and RIB can answer them between completed steps of a
+long configuration settlement instead of queueing them behind it.
 
 ### Dirty-peer resync
 

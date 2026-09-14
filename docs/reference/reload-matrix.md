@@ -9,9 +9,10 @@ change into effect?
 
 This doc is the operator-facing index. The authoritative classification
 lives in the source — `neighbor_runtime_equal()`, `config_field_impact()`,
-`neighbor_change_hot_applicable()`, and `ConfigDiff` (in
-`src/config/mod.rs`), `reload.rs` (the changed-neighbor hot/rebuild
-partition, `pin_unreconciled_daemon_runtime_fields`, and the
+`neighbor_change_hot_applicable()`, `classify_sighup_reload()`,
+`plan_reload_peer_actions()`, and `ConfigDiff` (in
+`src/config/mod.rs`), `reload.rs` (the route dispatch, the sequential
+changed-neighbor hot/rebuild partition, `pin_unreconciled_daemon_runtime_fields`, and the
 per-section error/warn arms) together with the pinning helpers
 `pin_tcp_ao_startup_only_runtime` / `pin_bfd_startup_only_runtime` it
 invokes from `src/config/mod.rs`, and
@@ -29,6 +30,8 @@ bug — file an issue.
 | **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
 | **unsupported** | Field is accepted at parse time but currently has no runtime effect. Documented so operators don't mistake it for live. Future PRs may promote unsupported fields to live; the matrix tracks the current daemon. |
 | **validation-only** | Field is validated at parse time (typically as a cross-field constraint marker) and has no runtime effect of its own. |
+| **rejected-before-mutation** | A reload carrying the value fails config parsing, so the whole candidate is refused before any runtime effect and the running value stays. |
+| **coordinator-gated** | EVPN runtime tables: supported shapes hot-apply through the ADR-0063 coordinator, and the runtime snapshot advances only after the daemon actors accept the change; unsupported shapes pin back to the committed model (see the EVPN section below). |
 
 ## SIGHUP reload routes
 
@@ -318,7 +321,9 @@ rebind on reload.
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required | Listener address. |
-| credential bytes behind unchanged token/TLS paths | reload-applied | Staged for all listeners, then one atomic generation; existing connections/streams survive. |
+| `enabled`, `access_mode`, `max_tier`, `principal` | restart-required | The whole listener config is pinned to the live listener on reload. |
+| `tls_expiry_warning_seconds` (`grpc_tcp`) | restart-required | Pinned with the rest of the listener config. |
+| credential bytes behind unchanged token/TLS paths | reload-applied | Staged for all listeners and published as one atomic generation after the runtime reload is acknowledged; existing connections/streams survive. |
 | token/TLS paths or auth mode | restart-required | Listener shape and configured paths remain pinned. |
 | `path` (`grpc_uds`) | restart-required | UDS path bound at startup. |
 | `mode` (`grpc_uds`) | restart-required | Permissions set at bind time. |
@@ -476,7 +481,7 @@ load) or rejects the reload and keeps running on the previous config
 | `tcp_ao` mandatory fields | Missing `key`, `send_id`, `recv_id`, or `algorithm` | TCP-AO MKT is incomplete. |
 | `bfd.profile` references unknown profile | The `[[bfd_profiles]]` entry referenced by `[[neighbors]] bfd.profile` doesn't exist | |
 | iBGP-only fields on eBGP (or vice versa) | `route_reflector_client = true` on eBGP, etc. | |
-| Cross-section reference integrity | `peer_group` references a missing `[[peer_groups]]` entry, `import_policy_chain` references a missing `[policy] import_chain` name, etc. | |
+| Cross-section reference integrity | `peer_group` references a missing `[peer_groups.<name>]` entry, `import_policy_chain` names a policy that no `[policy.definitions.<name>]` or loaded `.rpol` file defines, etc. | |
 | TOML schema (`#[serde(deny_unknown_fields)]`) | Any misspelled or extraneous field | Catches typos before the daemon sees them. |
 
 ## Validation-only constraints
@@ -506,8 +511,14 @@ systemctl reload rustbgpd
 kill -HUP $(pidof rustbgpd)
 ```
 
-`rustbgpd --diff` calls into the same `ConfigDiff` machinery the
-reload path uses; what it reports is what reload will do.
+`rustbgpd --diff` calls into the same `ConfigDiff` machinery and route
+classifier the reload path uses. It cannot see live runtime conditions: SIGHUP
+also checks staged dataset contents and loader errors when it picks the route,
+and actor availability, convergence, or a late failure are runtime outcomes.
+`rbgp config diff` sends only the candidate TOML to the daemon, which resolves
+relative `.rpol` and dataset paths against its own working directory rather
+than the candidate's; use absolute paths or `rustbgpd --diff` for such a
+candidate.
 
 ## Related
 

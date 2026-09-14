@@ -58,10 +58,15 @@ is your rollback while the first proves the change. Per update:
    candidate config on both hosts (exit 0 or stop), and check the
    [reload matrix](../reference/reload-matrix.md) for whether any touched field
    is restart-required.
-2. **Reload RS1 only** (SIGHUP). Parse/validation rejection leaves runtime
-   untouched; a later reconcile failure can leave known partial changes.
-   Inspect the reload result and effective configuration before proceeding
-   ([current SIGHUP boundary](../reference/known-issues.md)).
+2. **Reload RS1 only** (SIGHUP). Parse, validation, or dataset load failures
+   and rejected family combinations leave runtime untouched. Member, policy,
+   and dataset changes, including a member joining or leaving, take the
+   generation route: a later failure restores RS1's prior generation and
+   rejects the reload. Only the sequential route (for example a TCP-AO
+   rotation or listener MD5/GTSM change) can halt with known partial
+   changes. `rustbgpd --diff` prints the route as `SIGHUP reload route`;
+   inspect the reload result and effective configuration before proceeding
+   ([SIGHUP reload routes](../reference/reload-matrix.md#sighup-reload-routes)).
 3. **Verify RS1:** sessions established (`rbgp summary`), spot-check a
    member's view (`rbgp rib sent <member>`), no alert movement.
 4. **Soak** for an operator-chosen window (long enough for a full

@@ -86,8 +86,8 @@ releases rather than carried forward from older measurements.
 | AIGP (type 26) | Yes | No | |
 | PMSI_TUNNEL (type 22) | Yes | Yes | RFC 6514 §5; originated on Type 3 IMET for ingress-replication BUM |
 | Only-to-Customer (type 35, RFC 9234) | No | Yes | Codec + ingress/egress enforcement (see Core Protocol row above). GoBGP does not implement RFC 9234 (osrg/gobgp#3244). |
-| TUNNEL_ENCAP (type 23) | Yes | No | |
-| PREFIX_SID (type 40) | Yes | No | |
+| TUNNEL_ENCAP (type 23) | Yes | Partial | RFC 9012 Tunnel TLV and sub-TLV framing validation with opaque retention; no typed tunnel semantics |
+| PREFIX_SID (type 40) | Yes | Partial | RFC 8669 framing with opaque retention; RFC 9252 SRv6 Service framing and eligibility checks with service-aware reflection; API/CLI views show advertised SIDs and an optional display-only reconstructed Function SID; no SID allocation, origination, or forwarding |
 | Unknown attribute passthrough | Yes | Yes | Partial bit on re-advert |
 
 ## Policy Engine
@@ -134,8 +134,8 @@ releases rather than carried forward from older measurements.
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
 | Import-policy explain | No | Yes (opt-in) | `ExplainImportPolicy` RPC + `rbgp policy explain` — per-prefix PERMIT/DENY/WITHDRAWN/EVICTED/STALE/NOT_SEEN decision trace at the transport eval site, IPv4/IPv6 unicast (ADR-0073). Off unless `[policy.explain] enabled = true`; the decision cache is per session |
-| RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
-| BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
+| RPKI management | Yes | Partial | `RpkiService` `ListCaches` (cache status and accepted epoch) and `ValidateRouteOrigin`, plus metrics; caches are config-file only, no gRPC RPKI CRUD |
+| BMP management | Yes | Partial | Collectors are config-file only, no runtime gRPC add/remove; experimental `ReplayOutbound` (`rbgp neighbor PEER replay-out`) re-announces one peer's unicast routes and re-baselines eligible `rib_out_post` collectors for that peer |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
 | Zebra/FRR integration | Yes | No | |
 | Runtime log level | Yes | Partial | Per-peer log level via config; no global runtime gRPC toggle |
@@ -181,7 +181,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | Config formats | TOML/YAML/JSON/HCL | TOML | |
-| Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart. Measured at route-server scale: sub-second UPDATE stall and ~1.6 s full re-advertisement at 700 clients x 400k routes (docs/perf/reload-stall-2026-07.md) |
+| Config reload (SIGHUP) | Yes | Yes | Neighbor, peer-group, policy, and dataset changes settle as one runtime generation that restores the prior state on failure; other families run sequentially; global identity changes require restart. Measured at route-server scale: sub-second UPDATE stall and ~1.6 s full re-advertisement at 700 clients x 400k routes (docs/perf/reload-stall-2026-07.md) |
 | Config persistence | No | Yes | gRPC mutations atomically persisted to TOML |
 | Prefix limits | Yes | Yes | rustbgpd inbound limits are per-family, and `max_prefix_action` selects the response: `shutdown` (the default) tears down with Cease/1, latches the peer, and optionally makes one generation-fenced restart attempt after a configured hold-down; `block` withholds net-new prefixes beyond a full bound while the session stays Established; `warning` warns once per crossing. `max_prefix_warning_percent` adds a sub-bound warning threshold under any action. Outbound per-family limits keep the session Established and withhold net-new advertisements without withdrawals or NOTIFICATION |
 | Embeddable library | Yes (Go) | No | Three crates are registry-published rather than the whole daemon: `rustbgpd-wire` (codec), `rustbgpd-fsm` (pure RFC 4271 FSM), and `rustbgpd-rpki` (VRP/ASPA tables, RTR client, validation) — see [EMBEDDING.md](../reference/embedding.md) |
@@ -246,7 +246,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Advantages Over GoBGP
 
-- **Zero unsafe in application logic** — `deny(unsafe_code)` per-crate
+- **Unsafe confined to three reviewed modules** — `deny(unsafe_code)` at every crate root; the Linux socket-option, BFD receive-TTL, and watchdog-exit sites are the scoped exceptions ([SECURITY.md](../../SECURITY.md))
 - **Property testing** — `proptest` suites in the wire, FSM, RIB, and BFD crates; GoBGP's tests are table-driven and its `go.mod` pulls in no property-testing library
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **ASPA path verification** — RTR v2, BGP-Role-selected upstream/downstream
@@ -257,7 +257,7 @@ Competing head-to-head with GoBGP for all use cases:
 - **Import-policy explain** — `ExplainImportPolicy` RPC + `rbgp policy explain` answer "why didn't this prefix come in?" from a per-session import-decision cache that records both permits and denies at the transport eval site (ADR-0073), opt-in via `[policy.explain] enabled = true` since the cache is retained per session; GoBGP has no per-prefix import-decision diagnostic
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
-- **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
+- **Secure-by-default gRPC** — owner-only UDS default listener, per-listener token or mTLS authentication, and per-method authorization tiers for principals and roles; GoBGP defaults to open TCP
 - **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
 - **Live TUI dashboard** — `rbgp top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
 - **EVPN RR + bidirectional VTEP via API-first + kernel-integrated model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3); validated end-to-end against FRR 10.7.1 and at 50k-route scale with churn (M30-M33). Phase 2 (declarative instance schema, FDB reconciler, local MAC + MAC+IP origination, VTEP convergence; ADR-0052/0054/0055/0056) adds the **bidirectional VTEP loop**: kernel FDB programming from received Type 2 routes (M36), local MAC/MAC+IP origination via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing, Type 3 IMET per L2VNI (M37), SVI MAC origination, sticky MAC config, and sub-second mobility wakeups. EVPN multi-homing (ESI, Type-1/Type-4) plus BUM-flood suppression + DF election (v0.17.0+) add alpha multi-homing execution: DF election (M38), Type 1/4 origination, default-on kernel BUM-port enforcement since v0.23.0 with explicit `false` opt-out (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. EVPN symmetric IRB (Type-5 / L3VNI), Interface-less, shipped end-to-end in v0.18.0 (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, `Dataplane::probe_ip_vrfs`, sub-second route-event subscription, `rbgp evpn vrfs`, M39 hosted smoke against FRR 10.7.1). ADR-0059 aliasing dataplane ECMP shipped in v0.19.0 (M40 FRR smoke). Native GW-IP and ESI overlay-index Type 5 origination, single-active ESI overlay-index receive (M71), and all-active ESI overlay-index receive with route-level ECMP plus L3VXLAN FDB-NHG (M72) now ship. On the VTEP-mode dimension this is functional parity-plus over GoBGP — GoBGP exposes the EVPN wire codec but does not own kernel-side FDB integration. GoBGP retains an edge on mature production multi-homing time-in-deployment and service-provider breadth, while rustbgpd's operational model stays API-first throughout

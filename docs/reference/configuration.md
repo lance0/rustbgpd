@@ -367,6 +367,9 @@ Peers that failed the immediate refresh retry on their next policy edit
 through the same `pending_refresh` / `pending_export_apply` carry-forward
 plumbing used elsewhere in the reload path; transient failures surface as
 `warn!` log lines rather than aborting the whole reload.
+A SIGHUP that changes this field together with static-neighbor, peer-group,
+policy, or dataset changes is rejected before any effect; reload it on its own
+([SIGHUP reload routes](reload-matrix.md#sighup-reload-routes)).
 
 The matching initiator-side toggle (`rbgp gshut`) is a runtime gRPC
 operation, not a config field; see `docs/reference/operations.md` for the operator
@@ -459,7 +462,10 @@ failure signal.
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
 for EBGP peers, advances the live snapshot, and retries transient per-peer
-refresh failures through the existing pending-refresh path.
+refresh failures through the existing pending-refresh path. As with
+`honor_graceful_shutdown`, combining the change with static-neighbor,
+peer-group, policy, or dataset changes in one SIGHUP is rejected before any
+effect.
 
 `install_blackhole_discard`, `allow_blackhole_broad_prefixes`, the three discard guardrails, and the
 `honor_blackhole` component of an enabled or requested FIB-discard spawn gate
@@ -1221,7 +1227,9 @@ non-deprecated key is selected. Reordering is therefore a restart-required
 configuration change. Appending a non-preferred successor can be installed
 live on SIGHUP; a later SIGHUP can select that installed successor and
 observation-gate predecessor deprecation in the same immutable generation.
-Deleting an MKT remains restart-coordinated.
+A still-later SIGHUP can delete deprecated MKTs that are not selected, provided
+the owner set, survivor order, and key definitions are unchanged; deleting a
+non-deprecated or selected key remains restart-required.
 
 ### TCP MSS clamp
 
@@ -1716,6 +1724,10 @@ rbgp dynamic-neighbor delete 10.0.0.0/24
   matcher is rolled back and the RPC reports failure. The write rewrites the
   whole config file in canonical form — see
   [Config Persistence](#config-persistence).
+- A SIGHUP that edits `[[dynamic_neighbors]]` in the TOML together with
+  static-neighbor, peer-group, policy, or dataset changes is rejected before
+  any effect; reload the range change on its own
+  ([SIGHUP reload routes](reload-matrix.md#sighup-reload-routes)).
 - **Delete stops *future* accepts only.** Already-established dynamic peers from
   a removed range keep running and drain naturally when they next return to
   Idle; delete never tears down a live session.
@@ -2616,11 +2628,14 @@ le = 24
 [policy.definitions.set-lp-customer]
 [[policy.definitions.set-lp-customer.statements]]
 action = "permit"
+prefix = "0.0.0.0/0"
+le = 32
 set_local_pref = 150
 
 [policy.definitions.tag-ixp]
 [[policy.definitions.tag-ixp.statements]]
 action = "permit"
+match_route_type = "external"
 set_community_add = ["LC:65001:1:100"]
 set_next_hop = "self"
 ```
@@ -2797,13 +2812,22 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   advertisements. Shared update groups recompute once per affected group,
   including per-client-best selection; changed verdicts withdraw denied
   routes and announce newly permitted routes without reinstalling chains
-  or resetting their counters. A file that fails to
-  load or parse **keeps the
-  prior snapshot** with a WARN, a
-  `bgp_policy_dataset_refresh_errors_total{dataset}` counter
-  increment, and a `last refresh FAILED` row in `rbgp policy stats`.
-  At initial load (or for a newly declared dataset) the file must
-  load cleanly.
+  or resetting their counters. On SIGHUP, every declared file must
+  load and parse before publication: a malformed or unreadable file
+  **rejects the whole reload** with no runtime effect, logs `SIGHUP
+  reload rejected without runtime effect` naming the dataset, and
+  increments `bgp_policy_dataset_refresh_errors_total{dataset}`; the
+  prior snapshot keeps serving and the candidate stays on disk for
+  correction. At startup every file must load cleanly.
+- Adding, removing, or re-mapping a `[policy.datasets]` entry is
+  reloadable: together with the matching `.rpol` and `[[neighbors]]`
+  changes (a route-server member joining or leaving with its own
+  datasets, say), it applies on SIGHUP as one runtime generation, and a
+  later failure restores the prior binding set. Dataset changes combined
+  with TCP-AO rotation, listener MD5/GTSM changes, `[[dynamic_neighbors]]`,
+  EVPN runtime tables, `[[fib_tables]]`, or the honor knobs are rejected
+  before any effect; see the
+  [reload matrix](reload-matrix.md#sighup-reload-routes).
 - Bounds: 64 MiB and 1,000,000 records per file; at most 16 datasets
   per `.rpol` compilation unit.
 - Producers should write-temp-then-rename so a refresh never reads a
@@ -3589,7 +3613,10 @@ reconciles: added tables back-fill from the current best routes, removed
 tables have their owned kernel rows withdrawn, and unaffected rows don't flap.
 The in-memory config snapshot advances only **after** the reconciler
 acknowledges the new set, so a missed apply never leaves the snapshot ahead of
-the kernel.
+the kernel. A SIGHUP that combines a `[[fib_tables]]` edit with static-neighbor,
+peer-group, policy, or dataset changes is rejected before any effect; reload
+the table edit on its own
+([SIGHUP reload routes](reload-matrix.md#sighup-reload-routes)).
 
 **Restart still required to *start* the FIB subsystem from an empty config**:
 if no `[[fib_tables]]` were present at startup the reconciler was never spawned,
@@ -4511,44 +4538,55 @@ alone never writes the file.
 
 ### SIGHUP Reload
 
-Sending `SIGHUP` to the rustbgpd process triggers a four-bucket config
-reload, applied in dependency order:
+Sending `SIGHUP` to the rustbgpd process re-reads the config file and its
+`.rpol` and dataset files, pins restart-required fields to their live values,
+and classifies the whole candidate into one of three routes before any
+credential, listener, session, or catalog effect. `rustbgpd --diff` and
+`rbgp config diff` print that route as `SIGHUP reload route`; the
+[reload matrix](reload-matrix.md#sighup-reload-routes) has the full table and
+the [operations guide](operations.md#configuration-reload-sighup) the
+settlement detail.
 
-1. **Definitions and hot-applied global flags** — neighbor sets, named
-   policies, peer groups, global import / export chains,
-   `honor_graceful_shutdown`, and control-plane-only
-   `honor_blackhole`. Each bucket diffs against the running config and
-   fires a single-shot command at the peer manager that goes through the
-   same `apply_policy_change` / `apply_peer_group_change` paths the
-   gRPC API uses. Hot-applied policy chains land at every affected
-   peer's session task without tearing the BGP session.
-2. **`[[neighbors]]` reconcile** — adds, deletes, and changes flow
-   through `diff_neighbors()` + a single `ReconcilePeers` command with
-   add/delete/change deltas.
-3. **Deletes of obsolete definitions** in reverse-dependency order —
-   so transient `still referenced` rejections don't fire while a
-   peer group is being deleted before the chain that named it.
-4. **Automatic Route Refresh on import-policy hot-apply** — when a
-   peer's effective import chain changes,
-   `PeerManager::update_runtime_policies` issues `soft_reset_in`
-   (gated on Established) so routes already in `AdjRibIn` get
-   re-evaluated. Operators do not need to follow up with a manual
-   `softreset` after a chain swap.
+1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
+   inline policy definitions, neighbor sets, global chains, `.rpol` content,
+   `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
+   as one owned runtime generation. The daemon resolves the candidate once,
+   derives one action per static neighbor (unchanged, hot update in place,
+   replace, add, or remove), and applies every changed live peer's final
+   chains. The prior config, policies, datasets, and session configs are
+   retained: a later failure restores them, the reload reports a clean
+   rejection, and the candidate file stays on disk for correction. A restore
+   that cannot be proven recovery-fences the daemon instead.
+2. **Sequential** — a candidate with no generation-class change
+   (`[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`,
+   `honor_graceful_shutdown` / `honor_blackhole`, TCP-AO rotation, listener
+   MD5/GTSM inventory, explain-only, `[gnmi_dialout]`), or a generation-class
+   change combined with TCP-AO rotation or listener MD5/GTSM changes while
+   dataset contents are unchanged, runs per-subsystem steps in dependency
+   order: listener authentication, EVPN runtime, and outbound prefix maxima;
+   definitions and global chains; the `[[neighbors]]` reconcile; the
+   honor knobs and `[[fib_tables]]`; then deletes of obsolete definitions in
+   reverse-dependency order. This route halts at the first step failure. If
+   no step had taken effect, the halt is a clean no-effect rejection; once a
+   step has landed, it returns an authoritative known-partial receipt that
+   records the failing bucket, target, and error, and the daemon's in-memory
+   config tracks what actually applied. Fix the failing TOML and reload again
+   to converge.
+3. **Rejected** — dataset content or binding changes combined with TCP-AO
+   rotation or listener MD5/GTSM changes, and any generation-class or dataset
+   change combined with `[[dynamic_neighbors]]`, EVPN runtime tables,
+   `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole`, are
+   rejected before any effect. Apply those families in separate reloads.
 
-Reload halts at the first step failure. If no step had taken effect
-yet, the halt is a clean no-effect failure: the reload is reported
-and refused with nothing mutated. Once any step has landed at the
-peer manager, the halt instead returns an authoritative
-known-partial receipt — it records the failing bucket, target, and
-error, and carries the honest partial snapshot of what actually
-applied, so the daemon's in-memory config tracks the peer manager
-rather than the rejected candidate. Every reload step reports
-through that receipt, the neighbor reconcile included; earlier
-steps that landed at the manager remain in effect. The acknowledged
-partial authority settles before another reload may begin, and a
-lost acknowledgement fences the runtime config for recovery instead
-of leaving the authority ambiguous. Operators fix the failing TOML
-and reload again to converge against the half-applied state.
+A candidate that fails to parse or validate, or whose `.rpol` or dataset files
+fail to load, is rejected before any effect on every route. A lost
+acknowledgement or non-authoritative result fences the runtime config for
+recovery rather than leaving the authority ambiguous.
+
+When a peer's effective import chain changes, the peer manager issues
+`soft_reset_in` (gated on Established) so routes already in `AdjRibIn` are
+re-evaluated. Operators do not need to follow up with a manual `softreset`
+after a chain swap.
 
 `[global]` identity and daemon-wide flags (ASN, router-id, listen
 port, cluster-id, admission and multipath knobs),
@@ -4573,9 +4611,10 @@ mutation does not expose direct `AddEvpnInstance` / `DeleteEvpnInstance`
 RPCs; unsupported shapes are tracked in
 <https://github.com/lance0/rustbgpd/issues/268>.
 
-Reload failures are reported per-step with structured logging
-(bucket / target / error). The previous in-memory config snapshot
-is preserved up to the point of failure.
+Reload failures are reported with structured logging (bucket / target /
+error). A rejected or restored reload leaves the previous in-memory config
+snapshot in place; a sequential known-partial halt advances it only as far as
+the steps that applied.
 
 ---
 
@@ -4621,6 +4660,7 @@ starting:
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
+| `set_as_path_prepend.asn` must not be 0, and a chain whose `.rpol` prepend resolves to AS 0 is rejected when attached (RFC 7607) | `ASN cannot be 0 (RFC 7607)` / `AS 0 cannot be prepended (RFC 7607)` |
 | `match_as_path` must be a valid regex | `invalid regex` |
 | RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |

@@ -42,10 +42,11 @@ IXP Manager v7.4 member DB
 router-config/v2 JSON                      fetched over HTTPS, mode 0600
         │  rs-config-render --input-format ixp-manager-v2 --check-with rustbgpd
         ▼
-candidate/: config.toml + policy/*.rpol + birdwatcher-protocol-aliases.conf
+candidate/: config.toml + policy/*.rpol + datasets/*.list
+            + birdwatcher-protocol-aliases.conf
             + render-receipt.json          (written last, after --check --strict)
         │  rs-config-render activate       (immutable generation, atomic `current` swap,
-        ▼                                   one synchronous reload, rbgp settle)
+        ▼                                   one synchronous reload, rbgp settlement check)
 rustbgpd@<handle>.service reads <runtime>/activation/current/config.toml
         │
         ▼
@@ -355,7 +356,8 @@ proven:
 
 A later member change is a fresh fetch, a fresh render into a fresh
 candidate directory, and another `activate`: the daemon hot-reloads
-(parse-then-swap SIGHUP through `reload-or-restart`), `current` moves to
+(one SIGHUP runtime generation through `reload-or-restart`; the other
+members keep their sessions), `current` moves to
 the new generation, and the previous generation stays on disk. Re-rendering
 the same upstream state produces byte-identical files and a no-op.
 
@@ -643,10 +645,14 @@ and the adapter at this commit:
   command, one fence per host. A redundant pair on two hosts is two
   independent lifecycles. There is no remote activation and no cross-host
   fence.
-- **Generations are retained, never pruned.** Every activated generation
-  stays under `<runtime>/activation/generations/<sha256>` for inspection;
-  the helper does not prune, retry indefinitely, deploy services, or call
-  IXP Manager from `activate`. Disk growth is yours to manage.
+- **Generations are retained until you prune them.** Every activated
+  generation stays under `<runtime>/activation/generations/<sha256>` for
+  inspection; activation and the lifecycle never remove one. Retention is the
+  separate, opt-in `rs-config-render prune` command (a dry run unless
+  `--apply`; see the
+  [renderer README](../../tools/rs-config-render/README.md#pruning-retained-generations)).
+  The helper does not retry indefinitely, deploy services, or call IXP Manager
+  from `activate`.
 - **Single-session clients, IPv4/IPv6 unicast, route-server routers only.**
   Multi-address clients, quarantine and non-route-server modes, and
   protocols other than 4/6 are refused at render. Filter translation

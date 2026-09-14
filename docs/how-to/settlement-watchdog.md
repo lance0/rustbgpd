@@ -249,8 +249,10 @@ exits 70, and no fail-stop happens without this line. Reading it:
   for matching this process's own log lines.
 - For `kind=sighup`, `reload_step` names the compile-time reload bucket
   that returned the typed fenced outcome, and `accepted_effect=true`
-  means at least one earlier SIGHUP effect was accepted, including the
-  credential-generation refresh that begins a daemon SIGHUP. `false`
+  means at least one earlier SIGHUP effect was accepted. gRPC credential
+  rotation runs only after the runtime generation is acknowledged, so a
+  candidate rejected at preflight or restored after a failure has no
+  credential effect. `false`
   means no earlier accepted effect was observed; it does **not** prove
   that the fenced step had no effect, because an acknowledgement-lost
   step remains ambiguous by definition.
@@ -418,19 +420,28 @@ detached), with a few semantics of its own:
   settles. SIGHUP has no pre-ownership timeout: it waits for the
   coordinator, so a long-running owned transaction delays it.
 - **Preflight rejections stay cheap.** A pending commit-confirm, a
-  parse failure, an outbound prefix-limit preflight rejection — all
+  parse or dataset load failure, an outbound prefix-limit preflight
+  rejection, a family combination the route classifier rejects
+  (`SIGHUP reload route: rejected` in `rustbgpd --diff`) — all
   reject before ownership does any work: clean no-effect, old config
   keeps running, fix and re-signal. The
   [reload matrix](../reference/reload-matrix.md) still governs which fields a
   reload can apply at all.
-- **Partial convergence is normal and settles cleanly.** A reload that
-  halts at a step failure produces an authoritative *known-partial*
-  receipt: the runtime snapshot, config bridge/persister, tracing, and
-  gNMI dial-out targets all adopt the same partial authority, the
-  owner settles, and the daemon logs `SIGHUP settled with an
-  authoritative partial runtime receipt`. Fix the failing TOML and
-  reload again. Partial is a clean outcome — only an *unprovable*
-  outcome fences.
+- **Partial convergence depends on the reload route.** On the
+  sequential route, a reload that halts at a step failure produces an
+  authoritative *known-partial* receipt: the runtime snapshot, config
+  bridge/persister, tracing, and gNMI dial-out targets all adopt the
+  same partial authority, the owner settles, and the daemon logs
+  `SIGHUP settled with an authoritative partial runtime receipt`. On
+  the generation route, a failure restores the prior generation and
+  reports a clean rejection (`reload generation failed; the peer
+  manager restored the prior generation and the candidate file is left
+  for correction`); a restore that leaves state uncertain fences as
+  `known_divergence`. `rustbgpd --diff` prints which route a candidate
+  takes as `SIGHUP reload route`; see
+  [configuration reload](../reference/operations.md#configuration-reload-sighup).
+  Either way, fix the failing TOML and reload again. Partial and
+  restored outcomes are clean — only an *unprovable* outcome fences.
 - **Policy state proof gets one bounded retry.** At a settlement-owned policy
   clean-state fence, one missed 100 ms session-state reply is retried at most
   once inside a two-second window shared by the operation. Confirmed

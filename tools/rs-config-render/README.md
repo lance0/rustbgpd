@@ -442,14 +442,22 @@ rs-config-render --context "$STATE/context.yml" \
     --out-dir "$STATE/candidate" --rtr-cache 127.0.0.1:3323
 rustbgpd --check --strict "$STATE/candidate/config.toml"
 rsync -a --delete "$STATE/candidate/" /etc/rustbgpd/
-systemctl reload rustbgpd        # SIGHUP: parse-then-swap
+systemctl reload rustbgpd        # SIGHUP: one runtime generation
 ```
 
-Any step failing (arouteserver exit, render refusal/abort, `--check
---strict` rejection or warning) leaves the previous configuration
-running untouched; the
-daemon's own reload seam guarantees a bad swap can never evict working
-policy either. Alert on the age of `render-receipt.json` — a pipeline
+Any step failing before the swap (arouteserver exit, render refusal/abort,
+`--check --strict` rejection or warning) installs nothing and leaves the
+previous configuration running untouched. After the swap, changed IRR data
+and a member joining or leaving (its `[[neighbors]]` entry plus its two
+datasets) apply on that SIGHUP as one runtime generation; unchanged members
+keep their sessions. A candidate that fails to load at SIGHUP is rejected
+before any effect, and a failure part-way restores the prior member set,
+policies, and datasets and rejects the reload. In both cases the daemon keeps
+running the previous configuration while the rejected candidate stays in
+`/etc/rustbgpd/`, and the next refresh signals it again. The preview command,
+the one rendered knob outside the generation, and the recovery details are in
+the [cookbook](../../docs/cookbook/ixp-filter-pipeline.md#3-validate-swap-reload).
+Alert on the age of `render-receipt.json` — a pipeline
 stuck for more than a couple of refresh intervals should page, not rot.
 
 ## Exit codes
