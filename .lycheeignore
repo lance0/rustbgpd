@@ -1,2 +1,4 @@
 # Reserved example hosts are documentation literals, not live dependencies.
 ^https?://([^.]+\.)*example\.(com|net|org)(:[0-9]+)?(/|$)
+# GitHub theme markers on logo images are not document anchors.
+.*#gh-(dark|light)-mode-only$

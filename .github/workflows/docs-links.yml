@@ -40,7 +40,7 @@ jobs:
           args: >-
             --files-from "${{ runner.temp }}/tracked-markdown.txt"
             --offline
-            --include-fragments=none
+            --include-fragments=anchor-only
             --no-progress
           fail: true
           failIfEmpty: true
@@ -69,7 +69,7 @@ jobs:
         with:
           args: >-
             --files-from "${{ runner.temp }}/tracked-markdown.txt"
-            --include-fragments=none
+            --include-fragments=anchor-only
             --no-progress
           fail: true
           failIfEmpty: true
