@@ -375,7 +375,9 @@ struct ManagedPeer {
     /// A positively known-down peer at the last policy apply (Idle/Connect/
     /// Active). Its pending flags after that apply are the carried `PeerUp`
     /// intent (policy.rs 3711-3720), not convergence debt, and it owes no
-    /// Route Refresh to the transaction that armed them.
+    /// Route Refresh to the transaction that armed them. Reset every policy
+    /// apply -- never a stale `true` inherited into the next convergence-debt
+    /// scan; the apply-side verdict is the only writer.
     policy_known_down: bool,
     /// RFC 8326 graceful-shutdown initiator toggle — operator-driven
     /// desired state. When true, every outbound update gets
