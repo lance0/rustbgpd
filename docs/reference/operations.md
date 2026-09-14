@@ -113,7 +113,8 @@ settlement and `BgpRuntimeConfigSettlementHalfBudget` at 50% of the budget; at
 either point identify the labeled owner and inspect the owning actor rather
 than retrying the mutation. Fencing produces one redacted diagnostic containing
 only operation identity/classification, phase, elapsed/budget seconds,
-attachment, terminal, optional fence reason, and exit status. It never includes
+attachment, terminal, optional fence reason, SIGHUP `reload_step` and
+`accepted_effect`, and exit status. It never includes
 config contents, tokens, confirm IDs, comments, credentials, paths, digests,
 candidates, or raw error text.
 
@@ -535,8 +536,10 @@ effective-impact view:
   or other ambiguous structural edits retain the broader reasons; this is
   structural attribution, not a proof of changed route outcomes.
 
-Exit codes: 0 = no actionable changes, 1 = actionable changes found,
-2 = error (bad config, missing file).
+Exit codes: `rustbgpd --diff` returns 0 = no actionable changes,
+1 = actionable changes found, 2 = error (bad config, missing file).
+`rbgp config diff` and `rbgp config plan` use 0 = no changes,
+2 = changes present, 1 = error.
 
 ## Configuration reload (SIGHUP)
 
@@ -684,8 +687,8 @@ Readiness retains its live actor checks and existing transaction seams.
 Operator deadlines, complete-result requirements, and the clean transition's
 atomic commit remain unchanged. The [paired native rollback receipt](../perf/artifacts/rib-summary-rollback-2026-09-12/README.md)
 records successful baseline and candidate reads, including candidate calls
-inside restore. It establishes neither a baseline deadline failure nor final
-release qualification; the final phase sweep and qualifying soak remain required.
+inside restore. It does not establish a baseline deadline failure. For
+release-level operating evidence, see the [flagship soak receipts](../soaks/README.md#historical-receipts).
 
 The serial work still scales with fleet size: 1,000 individual 100 ms state
 probes have a theoretical 100-second ceiling, and 1,000 individual 500 ms
@@ -747,7 +750,9 @@ error text. Per-step operational detail remains in structured
 `bgp_sighup_reload_outcomes_total{outcome}` is process-global and
 preinitializes five bounded outcomes: `complete` includes a clean no-op;
 `known_partial` means the retained task settled with an authoritative partial
-receipt; `rejected_no_effect` means it rejected before any runtime effect;
+receipt; `rejected_no_effect` means it rejected before any runtime effect or
+the generation route restored the prior generation after a later failure (a
+replaced session may already have reset once);
 `ignored_in_flight` counts each concurrent signal dropped while another reload
 owns the lane; and `task_failed` means the retained Tokio task itself failed.
 Recovery-fenced ownership deliberately has no outcome row because it remains
@@ -912,7 +917,8 @@ change, or SIGHUP reload) is still settling; when the named file resolves to
 a different RFC 8212 epoch/posture than the live daemon runs; and whenever
 the evidence is unavailable, denied, or unimplemented. It never confirms,
 aborts, rewrites, or stops anything, and a green result is dated
-(`observed at unix <t>`): it is an observation at one instant, not a fence —
+(`Pre-upgrade observation as of unix <t>` in text output,
+`observed_at_unix_seconds` in JSON): it is an observation at one instant, not a fence —
 a transaction can start after it. Continue with the coordinated stop,
 verify the service is inactive, then repeat the candidate `--check --strict`
 and any offline authority checks before installing. See
@@ -1194,7 +1200,9 @@ is treated as withdrawn; a malformed generic Prefix-SID attribute is discarded
 while the route remains. See [SRv6 Service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
 and [service eligibility](path-attribute-registry.md#srv6-service-eligibility)
 for the canonical rules. These reflection checks do not add SRv6 PE import,
-service origination, SID reconstruction, next-hop rewriting, or forwarding.
+service origination, next-hop rewriting, or forwarding. The optional
+`reconstructed_sid` in VPN and EVPN inspection views is display-only and does
+not affect selection.
 
 ---
 
@@ -1308,7 +1316,8 @@ without paging on disabled peers. Flap-rate alerting remains based on
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
 the same 200 ms core-actor deadline as `/readyz`. `rbgp health --liveness`
 uses the Read-tier `ControlService.CheckLiveness` instead: it proves only that
-an authenticated gRPC handler answered and prints `alive` (JSON: `{"alive":true}`).
+an authenticated gRPC handler answered and prints `alive` (JSON: a
+pretty-printed object with `"alive": true`).
 HTTP `/livez` is the corresponding non-disclosing HTTP alternative when the
 metrics listener is configured. Neither liveness path checks actor readiness,
 BGP convergence, or forwarding. Successful Read authorization audits are DEBUG;
@@ -1421,7 +1430,7 @@ not advance on a rejected load.
 |--------|-------------------|
 | `bgp_policy_generation_loaded_timestamp_seconds` | Unix time of the last successful full policy apply — initial load, SIGHUP reload (stamped even when the reloaded content is unchanged: the daemon re-accepted it), or config transaction. Frozen across rejected reloads |
 | `bgp_policy_dataset_loaded_timestamp_seconds{dataset}` | Unix time the named `[policy.datasets.<name>]` external dataset last swapped in a loaded generation (initial load, or a refresh whose content changed). A failed refresh keeps the prior snapshot serving and does not advance this. Series reaped when the dataset is removed from config |
-| `bgp_policy_dataset_refresh_errors_total{dataset}` | Failed dataset refresh attempts; the prior snapshot keeps serving. Series reaped when the dataset is removed from config |
+| `bgp_policy_dataset_refresh_errors_total{dataset}` | SIGHUP candidates in which the named, already-running dataset's file failed to load or parse (a newly declared dataset that fails to load rejects the candidate at parse time instead, without counting). The daemon counts the failure before routing the reload, then rejects the whole reload with no runtime effect (`SIGHUP reload rejected without runtime effect`), so the prior snapshot keeps serving and neither timestamp advances. Series reaped when the dataset is removed from config |
 
 **Alerting on pipeline staleness.** Export ages, not the raw
 timestamps, and let Prometheus do the arithmetic. If your pipeline
@@ -1442,7 +1451,9 @@ The dataset timestamp advances only when a refresh swaps in *changed*
 content, so pair the dataset-age expression with the refresh-error
 counter: age alone can also mean "the data legitimately hasn't
 changed", while age plus rising errors means the pipeline output is
-being rejected. The full-apply timestamp has no such caveat — it is
+being rejected. A malformed dataset file also freezes the full-apply
+timestamp, because it rejects the whole reload. That timestamp has no
+data-unchanged caveat — it is
 stamped on every successful SIGHUP — so it is the primary "pipeline
 stuck or daemon rejecting everything" pager.
 
@@ -1852,10 +1863,13 @@ of choice and apply retention outside the daemon:
 - Export logs to remote storage when `operator_only` actions, role denials, or
   authentication failures need tamper-resistant evidence.
 
-Useful local queries:
+Useful local queries follow. `operator_only` decisions log at WARN and most
+others at INFO, but a successful `read`-tier call (`CheckLiveness`) logs at
+DEBUG, so these queries omit such calls unless debug logging is enabled;
+`bgp_grpc_authz_decisions_total` still counts every request.
 
 ```bash
-# All gRPC authorization records from a systemd unit.
+# gRPC authorization records at the configured log level from a systemd unit.
 journalctl -u rustbgpd -o cat --since -24h \
   | jq 'select(.target == "grpc_authz")'
 
@@ -1863,7 +1877,7 @@ journalctl -u rustbgpd -o cat --since -24h \
 journalctl -u rustbgpd -o cat --since -24h \
   | jq 'select(.target == "grpc_authz" and .tier == "operator_only")'
 
-# Tier or role denials that should be investigated before enabling tier mode.
+# Listener-cap, role, and authentication denials to investigate.
 journalctl -u rustbgpd -o cat --since -24h \
   | jq 'select(.target == "grpc_authz"
       and (.result == "listener_tier_denied"
@@ -2252,7 +2266,10 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
-| `config reload complete` | INFO | SIGHUP reload completed |
+| `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
+| `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
+| `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |
+| `reload generation left runtime state uncertain; fencing` | ERROR | Generation-route compensation could not be proved; the daemon recovery-fences |
 | `config reload stopped at this step; settling the acknowledged partial runtime authority before another reload may begin` | ERROR | A reload step failed after the coordinator established the resulting authority; inspect the structured `bucket`, `target`, and `error` fields |
 | `GR restart marker` | INFO | Restart marker written or read |
 | `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
@@ -2714,7 +2731,9 @@ IPv6 peer is supported; repeated link-local addresses on different interfaces
 are refused. These prerequisites are checked before monitoring reset or replay
 traffic, because the reset clears the entire cached peer inventory.
 
-Eligible collectors have `rib_out_post = true` and `rib_in_pre = false`.
+Eligible collectors have a `monitor` list that includes `rib_out_post` and
+omits `rib_in_pre` (for example `monitor = ["rib_out_post"]`; the default
+`["rib_in_pre"]` is not eligible).
 Before replay, each receives a monitoring-only Peer Down (reason 5) followed
 by the current Peer Up, clearing its previous peer inventory. The BGP session
 stays established. Mixed inbound/outbound collectors are excluded because
@@ -3789,8 +3808,11 @@ operator checklist, see
   log for the `draining EVPN originator` / `withdrawing EVPN Type 3
   IMET routes` lines firing **before** any peer-session-shutdown
   log lines.
-- **`could not subscribe to RTNLGRP_NEIGH; local-MAC observations
-  will be silent`** in the startup log. The daemon lacks
+- **`rtnetlink multicast subscription failed; corresponding upward
+  feed will be silent`** with `group_name="RTNLGRP_NEIGH"` in the
+  startup log: local-MAC observations will be silent. The same message
+  with `RTNLGRP_IPV4_ROUTE`, `RTNLGRP_IPV6_ROUTE`, or `RTNLGRP_LINK`
+  silences that route or link-event feed instead. The daemon lacks
   `CAP_NET_ADMIN`. Downward FDB programming also needs the
   capability; if the dataplane reconciler is working but the
   originator is silent, the cap is partially granted (rare). Check

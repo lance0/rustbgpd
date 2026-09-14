@@ -108,8 +108,9 @@ Preferred posture:
   `operator_only`) cataloged in `docs/reference/grpc-method-inventory.md` and
   `crates/api/src/authz.rs`. The runtime emits `grpc_authz` decision logs and
   `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced, and
-  `security.grpc.enforcement = "tier"` (the default since v0.24.0) enforces
-  per-principal role ceilings. `docs/adr/0064-grpc-authorization.md` records the
+  `security.grpc.enforcement = "tier"` (the default since v0.24.0 and the only
+  accepted mode since v0.63.0) enforces per-principal role ceilings.
+  `docs/adr/0064-grpc-authorization.md` records the
   tier model and which of its slices remain open.
 - `[security.grpc.roles]` and listener `principal` labels can be staged now so
   audit records use stable operator-controlled identities on bearer-token TCP
@@ -517,9 +518,10 @@ If `CAP_NET_ADMIN` is not granted:
   with `EPERM`/`EACCES` → `DataplaneError::PermissionDenied`. The
   reconcile actor's permanent-failure suppression then logs the
   failure and stops retrying that op.
-- The notify task logs `could not subscribe to RTNLGRP_NEIGH;
-  local-MAC observations will be silent` at WARN. Downward
-  programming may still work; upward origination won't fire.
+- The dataplane connection logs `rtnetlink multicast subscription
+  failed; corresponding upward feed will be silent` at WARN with
+  `group_name="RTNLGRP_NEIGH"` (or the IPv4/IPv6 route or link group).
+  Downward programming may still work; upward origination won't fire.
 
 **RR-only deployments** (both `[[evpn_instances]]` and
 `[[evpn_ip_vrfs]]` empty) need none of this — no netlink socket is
@@ -613,7 +615,9 @@ the roadmap:
   add/select/deprecate/delete lifecycle and authenticated traffic on the sole
   survivor.
 - gRPC token and mTLS material behind unchanged paths rotate on SIGHUP as one
-  all-listener generation. Alert on
+  all-listener generation, only after the reload's runtime state is
+  acknowledged; a rejected or restored candidate has no credential effect.
+  Alert on
   `bgp_grpc_credential_reloads_total{outcome="failure"}`; failures retain the
   last-known-good generation and logs never include secret bytes.
   [Native gRPC expiry visibility](operations.md#native-grpc-certificate-expiry)

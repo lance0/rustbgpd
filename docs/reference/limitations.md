@@ -64,8 +64,12 @@ The reflector implements scoped
 [SRv6 service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
 and [eligibility](path-attribute-registry.md#srv6-service-eligibility) checks,
 with unchanged-next-hop reflection of eligible raw attributes. SRv6 PE import,
-service origination, SID reconstruction, next-hop rewriting, and forwarding
-remain unimplemented.
+service origination, next-hop rewriting, and forwarding remain unimplemented.
+Inspection views show an optional
+[`reconstructed_sid`](api.md#prefix-sid-inspection-on-vpn-and-evpn-routes)
+when a single route supplies an unambiguous Function transposition;
+cross-route Argument composition is not reconstructed, and the value does not
+affect selection.
 See [SRv6 route troubleshooting](operations.md#srv6-service-route-is-visible-but-cannot-be-selected)
 for the retained-but-ineligible route case.
 
@@ -152,7 +156,13 @@ full gate ladder.
   callers wait instead of commands being dropped or an unbounded queue growing.
   Under a slow configuration operation this can increase concurrent management
   request latency even though routing-session work continues on its own actor
-  paths.
+  paths. Live operator reads such as neighbor snapshots, policy statistics, and
+  RIB queries use a separate bounded read lane and are admitted at defined
+  points during policy and reload generations
+  ([ADR-0132](../adr/0132-operator-read-path.md)), but they keep their
+  deadlines and can still time out behind an individual synchronous work unit.
+  See [configuration reload](operations.md#configuration-reload-sighup) for the
+  admission points.
 
 ## Operational proof
 
