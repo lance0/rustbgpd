@@ -13,9 +13,11 @@ Measured implementation evidence is indexed separately in the
 ## Index
 
 `Lifecycle` is a navigation aid, not a replacement for the decision's source
-status. Accepted and Current records are Active; rejected records are Rejected.
-A Proposed record is Unstated unless its own text says it is Parked. The
-current proposed records do not, and [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
+status. Accepted, Current, and Implemented records are Active; rejected records
+are Rejected (including a record whose accepted decision is to reject the
+proposal, such as ADR-0106). A Proposed record is Unstated unless its own text
+establishes another lifecycle, such as ADR-0100 (Parked as an unscheduled
+research blueprint). [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
 do not establish the lifecycle of their associated ADRs. No record currently
 states that the whole decision is Superseded.
 
@@ -121,13 +123,13 @@ states that the whole decision is Superseded.
 | [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 | Active |
 | [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 | Active |
 | [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted | 2026-07-03 | Active |
-| [0100](0100-parallel-rib-manager.md) | Parallelizing the RibManager (research blueprint) | Proposed | 2026-07-03 | Unstated |
+| [0100](0100-parallel-rib-manager.md) | Parallelizing the RibManager (research blueprint) | Proposed | 2026-07-03 | Parked |
 | [0101](0101-route-server-profile.md) | IXP route-server profile — per-client best-path (RFC 7947 §2.3.2) | Accepted | 2026-07-03 | Active |
 | [0102](0102-evpn-origination-acknowledgement.md) | EVPN origination acknowledgement-awareness (Type 1/2/4) | Accepted | 2026-07-09 | Active |
 | [0103](0103-rpol-execution-model.md) | rpol execution model, purity contract, and evaluation budgets | Accepted | 2026-07-09 | Active |
 | [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 | Active |
 | [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 | Active |
-| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 | Unstated |
+| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Accepted (ordinary restore rejected) | 2026-07-14 | Rejected |
 | [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Accepted | 2026-07-15 | Active |
 | [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 | Active |
 | [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 | Active |
@@ -145,7 +147,7 @@ states that the whole decision is Superseded.
 | [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 history restore and provenance-bearing commit-confirm v2 shipped | 2026-08-01 | Active |
 | [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Accepted | 2026-08-03 | Active |
 | [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 | Unstated |
-| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Implemented | 2026-08-04 | Unstated |
+| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Implemented | 2026-08-04 | Active |
 | [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 | Active |
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 | Active |
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 | Active |
@@ -168,14 +170,11 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The six records below do not state one of the navigation lifecycles above.
+The three records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
-- [ADR-0100](0100-parallel-rib-manager.md)
-- [ADR-0106](0106-warm-checkpoint-restore-decision.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
-- [ADR-0124](0124-bounded-config-history-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
 
 ## Template

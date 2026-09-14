@@ -1,7 +1,9 @@
 # ADR-0106: Warm checkpoint restore under planned-restart GR
 
-**Status:** Proposed (recommendation: reject ordinary restore)
+**Status:** Accepted — ordinary planned-restart route restore rejected
 **Date:** 2026-07-14
+**Amended:** 2026-09-14 (status made explicit; the 2026-07-14 decision to reject
+ordinary restore has been operated under since it was recorded)
 
 ## Context
 
