@@ -175,9 +175,11 @@ not a merge gate.
 ### Host coexistence: bench vs. soak
 
 Criterion comparisons, the rrtransport production receipt, and soak workloads
-share the primary host. That coexistence is now the normal case rather than a
-plan: the 24h flagship soak receipts record the primary host, and benchmarking
-moved there when the VPS was retired. All three acquire an exclusive `flock` on
+can share one host, and every cooperating runner takes the same lock. The
+2026-08 flagship passes recorded the primary host; the 2026-09 route-server
+flagship runs used a separate virtualized soak host (see their receipts),
+which is not a performance-measurement platform. All three acquire an
+exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before doing
 real work — `bench/compare-criterion.sh` directly, and the rrtransport receipt
 runner and soak runners via the shared `tests/soak/host-lock.sh` helper. A bench
@@ -481,7 +483,7 @@ these columns:
 
 This is **reviewer guidance, applied per benchmark row — not CI
 policy**; nothing auto-fails. It is deliberately a *rule* rather than a
-flat percentage: the VPS runner's same-SHA noise floor is ~11% and
+flat percentage: the retired VPS runner's same-SHA noise floor was ~11%, and
 small benchmarks carry several points of spread depending on shape, so
 a magnitude-only threshold would both miss real small regressions and
 cry wolf on noisy ones. Read `stddev` and `min..max` **before** the
@@ -490,11 +492,11 @@ mean delta.
 ```
 ONE benchmark row (attempts = N, N ≥ 3 recommended)
 │
-│ attempts n/N with n < N ? ───────────► LOW CONFIDENCE: re-dispatch (don't grade)
+│ attempts n/N with n < N ? ───────────► LOW CONFIDENCE: rerun (don't grade)
 │ no
 │ min..max straddles 0 ? ──────────────► NOISE: not actionable (sign unreliable)
 │ no  (entirely one side of 0)
-│ stddev ≥ ~10% (script default; see below) ? ─► INCONCLUSIVE: re-dispatch, more attempts
+│ stddev ≥ ~10% (script default; see below) ? ─► INCONCLUSIVE: rerun, more attempts
 │ no  (single-digit stddev)
 ▼ CONFIRMED SIGNAL
 │
@@ -502,8 +504,8 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 │
 └─ mean delta > 0 (slower) → CONFIRMED REGRESSION
        ├─ < ~3%, explained by the PR ──► ACCEPTABLE: mention the tradeoff, proceed
-       ├─ < ~3%, unexplained, hot path ─► INVESTIGATE anyway
-       └─ ≥ ~3%, or unexplained ────────► BLOCK + investigate before merge
+       ├─ < ~3%, unexplained ──────────► INVESTIGATE before merge
+       └─ ≥ ~3% ───────────────────────► BLOCK + investigate before merge
 ```
 
 | Result | Action |
@@ -512,7 +514,7 @@ ONE benchmark row (attempts = N, N ≥ 3 recommended)
 | `stddev` ≥ ~10% (`--regression-max-stddev-pct` default) | inconclusive — rerun with more attempts |
 | confirmed improvement | note it, no gate |
 | confirmed regression < ~3% | acceptable if explained by the PR; mention the tradeoff |
-| confirmed regression < ~3% but unexplained in a hot path | investigate anyway |
+| confirmed regression < ~3% but unexplained | investigate before merge |
 | confirmed regression ≥ ~3% | block + investigate before merge |
 
 **The 10% cut is `bench/compare-criterion.sh`'s default, not a noise floor.**
@@ -524,8 +526,8 @@ measured shape gives a tighter or wider figure, pass
 
 > **Confirmed regression** means `min..max` is entirely above zero and
 > `stddev` is below the configured stddev ceiling. Regressions under ~3% may
-> be accepted when the PR explains the tradeoff; regressions at or above
-> ~3%, or unexplained regressions in a hot path, should block pending
+> be accepted when the PR explains the tradeoff; unexplained regressions under
+> ~3% are investigated before merge; regressions at or above ~3% block pending
 > investigation.
 
 `bench/compare-criterion.sh --fail-on-regression` codifies the confident
@@ -703,10 +705,11 @@ full-scans that dominated earlier versions.
 
 ### Best-Path Comparison
 
-1000 pairwise `best_path_cmp()` calls per iteration. The 11-step tiebreak
-(stale, RPKI, ASPA, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref,
-CLUSTER_LIST, ORIGINATOR_ID, peer addr) is the inner loop of best-path
-selection.
+1000 pairwise `best_path_cmp()` calls per iteration. The tiebreak chain
+(stale, RPKI, ASPA, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref, effective
+BGP identifier — ORIGINATOR_ID when present — CLUSTER_LIST, peer addr, Add-Path
+path ID) is the inner loop of best-path selection. The measurements below are
+dated and predate the current chain order.
 
 | Scenario | Time (1000 calls) | Per-call | vs v0.31.0 |
 |----------|-------------------|----------|------------|
@@ -1431,6 +1434,14 @@ container counter used by bgperf2.
 |---|---|---|---|
 | Route server — 1000 eBGP RS-client sessions × 400 routes (400,000), 24 h under churn with 48 SIGHUP reloads and 6 max-prefix trip/restart cycles | **432–449 MB** between injections | 581.7 MB (reload re-advertisement and trip re-announce bursts, settling back into the band each time) | 0.0724 MB/h |
 | Route reflector — 1000 iBGP RR-client sessions × 100 routes (100,000), 24 h under 5,486,092 churn cycles | **~220–235 MB** for the whole hold | 342.5 MB, in the terminal 1,000-way full-table refresh | 0.2958 MB/h |
+
+The later route-server flagship runs of
+[2026-09-11](soaks/soak-rs-flagship-24h-2026-09-11.md) and
+[2026-09-12](soaks/soak-rs-flagship-24h-2026-09-12.md) ran the same session
+and route shape at unreleased revisions on a virtualized soak host. Both passed
+their RSS gates (peaks 691.5 MB and 729.8 MB, most samples roughly
+509–562 MB) and failed other gates; different hosts and revisions make them
+observations, not a comparison with the band above.
 
 Receipts, gates, and artifacts:
 [`soaks/soak-rs-flagship-24h.md`](soaks/soak-rs-flagship-24h.md) and

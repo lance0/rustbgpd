@@ -251,7 +251,7 @@ artifacts under [`artifacts/soak/`](artifacts/soak). Harnesses live in
 
 | Workflow | Trigger | What it re-proves |
 |----------|---------|-------------------|
-| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 22-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
+| [`ci.yml`](../.github/workflows/ci.yml) | PRs and pushes to `main`, skipping Markdown-only changes | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 22-target fuzz inventory, Criterion benchmark-body smokes (including the selection-deferral release self-test and bounded timing/diagnostic MRT snapshot-allocation modes), and committed receipt replays |
 | [`interop.yml`](../.github/workflows/interop.yml) | lab-relevant PR / non-documentation push | The PR-gated M-series table above, one containerlab job per milestone |
 | [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | lab-relevant PR / non-documentation push / manual dispatch | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
 | [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled 22-target campaign: all 13 wire targets have tracked seeds; `main` runs restore only a staged, manifest-validated corpus within 20,000 files / 16 MiB, fall back explicitly to tracked seeds on miss or service outage, and seal a fresh bounded bundle after success |
