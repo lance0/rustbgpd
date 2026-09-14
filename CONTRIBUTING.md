@@ -326,28 +326,37 @@ points back at the postmortem.
 
 ## Commit Messages
 
-- Start with a verb: Add, Fix, Update, Remove, Refactor, Bump
-- Keep the first line under 72 characters
-- Use the body for context when needed
+Commits, pull request titles, and squash-merge titles use the project's
+`type(scope): summary` convention. It is a convention only: no hook or CI
+check enforces it.
 
-Examples:
+- **Type**, chosen by what the change does: `feat` adds behavior, `fix`
+  corrects behavior, `perf` improves measured performance, `refactor` preserves
+  behavior, `docs` changes documentation, `test` changes tests, `build` changes
+  dependencies or build tooling, `ci` changes automation, and `chore` covers
+  remaining maintenance such as release preparation.
+- **Scope**: one lowercase name for the main subsystem, such as `api`, `cli`,
+  `rib`, `wire`, `fsm`, `transport`, `policy`, `evpn`, `rpki`, `bmp`,
+  `config`, `bench`, `docs`, or `repo`. Prefer an existing scope, and use the
+  dominant subsystem when a change spans several crates.
+- **Summary**: a lowercase imperative phrase with no trailing period that
+  describes the resulting change. Keep the whole subject under 72 characters
+  when practical.
+- **Body**: optional. Add one only to explain a non-obvious reason, a
+  compatibility impact, or a limitation.
+
+Examples from the history:
+
 ```
-Add NOTIFICATION encode/decode to wire crate
-Fix hold time negotiation edge case for zero values
-Update FRR interop topology to 10.3.1
-Refactor FSM event dispatch to use match exhaustiveness
+fix(config): apply dataset binding changes through compensated generations
+feat(api): expose reconstructed srv6 function sids
+test(docs): fence curated cli and config examples
+docs(soak): publish flagship receipts for two failed 24-hour runs
+chore(release): prepare v0.70.0
 ```
 
-Version bumps:
-```
-Bump version to v0.1.0
-```
-
-Roadmap/docs updates:
-```
-roadmap: add M1 exit criteria
-docs: update interop matrix for BIRD 2.16
-```
+Older commits use capitalized, unprefixed subjects; leave that history as it
+is.
 
 ## Project Structure
 
