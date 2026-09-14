@@ -206,7 +206,28 @@ fn use_case_config_fences_pass_base_and_authenticated_tcp_check_strict() {
         .expect("read use-case guide");
     assert_eq!(document.matches("<!-- use-case-config:").count(), 3);
     let bearer_header = r#"-H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)""#;
-    assert_eq!(document.matches(bearer_header).count(), 2);
+    // Every grpcurl call targets the documented UDS or TCP listener, and the
+    // bearer header rides on exactly the TCP calls.
+    let mut tcp_calls = 0;
+    for call in document.split("grpcurl -plaintext").skip(1) {
+        let call = call
+            .split_once(" rustbgpd.v1.")
+            .expect("grpcurl call names a rustbgpd.v1 method")
+            .0;
+        let tcp = call.ends_with("localhost:50051");
+        assert!(
+            tcp || call.ends_with("-unix /var/lib/rustbgpd/grpc.sock"),
+            "grpcurl call targets neither documented listener: {call}"
+        );
+        assert_eq!(
+            call.contains(bearer_header),
+            tcp,
+            "bearer header must appear on exactly the localhost:50051 calls: {call}"
+        );
+        tcp_calls += usize::from(tcp);
+    }
+    assert!(tcp_calls > 0, "no authenticated TCP grpcurl example left");
+    assert_eq!(document.matches(bearer_header).count(), tcp_calls);
     let cases = [
         ("ddos-mitigation", "mitigation-platform", "operator"),
         ("hosting-provider", "provisioning-system", "operator"),
