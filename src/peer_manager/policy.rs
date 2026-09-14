@@ -182,7 +182,7 @@ struct CapturedResolvedPolicy {
     /// convergence debt or arming a spurious retry.
     adj_rib_in_may_have_moved: bool,
     /// A positively known-down peer at capture time. Its pending flags after
-    /// an apply are the carried `PeerUp` intent (policy.rs 3711-3720), not
+    /// an apply are the carried `PeerUp` intent, not
     /// convergence debt, and it owes no Route Refresh to this transaction.
     known_down: bool,
 }
@@ -1394,7 +1394,7 @@ impl PeerManager {
                 };
             }
             applied[applied_idx].adj_rib_in_may_have_moved = true;
-            // The apply classified the peer (3544-3548); its verdict is
+            // The apply classified the peer from its state query outcome; its verdict is
             // authoritative for the convergence-debt scan and adds no extra
             // session round trip.
             applied[applied_idx].known_down = self
@@ -1598,6 +1598,9 @@ impl PeerManager {
                     pending_refresh: false,
                     pending_export_apply: false,
                     adj_rib_in_may_have_moved: false,
+                    // Retain the peer's apply-side classification so rollback
+                    // compensation does not treat a positively down member as
+                    // convergence debt.
                     known_down: managed.policy_known_down,
                 }
             };
@@ -2006,7 +2009,7 @@ impl PeerManager {
             } else if require_clean_convergence {
                 // A positively known-down member's refresh owes nothing to this
                 // transaction: AdjRibIn is empty until PeerUp installs the
-                // accepted session chain (policy.rs 3711-3720). Its pending
+                // accepted session chain. Its pending
                 // flag is carried intent, not debt. Ambiguous observations
                 // (SessionGone / TimedOut) keep failing closed: they cannot
                 // prove the session kept the edit.
@@ -3542,8 +3545,10 @@ impl PeerManager {
                 if state.fsm_state != SessionState::Established
         );
 
-        // A positively known-down peer holds the accepted session chain for
-        // exempt it from the rollback scan.
+        // A positively known-down peer holds the accepted session chain
+        // for the new import/export policy, so it owes no Route Refresh
+        // and no convergence-debt rollback; record the classification
+        // so the debt scan seats it out.
         if let Some(managed) = self.peers.get_mut(&peer_key) {
             managed.policy_known_down = is_known_non_established;
         }
@@ -3639,7 +3644,7 @@ impl PeerManager {
 
         // A positively known-down peer has no AdjRibIn to refresh and no RIB
         // outbound registration: the session actor accepted the new session
-        // chain in memory, and 3711-3720 below deliberately leaves PeerUp in
+        // chain in memory, and the PeerUp transition deliberately leaves intent in
         // charge of installing it and re-registering with the RIB without a
         // retry marker. Ambiguous observations (TimedOut / SessionGone) keep
         // failing closed: they cannot prove the session kept the edit.
