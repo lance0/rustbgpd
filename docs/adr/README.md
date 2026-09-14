@@ -14,8 +14,8 @@ Measured implementation evidence is indexed separately in the
 
 `Lifecycle` is a navigation aid, not a replacement for the decision's source
 status. Accepted, Current, and Implemented records are Active; rejected records
-are Rejected (including proposed records whose explicit recommendation is to
-reject, such as ADR-0106). A Proposed record is Unstated unless its own text
+are Rejected (including a record whose accepted decision is to reject the
+proposal, such as ADR-0106). A Proposed record is Unstated unless its own text
 establishes another lifecycle, such as ADR-0100 (Parked as an unscheduled
 research blueprint). [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
 do not establish the lifecycle of their associated ADRs. No record currently
@@ -129,7 +129,7 @@ states that the whole decision is Superseded.
 | [0103](0103-rpol-execution-model.md) | rpol execution model, purity contract, and evaluation budgets | Accepted | 2026-07-09 | Active |
 | [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 | Active |
 | [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 | Active |
-| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 | Rejected |
+| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Accepted (ordinary restore rejected) | 2026-07-14 | Rejected |
 | [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Accepted | 2026-07-15 | Active |
 | [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 | Active |
 | [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 | Active |

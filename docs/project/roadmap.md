@@ -208,7 +208,7 @@ remain visible without automatically blocking a release whose agreed gates pass.
   ([docs/cookbook/route-server-shadow-pilot.md](../cookbook/route-server-shadow-pilot.md),
   #1331) now documents the standing non-authoritative deployment end to end —
   the tooling side is done. The remaining adoption track is ADR-0125 E1 (though
-  DR1 has been advisory since 2026-08-09 per LAN-244 rather than a hard blocking
+  DR1 has been advisory since 2026-08-08 per LAN-244 rather than a hard blocking
   tagging gate): one external pilot with two weekly checkpoints at its normal
   refresh cadence, then a final semantic diff and support bundle, tested
   rollback, and recorded incorporated feedback or explicit no-change finding.
@@ -362,7 +362,7 @@ proof on the activated cell in hosted CI.
   [1,000-peer route-server receipt](../perf/route-server-1000-2026-07.md)
   now retains real-daemon 400k-route/reload/readiness evidence. The
   shadow-pilot cookbook (#1331) is shipped; remaining demand-shaped work is
-  the ADR-0125 E1 external pilot (advisory since 2026-08-09 under DR1 per
+  the ADR-0125 E1 external pilot (advisory since 2026-08-08 under DR1 per
   LAN-244): two weekly checkpoints, a final semantic diff and support bundle,
   tested rollback, and a recorded feedback or explicit no-change outcome.
 - **RFC 9857 SR Policy state in BGP-LS** (receive/reflect/API) — ADR-0116
@@ -384,7 +384,7 @@ is complete: filtered-route views from `PolicyService.ListRejectedRoutes`
 (reject reasons mapped to large communities under `64496:65520:*`) and
 noexport views from the export-explain surface (`64496:65521:*`). With the
 shadow-pilot cookbook shipped (#1331), the next useful work is executing that
-cookbook under ADR-0125 E1 (advisory since 2026-08-09 under DR1 per LAN-244):
+cookbook under ADR-0125 E1 (advisory since 2026-08-08 under DR1 per LAN-244):
 an external pilot using the shipped `rbgp diff` against an incumbent's MRT/BMP
 feed for two weekly checkpoints at its normal refresh cadence, followed by the
 final semantic diff and support bundle, tested rollback, and a recorded
