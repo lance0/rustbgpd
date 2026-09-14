@@ -55,7 +55,7 @@ summary, command logs, environment metadata, and raw Criterion artifacts under
 `target/bench-compare/`. Use `--features LIST` when the selected benchmark is
 feature-gated; the same Cargo feature set is applied to both refs.
 
-Retained fanout comparisons additionally use `--lan395-gate-out PATH`. That
+Retained fanout comparisons additionally use `--fanout-gate-out PATH`. That
 mode rejects any missing or unexpected fanout row, requires the exact pinned
 two-attempt transport matrix on a performance-governor CPU, applies every
 acceptance threshold, and writes only a checksummed sanitized receipt. Generic
@@ -195,7 +195,7 @@ bench/compare-criterion.sh \
   --filter distribute_fanout \
   --attempts 2 \
   --require-performance \
-  --lan395-gate-out target/lan395-criterion-receipt
+  --fanout-gate-out target/fanout-criterion-receipt
 ```
 
 For the default RIB benchmark surface:
