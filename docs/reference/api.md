@@ -69,7 +69,7 @@ not by itself make it v1-stable.
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
-| `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`); served on UDS and mTLS TCP listeners |
+| `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete, peer-group config, and dynamic-neighbor-prefix entries, with commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`; see [gNMI](gnmi.md)); served on UDS and mTLS TCP listeners |
 
 ## Authentication and TLS
 
@@ -258,7 +258,7 @@ The API uses gRPC status codes consistently across services:
 | `FAILED_PRECONDITION` | The request is valid but the daemon is not in a state where it can complete it, such as MRT export being disabled or a policy object still being referenced |
 | `DEADLINE_EXCEEDED` | A bounded actor or session read did not complete before its operation deadline; this does not mean the targeted runtime state is absent |
 | `UNAVAILABLE` | A required actor or session task exited, or a required actor, command channel, or persistence queue is unavailable, closed, or back-pressured |
-| `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet |
+| `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet, the connected daemon predates the RPC, or a gNMI path or extension is outside the supported subset |
 | `INTERNAL` | An internal daemon actor, metrics encoder, or RIB boundary failed unexpectedly after the request passed validation |
 
 Runtime-config mutations that fail after transient runtime changes, but whose
@@ -1143,7 +1143,9 @@ IPv6 peer is supported; repeated link-local addresses on different interfaces
 are refused. These prerequisites are checked before monitoring reset or replay
 traffic, because the reset clears the entire cached peer inventory.
 
-Eligible collectors have `rib_out_post = true` and `rib_in_pre = false`.
+Eligible collectors have a `monitor` list that includes `rib_out_post` and
+omits `rib_in_pre` (for example `monitor = ["rib_out_post"]`; the default
+`["rib_in_pre"]` is not eligible).
 Before replay, each receives a monitoring-only Peer Down (reason 5) followed
 by the current Peer Up, clearing its previous peer inventory. The BGP session
 stays established. Mixed inbound/outbound collectors are excluded because
@@ -2626,6 +2628,16 @@ Daemon lifecycle, health checks, and metrics.
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.ControlService/GetHealth
+```
+
+For a handler-liveness probe that needs only the Read tier, call
+`CheckLiveness` (an empty response) or run `rbgp health --liveness`, which
+prints `alive`. It does not check actor readiness.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.ControlService/CheckLiveness
+rbgp health --liveness
 ```
 
 If `[global.telemetry] prometheus_addr` is configured, the same HTTP listener

@@ -43,7 +43,8 @@ tls_client_ca_file = "/etc/rustbgpd/certs/ca.pem"
 "rustbgpd://observer/collector" = "observer"
 ```
 
-`[security.grpc].enforcement = "tier"` is the default. For mTLS listeners, the
+`[security.grpc].enforcement = "tier"` is the default and, since v0.63.0, the
+only accepted mode. For mTLS listeners, the
 principal is derived from the verified client certificate in ADR-0064 order:
 `rustbgpd:` URI SAN, then email SAN, then Subject CN. The principal must have a
 matching `[security.grpc.roles]` entry. `Capabilities`, `Get`, and `Subscribe`
@@ -56,7 +57,7 @@ are `sensitive_read`; `Set` is `operator_only`.
 | `Capabilities` | Returns gNMI version `0.10.0`, the OpenConfig modules backing the supported paths, and `JSON` / `JSON_IETF` encodings. |
 | `Get` | Returns the supported OpenConfig BGP global and neighbor `state` subset. |
 | `Subscribe` | Supports `ONCE`, `POLL`, `STREAM SAMPLE`, and `STREAM ON_CHANGE` (the last is scoped to the neighbor session-state leaf — see below). |
-| `Set` | Operator-only. Supports the static-neighbor and peer-group config subsets below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
+| `Set` | Operator-only. Supports the static-neighbor, peer-group, and dynamic-neighbor-prefix config subsets below through ADR-0076 transactions; unsupported paths return `UNIMPLEMENTED`, malformed values return `INVALID_ARGUMENT`, and transaction precondition failures return `FAILED_PRECONDITION`. Lower-tier callers receive `PERMISSION_DENIED` before the handler runs. |
 
 Neighbor snapshots for `Get`, subscription bootstrap, periodic sampling, and
 heartbeat reconciliation use the peer manager's operator-read lane on TLS and
@@ -528,7 +529,8 @@ TARGET_DEFINED remains unsupported.
 
 M54 validates this surface with the real `gnmic` client over mTLS, including
 Capabilities, Get, Set add/delete, commit-confirmed Set confirm/cancel,
-read-tier Set denial, unsupported-path rejection, and Subscribe SAMPLE:
+Set denial for an `observer` principal (`sensitive_read` ceiling),
+unsupported-path rejection, and Subscribe SAMPLE:
 
 ```bash
 bash tests/interop/scripts/gen-m54-certs.sh
