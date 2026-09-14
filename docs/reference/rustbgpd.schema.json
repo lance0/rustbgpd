@@ -82,7 +82,7 @@
       }
     },
     "fib_tables": {
-      "description": "General-purpose Linux unicast FIB export tables (ADR-0061).\nEmpty by default — route-server / route-reflector deployments\nleave this empty and never spawn the ordinary unicast kernel\nFIB actor. Each entry is an explicit operator opt-in for one\nLinux route table; when at least one table is present the\ndefault-off FIB reconciler starts and programs unicast best\nroutes into the configured non-reserved tables. Restart-required.",
+      "description": "General-purpose Linux unicast FIB export tables (ADR-0061).\nEmpty by default — route-server / route-reflector deployments\nleave this empty and never spawn the ordinary unicast kernel\nFIB actor. Each entry is an explicit operator opt-in for one\nLinux route table; when at least one table is present the\ndefault-off FIB reconciler starts and programs unicast best\nroutes into the configured non-reserved tables. Table edits\nhot-apply on SIGHUP while the reconciler runs; starting it from an\nempty config requires a restart.",
       "type": "array",
       "default": [],
       "items": {

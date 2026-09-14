@@ -148,7 +148,9 @@ pub struct Config {
     /// FIB actor. Each entry is an explicit operator opt-in for one
     /// Linux route table; when at least one table is present the
     /// default-off FIB reconciler starts and programs unicast best
-    /// routes into the configured non-reserved tables. Restart-required.
+    /// routes into the configured non-reserved tables. Table edits
+    /// hot-apply on SIGHUP while the reconciler runs; starting it from an
+    /// empty config requires a restart.
     #[serde(default)]
     pub fib_tables: Vec<FibTableConfig>,
     /// Optional rustbgpd-managed EVPN Linux netdev lifecycle
