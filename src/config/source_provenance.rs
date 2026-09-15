@@ -16,7 +16,7 @@ use rustbgpd_policy::datasets::{
 use rustbgpd_policy::rpol::RpolFile;
 use sha2::{Digest, Sha256};
 
-use super::{Config, DatasetBindMode, persisted_config_document_bounded};
+use super::{Config, DatasetBindMode, absolute_config_path, persisted_config_document_bounded};
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 const EXTERNAL_SOURCES_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-external-sources.v2\0";
@@ -332,19 +332,19 @@ impl AcceptedConfigSnapshot {
         config_path: &Path,
         after_capture: impl FnOnce(),
     ) -> Result<Arc<Self>, String> {
-        let base_dir = config_path.parent().map(PathBuf::from);
+        let config_path = absolute_config_path(config_path)?;
         let mut capture = SourceCapture::default();
         let mut config = Config::load_from_toml_source_with_capture(
             content,
             "retained config history snapshot",
-            base_dir.as_deref(),
+            config_path.parent(),
             None,
             DatasetBindMode::Stage,
             Some(&mut capture),
             None,
             None,
         )?;
-        config.file_path = Some(config_path.to_path_buf());
+        config.file_path = Some(config_path);
         after_capture();
         config.policy.dataset_bindings = config.policy.dataset_bindings.detached_clone();
         let normalized_toml = Arc::new(
@@ -408,19 +408,19 @@ impl AcceptedConfigSnapshot {
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
         let content = String::from_utf8(bytes)
             .map_err(|error| format!("error: failed to read {}: {error}", path.display()))?;
-        let base_dir = path.parent().map(PathBuf::from);
+        let file_path = absolute_config_path(path)?;
         let mut capture = SourceCapture::default();
         let mut config = Config::load_from_toml_source_with_capture(
             &content,
             &path.display().to_string(),
-            base_dir.as_deref(),
+            file_path.parent(),
             live_bindings,
             DatasetBindMode::Stage,
             Some(&mut capture),
             prior.map(|snapshot| &snapshot.manifest),
             prior.map(|snapshot| &snapshot.config.policy.dataset_bindings),
         )?;
-        config.file_path = Some(path.to_path_buf());
+        config.file_path = Some(file_path);
         after_capture();
         if let Some(prior) = prior {
             config
@@ -1473,5 +1473,70 @@ log_format = "json"
         // Lossy display renders both bytes as U+FFFD; if digest identity uses it,
         // snapshots collapse and this assertion goes red.
         assert_ne!(first.source_sha256, second.source_sha256);
+    }
+
+    #[test]
+    fn relative_config_path_records_the_absolute_launch_roster() {
+        const CHILD_DIR_ENV: &str = "RUSTBGPD_RELATIVE_CONFIG_TEST_DIR";
+        let Some(dir) = std::env::var_os(CHILD_DIR_ENV) else {
+            // The working directory is process-wide: resolve the relative
+            // launch only in a dedicated invocation of this one test.
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = fixture(dir.path());
+            fs::create_dir(dir.path().join("roots")).unwrap();
+            let toml = fs::read_to_string(&config_path).unwrap();
+            fs::write(
+                &config_path,
+                toml.replace("rpol_files = [", "rpol_roots = [\"roots\"]\nrpol_files = ["),
+            )
+            .unwrap();
+            let dir = fs::canonicalize(dir.path()).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::source_provenance::tests::relative_config_path_records_the_absolute_launch_roster",
+                    "--test-threads=1",
+                ])
+                .current_dir(&dir)
+                .env(CHILD_DIR_ENV, &dir)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let relative = AcceptedConfigSnapshot::load(Path::new("config.toml"), None).unwrap();
+        let absolute = AcceptedConfigSnapshot::load(&dir.join("config.toml"), None).unwrap();
+        let roster = |snapshot: &AcceptedConfigSnapshot| {
+            let policy = &snapshot.config.policy;
+            (
+                policy.rpol_files.clone(),
+                policy.rpol_roots.clone(),
+                policy
+                    .datasets
+                    .values()
+                    .map(|dataset| dataset.path.clone())
+                    .collect::<Vec<_>>(),
+                snapshot.config.file_path.clone(),
+            )
+        };
+        let expected = (
+            vec![
+                dir.join("policy.rpol").display().to_string(),
+                dir.join("a-unit.rpol").display().to_string(),
+            ],
+            vec![dir.join("roots").display().to_string()],
+            vec![dir.join("customers.txt").display().to_string()],
+            Some(dir.join("config.toml")),
+        );
+        assert_eq!(roster(&absolute), expected);
+        assert_eq!(roster(&relative), expected);
+        assert_eq!(relative.normalized_toml, absolute.normalized_toml);
+        assert_eq!(relative.source_sha256, absolute.source_sha256);
     }
 }
