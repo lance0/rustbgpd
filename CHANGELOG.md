@@ -117,7 +117,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rpol_roots`, and dataset paths as absolute paths resolved from the
   candidate file's directory. The daemon opens those paths itself, so run
   these commands on the daemon's host with candidate files the daemon can
-  read.
+  read. A daemon started with a relative config path now records absolute
+  policy and dataset paths, so `rbgp config effective` and configs it
+  persists show absolute paths, matching an absolute launch.
 - Global import and export chain set and clear calls no longer require every
   configured session to be Established: a positively down session adopts the
   new chain when it comes up. An ambiguous session state still fails with
