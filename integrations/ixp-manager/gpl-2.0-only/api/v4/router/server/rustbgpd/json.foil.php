@@ -90,8 +90,10 @@ foreach( $t->ints as $int ) {
             $query->whereNull( 'protocol' )->orWhere( 'protocol', $router->protocol );
         } )
         ->orderBy( 'order_by' )->get();
+    // Filters are per customer; key by id so a member with several
+    // interfaces on this VLAN contributes each filter once.
     foreach( $filters as $filter ) {
-        $filterRows[] = $filter;
+        $filterRows[(int)$filter->id] = $filter;
     }
 
     $origins = array_map( 'intval', IrrdbAggregator::asnsForRouterConfiguration(
