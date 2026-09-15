@@ -49,7 +49,9 @@ diff actually ran before tagging.
       covering metric consumers and metric release notes, public tracker-ID and
       artifact-home-path hygiene, site ingest sources, SIGHUP architecture route
       coverage, pinned IXP Manager docs, release-checklist source paths, and
-      performance receipt provenance and freshness.
+      performance receipt provenance and freshness. Its `markdown-pinned-tests`
+      job runs the Rust tests that read a changed Markdown file, as listed in
+      `.github/markdown-test-pins.json`.
 - [ ] **Embedding docs contract** — the `embedding-doc-contract` matrix job in
       `.github/workflows/public-docs-contract.yml` is green. Its two
       seconds-cheap Python checks now run unfiltered beside the public-docs
