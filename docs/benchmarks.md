@@ -1440,8 +1440,11 @@ The later route-server flagship runs of
 [2026-09-12](soaks/soak-rs-flagship-24h-2026-09-12.md) ran the same session
 and route shape at unreleased revisions on a virtualized soak host. Both passed
 their RSS gates (peaks 691.5 MB and 729.8 MB, most samples roughly
-509–562 MB) and failed other gates; different hosts and revisions make them
-observations, not a comparison with the band above.
+509–562 MB) and failed other gates. The
+[2026-09-14 run](soaks/soak-rs-flagship-24h-2026-09-14.md) on the v0.70.0
+release commit, on the same host shape, passed its RSS gates (peak 725.8 MB,
+5th–95th percentile 500.7–561.1 MB). Different hosts and revisions make
+these observations, not a comparison with the band above.
 
 Receipts, gates, and artifacts:
 [`soaks/soak-rs-flagship-24h.md`](soaks/soak-rs-flagship-24h.md) and
