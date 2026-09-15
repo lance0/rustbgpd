@@ -566,6 +566,13 @@ fn validate(
     let mut vlis = BTreeSet::new();
     let mut asns = BTreeMap::new();
     let mut addresses = BTreeSet::new();
+    // IXP Manager keeps `irrdbfilter` and `rsmorespecifics` per VLAN
+    // interface but its BIRD template filters every session of an ASN by the
+    // first interface's flags; refuse a member whose interfaces disagree.
+    let mut flags = BTreeMap::new();
+    // `peering_ips` must be exactly the member's own interface addresses.
+    let mut member_addresses = BTreeMap::<u32, BTreeSet<IpAddr>>::new();
+    let mut peering = Vec::new();
     let mut effective = Vec::new();
     for client in &document.clients {
         let address: IpAddr = client
@@ -591,6 +598,10 @@ fn validate(
                 .is_some_and(|cust| cust != client.customer_id)
             || !vlis.insert(client.vlan_interface_id)
             || !addresses.insert(address)
+            || !member_addresses
+                .entry(client.asn)
+                .or_default()
+                .insert(address)
             || peering_ips.is_empty()
             || !strictly_sorted(&peering_ips)
             || !peering_ips.contains(&address)
@@ -600,6 +611,18 @@ fn validate(
         {
             return Err(Error::Refused("invalid or duplicate client data"));
         }
+        if flags
+            .insert(
+                client.customer_id,
+                (client.irr_filter, client.more_specifics),
+            )
+            .is_some_and(|previous| previous != (client.irr_filter, client.more_specifics))
+        {
+            return Err(Error::Refused(
+                "member interfaces disagree on IRR filtering or more-specifics",
+            ));
+        }
+        peering.push((client.asn, peering_ips.into_iter().collect::<BTreeSet<_>>()));
         let prefixes = if client.irr_filter {
             if client.origins.is_empty()
                 || client.origins.contains(&0)
@@ -655,6 +678,12 @@ fn validate(
             Auth::Md5 { .. } => {}
         }
         effective.push(prefixes);
+    }
+    if peering
+        .iter()
+        .any(|(asn, peering_ips)| Some(peering_ips) != member_addresses.get(asn))
+    {
+        return Err(Error::Refused("invalid or duplicate client data"));
     }
     validate_ui_filters(document, expected, &customers)?;
     Ok(effective)
@@ -762,12 +791,9 @@ pub fn render_document(
     for (client, prefixes) in document.clients.iter().zip(&effective) {
         let slug = client.vlan_interface_id;
         if !client.irr_filter {
-            let desc = format!("{} (ASN {}, VLI {})", client.name, client.asn, slug);
-            eprintln!(
-                "rs-config-render: warning: member {desc} has IRR filtering disabled; rendering policy without IRR terms"
-            );
             warnings.push(format!(
-                "member {desc} has IRR filtering disabled; rendering policy without IRR terms"
+                "member {} (ASN {}, VLI {slug}) has IRR filtering disabled; rendering policy without IRR terms",
+                client.name, client.asn
             ));
             irrdb_disabled_clients.push(json!({
                 "customer_id": client.customer_id,
@@ -1196,7 +1222,7 @@ fn render_ixp_irr_disabled_client_tests(out: &mut String, slug: u64, peer_asn: u
     let wrong_asn = if peer_asn == 64496 { 64497 } else { 64496 };
     let _ = write!(
         out,
-        "\ntest client-{slug}-synthetic-first-as-authorized {{\n\
+        "\ntest client-{slug}-synthetic-unregistered-origin-accepted {{\n\
          \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64498\" }}\n\
          \x20   expect client-{slug} == accept\n\
          }}\n\

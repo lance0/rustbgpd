@@ -1538,9 +1538,10 @@ fn rustbgpd_bin() -> std::path::PathBuf {
     bin
 }
 
-#[cfg(unix)]
-#[test]
-fn multi_connection_member_renders_two_neighbors_and_passes_strict_check() {
+/// The supported fixture with HEAnet (customer 2, ASN 1213) on a second VLAN
+/// interface: VLI 2 at 10.1.0.11 next to VLI 1 at 10.1.0.10, both listing
+/// the member's two addresses as `peering_ips`, as the skin exports them.
+fn two_interface_member() -> serde_json::Value {
     let mut input = v2_value(V2_SUPPORTED);
     let mut client2 = input["clients"][0].clone();
     client2["vlan_interface_id"] = 2.into();
@@ -1549,6 +1550,53 @@ fn multi_connection_member_renders_two_neighbors_and_passes_strict_check() {
     input["clients"][0]["peering_ips"] = serde_json::json!(["10.1.0.10", "10.1.0.11"]);
     input["clients"].as_array_mut().unwrap().push(client2);
     input["complete"]["client_count"] = 3.into();
+    input
+}
+
+#[test]
+fn multi_connection_member_interfaces_must_agree_and_own_their_peering_ips() {
+    let refuses = |pointer: &str, replacement: serde_json::Value, reason: &str| {
+        let mut input = two_interface_member();
+        *input.pointer_mut(pointer).unwrap() = replacement;
+        match rendered_v2(&input) {
+            Err(Error::Refused(actual)) => assert_eq!(actual, reason, "{pointer}"),
+            other => panic!("{pointer}: expected refusal {reason:?}, got {other:?}"),
+        }
+    };
+    let disagree = "member interfaces disagree on IRR filtering or more-specifics";
+    // IXP Manager's BIRD template would filter both sessions by VLI 1's
+    // flags; rustbgpd refuses rather than degrade one interface.
+    refuses("/clients/2/irr_filter", serde_json::json!(false), disagree);
+    refuses(
+        "/clients/2/more_specifics",
+        serde_json::json!(true),
+        disagree,
+    );
+    let foreign = "invalid or duplicate client data";
+    // `peering_ips` is exactly the member's own interface addresses: not
+    // another member's address, and not a subset of the member's own.
+    refuses(
+        "/clients/0/peering_ips",
+        serde_json::json!(["10.1.0.6", "10.1.0.10", "10.1.0.11"]),
+        foreign,
+    );
+    refuses(
+        "/clients/0/peering_ips",
+        serde_json::json!(["10.1.0.10"]),
+        foreign,
+    );
+    refuses(
+        "/clients/1/peering_ips",
+        serde_json::json!(["10.1.0.6", "10.1.0.10"]),
+        foreign,
+    );
+    assert!(rendered_v2(&two_interface_member()).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn multi_connection_member_renders_two_neighbors_and_passes_strict_check() {
+    let input = two_interface_member();
 
     let candidate = rendered_v2(&input).expect("multi-connection member renders cleanly");
     assert_eq!(candidate.files.len(), 12);
@@ -1672,6 +1720,9 @@ fn irrdb_disabled_member_renders_clean_policy_without_irr_terms() {
     assert!(client4_rpol.contains("term reject-first-as-not-peer-as"));
     assert!(client4_rpol.contains("term accept-authorized { accept }"));
 
+    // The in-language tests document the intent: without IRR terms an
+    // unregistered origin behind the peer AS is accepted.
+    assert!(client4_rpol.contains("test client-4-synthetic-unregistered-origin-accepted"));
     assert!(run_rpol_tests(client4_rpol).unwrap().all_passed());
 
     let disabled = candidate.metadata["irrdb_disabled_clients"]
