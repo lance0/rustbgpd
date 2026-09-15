@@ -196,12 +196,24 @@ mod unix {
         };
         let clients = receipt["counts"]["clients"].as_u64();
         // Dataset counts of zero are only consistent when every client has
-        // IRR filtering disabled.
+        // IRR filtering disabled: one entry per distinct VLAN interface.
         let all_irrdb_disabled = irrdb_keys
             && receipt["irrdb_disabled_clients"]
                 .as_array()
-                .and_then(|clients| u64::try_from(clients.len()).ok())
-                == clients;
+                .is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .map(|entry| {
+                            entry
+                                .get("vlan_interface_id")?
+                                .as_u64()
+                                .filter(|id| *id > 0)
+                        })
+                        .collect::<Option<BTreeSet<_>>>()
+                        .is_some_and(|ids| {
+                            ids.len() == entries.len() && u64::try_from(ids.len()).ok() == clients
+                        })
+                });
         if !exact_keys(&receipt, root_keys)
             || !exact_keys(
                 &receipt["input"],
