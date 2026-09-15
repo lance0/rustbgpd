@@ -189,7 +189,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto -d '{
   "prefix": "203.0.113.10",
   "prefix_length": 32
-}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/DeletePath
+}' -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/DeletePath
 ```
 
 **Monitoring:** Prometheus metrics track FlowSpec rule counts per peer. BMP
