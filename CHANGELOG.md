@@ -58,6 +58,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing-file errors when comparing or planning candidates outside the daemon's
   working directory.
 
+- A daemon started with a relative config path (for example
+  `cd /etc/rustbgpd && rustbgpd config.toml`) now records absolute
+  `rpol_files`, `rpol_roots`, and `[policy.datasets.*].path` values, as an
+  absolute launch already did. `rbgp config diff` no longer reports false
+  policy path changes against such a daemon, and `rbgp config plan` and
+  `apply` no longer reject every candidate that declares `rpol_files` or
+  datasets. `rbgp config effective` and configs persisted by such a daemon
+  now show absolute paths. `rustbgpd --diff` resolves both files the same
+  way, so the same file spelled relatively and absolutely compares equal.
+
 - SIGHUP now applies `[policy.datasets]` binding changes through the same
   compensated runtime generation as dataset contents instead of rejecting
   them. Adding, removing, or re-mapping a dataset, together with the matching
