@@ -250,7 +250,8 @@ length, and runtime snapshot. Supplying it with `--plan-token` skips the
 automatic plan and applies only that exact reviewed candidate. Without it,
 `config apply` first streams a plan for the same bytes and applies only a
 `COMMITTABLE` result. `NOOP` and `REJECTED` return a non-mutating status without
-calling Apply. Older daemons are supported only when the streaming method is
+calling Apply; the CLI prints that receipt and exits `0` for `NOOP` and `3` for
+`REJECTED`. Older daemons are supported only when the streaming method is
 explicitly `UNIMPLEMENTED`; Plan and automatically planned Apply then retry the
 legacy unary RPC if the encoded request fits its four-MiB ceiling. An explicit
 `--plan-token` fails closed when streamed Apply is unavailable because unary
@@ -442,9 +443,9 @@ accepts v2 only when one load reproduces TOML/manifest/source digests;
 unreadable/mismatched rows fail closed before mutation. An eligible
 row is routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
-update-group annotations, and the same receipts. Confirmed rollback remains
-subject to that planner: a full-snapshot rollback with external policy inputs
-is admitted only when the verified history row's `.rpol`/dataset identity is
+update-group annotations, and the same receipts and exit codes. Confirmed rollback
+remains subject to that planner: a full-snapshot rollback with external policy
+inputs is admitted only when the verified history row's `.rpol`/dataset identity is
 byte-identical to the currently accepted one, and an unchanged-external-input
 pure-`[[fib_tables]]` rollback can carry the provenance-verified v2 history
 row's exact accepted prior snapshot through v3 authority. Rolling back across
@@ -538,8 +539,12 @@ effective-impact view:
 
 Exit codes: `rustbgpd --diff` returns 0 = no actionable changes,
 1 = actionable changes found, 2 = error (bad config, missing file).
-`rbgp config diff` and `rbgp config plan` use 0 = no changes,
-2 = changes present, 1 = error.
+`rbgp config diff` uses 0 = no changes, 2 = changes present, 1 = error.
+`rbgp config plan` uses 0 = noop, 2 = committable, 3 = rejected, 1 = error.
+`rbgp config apply` and `rbgp config rollback` use 0 = committed or noop,
+3 = rejected, 1 = error. A rejected transaction still prints its full receipt,
+including `--json` output, and changes nothing; the `status` field tells a
+noop from a commit.
 
 ## Configuration reload (SIGHUP)
 

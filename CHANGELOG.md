@@ -52,6 +52,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tag_as_set`, and scrubs that tag on entry. RPKI-invalid routes are still
   rejected by shared hygiene. Before the RTR cache's first End of Data, every
   route reads `not-found`, so these routes are rejected until the cache syncs.
+- `rbgp config plan`, `config apply`, and `config rollback` now exit 3 when the
+  daemon rejects the transaction. A rejected plan previously exited 2, the
+  same code as a committable plan, and a rejected apply or rollback exited 0,
+  the same code as a commit. The full receipt, including `--json` output, is
+  still printed before the non-zero exit. A receipt with an unrecognized
+  status now exits 1 instead of passing as a commit or as changes present.
 
 ### Upgrade notes
 
@@ -86,6 +92,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now refuses the render (exit 2) instead of being ignored. An unknown key in
   the general `irrdb` section or under its `use_*` options fails the render
   with exit 1.
+- Scripts that gate on `rbgp config plan`, `config apply`, or
+  `config rollback` now see exit 3 for a rejected transaction. `plan` keeps 0
+  for noop and 2 for committable. `apply` and `rollback` keep 0 for a commit
+  and also exit 0 for a noop; the receipt's `status` field tells them apart.
+  A wrapper that applies after `plan` exits 2 no longer reaches an apply the
+  daemon would refuse. A wrapper that treats every `plan` exit other than 1
+  as "changes present" must handle 3 as a rejection.
 
 ## [0.70.1] — 2026-09-15
 

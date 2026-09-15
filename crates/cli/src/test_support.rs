@@ -84,6 +84,9 @@ pub(crate) struct MockState {
     pub(crate) config_stream_plan_resume: Notify,
     pub(crate) config_stream_apply_resume: Notify,
     pub(crate) config_stream_plan_status: AtomicUsize,
+    /// Status served by apply (streamed and unary) and rollback receipts;
+    /// 0 serves committable.
+    pub(crate) config_apply_status: AtomicUsize,
     pub(crate) config_stream_plan_error: Mutex<Option<(Code, String, Vec<u8>)>>,
     pub(crate) config_stream_apply_error: Mutex<Option<(Code, String, Vec<u8>)>>,
     pub(crate) config_confirm_calls: AtomicUsize,
@@ -297,6 +300,15 @@ impl Interceptor for AuthInterceptor {
             Ok(request)
         } else {
             Err(Status::unauthenticated("invalid bearer token"))
+        }
+    }
+}
+
+impl MockState {
+    fn apply_receipt_status(&self) -> i32 {
+        match self.config_apply_status.load(Ordering::SeqCst) {
+            0 => server_proto::ConfigTransactionPlanStatus::Committable as i32,
+            status => status as i32,
         }
     }
 }
@@ -613,7 +625,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         *self.state.last_stream_apply_candidate.lock().await = Some(candidate);
         Ok(Response::new(
             server_proto::ConfigTransactionApplyResponse {
-                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                status: self.state.apply_receipt_status(),
                 runtime_snapshot_token: "kv1:committed:2".to_string(),
                 committed_sections: vec!["[[fib_tables]]".to_string()],
                 human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
@@ -700,7 +712,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         *self.state.last_config_apply.lock().await = Some(request.into_inner());
         Ok(Response::new(
             server_proto::ConfigTransactionApplyResponse {
-                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                status: self.state.apply_receipt_status(),
                 runtime_snapshot_token: "kv1:committed:2".to_string(),
                 committed_sections: vec!["[[fib_tables]]".to_string()],
                 human_text: "Committed [[fib_tables]] transaction.\n".to_string(),
@@ -854,7 +866,7 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         }
         Ok(Response::new(
             server_proto::ConfigTransactionApplyResponse {
-                status: server_proto::ConfigTransactionPlanStatus::Committable as i32,
+                status: self.state.apply_receipt_status(),
                 runtime_snapshot_token: "kv1:rolledback:3".to_string(),
                 committed_sections: vec!["[[neighbors]] modify".to_string()],
                 human_text: "Rolled back to applied config 1.\n".to_string(),
