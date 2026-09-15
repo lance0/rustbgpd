@@ -22,7 +22,8 @@ RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
 WORKFLOWS = tuple(
     f".github/workflows/{name}.yml"
     for name in ("ci", "container", "kernel-dataplane",
-                 "release-install-contract", "release", "update-group-fault")
+                 "release-install-contract", "release", "update-group-fault",
+                 "public-docs-contract")
 )
 EXPECTED_ROOT_COMMANDS = {
     WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=2, test=7),
@@ -31,6 +32,7 @@ EXPECTED_ROOT_COMMANDS = {
     WORKFLOWS[3]: Counter(build=1, test=2),
     WORKFLOWS[4]: Counter(build=2, test=1),
     WORKFLOWS[5]: Counter(test=3),
+    WORKFLOWS[6]: Counter(test=1),
 }
 EXPECTED_STANDALONE_COMMANDS = (
     (WORKFLOWS[0], "cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked"),

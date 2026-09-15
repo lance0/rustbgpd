@@ -49,7 +49,9 @@ diff actually ran before tagging.
       covering metric consumers and metric release notes, public tracker-ID and
       artifact-home-path hygiene, site ingest sources, SIGHUP architecture route
       coverage, pinned IXP Manager docs, release-checklist source paths, and
-      performance receipt provenance and freshness.
+      performance receipt provenance and freshness. Its `markdown-pinned-tests`
+      job runs the Rust tests that read a changed Markdown file, as listed in
+      `.github/markdown-test-pins.json`.
 - [ ] **Embedding docs contract** — the `embedding-doc-contract` matrix job in
       `.github/workflows/public-docs-contract.yml` is green. Its two
       seconds-cheap Python checks now run unfiltered beside the public-docs
@@ -63,7 +65,9 @@ diff actually ran before tagging.
       for the name and becomes an ordinary registry baseline automatically
       once that normal release is visible.
 - [ ] **IXP Manager / Bird's Eye contract** — when the IXP Manager,
-      Bird's Eye, renderer, adapter, or interop-doc surface changed,
+      Bird's Eye, renderer, adapter, or interop-doc surface changed, or the
+      daemon surface the oracle builds against changed (`proto/`,
+      `crates/api/`, `crates/policy/`, `crates/cli/`, or `src/config/`),
       `.github/workflows/ixp-compat.yml` ran and is green. It is path-scoped on
       pull requests and main-branch pushes and also supports manual dispatch,
       so confirm the applicable run instead of assuming a green tag build

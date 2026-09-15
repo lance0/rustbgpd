@@ -774,6 +774,11 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     for path in [
         "examples/birdwatcher-adapter/**",
         "tests/birdwatcher_adapter_smoke.rs",
+        "proto/**",
+        "crates/api/**",
+        "crates/policy/**",
+        "crates/cli/**",
+        "src/config/**",
     ] {
         let entry = format!("      - \"{path}\"");
         assert_eq!(workflow.lines().filter(|line| *line == entry).count(), 2);

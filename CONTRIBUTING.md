@@ -37,7 +37,10 @@ Documentation changes additionally pass
 `.github/workflows/public-docs-contract.yml` because the main lane ignores
 Markdown. Published docs name the thing directly, link the ADR, or cite the
 GitHub PR number — never a private issue-tracker ID an external reader
-cannot resolve.
+cannot resolve. The same workflow runs the Rust tests that read a changed
+Markdown file. When a Rust test starts reading a Markdown file, add it to
+`.github/markdown-test-pins.json`; `python3 scripts/check_markdown_test_pins.py`
+fails until you do.
 
 ### Optional local task runner
 
