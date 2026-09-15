@@ -208,10 +208,17 @@ reload during the call. Add `--initial` only when
 both no current generation and no reachable daemon exist. Normalized comparison
 TOML is limited to 4,194,299 bytes (4 MiB minus five encoded-request bytes).
 
-The activation executable must be synchronous. Exit 7 occurs only when it could
-not start: the prior link is restored without another activation and the prior
-runtime is verified unchanged. Once it starts, a nonzero exit, timeout, or
-unsettled result leaves `current` on the candidate and returns exit 5. Leave
+The activation executable must be synchronous. Exit 7 means the candidate was
+not applied: the executable could not start, or the daemon rejected its reload
+without runtime effect. The prior link is then restored without another
+activation and the prior runtime is verified unchanged. The helper accepts a
+rejection only when `rbgp metrics`, read before the executable and again after
+the prior link is restored, shows the same daemon process recorded exactly one
+SIGHUP outcome, `rejected_no_effect`, and no runtime-config settlement is in
+progress. Otherwise, once the executable starts, a nonzero exit, timeout, or
+unsettled result leaves `current` on the candidate and returns exit 5; a
+rejection that cannot be re-proven after the prior link is restored also returns
+exit 5, with `current` on the previous generation. Leave
 retained state untouched and inspect the current private receipt if present;
 recovery or receipt durability is unproven, and the receipt may be absent or
 stale when its final write or directory sync failed. `rs-config-render status`
@@ -284,9 +291,9 @@ the [tool README](../../tools/rs-config-render/README.md#exit-codes):
 | 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
 | 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
 | 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
-| 5 | **manual recovery** — a human is needed: the activation effect is uncertain (`current` stays on the candidate) or a `recover --apply` step did not complete (`current` is wherever that step left it — on the rollback target after a rollback that did not settle); retained state and any upstream lock are kept and no callback is issued; inspect with `status` before acting |
+| 5 | **manual recovery** — a human is needed: the activation effect is uncertain (`current` stays on the candidate, or on the previous generation when a no-effect rejection could not be re-proven after restoring it) or a `recover --apply` step did not complete (`current` is wherever that step left it — on the rollback target after a rollback that did not settle); retained state and any upstream lock are kept and no callback is issued; inspect with `status` before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
-| 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
+| 7 | **rolled back** — the candidate was not applied: the activation command never started, or the daemon rejected its reload without runtime effect; the prior generation is restored and proven and the lock is released; retrying is safe |
 | 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode), could not be created or written (arouteserver mode), or a `prune --apply` removal failed |
 | 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 

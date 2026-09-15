@@ -367,14 +367,14 @@ Exit codes, and exactly what each one guarantees:
 |---|---|---|
 | 0 | activated, or no-op (equal content) | `current` → the candidate's generation; receipt current |
 | 2 | refused before any effect (bad candidate/receipt, wrong modes, `--initial` misuse, helper contract violation) | unchanged |
-| 7 | the activation command **could not start** | the prior `current` is restored without a second activation and the prior runtime is verified unchanged — proven pre-effect restoration |
-| 5 | the command started and then failed, timed out, or the runtime did not settle | `current` stays on the candidate; **recovery is operator-owned**; a synced owner fence stays in the host-state directory and every later activation or lifecycle run returns 5 until it is resolved — [Activation manual recovery](activation-manual-recovery.md) |
+| 7 | the activation command **could not start**, or the daemon **rejected the reload without runtime effect** (proven from `rbgp metrics`: one `rejected_no_effect` SIGHUP outcome in the same process, no settlement in progress) | the prior `current` is restored without a second activation and the prior runtime is verified unchanged — proven prior-runtime restoration |
+| 5 | the command started and then failed, timed out, or the runtime did not settle, and no no-effect rejection was proven | `current` stays on the candidate (or on the previous generation if the rejection could not be re-proven after restoring it); **recovery is operator-owned**; a synced owner fence stays in the host-state directory and every later activation or lifecycle run returns 5 until it is resolved — [Activation manual recovery](activation-manual-recovery.md) |
 
 Real exit-7 and exit-5 runs, on a changed candidate:
 
 ```console
 $ rs-config-render activate … --candidate candidate-2 --activation-command /usr/local/bin/does-not-exist
-rs-config-render: activation: activation command did not start; prior generation restored
+rs-config-render: activation: candidate not applied; prior generation restored
 $ echo $?
 7
 $ readlink /var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation/current
@@ -432,7 +432,7 @@ success the command prints `IXP Manager lifecycle updated`.
 |---|---|
 | 0 | `updated` delivered |
 | 2 | no lock acquired, or a definite pre-activation refusal was released back to IXP Manager |
-| 7 | activation command never started; exact prior runtime proven; release delivered |
+| 7 | candidate not applied (activation command never started, or the daemon rejected the reload without runtime effect); exact prior runtime proven; release delivered |
 | 5 | lock acquisition or activation effect is **uncertain** — no callback is issued; the owner fence stands; operator recovery ([runbook](activation-manual-recovery.md)) |
 | 6 | one durable `updated` or release callback is still pending — retry only that with `resume` |
 
@@ -558,13 +558,16 @@ handle; the activation path must be exactly `<runtime>/activation`; mode
 0700, owned by `rustbgpd`), or `--initial` was passed with a live daemon
 or omitted on first publication. Nothing was published.
 
-**Activate exits 7.** `sudo`/`systemctl` could not be executed (sudoers
-line missing, wrong path). The prior generation is restored and the prior
-runtime proven unchanged. Fix the command and re-run.
+**Activate exits 7.** Either `sudo`/`systemctl` could not be executed
+(sudoers line missing, wrong path), or the daemon rejected the reload without
+runtime effect: its log carries `SIGHUP reload rejected without runtime
+effect` with the reason. The prior generation is restored and the prior
+runtime proven unchanged. Fix the command or the candidate and re-run.
 
 **Activate or lifecycle exits 5.** The command started and something after
-it is unproven: a rejected reload, a daemon that did not settle within
-`--settle-seconds`, a timeout, or a lifecycle lock state that is uncertain.
+it is unproven: a rejection the daemon's reload outcomes could not prove, a
+daemon that did not settle within `--settle-seconds`, a timeout, or a
+lifecycle lock state that is uncertain.
 Nothing is retried for you, and every later run returns 5 while the fence
 stands. Confirm the candidate's health with `rbgp health` and
 `rbgp neighbor`, decide keep-or-roll-back, release the fence, handle the

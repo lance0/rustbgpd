@@ -148,11 +148,22 @@ including five bytes of protobuf overhead, remains within 4 MiB.
 The helper rechecks a private immutable generation, atomically renames the
 relative `current` symlink, runs one synchronous executable, and requires both
 `rbgp health` and `rbgp config diff` to settle. Equal content is a no-op. Exit 7
-is limited to a command that could not start: the helper restores the prior
-link without a second activation and verifies the unchanged prior runtime. Once
-the command starts, a nonzero exit, timeout, or unsettled runtime leaves
-`current` on the candidate and returns exit 5 for explicit operator recovery;
-the operator procedure for that state is the
+means the candidate was not applied: the command could not start, or it ran and
+the daemon rejected that reload without runtime effect. The helper then restores
+the prior link without a second activation and verifies the unchanged prior
+runtime. A rejection counts only on the daemon's own evidence: `rbgp metrics`,
+read before the command and again after `current` is restored, shows the same
+daemon process (`process_start_time_seconds`) recorded exactly one SIGHUP
+outcome, `bgp_sighup_reload_outcomes_total{outcome="rejected_no_effect"}`, and
+no runtime-config settlement is in progress
+(`bgp_runtime_config_settlement_active` absent). (The daemon also records that
+outcome when its generation route restored the prior generation after a later
+failure, so a replaced member session may have reset once.) Otherwise, once the
+command starts, a nonzero exit, timeout, or unsettled runtime leaves `current`
+on the candidate and returns exit 5 for explicit operator recovery. If the
+rejection cannot be re-proven after `current` is restored, `current` stays on
+the previous generation and the exit is still 5. The operator procedure for
+exit 5 is the
 [activation manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md).
 
 Authorize the `rustbgpd` account in sudoers for only the exact per-handle
@@ -160,8 +171,8 @@ Authorize the `rustbgpd` account in sudoers for only the exact per-handle
 handle uses its own runtime/activation/UDS and service instance but the same
 host-state directory, which serializes lifecycle ownership across the host.
 The private `activation-receipt.json` is written last; generations are retained for
-operator inspection. Exit 0 means activated or no-op, 2 refusal, 7 proven
-pre-effect restoration, and 5 means recovery or receipt durability is
+operator inspection. Exit 0 means activated or no-op, 2 refusal, 7 a candidate
+that was not applied with the prior runtime proven, and 5 means recovery or receipt durability is
 unproven (the full table is under [Exit codes](#exit-codes)). A receipt may
 therefore be absent or stale after exit 5. The helper does not deploy services,
 retry indefinitely, or call IXP Manager, and the activation path never removes a
@@ -212,8 +223,9 @@ body ceiling, and 4 MiB configuration ceiling.
 
 Lifecycle intent is written and synced before every upstream request. Exit 0
 means `updated` was delivered. Exit 2 means no lock was acquired or a definite
-pre-activation refusal was released. Exit 7 means the activation command never
-started, exact prior runtime was proven, and release was delivered. Exit 5
+pre-activation refusal was released. Exit 7 means the candidate was not applied
+(the activation command never started, or the daemon rejected the reload without
+runtime effect), exact prior runtime was proven, and release was delivered. Exit 5
 does not issue a callback because lock acquisition or an activation effect is
 uncertain. Exit 6 leaves one durable `updated` or release callback pending.
 
@@ -478,9 +490,9 @@ knowing which subcommand ran. The mapping is asserted by
 | 2 | **refused** — an unsupported knob, an invalid option combination, an unmet precondition (including an unavailable strict checker), no upstream lock acquired, or a definite pre-activation refusal released; nothing is published or activated and no generation, receipt, or journal is left behind (the lifecycle folds a strict-check rejection into this code and leaves that candidate, receipt-less, in its candidate directory for inspection) |
 | 3 | **aborted** — a generated set is empty or under the plausibility floor (arouteserver mode) |
 | 4 | **shape drift** — the context's top-level structure drifted from the pinned fingerprint; pass `--allow-shape-drift` to proceed (arouteserver mode) |
-| 5 | **manual recovery** — a human is needed: the activation effect is uncertain (`current` stays on the candidate) or a `recover --apply` step did not complete (`current` is wherever that step left it — on the rollback target after a rollback that did not settle); retained state and any upstream lock are kept and no callback is issued; inspect with `status` before acting |
+| 5 | **manual recovery** — a human is needed: the activation effect is uncertain (`current` stays on the candidate, or on the previous generation when a no-effect rejection could not be re-proven after restoring it) or a `recover --apply` step did not complete (`current` is wherever that step left it — on the rollback target after a rollback that did not settle); retained state and any upstream lock are kept and no callback is issued; inspect with `status` before acting |
 | 6 | **callback pending** — one durable `updated` or release callback is undelivered; run `ixp-manager-lifecycle resume` |
-| 7 | **rolled back** — the activation command never started; the prior generation is restored and proven and the lock is released; retrying is safe |
+| 7 | **rolled back** — the candidate was not applied: the activation command never started, or the daemon rejected its reload without runtime effect; the prior generation is restored and proven and the lock is released; retrying is safe |
 | 8 | **output unusable** — the candidate directory is not an absent or empty private directory (IXP Manager mode), could not be created or written (arouteserver mode), or a `prune --apply` removal failed |
 | 9 | **strict check failed** — `rustbgpd --check --strict` ran and rejected the rendered IXP Manager candidate (the only path to this code); its files stay in the candidate directory without a receipt |
 

@@ -710,7 +710,7 @@ fn main() -> ExitCode {
                 let message = match error {
                     rs_config_render::activation::Error::Refused(reason) => reason,
                     rs_config_render::activation::Error::RolledBack => {
-                        "activation command did not start; prior generation restored"
+                        "candidate not applied; prior generation restored"
                     }
                     rs_config_render::activation::Error::RecoveryRequired => {
                         "recovery required; inspect private activation state"
