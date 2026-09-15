@@ -101,7 +101,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Route-server member joins and leaves that add, remove, or re-map
   `[policy.datasets]` bindings now apply through SIGHUP without a restart and
   without flapping other members, and `rs-config-render activate` settles such
-  candidates and exits 0. Binding changes combined with the listed
+  candidates and exits 0. A join or leave of a member that carries
+  `md5_password` or `ttl_security` (GTSM), which covers every join and leave
+  in a fleet whose members use GTSM, also changes the listener's MD5/GTSM keys
+  and is still rejected before any effect. For those fleets
+  `rs-config-render activate` does not settle, and a restart is still required
+  to apply the change. Binding changes combined with the listed
   authentication, dynamic-neighbor, EVPN, FIB, or honor-knob changes still
   reject before any effect.
 - `rbgp config diff` and `rustbgpd --diff` print a
