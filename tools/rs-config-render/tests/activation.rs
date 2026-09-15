@@ -950,7 +950,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 16);
+    assert_eq!(tests, 17);
 }
 
 mod prune {
@@ -1258,4 +1258,41 @@ mod prune {
         assert!(lock_at < fence_at, "host lock must precede the fence check");
         assert!(source.contains("let _host_lock ="));
     }
+}
+
+/// Zero dataset counts are only consistent with a receipt that names every
+/// client as IRRDB-disabled; a six-key receipt (rendered before those keys
+/// existed) keeps the original non-zero requirement.
+#[test]
+fn zero_dataset_counts_require_every_client_irrdb_disabled() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let candidate = rig.candidate("candidate-counts", 120);
+    let receipt_path = candidate.join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let clients = usize::try_from(receipt["counts"]["clients"].as_u64().unwrap()).unwrap();
+    assert!(clients > 0);
+    receipt["counts"]["prefixes"] = 0.into();
+    receipt["counts"]["origins"] = 0.into();
+    let write = |receipt: &serde_json::Value| {
+        fs::write(&receipt_path, serde_json::to_vec(receipt).unwrap()).unwrap();
+    };
+    write(&receipt);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    receipt["irrdb_disabled_clients"] = vec![serde_json::json!({}); clients - 1].into();
+    write(&receipt);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    let mut legacy = receipt.clone();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("irrdb_disabled_clients");
+    object.remove("warnings");
+    write(&legacy);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    receipt["irrdb_disabled_clients"] = vec![serde_json::json!({}); clients].into();
+    write(&receipt);
+    assert_eq!(
+        rig.run(&candidate, true, &rig.activation),
+        Ok(Status::Activated)
+    );
 }

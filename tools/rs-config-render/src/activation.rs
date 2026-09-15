@@ -72,11 +72,12 @@ mod unix {
         "counts",
         "refusals",
         "host",
-        "irrdb_disabled_clients",
-        "warnings",
         GENERATED,
         "strict_check",
     ];
+    /// Array-valued keys later renderers add together. Generations rendered
+    /// before them stay valid activation, status, and rollback targets.
+    const IRRDB_ROOT_KEYS: &[&str] = &["irrdb_disabled_clients", "warnings"];
     const COUNT_KEYS: &[&str] = &["clients", "prefixes", "origins"];
     const SKINS: &str = "route_server_skin_files";
     const MULTI: &str = "multi_address_clients";
@@ -178,7 +179,30 @@ mod unix {
         }
         let receipt: Value = serde_json::from_slice(&receipt_bytes)
             .map_err(|_| Error::Refused("render receipt is invalid"))?;
-        if !exact_keys(&receipt, ROOT_KEYS)
+        let irrdb_keys = receipt.as_object().is_some_and(|object| {
+            IRRDB_ROOT_KEYS
+                .iter()
+                .all(|key| object.get(*key).is_some_and(Value::is_array))
+        });
+        let extended_root_keys = ROOT_KEYS
+            .iter()
+            .chain(IRRDB_ROOT_KEYS)
+            .copied()
+            .collect::<Vec<_>>();
+        let root_keys: &[&str] = if irrdb_keys {
+            &extended_root_keys
+        } else {
+            ROOT_KEYS
+        };
+        let clients = receipt["counts"]["clients"].as_u64();
+        // Dataset counts of zero are only consistent when every client has
+        // IRR filtering disabled.
+        let all_irrdb_disabled = irrdb_keys
+            && receipt["irrdb_disabled_clients"]
+                .as_array()
+                .and_then(|clients| u64::try_from(clients.len()).ok())
+                == clients;
+        if !exact_keys(&receipt, root_keys)
             || !exact_keys(
                 &receipt["input"],
                 &["schema", "ixp_manager_version", "router_handle", "sha256"],
@@ -186,8 +210,6 @@ mod unix {
             || !exact_keys(&receipt["counts"], COUNT_KEYS)
             || !exact_keys(&receipt["refusals"], REFUSAL_KEYS)
             || !exact_keys(&receipt["strict_check"], &["binary_version", "passed"])
-            || !receipt["irrdb_disabled_clients"].is_array()
-            || !receipt["warnings"].is_array()
             || !matches!(
                 receipt["input"]["schema"].as_str(),
                 Some(
@@ -202,11 +224,12 @@ mod unix {
             || !receipt["input"]["sha256"]
                 .as_str()
                 .is_some_and(valid_digest)
-            || receipt["counts"]["clients"]
-                .as_u64()
-                .is_none_or(|count| count == 0)
-            || receipt["counts"]["prefixes"].as_u64().is_none()
-            || receipt["counts"]["origins"].as_u64().is_none()
+            || clients.is_none_or(|count| count == 0)
+            || COUNT_KEYS[1..].iter().any(|key| {
+                receipt["counts"][key]
+                    .as_u64()
+                    .is_none_or(|count| count == 0 && !all_irrdb_disabled)
+            })
             || receipt["refusals"]["status"] != "passed"
             || !REFUSAL_KEYS[1..]
                 .iter()

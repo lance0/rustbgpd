@@ -1729,3 +1729,48 @@ fn a_fence_write_failure_exits_5_and_leaves_a_fence_only_a_hand_can_clear() {
     assert_ne!(rig.current(), current);
     assert!(!rig.fence().exists());
 }
+
+/// Generations rendered before the receipt gained `irrdb_disabled_clients`
+/// and `warnings` stay valid: `activate` verifies such a current generation,
+/// `recover rollback` re-stages it, `status` reports it, and a newer-shape
+/// candidate activates over it.
+#[test]
+fn receipts_without_the_irrdb_keys_remain_valid_generations() {
+    let _guard = test_guard();
+    let rig = Rig::new();
+    let previous = rig.current();
+    let receipt_path = rig.state.join(&previous).join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let object = receipt.as_object_mut().unwrap();
+    assert!(object.remove("irrdb_disabled_clients").is_some());
+    assert!(object.remove("warnings").is_some());
+    assert_eq!(
+        object.len(),
+        6,
+        "the pre-upgrade receipt shape has six keys"
+    );
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+
+    // A newer-shape candidate whose activation fails verifies the legacy
+    // current generation on the way in and leaves it as the rollback target.
+    let server = rig.induce_exit_5("fail", vec![Response::json(200)]);
+    let rollback = rollback_args(&rig);
+    let (code, _, stderr) = rig.recover_cli(&strs(&rollback), true, Some(&server.origin));
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(rig.current(), previous);
+    assert_eq!(rig.runtime(), previous);
+    let (code, fields, stderr) = rig.status_cli(true);
+    assert_eq!(code, 0, "{stderr}");
+    assert_fields(
+        &fields,
+        &[
+            ("current", &previous),
+            ("daemon", "healthy"),
+            ("runtime_equals_current", "yes"),
+        ],
+    );
+    let output = rig.activate_cli(&rig.second_candidate(), false);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_ne!(rig.current(), previous);
+}
