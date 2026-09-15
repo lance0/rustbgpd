@@ -247,6 +247,17 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+/// A config file path made absolute lexically (`std::path::absolute`: the
+/// working directory is prefixed, symlinks and `..` are kept), the same
+/// normalization `rbgp` applies to candidate paths. Relative external inputs
+/// resolve against its parent, so a relative launch records the same absolute
+/// `rpol_files`, `rpol_roots`, dataset paths and `file_path` as the equivalent
+/// absolute launch.
+pub(crate) fn absolute_config_path(path: &std::path::Path) -> Result<PathBuf, String> {
+    std::path::absolute(path)
+        .map_err(|error| format!("error: failed to resolve {}: {error}", path.display()))
+}
+
 impl Config {
     fn peer_group_for_neighbor(
         &self,
@@ -874,15 +885,15 @@ impl Config {
             Ok(c) => c,
             Err(e) => return Err(format!("error: failed to read {path}: {e}")),
         };
-        let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
+        let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
             &content,
             path,
-            base_dir.as_deref(),
+            file_path.parent(),
             prior_datasets,
             DatasetBindMode::Apply,
         )?;
-        config.file_path = Some(PathBuf::from(path));
+        config.file_path = Some(file_path);
         Ok(config)
     }
 
@@ -897,15 +908,15 @@ impl Config {
     ) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|error| format!("error: failed to read {path}: {error}"))?;
-        let base_dir = std::path::Path::new(path).parent().map(PathBuf::from);
+        let file_path = absolute_config_path(std::path::Path::new(path))?;
         let mut config = Self::load_from_toml_source_with_datasets(
             &content,
             path,
-            base_dir.as_deref(),
+            file_path.parent(),
             Some(prior_datasets),
             DatasetBindMode::Stage,
         )?;
-        config.file_path = Some(PathBuf::from(path));
+        config.file_path = Some(file_path);
         Ok(config)
     }
 
