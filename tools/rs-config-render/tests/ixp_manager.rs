@@ -1301,9 +1301,30 @@ fn run_cli(
     input_mode: u32,
     extra: &[&str],
 ) -> std::process::Output {
+    run_cli_document(
+        temp,
+        out,
+        FIXTURE,
+        "ixp-manager-v1",
+        fail,
+        input_mode,
+        extra,
+    )
+}
+
+#[cfg(unix)]
+fn run_cli_document(
+    temp: &tempfile::TempDir,
+    out: &std::path::Path,
+    document: &[u8],
+    format: &str,
+    fail: bool,
+    input_mode: u32,
+    extra: &[&str],
+) -> std::process::Output {
     use std::process::Command;
     let input = temp.path().join("input.json");
-    fs::write(&input, FIXTURE).unwrap();
+    fs::write(&input, document).unwrap();
     set_mode(&input, input_mode);
     let log = temp.path().join("checker.log");
     let checker = temp.path().join("checker.sh");
@@ -1311,7 +1332,7 @@ fn run_cli(
     set_mode(&checker, 0o700);
     let runtime = temp.path().join("b2-rs1-lan1-ipv4");
     Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
-        .args(["--input-format", "ixp-manager-v1", "--context"])
+        .args(["--input-format", format, "--context"])
         .arg(&input)
         .arg("--out-dir")
         .arg(out)
@@ -1762,4 +1783,60 @@ fn irrdb_disabled_member_renders_clean_policy_without_irr_terms() {
         assert_eq!(receipt["strict_check"]["passed"], true);
         assert_eq!(receipt["irrdb_disabled_clients"][0]["name"], "AS112");
     }
+}
+
+/// A member name from the export carrying a newline and terminal escapes.
+const HOSTILE_NAME: &str = "AS112\nrs-config-render: forged line\u{1b}[2J\u{9b}31m";
+
+fn irr_disabled_hostile_member() -> serde_json::Value {
+    let mut input = v2_value(V2_SUPPORTED);
+    input["clients"][1]["irr_filter"] = false.into();
+    input["clients"][1]["origins"] = serde_json::json!([]);
+    input["clients"][1]["prefixes"] = serde_json::json!([]);
+    input["clients"][1]["name"] = HOSTILE_NAME.into();
+    input
+}
+
+#[test]
+fn irr_disabled_warning_escapes_the_member_name() {
+    let candidate = rendered_v2(&irr_disabled_hostile_member()).unwrap();
+    let warnings = candidate.metadata["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().unwrap();
+    assert!(!warning.chars().any(char::is_control), "{warning:?}");
+    assert!(warning.contains(r#"member "AS112\nrs-config-render: forged line\u{1b}[2J\u{9b}31m""#));
+    // The receipt keeps the exported name verbatim; only display text escapes.
+    assert_eq!(
+        candidate.metadata["irrdb_disabled_clients"][0]["name"],
+        HOSTILE_NAME
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_prints_irr_disabled_warnings_to_stderr_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = temp.path().join("candidate");
+    let document = serde_json::to_vec(&irr_disabled_hostile_member()).unwrap();
+    let result = run_cli_document(&temp, &out, &document, "ixp-manager-v2", false, 0o600, &[]);
+    assert!(result.status.success(), "{result:?}");
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(
+        stderr.starts_with("rs-config-render: warning: member \"AS112\\n")
+            && stderr.ends_with(
+                "(ASN 112, VLI 4) has IRR filtering disabled; rendering policy without IRR terms\n"
+            ),
+        "{stderr:?}"
+    );
+    assert!(
+        !stderr.chars().any(|c| c.is_control() && c != '\n'),
+        "{stderr:?}"
+    );
+    assert!(
+        stdout.starts_with("validated ") && stdout.contains(" candidate file(s) + receipt into "),
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains("IRR filtering disabled"), "{stdout:?}");
 }

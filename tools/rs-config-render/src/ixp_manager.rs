@@ -791,8 +791,11 @@ pub fn render_document(
     for (client, prefixes) in document.clients.iter().zip(&effective) {
         let slug = client.vlan_interface_id;
         if !client.irr_filter {
+            // Debug-quote the exported name: control characters escape
+            // (including C1, which JSON quoting leaves raw), so the receipt
+            // warning and the stderr line printed from it cannot forge lines.
             warnings.push(format!(
-                "member {} (ASN {}, VLI {slug}) has IRR filtering disabled; rendering policy without IRR terms",
+                "member {:?} (ASN {}, VLI {slug}) has IRR filtering disabled; rendering policy without IRR terms",
                 client.name, client.asn
             ));
             irrdb_disabled_clients.push(json!({
