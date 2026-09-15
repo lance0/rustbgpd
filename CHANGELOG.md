@@ -29,6 +29,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when combined with dataset changes. The runtime refusal for adding an
   authenticated neighbor through a config transaction now says that SIGHUP
   applies the join, datasets included, as one generation.
+- `rs-config-render activate` and `ixp-manager-lifecycle run` now roll back
+  when the daemon rejects the reload without runtime effect, instead of
+  returning exit 5 for manual recovery. Examples are a generation combined with
+  an honor-knob edit, or a dataset change combined with an in-place MD5 or GTSM
+  edit. The helper reads `rbgp metrics` before the activation command, then
+  re-points `current` at the previous generation. It exits 7 (`rolled_back`,
+  release callback delivered) only when a second read shows the same daemon
+  process recorded exactly one SIGHUP outcome, `rejected_no_effect`, no
+  runtime-config settlement is in progress, and the daemon still runs the
+  previous generation. A settle timeout without that outcome, a dropped or
+  additional reload, a daemon restart, a partial apply, or an unreachable
+  daemon still returns exit 5.
 
 ### Upgrade notes
 
@@ -40,6 +52,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   member's listener entry returns a known-partial receipt with bucket
   `listener_auth.withdraw`. The entries it leaves cover only addresses that
   are no longer configured.
+- A candidate that the daemon rejects without runtime effect now makes
+  `rs-config-render activate` and `ixp-manager-lifecycle run` exit 7 instead
+  of 5, with `current` back on the previous generation, the activation receipt
+  `rolled_back`, and no host fence. Wrappers that branch on the exit code need
+  no change: 7 already means the candidate was not applied and a retry is safe.
+  The exit-7 stderr text is now `candidate not applied; prior generation
+  restored` (`...; lock released` for the lifecycle). The helper also makes one
+  `rbgp metrics` call per activation, which needs the same gRPC read access as
+  `rbgp health`. If `current` was restored but the rejection could not be
+  re-proven, exit 5 now leaves `current` on the previous generation.
 
 ## [0.70.1] — 2026-09-15
 

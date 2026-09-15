@@ -15,6 +15,18 @@ use sha2::{Digest, Sha256};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ixp-manager-v1-supported.json");
 const SECRET: &str = "activation-secret-must-not-escape";
+/// The fake daemon's reload ledger: a preinitialized outcome row set and
+/// process identity, with no settlement owner registered.
+const METRICS: &str = "# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1700000000
+# TYPE bgp_sighup_reload_outcomes_total counter
+bgp_sighup_reload_outcomes_total{outcome=\"complete\"} 3
+bgp_sighup_reload_outcomes_total{outcome=\"ignored_in_flight\"} 0
+bgp_sighup_reload_outcomes_total{outcome=\"known_partial\"} 0
+bgp_sighup_reload_outcomes_total{outcome=\"rejected_no_effect\"} 0
+bgp_sighup_reload_outcomes_total{outcome=\"task_failed\"} 0
+";
+const SETTLING: &str = "bgp_runtime_config_settlement_active{fence_reason=\"none\",kind=\"sighup_reload\",phase=\"mutating\",response_attached=\"detached\"} 1";
 /// Settle window every `Rig::run` activation is given.
 const SETTLE: Duration = Duration::from_secs(1);
 // Serialize the binary. `Command::spawn` in any thread copies every open
@@ -74,6 +86,7 @@ impl Rig {
             ("checker-mode", "ok"),
             ("health-mode", "ok"),
             ("activation-mode", "ok"),
+            ("metrics", METRICS),
         ] {
             fs::write(root.join(name), value).unwrap();
         }
@@ -120,12 +133,22 @@ case "$*" in
     printf '{"healthy":%s}\n' "$healthy"
     exit 0
     ;;
+  *" metrics")
+    [ -f "$root/metrics" ] || { printf 'Error: cannot reach rustbgpd at test (connection refused)\n' >&2; exit 1; }
+    cat "$root/metrics"
+    # A staged next page is served from the following read on.
+    if [ -f "$root/metrics-then" ]; then mv "$root/metrics-then" "$root/metrics"; fi
+    exit 0
+    ;;
 esac
 for arg do candidate=$arg; done
 target=$(cat "$root/runtime")
 current=$(CDPATH= cd -- "$root/b2-rs1-lan1-ipv4/activation" && pwd -P)/current
 grep -F "\"$current/policy/ixp-hygiene.rpol\"" "$candidate" >/dev/null || exit 8
 printf 'ABSOLUTE_CURRENT_OK\n' >> "$root/rbgp.log"
+cp "$candidate" "$root/last-diff"
+# A daemon that kept (or partially left) its runtime equals only that document.
+if [ -f "$root/runtime-toml" ]; then cmp -s "$candidate" "$root/runtime-toml" && exit 0; exit 2; fi
 if [ -f "$root/reject" ] && [ "$target" = "$(cat "$root/reject")" ]; then exit 2; fi
 exit 0
 "#,
@@ -146,6 +169,27 @@ case "$(cat "$root/activation-mode")" in
     if [ ! -f "$root/hung-once" ]; then touch "$root/hung-once"; exec sleep 120; fi ;;
   reject-current)
     [ -f "$root/reject" ] || printf '%s\n' "$target" > "$root/reject" ;;
+  no-effect-*|partial|down|repoint-*)
+    # The last comparison before the command is the known-good prior runtime.
+    cp "$root/last-diff" "$root/runtime-toml"
+    count() {{ sed "s/outcome=\"$1\"}} 0/outcome=\"$1\"}} 1/" "$root/metrics" > "$root/metrics.new" && mv "$root/metrics.new" "$root/metrics"; }}
+    case "$(cat "$root/activation-mode")" in
+      no-effect-rejected|repoint-*) count rejected_no_effect ;;
+      no-effect-ignored) count rejected_no_effect; count ignored_in_flight ;;
+      no-effect-restarted)
+        count rejected_no_effect
+        sed 's/^process_start_time_seconds .*/process_start_time_seconds 1700000100/' "$root/metrics" > "$root/metrics.new" && mv "$root/metrics.new" "$root/metrics" ;;
+      no-effect-settling)
+        count rejected_no_effect
+        printf '%s\n' '{SETTLING}' >> "$root/metrics" ;;
+      no-effect-no-metrics) rm "$root/metrics" ;;
+      partial) count known_partial; printf 'partial\n' > "$root/runtime-toml" ;;
+      down) rm "$root/metrics" "$root/runtime" ;;
+    esac
+    case "$(cat "$root/activation-mode")" in
+      repoint-settling) cp "$root/metrics" "$root/metrics-then"; printf '%s\n' '{SETTLING}' >> "$root/metrics-then" ;;
+      repoint-down) rm "$root/runtime" ;;
+    esac ;;
 esac
 printf '{SECRET}\n' >&2
 exit 0
@@ -497,7 +541,24 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
     // deadline (or a settle loop that never gives up) overshoots this by far,
     // while scheduler load cannot reach it.
     const HANG_MARGIN: Duration = Duration::from_secs(30);
-    for mode_name in ["fail-once", "hang-once", "reject-current"] {
+    // Besides a failed, hung, or never-settling command, a daemon that kept
+    // its prior runtime is still ambiguous without its own terminal
+    // no-effect outcome for exactly the one observed reload: no outcome yet,
+    // a dropped in-flight signal, a restarted process, a registered
+    // settlement owner, an unreadable ledger, a partial apply, or a daemon
+    // that went away.
+    for mode_name in [
+        "fail-once",
+        "hang-once",
+        "reject-current",
+        "no-effect-silent",
+        "no-effect-ignored",
+        "no-effect-restarted",
+        "no-effect-settling",
+        "no-effect-no-metrics",
+        "partial",
+        "down",
+    ] {
         let rig = Rig::new();
         let first = rig.candidate("candidate-a", 110);
         rig.run(&first, true, &rig.activation).unwrap();
@@ -508,7 +569,8 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         let started = Instant::now();
         assert_eq!(
             rig.run(&candidate, false, &rig.activation),
-            Err(Error::RecoveryRequired)
+            Err(Error::RecoveryRequired),
+            "{mode_name}"
         );
         let elapsed = started.elapsed();
         // A failed command is reported at once; a hung command is killed at
@@ -525,7 +587,7 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
             "{mode_name}: ran past the settle deadline: {elapsed:?}"
         );
         let receipt = rig.receipt();
-        assert_ne!(rig.current(), prior);
+        assert_ne!(rig.current(), prior, "{mode_name}");
         assert!(
             rig.current()
                 .ends_with(receipt["candidate_sha256"].as_str().unwrap())
@@ -543,6 +605,93 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
                 .count(),
             activations.lines().count() + 1
         );
+    }
+}
+
+fn cli_activate(rig: &Rig, candidate: &Path, initial: bool) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rs-config-render"));
+    command
+        .args(["activate", "--candidate"])
+        .arg(candidate)
+        .arg("--state-dir")
+        .arg(&rig.state)
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
+        .arg("--check-with")
+        .arg(&rig.checker)
+        .arg("--rbgp")
+        .arg(&rig.rbgp)
+        .arg("--rbgp-addr")
+        .arg(rig.binding(&rig.state).rbgp_addr())
+        .args(["--settle-seconds", "1", "--activation-command"])
+        .arg(&rig.activation);
+    if initial {
+        command.arg("--initial");
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn rejected_reload_without_effect_rolls_back_to_the_previous_generation() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let first = rig.candidate("candidate-a", 120);
+    rig.run(&first, true, &rig.activation).unwrap();
+    let prior = rig.current();
+    let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
+    rig.set("activation-mode", "no-effect-rejected");
+    let output = cli_activate(&rig, &rig.candidate("candidate-rejected", 121), false);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rs-config-render: activation: candidate not applied; prior generation restored\n"
+    );
+    assert_eq!(rig.current(), prior);
+    let receipt = rig.receipt();
+    assert_eq!(receipt["status"], "rolled_back");
+    assert_eq!(receipt["previous_generation"], prior.as_str());
+    assert_eq!(receipt["activation_runs"], 1);
+    assert_eq!(receipt["phases"]["candidate_activation_ran"], true);
+    assert_eq!(receipt["phases"]["rollback_link"]["durable"], true);
+    assert_eq!(receipt["phases"]["rollback_activation_ran"], false);
+    assert_eq!(receipt["phases"]["runtime_equal"], true);
+    // One activation command only: the rejected reload is not signalled again.
+    assert_eq!(
+        fs::read_to_string(rig.root.join("activation.log"))
+            .unwrap()
+            .lines()
+            .count(),
+        activations.lines().count() + 1
+    );
+    assert!(!rig.host.join("ixp-manager-host-fence.json").exists());
+}
+
+#[test]
+fn rejection_evidence_lost_after_repointing_requires_recovery() {
+    let _serial = activation_test_guard();
+    // The ledger proves a no-effect rejection before `current` is re-pointed,
+    // but a settlement owner registers (it may have read the candidate) or the
+    // daemon goes away before the re-proof: `current` stays on the previous
+    // generation, which is not proven to be running.
+    for mode_name in ["repoint-settling", "repoint-down"] {
+        let rig = Rig::new();
+        let first = rig.candidate("candidate-a", 130);
+        rig.run(&first, true, &rig.activation).unwrap();
+        let prior = rig.current();
+        rig.set("activation-mode", mode_name);
+        let output = cli_activate(&rig, &rig.candidate("candidate-raced", 131), false);
+        assert_eq!(output.status.code(), Some(5), "{mode_name}: {output:?}");
+        assert_eq!(rig.current(), prior, "{mode_name}");
+        let receipt = rig.receipt();
+        assert_eq!(receipt["status"], "recovery_required", "{mode_name}");
+        assert_eq!(receipt["phases"]["candidate_activation_ran"], true);
+        assert_eq!(receipt["phases"]["rollback_link"]["durable"], true);
+        assert_eq!(receipt["phases"]["rollback_activation_ran"], false);
+        assert_eq!(receipt["phases"]["runtime_equal"], false, "{mode_name}");
+        assert!(rig.host.join("ixp-manager-host-fence.json").exists());
     }
 }
 
@@ -801,7 +950,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 14);
+    assert_eq!(tests, 16);
 }
 
 mod prune {

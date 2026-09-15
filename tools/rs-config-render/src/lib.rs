@@ -157,15 +157,17 @@ pub enum Exit {
     /// Context top-level shape differs from the pinned fingerprint.
     ShapeDrift = 4,
     /// A human is needed: the activation effect is uncertain (`current` left
-    /// on the candidate) or a `recover --apply` step did not complete
-    /// (`current` wherever that step left it — the rollback target after a
-    /// rollback that did not settle); retained state and any upstream lock
-    /// kept; no callback issued.
+    /// on the candidate, or on the previous generation when the daemon's
+    /// no-effect rejection could not be re-proven after re-pointing) or a
+    /// `recover --apply` step did not complete (`current` wherever that step
+    /// left it — the rollback target after a rollback that did not settle);
+    /// retained state and any upstream lock kept; no callback issued.
     ManualRecovery = 5,
     /// One durable lifecycle callback is pending; run `resume`.
     CallbackPending = 6,
-    /// Activation command never started; prior generation restored and proven,
-    /// lock released; retry is safe.
+    /// Candidate not applied — the activation command never started, or the
+    /// daemon rejected its reload without runtime effect; prior generation
+    /// restored and proven, lock released; retry is safe.
     RolledBack = 7,
     /// Output directory unusable: not an absent or empty private directory
     /// (IXP Manager mode) or could not be created or written.

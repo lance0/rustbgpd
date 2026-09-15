@@ -68,7 +68,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(reason) => formatter.write_str(reason),
-            Self::RolledBack => formatter.write_str("activation did not start; lock released"),
+            Self::RolledBack => formatter
+                .write_str("candidate not applied; prior generation restored; lock released"),
             Self::ManualRecovery => {
                 formatter.write_str("manual recovery required; upstream lock retained")
             }

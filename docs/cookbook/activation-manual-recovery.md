@@ -64,7 +64,10 @@ runtime_equals_current: no
 directory: while it stands, `resume` and every new `run` or `activate` answer
 with the same exit 5 line and touch nothing (`resume` has no action for this
 phase). `current_is_candidate: yes` says `current` was moved onto the candidate
-and `advisory_receipt_previous_generation` names what was live before.
+and `advisory_receipt_previous_generation` names what was live before. It reads
+`no` when the daemon rejected the reload but the helper could not re-prove that
+rejection after restoring the previous generation: `current` already names the
+previous generation, which is not proven to be running.
 
 `error_class` tells you how far it got. `activation` (the case this runbook
 walks) means the candidate was rendered, `current` was moved, and the
@@ -462,8 +465,9 @@ candidate); leave it alone, the next successful run rewrites it.
 
 - Exit 6 (one callback pending): run `ixp-manager-lifecycle resume`; it replays
   only that callback.
-- Exit 7 (the activation command never started): nothing to recover, `current`
-  was restored and the lock released.
+- Exit 7 (the candidate was not applied: the activation command never started,
+  or the daemon rejected the reload without runtime effect): nothing to
+  recover, `current` was restored and the lock released.
 - An unreadable or foreign fence or journal (wrong mode, symlink, another
   handle's binding, unparseable JSON): the helper exits 5 for those too;
   inspect who wrote them before removing anything.

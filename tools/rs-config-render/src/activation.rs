@@ -57,7 +57,7 @@ mod unix {
     use std::ffi::OsString;
     use std::fmt::Write as _;
     use std::fs::{self, File, OpenOptions};
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
     use std::path::{Component, Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
@@ -688,6 +688,87 @@ mod unix {
         runtime_diff(rbgp, rbgp_addr, comparison, deadline) == RuntimeDiff::Equal
     }
 
+    /// The daemon's reload ledger from `rbgp metrics`: process identity, every
+    /// `bgp_sighup_reload_outcomes_total` row, and whether any runtime-config
+    /// settlement owner is registered. The daemon records each observed SIGHUP
+    /// exactly once (a terminal outcome or `ignored_in_flight`; a fenced reload
+    /// stays registered), and reads the candidate files only while registered.
+    struct Reloads {
+        process_start: f64,
+        outcomes: BTreeMap<String, u64>,
+        settling: bool,
+    }
+
+    /// Output above this is not a metrics page this probe trusts.
+    const MAX_METRICS_BYTES: u64 = 64 << 20;
+
+    fn reloads(rbgp: &Path, rbgp_addr: &str, deadline: Instant) -> Option<Reloads> {
+        let mut child = Command::new(rbgp)
+            .args(["--addr", rbgp_addr, "metrics"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        // Drain stdout while waiting: a large page would fill the pipe and
+        // stall the child until the deadline.
+        let stdout = child.stdout.take()?;
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .take(MAX_METRICS_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        });
+        if !wait_output(child, deadline)?.status.success() {
+            return None;
+        }
+        let bytes = reader.join().ok()?.ok()?;
+        if bytes.len() as u64 > MAX_METRICS_BYTES {
+            return None;
+        }
+        let mut process_start = None;
+        let mut outcomes = BTreeMap::new();
+        let mut settling = false;
+        for line in std::str::from_utf8(&bytes).ok()?.lines() {
+            let Some((series, value)) = line.rsplit_once(' ') else {
+                continue;
+            };
+            if series == "process_start_time_seconds" {
+                process_start = Some(value.parse().ok()?);
+            } else if let Some(outcome) = series
+                .strip_prefix("bgp_sighup_reload_outcomes_total{outcome=\"")
+                .and_then(|rest| rest.strip_suffix("\"}"))
+            {
+                outcomes.insert(outcome.to_owned(), value.parse().ok()?);
+            } else if series.starts_with("bgp_runtime_config_settlement_active{") {
+                settling |= value != "0";
+            }
+        }
+        outcomes
+            .contains_key("rejected_no_effect")
+            .then_some(Reloads {
+                process_start: process_start?,
+                outcomes,
+                settling,
+            })
+    }
+
+    /// Whether, since `before`, the same daemon process recorded exactly one
+    /// SIGHUP outcome, `rejected_no_effect`, and holds no settlement owner now.
+    fn rejected_once_since(
+        rbgp: &Path,
+        rbgp_addr: &str,
+        before: &Reloads,
+        deadline: Instant,
+    ) -> bool {
+        let Some(after) = reloads(rbgp, rbgp_addr, deadline) else {
+            return false;
+        };
+        let mut expected = before.outcomes.clone();
+        *expected.entry("rejected_no_effect".to_owned()).or_default() += 1;
+        !after.settling && after.process_start == before.process_start && after.outcomes == expected
+    }
+
     fn settle(rbgp: &Path, rbgp_addr: &str, comparison: &Path, deadline: Instant) -> bool {
         loop {
             if health_probe(rbgp, rbgp_addr, deadline) == Health::Reachable(true)
@@ -993,6 +1074,11 @@ mod unix {
             unpublished.0.take();
             phases.candidate_publication = Some(publication);
             if publication == Publication::Durable {
+                let before = reloads(
+                    options.rbgp,
+                    options.rbgp_addr,
+                    Instant::now() + options.settle,
+                );
                 phases.candidate =
                     activate_and_settle(options.into(), candidate_comparison.as_ref());
                 if phases.candidate.settled {
@@ -1002,13 +1088,24 @@ mod unix {
                     finish("activated", phases)?;
                     return Ok(Status::Activated);
                 }
-                if !phases.candidate.ran {
+                // A started command is rolled back only on the daemon's own
+                // terminal no-effect outcome for the one reload it observed,
+                // re-proven after `current` names the previous generation: a
+                // reload that registers after that re-point reads the previous
+                // files, and one registered before it is still visible.
+                let rejected = |deadline| {
+                    before.as_ref().is_some_and(|before| {
+                        rejected_once_since(options.rbgp, options.rbgp_addr, before, deadline)
+                    })
+                };
+                if !phases.candidate.ran || rejected(Instant::now() + options.settle) {
                     let rollback = publish_current(options.state_dir, previous_target);
                     if rollback != Publication::UnchangedError {
                         phases.rollback_publication = Some(rollback);
                     }
                     let deadline = Instant::now() + options.settle;
                     if rollback == Publication::Durable
+                        && (!phases.candidate.ran || rejected(deadline))
                         && health_probe(options.rbgp, options.rbgp_addr, deadline)
                             == Health::Reachable(true)
                         && equal_runtime(

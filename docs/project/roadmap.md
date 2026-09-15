@@ -402,9 +402,10 @@ an original Foil JSON export, fails closed on unsupported effective policy, and
 writes a private candidate, validates it with the selected rustbgpd binary's
 strict offline check, then writes the validated receipt last. Its local helper
 now rechecks, atomically publishes and settles immutable generations. Exit 7
-is limited to a command that could not start and proves exact prior-link/runtime
-restoration without a second activation. A started command that fails or does
-not settle leaves the candidate current; exit 5 requires explicit recovery.
+covers a command that could not start or a reload the daemon rejected without
+runtime effect, and proves exact prior-link/runtime restoration without a second
+activation. A started command that fails or does not settle without that proof
+leaves the candidate current; exit 5 requires explicit recovery.
 M96 proves the pre-effect restoration against an MD5-authenticated FRR member
 without a daemon restart or session flap. The authenticated v7.4 lifecycle now
 journals lock intent, fetches the real Foil boundary, drives that activation,
