@@ -58,6 +58,24 @@ pub fn change_status_exit_code(has_changes: bool) -> i32 {
     if has_changes { 2 } else { 0 }
 }
 
+/// Detailed exit code for a `config plan`, `apply`, or `rollback` receipt
+/// the daemon rejected. The receipt is still printed in full.
+const EXIT_REJECTED: i32 = 3;
+
+/// Maps a transaction receipt status to its detailed exit code: 0 noop,
+/// `committable` for a committable plan (2) or committed apply/rollback (0),
+/// and [`EXIT_REJECTED`] rejected. An unrecognized status fails closed.
+fn transaction_exit_code(status: i32, committable: i32) -> Result<i32, CliError> {
+    match ConfigTransactionPlanStatus::try_from(status) {
+        Ok(ConfigTransactionPlanStatus::Noop) => Ok(0),
+        Ok(ConfigTransactionPlanStatus::Committable) => Ok(committable),
+        Ok(ConfigTransactionPlanStatus::Rejected) => Ok(EXIT_REJECTED),
+        Ok(ConfigTransactionPlanStatus::Unspecified) | Err(_) => Err(CliError::Argument(format!(
+            "daemon returned an invalid config transaction status {status}"
+        ))),
+    }
+}
+
 /// Returns whether the candidate differs from the runtime config, for the
 /// 0 (no changes) / 2 (changes present) exit-code contract.
 pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result<bool, CliError> {
@@ -76,14 +94,13 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
     Ok(resp.has_any_changes)
 }
 
-/// Returns whether the plan contains changes (status other than noop),
-/// for the 0 (no changes) / 2 (changes present) exit-code contract.
+/// Returns the plan's exit code: 0 noop, 2 committable, 3 rejected.
 pub async fn plan(
     connection: Connection,
     from_file: &str,
     expected_runtime_snapshot_token: Option<&str>,
     json: bool,
-) -> Result<bool, CliError> {
+) -> Result<i32, CliError> {
     let candidate_toml = Arc::new(read_candidate_toml(from_file)?);
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -125,20 +142,22 @@ pub async fn plan(
             outln!("{line}")?;
         }
     }
-    Ok(resp.status != ConfigTransactionPlanStatus::Noop as i32)
+    transaction_exit_code(resp.status, change_status_exit_code(true))
 }
 
 fn plan_token_human_line(plan_token: Option<&str>) -> Option<String> {
     plan_token.map(|token| format!("plan_token: {token}"))
 }
 
+/// Returns the apply's exit code: 0 committed or noop, 3 rejected.
 pub async fn apply(
     connection: Connection,
     options: ApplyOptions<'_>,
     json: bool,
-) -> Result<(), CliError> {
+) -> Result<i32, CliError> {
     let response = apply_response(connection, options).await?;
-    print_apply_response(&response, json)
+    print_apply_response(&response, json)?;
+    transaction_exit_code(response.status, 0)
 }
 
 async fn apply_response(
@@ -607,12 +626,12 @@ pub async fn history(connection: Connection, json: bool) -> Result<(), CliError>
 
 /// Junos-style `rollback N`: the daemon resolves a provenance-verified v2 row
 /// and routes it through the same transaction path as apply with the same
-/// receipts. Retired TOML rows are ineligible.
+/// receipts and exit codes. Retired TOML rows are ineligible.
 pub async fn rollback(
     connection: Connection,
     options: RollbackOptions<'_>,
     json: bool,
-) -> Result<(), CliError> {
+) -> Result<i32, CliError> {
     if options.index == 0 {
         return Err(CliError::Argument(
             "rollback index must be >= 1 (index 0 is the newest config-history row)".to_string(),
@@ -660,7 +679,7 @@ pub async fn rollback(
     if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
         crate::output::print_next_step(json, &footer);
     }
-    Ok(())
+    transaction_exit_code(resp.status, 0)
 }
 
 fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
@@ -1287,7 +1306,7 @@ mod tests {
             "the Plan stream was fully materialized before the RPC accepted its first frame"
         );
         server.state.config_stream_plan_resume.notify_one();
-        assert!(plan_task.await.unwrap().unwrap());
+        assert_eq!(plan_task.await.unwrap().unwrap(), 2);
         assert_eq!(PLAN_FRAME_POLLS.load(Ordering::SeqCst), expected_frames);
 
         APPLY_FRAME_POLLS.store(0, Ordering::SeqCst);
@@ -1446,6 +1465,24 @@ mod tests {
         assert_eq!(change_status_exit_code(true), 2);
     }
 
+    #[test]
+    fn transaction_exit_codes_separate_rejected_and_fail_closed_on_unknown() {
+        for (committable, expected) in [(2, 2), (0, 0)] {
+            let code = |status: ConfigTransactionPlanStatus| {
+                transaction_exit_code(status as i32, committable).unwrap()
+            };
+            assert_eq!(code(ConfigTransactionPlanStatus::Noop), 0);
+            assert_eq!(code(ConfigTransactionPlanStatus::Committable), expected);
+            assert_eq!(code(ConfigTransactionPlanStatus::Rejected), EXIT_REJECTED);
+            for status in [ConfigTransactionPlanStatus::Unspecified as i32, 999] {
+                assert!(matches!(
+                    transaction_exit_code(status, committable),
+                    Err(CliError::Argument(_))
+                ));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn effective_fetches_running_config() {
         let server = spawn_mock_server(None).await;
@@ -1511,11 +1548,11 @@ mod tests {
         let server = spawn_mock_server(None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        let has_changes = plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
+        let code = plan(connection, path.to_str().unwrap(), Some("kv1:old:1"), true)
             .await
             .unwrap();
 
-        assert!(has_changes, "committable plan → exit code 2");
+        assert_eq!(code, 2, "committable plan → exit code 2");
         assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 1);
         let request = server.state.last_config_plan.lock().await.clone().unwrap();
         assert_eq!(
@@ -1558,11 +1595,11 @@ mod tests {
         server.state.config_plan_noop.store(true, Ordering::SeqCst);
         let connection = connect(&server.addr, None).await.unwrap();
 
-        let has_changes = plan(connection, path.to_str().unwrap(), None, true)
+        let code = plan(connection, path.to_str().unwrap(), None, true)
             .await
             .unwrap();
 
-        assert!(!has_changes, "noop plan must map to exit code 0");
+        assert_eq!(code, 0, "noop plan must map to exit code 0");
     }
 
     #[tokio::test]
@@ -1721,7 +1758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn implicit_plan_noop_or_rejected_returns_structured_success_without_apply() {
+    async fn implicit_plan_noop_or_rejected_returns_structured_receipt_without_apply() {
         for status in [
             ConfigTransactionPlanStatus::Noop,
             ConfigTransactionPlanStatus::Rejected,

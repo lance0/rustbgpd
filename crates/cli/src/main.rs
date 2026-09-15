@@ -127,7 +127,10 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     Detailed contracts after parsing (also in each subcommand's --help):\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
-    config diff, plan    0 no changes / 1 error / 2 changes present\n  \
+    config diff          0 no changes / 1 error / 2 changes present\n  \
+    config plan          0 no changes / 1 error / 2 changes present / 3 rejected\n  \
+    config apply         0 committed or noop / 1 error / 3 rejected\n  \
+    config rollback      0 committed or noop / 1 error / 3 rejected\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
     policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below a threshold\n  \
@@ -573,7 +576,8 @@ enum ConfigAction {
     #[command(after_help = "Exit codes:\n  \
         0  no changes (plan is a noop)\n  \
         1  error (unreadable candidate, invalid config, connection or daemon failure)\n  \
-        2  changes present (plan is committable or rejected)")]
+        2  changes present (plan is committable)\n  \
+        3  rejected by the daemon (the plan receipt is still printed)")]
     Plan {
         /// Candidate TOML file to validate and classify
         #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
@@ -585,6 +589,10 @@ enum ConfigAction {
     },
 
     /// Commit a previously planned candidate transaction
+    #[command(after_help = "Exit codes:\n  \
+        0  committed, or nothing to commit (noop)\n  \
+        1  error (unreadable candidate, invalid config, connection or daemon failure)\n  \
+        3  rejected by the daemon (the receipt is still printed; nothing was committed)")]
     Apply {
         /// Candidate TOML file to validate and commit
         #[arg(value_name = "CANDIDATE", value_hint = clap::ValueHint::FilePath)]
@@ -650,6 +658,10 @@ enum ConfigAction {
     /// classification, reload-impact annotations, and receipts. Pass --confirm-id /
     /// --confirm-timeout to make the rollback itself auto-revert unless
     /// confirmed.
+    #[command(after_help = "Exit codes:\n  \
+        0  rolled back, or nothing to roll back (noop)\n  \
+        1  error (ineligible or unreadable row, connection or daemon failure)\n  \
+        3  rejected by the daemon (the receipt is still printed; nothing was committed)")]
     Rollback {
         /// History row to restore (N >= 1)
         index: u32,
@@ -3310,15 +3322,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 candidate,
                 expected_runtime_snapshot_token,
             } => {
-                let has_changes = commands::config::plan(
+                let result = commands::config::plan(
                     connection,
                     &candidate,
                     expected_runtime_snapshot_token.as_deref(),
                     json,
                 )
-                .await?;
-                let code = commands::config::change_status_exit_code(has_changes);
-                std::process::exit(flush_stdout_result(&mut std::io::stdout(), Ok(code))?);
+                .await;
+                std::process::exit(flush_stdout_result(&mut std::io::stdout(), result)?);
             }
             ConfigAction::Apply {
                 candidate,
@@ -3329,7 +3340,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 confirm_id,
                 confirm_timeout_seconds,
             } => {
-                commands::config::apply(
+                let result = commands::config::apply(
                     connection,
                     commands::config::ApplyOptions {
                         from_file: &candidate,
@@ -3342,7 +3353,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     },
                     json,
                 )
-                .await
+                .await;
+                std::process::exit(flush_stdout_result(&mut std::io::stdout(), result)?);
             }
             ConfigAction::Confirm { confirm_id } => {
                 commands::config::confirm(connection, &confirm_id, json).await
@@ -3360,7 +3372,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 confirm_id,
                 confirm_timeout_seconds,
             } => {
-                commands::config::rollback(
+                let result = commands::config::rollback(
                     connection,
                     commands::config::RollbackOptions {
                         index,
@@ -3372,7 +3384,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     },
                     json,
                 )
-                .await
+                .await;
+                std::process::exit(flush_stdout_result(&mut std::io::stdout(), result)?);
             }
             ConfigAction::Effective => commands::config::effective(connection, json).await,
             ConfigAction::Import { .. } => unreachable!("handled before connect"),
@@ -4952,6 +4965,25 @@ mod tests {
             assert!(
                 help.contains("1  error"),
                 "config {name} --help must document exit code 1: {help}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_plan_apply_and_rollback_help_document_rejected_exit_code() {
+        let mut command = cli_command(BINARY_NAME);
+        let config = command
+            .find_subcommand_mut("config")
+            .expect("config subcommand exists");
+        for name in ["plan", "apply", "rollback"] {
+            let help = config
+                .find_subcommand_mut(name)
+                .unwrap_or_else(|| panic!("config {name} subcommand exists"))
+                .render_long_help()
+                .to_string();
+            assert!(
+                help.contains("3  rejected by the daemon"),
+                "config {name} --help must document exit code 3: {help}"
             );
         }
     }
@@ -8313,7 +8345,8 @@ printf '%s\n' "${COMPREPLY[@]}"
             help.contains("2  parser or usage error"),
             "help was: {help}"
         );
-        assert!(help.contains("config diff, plan"), "help was: {help}");
+        assert!(help.contains("config plan"), "help was: {help}");
+        assert!(help.contains("config rollback"), "help was: {help}");
         assert!(help.contains("policy fmt"), "help was: {help}");
     }
 

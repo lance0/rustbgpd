@@ -76,6 +76,8 @@ RUNTIME_SNAPSHOT_TOKEN="$(rbgp --json config plan config.toml \
   | jq -r .runtime_snapshot_token)"
 rbgp config apply config.toml \
   --expected-runtime-snapshot-token "$RUNTIME_SNAPSHOT_TOKEN"
+# plan exits 0 noop / 2 committable / 3 rejected; apply and rollback exit
+# 0 committed or noop / 3 rejected. Errors exit 1.
 
 # Confirmed apply: rolls back unless confirmed before the timeout.
 rbgp config apply config.toml \

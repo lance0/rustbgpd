@@ -41,6 +41,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previous generation. A settle timeout without that outcome, a dropped or
   additional reload, a daemon restart, a partial apply, or an unreachable
   daemon still returns exit 5.
+- `rbgp config plan`, `config apply`, and `config rollback` now exit 3 when the
+  daemon rejects the transaction. A rejected plan previously exited 2, the
+  same code as a committable plan, and a rejected apply or rollback exited 0,
+  the same code as a commit. The full receipt, including `--json` output, is
+  still printed before the non-zero exit. A receipt with an unrecognized
+  status now exits 1 instead of passing as a commit or as changes present.
 
 ### Upgrade notes
 
@@ -62,6 +68,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp metrics` call per activation, which needs the same gRPC read access as
   `rbgp health`. If `current` was restored but the rejection could not be
   re-proven, exit 5 now leaves `current` on the previous generation.
+- Scripts that gate on `rbgp config plan`, `config apply`, or
+  `config rollback` now see exit 3 for a rejected transaction. `plan` keeps 0
+  for noop and 2 for committable. `apply` and `rollback` keep 0 for a commit
+  and also exit 0 for a noop; the receipt's `status` field tells them apart.
+  A wrapper that applies after `plan` exits 2 no longer reaches an apply the
+  daemon would refuse. A wrapper that treats every `plan` exit other than 1
+  as "changes present" must handle 3 as a rejection.
 
 ## [0.70.1] — 2026-09-15
 
