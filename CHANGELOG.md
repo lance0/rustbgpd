@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.70.1] — 2026-09-15
+
+### Security
+
+- **`rustls` 0.23.43 → 0.23.45 clears RUSTSEC-2026-0285** (TLS 1.3 handshake
+  messages accepted across encryption level boundaries). The crate is
+  transitive via `tokio-rustls`/`tonic` and `ureq`, which makes the TLS gRPC
+  listener and rustls-based clients the exposed surfaces. Lockfile-only: no
+  configuration change is needed.
+
+### Added
+
+- `rs-config-render`'s IXP Manager router document accepts an optional
+  `listen_port`, which defaults to 179 and refuses `0`.
+
 ### Changed
 
 - `[global].dynamic_neighbor_limit` is now reload-applied instead of
@@ -34,6 +49,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than gating the reload on the diff's exit code.
 
 ### Fixed
+
 - `rbgp config diff`, `plan`, and `apply` now resolve relative `rpol_files`,
   `rpol_roots`, and `[policy.datasets.*].path` references against the candidate
   file's parent directory before sending the candidate TOML to the daemon. The
@@ -61,6 +77,41 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `activate` exited 5 against a healthy daemon. Every rendered IXP
   candidate declares per-client datasets, so member joins and leaves through
   `activate` now settle and exit 0.
+- `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, and
+  `ClearGlobalExportChain` no longer fail with `policy_state_non_established`
+  while a configured neighbor is positively Idle, Connect, or Active. That
+  session holds the new chain and installs it, with its RIB outbound
+  registration, at `PeerUp`. Ambiguous observations (the session is gone or
+  its state query times out) still fail closed with `INTERNAL` and full
+  compensation. Routes retained under an active GR/LLGR window stay evaluated
+  under the prior chain until re-sync.
+
+### Upgrade notes
+
+- Route-server member joins and leaves that add, remove, or re-map
+  `[policy.datasets]` bindings now apply through SIGHUP without a restart and
+  without flapping other members, and `rs-config-render activate` settles such
+  candidates and exits 0. Binding changes combined with the listed
+  authentication, dynamic-neighbor, EVPN, FIB, or honor-knob changes still
+  reject before any effect.
+- `rbgp config diff` and `rustbgpd --diff` print a
+  `datasets: contents not compared` notice, and no longer print `No changes.`,
+  for a candidate that declares `[policy.datasets]`. JSON output adds
+  `declared_datasets_count` under `summary` and `reload_applied`. Exit codes
+  are unchanged, so an IRR-only refresh still exits 0: when datasets are
+  declared, do not gate the reload on the diff's exit code.
+- `[global].dynamic_neighbor_limit` is now reload-applied. Lowering it below
+  current occupancy keeps existing dynamic sessions and refuses new
+  connections until the count falls under the new limit.
+- `rbgp config diff`, `plan`, and `apply` send relative `rpol_files`,
+  `rpol_roots`, and dataset paths as absolute paths resolved from the
+  candidate file's directory. The daemon opens those paths itself, so run
+  these commands on the daemon's host with candidate files the daemon can
+  read.
+- Global import and export chain set and clear calls no longer require every
+  configured session to be Established: a positively down session adopts the
+  new chain when it comes up. An ambiguous session state still fails with
+  `INTERNAL`.
 
 ## [0.70.0] — 2026-09-13
 
