@@ -119,6 +119,10 @@ v0.70.0 shipped on the
 [2026-09-12 route-server flagship run](../soaks/soak-rs-flagship-24h-2026-09-12.md),
 which failed only the `management_cadence` gate and ran a pre-release commit;
 its receipt records the release relationship. The
+[2026-09-14 run](../soaks/soak-rs-flagship-24h-2026-09-14.md) qualified the
+v0.70.0 release commit under the current gates (a reanalysis with the
+reload-window cadence rule; the original on-host verdict failed only the
+superseded zero-miss rule). The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

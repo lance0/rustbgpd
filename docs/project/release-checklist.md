@@ -111,7 +111,11 @@ Qualify the selected release candidate with the full 24-hour route-server
 management-load soak. v0.70.0 shipped on the
 [2026-09-12 run](../soaks/soak-rs-flagship-24h-2026-09-12.md), which failed
 only the `management_cadence` gate on a pre-release commit; its receipt records
-that release relationship. Use the
+that release relationship. The
+[2026-09-14 run](../soaks/soak-rs-flagship-24h-2026-09-14.md) then qualified
+the v0.70.0 release commit: it passes every gate under the current
+reload-window cadence rule on reanalysis, and its original on-host verdict
+failed only the superseded zero-miss cadence rule. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 
