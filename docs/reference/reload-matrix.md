@@ -41,9 +41,23 @@ in `src/config/mod.rs` says how a whole candidate is executed, and
 
 | Route | Candidate | Guarantee |
 |---|---|---|
-| **generation** | Static `[[neighbors]]`, `[peer_groups]`, inline policy / neighbor sets / global chains, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained config, policy, dataset, and session state and rejects cleanly |
-| **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or listener MD5/GTSM changes while dataset contents are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
-| **rejected** | Dataset content or binding changes combined with TCP-AO rotation or listener MD5/GTSM changes; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
+| **generation** | Static `[[neighbors]]`, `[peer_groups]`, inline policy / neighbor sets / global chains, `.rpol` content, dataset contents, dataset bindings (added, removed, or re-mapped `[policy.datasets]` entries), or outbound prefix maxima changed without an incompatible family. This includes adding or removing a whole static neighbor that carries `md5_password` or `ttl_security` | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained config, policy, dataset, and session state and rejects cleanly |
+| **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or a listener MD5/GTSM edit while dataset contents are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
+| **rejected** | Dataset content or binding changes combined with TCP-AO rotation or a listener MD5/GTSM edit; or a generation-class/dataset change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately |
+
+A *listener MD5/GTSM edit* changes the inbound MD5 password or GTSM setting of
+a static neighbor that stays configured, directly or through its peer group,
+or of a `[[dynamic_neighbors]]` range. A static neighbor joining or leaving
+with its own `md5_password` or `ttl_security` is not an edit. The generation
+installs the joining neighbor's listener key or GTSM selector before it adds
+the session, and withdraws a departing neighbor's entry only after the
+session is removed. If the generation fails, the peer manager restores the
+prior sessions first, and then the listener's prior MD5 keys and GTSM
+selectors return. A departing neighbor's entry is still in place when its
+session is re-added. A re-added session is new: its TCP connection, uptime,
+and counters start again. If the generation applies but the withdrawal step
+cannot reach the listener, the reload returns a known-partial receipt. The
+entries it leaves cover only addresses that are no longer configured.
 
 Daemon restart-required fields are pinned on every route.
 An explain-only change stays sequential; `[policy.explain]` is carried with the

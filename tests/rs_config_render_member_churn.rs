@@ -15,6 +15,11 @@
 //!    and allows the 3rd member to establish.
 //! 4. Member leave (removing the 3rd member) through `activate` settles cleanly with
 //!    the same invariants.
+//!
+//! The same flow runs for a joining member that carries an MD5 session password,
+//! and for a fleet with GTSM (`ttl_security = true`) on every member: both change
+//! the listener's inbound authentication inventory, and both must still apply as
+//! one reload generation.
 
 #[path = "support/mod.rs"]
 mod support;
@@ -51,6 +56,7 @@ struct MemberSpec {
     asn: u32,
     address: &'static str,
     prefix: &'static str,
+    md5: Option<&'static str>,
 }
 
 const MEMBER_1: MemberSpec = MemberSpec {
@@ -60,6 +66,7 @@ const MEMBER_1: MemberSpec = MemberSpec {
     asn: 65001,
     address: "127.0.0.2",
     prefix: "198.51.100.0/24",
+    md5: None,
 };
 
 const MEMBER_2: MemberSpec = MemberSpec {
@@ -69,6 +76,7 @@ const MEMBER_2: MemberSpec = MemberSpec {
     asn: 65002,
     address: "127.0.0.3",
     prefix: "198.51.101.0/24",
+    md5: None,
 };
 
 const MEMBER_3: MemberSpec = MemberSpec {
@@ -78,6 +86,12 @@ const MEMBER_3: MemberSpec = MemberSpec {
     asn: 65003,
     address: "127.0.0.4",
     prefix: "198.51.102.0/24",
+    md5: None,
+};
+
+const MEMBER_3_MD5: MemberSpec = MemberSpec {
+    md5: Some("member3-session-secret"),
+    ..MEMBER_3
 };
 
 fn set_mode(path: &Path, mode: u32) {
@@ -104,7 +118,10 @@ fn ixp_manager_json(bgp_port: u16, members: &[&MemberSpec]) -> Vec<u8> {
                 "address": m.address,
                 "peering_ips": [m.address],
                 "max_prefix": 100,
-                "auth": {"type": "none"},
+                "auth": match m.md5 {
+                    Some(value) => json!({"type": "md5", "value": value}),
+                    None => json!({"type": "none"}),
+                },
                 "irr_filter": true,
                 "more_specifics": false,
                 "origins": [m.asn],
@@ -131,7 +148,7 @@ fn ixp_manager_json(bgp_port: u16, members: &[&MemberSpec]) -> Vec<u8> {
             "bgp_lc": true,
             "rfc1997_passthru": false,
             "rpki": false,
-            "skip_md5": true
+            "skip_md5": members.iter().all(|m| m.md5.is_none())
         },
         "policy": {
             "minimum_prefix_length": 24,
@@ -162,6 +179,7 @@ fn write_candidate(
     candidate_dir: &Path,
     bgp_port: u16,
     members: &[&MemberSpec],
+    gtsm: bool,
     checker: &Path,
     binding: &RenderBinding,
 ) {
@@ -174,6 +192,45 @@ fn write_candidate(
     let json_bytes = ixp_manager_json(bgp_port, members);
     ixp_manager::write_checked_candidate_bytes(&json_bytes, candidate_dir, 300, checker, binding)
         .expect("write checked candidate");
+    if gtsm {
+        enable_gtsm_fleet(candidate_dir, checker);
+    }
+}
+
+/// The IXP Manager export carries no GTSM flag, so emulate the other
+/// renderer's fleet-wide `gtsm` output on every rendered member, then re-run
+/// the strict check and re-record the file hash the activation verifies.
+fn enable_gtsm_fleet(candidate_dir: &Path, checker: &Path) {
+    use sha2::{Digest, Sha256};
+
+    let config_path = candidate_dir.join("config.toml");
+    let rendered = fs::read_to_string(&config_path).expect("read rendered config");
+    let marker = "route_server_client = true\n";
+    assert!(rendered.contains(marker), "rendered member marker");
+    let config = rendered.replace(marker, &format!("{marker}ttl_security = true\n"));
+    fs::write(&config_path, &config).expect("write GTSM fleet config");
+    let checked = Command::new(checker)
+        .args(["--check", "--strict"])
+        .arg(&config_path)
+        .output()
+        .expect("run strict check");
+    assert!(
+        checked.status.success(),
+        "GTSM fleet config must pass the strict check:\n{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let receipt_path = candidate_dir.join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("read render receipt"))
+            .expect("parse render receipt");
+    let digest: String = Sha256::digest(config.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    receipt["generated_files"]["config.toml"] = digest.into();
+    let mut encoded = serde_json::to_vec_pretty(&receipt).expect("serialize render receipt");
+    encoded.push(b'\n');
+    fs::write(&receipt_path, encoded).expect("write render receipt");
 }
 
 fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
@@ -266,10 +323,23 @@ fn drain_inbound(
 
 async fn spawn_ebgp_peer(
     member: &'static MemberSpec,
+    gtsm: bool,
     daemon_addr: SocketAddr,
 ) -> Result<PeerHandle, String> {
     let local: Ipv4Addr = member.address.parse().map_err(|e| format!("{e}"))?;
     let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
+    if let Some(password) = member.md5 {
+        rustbgpd_transport::set_tcp_md5sig(&socket2::SockRef::from(&sock), daemon_addr, password)
+            .map_err(|e| format!("TCP MD5 on {local}: {e}"))?;
+    }
+    if gtsm {
+        rustbgpd_transport::set_gtsm(
+            &socket2::SockRef::from(&sock),
+            daemon_addr,
+            std::num::NonZeroU8::MIN,
+        )
+        .map_err(|e| format!("GTSM on {local}: {e}"))?;
+    }
     sock.bind(SocketAddr::new(local.into(), 0))
         .map_err(|e| format!("bind {local}: {e}"))?;
 
@@ -410,6 +480,20 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_daemon_member_join_and_leave_through_activate() {
+    member_churn(&MEMBER_3, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_daemon_md5_member_join_and_leave_through_activate() {
+    member_churn(&MEMBER_3_MD5, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_daemon_gtsm_fleet_member_join_and_leave_through_activate() {
+    member_churn(&MEMBER_3, true).await;
+}
+
+async fn member_churn(member3: &'static MemberSpec, gtsm: bool) {
     let evidence = support::RetainOnPanic::new(
         tempfile::Builder::new()
             .prefix("rs-churn-")
@@ -481,6 +565,7 @@ fi
         &candidate,
         bgp_port,
         &[&MEMBER_1, &MEMBER_2],
+        gtsm,
         daemon_bin,
         &render_binding,
     );
@@ -519,10 +604,10 @@ fi
     // =========================================================================
     // Phase 2: Connect 2 live eBGP members and wait for Established
     // =========================================================================
-    let peer1 = spawn_ebgp_peer(&MEMBER_1, daemon_bgp_addr)
+    let peer1 = spawn_ebgp_peer(&MEMBER_1, gtsm, daemon_bgp_addr)
         .await
         .expect("peer 1 establishes");
-    let peer2 = spawn_ebgp_peer(&MEMBER_2, daemon_bgp_addr)
+    let peer2 = spawn_ebgp_peer(&MEMBER_2, gtsm, daemon_bgp_addr)
         .await
         .expect("peer 2 establishes");
 
@@ -580,7 +665,8 @@ fi
     write_candidate(
         &candidate,
         bgp_port,
-        &[&MEMBER_1, &MEMBER_2, &MEMBER_3],
+        &[&MEMBER_1, &MEMBER_2, member3],
+        gtsm,
         daemon_bin,
         &render_binding,
     );
@@ -708,7 +794,7 @@ fi
     );
 
     // Now connect Member 3
-    let peer3 = spawn_ebgp_peer(&MEMBER_3, daemon_bgp_addr)
+    let peer3 = spawn_ebgp_peer(member3, gtsm, daemon_bgp_addr)
         .await
         .expect("peer 3 establishes");
 
@@ -745,6 +831,7 @@ fi
         &candidate,
         bgp_port,
         &[&MEMBER_1, &MEMBER_2],
+        gtsm,
         daemon_bin,
         &render_binding,
     );

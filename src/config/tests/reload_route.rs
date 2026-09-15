@@ -128,6 +128,90 @@ fn listener_auth_family_ignores_roster_changes_without_authentication() {
     assert!(diff_config(&prior, &gtsm).listener_inbound_auth_changed);
 }
 
+/// A route-server member joining or leaving with its own MD5 password or
+/// GTSM selector, together with its datasets, is one generation: the listener
+/// entries belong to a whole neighbor the generation adds or removes. Editing
+/// an existing neighbor's password or GTSM setting alongside datasets still
+/// rejects.
+#[test]
+fn authenticated_member_join_and_leave_with_datasets_take_the_generation_route() {
+    let dir = dataset_config_dir("64500\n");
+    let bound = load_dir(&dir).unwrap();
+    let with_datasets = |toml: &str| {
+        let mut config = rs(toml);
+        config.policy.datasets = bound.policy.datasets.clone();
+        config.policy.dataset_bindings = bound.policy.dataset_bindings.clone();
+        config
+    };
+    let prior = rs(RS_TOML);
+    let member = |auth: &str| {
+        format!("{RS_TOML}\n[[neighbors]]\naddress = \"10.0.0.7\"\nremote_asn = 65007\n{auth}\n")
+    };
+    let rejected = SighupReloadRoute::Rejected {
+        reasons: vec!["dataset changes with listener MD5/GTSM changes".to_string()],
+    };
+
+    for auth in ["md5_password = \"member-secret\"", "ttl_security = true"] {
+        let join = diff_config(&prior, &with_datasets(&member(auth)));
+        assert!(join.policy.datasets_changed, "{auth}");
+        assert!(!join.listener_inbound_auth_changed, "join {auth}");
+        assert_eq!(
+            join.sighup_route,
+            SighupReloadRoute::Generation,
+            "join {auth}"
+        );
+
+        let leave = diff_config(&with_datasets(&member(auth)), &prior);
+        assert!(!leave.listener_inbound_auth_changed, "leave {auth}");
+        assert_eq!(
+            leave.sighup_route,
+            SighupReloadRoute::Generation,
+            "leave {auth}"
+        );
+
+        // The same authentication applied to an existing neighbor is an
+        // in-place edit, alone or next to a whole-member join.
+        let edit_toml = RS_TOML.replace("hold_time = 180", &format!("hold_time = 180\n{auth}"));
+        let edit = diff_config(&prior, &with_datasets(&edit_toml));
+        assert!(edit.listener_inbound_auth_changed, "edit {auth}");
+        assert_eq!(edit.sighup_route, rejected, "edit {auth}");
+        let edit_and_join = format!(
+            "{edit_toml}\n[[neighbors]]\naddress = \"10.0.0.7\"\nremote_asn = 65007\n{auth}\n"
+        );
+        assert_eq!(
+            diff_config(&prior, &with_datasets(&edit_and_join)).sighup_route,
+            rejected,
+            "edit and join {auth}"
+        );
+    }
+
+    // A changed password or hop count on a member present on both sides.
+    let md5_member = member("md5_password = \"member-secret\"");
+    let rotated = md5_member.replace("member-secret", "rotated-secret");
+    assert_eq!(
+        diff_config(&rs(&md5_member), &with_datasets(&rotated)).sighup_route,
+        rejected
+    );
+    let gtsm_member = member("ttl_security = true");
+    let hops = gtsm_member.replace(
+        "ttl_security = true",
+        "ttl_security = true\nttl_security_hops = 2",
+    );
+    assert_eq!(
+        diff_config(&rs(&gtsm_member), &with_datasets(&hops)).sighup_route,
+        rejected
+    );
+    // A peer-group password reaches its existing members in place.
+    let group_md5 = RS_TOML.replace(
+        "max_prefixes = 1000",
+        "max_prefixes = 1000\nmd5_password = \"group-secret\"",
+    );
+    assert_eq!(
+        diff_config(&prior, &with_datasets(&group_md5)).sighup_route,
+        rejected
+    );
+}
+
 #[test]
 fn plan_gives_policy_only_movement_no_session_action() {
     let prior = rs(RS_TOML);

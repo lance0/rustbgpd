@@ -589,12 +589,18 @@ What happens:
    knobs, TCP-AO rotation, listener MD5/GTSM inventory, explain-only,
    `[gnmi_dialout]`) runs the existing
    per-subsystem steps. A generation-class change combined with a TCP-AO
-   rotation or a listener MD5/GTSM authentication change also stays on
-   this path when dataset contents are unchanged, logged as running without
-   generation compensation: the rotation is its own ordered protocol and
-   the session reshape primitive refuses authentication changes.
+   rotation or an in-place listener MD5/GTSM edit also stays on this path
+   when dataset contents are unchanged. An in-place edit changes the
+   password or GTSM setting of a neighbor that stays configured, or of a
+   dynamic range. The daemon logs that the change runs without generation
+   compensation, because the rotation is its own ordered protocol and the
+   session reshape primitive refuses authentication changes. A static
+   neighbor joining or leaving with its own `md5_password` or
+   `ttl_security` takes the generation route. Its listener entry is
+   installed before the session is added, withdrawn after the session is
+   removed, and restored with the prior generation if the reload fails.
 4. **Rejected changes** — dataset content or binding changes combined with
-   TCP-AO rotation or listener MD5/GTSM authentication changes reject before
+   TCP-AO rotation or an in-place listener MD5/GTSM edit reject before
    any effect. A generation-class or dataset change combined with
    `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
    `honor_graceful_shutdown` / `honor_blackhole` also rejects: those families

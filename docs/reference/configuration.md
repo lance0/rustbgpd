@@ -2823,10 +2823,12 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   reloadable: together with the matching `.rpol` and `[[neighbors]]`
   changes (a route-server member joining or leaving with its own
   datasets, say), it applies on SIGHUP as one runtime generation, and a
-  later failure restores the prior binding set. Dataset changes combined
-  with TCP-AO rotation, listener MD5/GTSM changes, `[[dynamic_neighbors]]`,
-  EVPN runtime tables, `[[fib_tables]]`, or the honor knobs are rejected
-  before any effect; see the
+  later failure restores the prior binding set. This also holds when the
+  joining or leaving neighbor carries `md5_password` or `ttl_security`.
+  Dataset changes combined with TCP-AO rotation, an MD5/GTSM edit to a
+  neighbor that stays configured, `[[dynamic_neighbors]]`, EVPN runtime
+  tables, `[[fib_tables]]`, or the honor knobs are rejected before any
+  effect; see the
   [reload matrix](reload-matrix.md#sighup-reload-routes).
 - Bounds: 64 MiB and 1,000,000 records per file; at most 16 datasets
   per `.rpol` compilation unit.
@@ -4561,8 +4563,10 @@ settlement detail.
    (`[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`,
    `honor_graceful_shutdown` / `honor_blackhole`, TCP-AO rotation, listener
    MD5/GTSM inventory, explain-only, `[gnmi_dialout]`), or a generation-class
-   change combined with TCP-AO rotation or listener MD5/GTSM changes while
-   dataset contents are unchanged, runs per-subsystem steps in dependency
+   change combined with TCP-AO rotation or a listener MD5/GTSM edit (a
+   changed password or GTSM setting on a neighbor that stays configured, or
+   on a dynamic range) while dataset contents are unchanged, runs
+   per-subsystem steps in dependency
    order: listener authentication, EVPN runtime, and outbound prefix maxima;
    definitions and global chains; the `[[neighbors]]` reconcile; the
    honor knobs and `[[fib_tables]]`; then deletes of obsolete definitions in
@@ -4573,7 +4577,7 @@ settlement detail.
    config tracks what actually applied. Fix the failing TOML and reload again
    to converge.
 3. **Rejected** — dataset content or binding changes combined with TCP-AO
-   rotation or listener MD5/GTSM changes, and any generation-class or dataset
+   rotation or a listener MD5/GTSM edit, and any generation-class or dataset
    change combined with `[[dynamic_neighbors]]`, EVPN runtime tables,
    `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole`, are
    rejected before any effect. Apply those families in separate reloads.
