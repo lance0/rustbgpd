@@ -771,13 +771,30 @@ fn main() -> ExitCode {
             &binding,
             schema,
         ) {
-            Ok(files) => stdout_exit(write_stdout(|writer| {
-                writeln!(
-                    writer,
-                    "validated {files} candidate file(s) + receipt into {}",
-                    cli.out_dir.display()
-                )
-            })),
+            Ok(files) => {
+                // The receipt carries the render warnings; surface them here
+                // so the library stays silent for lifecycle callers.
+                let receipt: serde_json::Value =
+                    std::fs::read(cli.out_dir.join("render-receipt.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                        .unwrap_or_default();
+                for warning in receipt["warnings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    eprintln!("rs-config-render: warning: {warning}");
+                }
+                stdout_exit(write_stdout(|writer| {
+                    writeln!(
+                        writer,
+                        "validated {files} candidate file(s) + receipt into {}",
+                        cli.out_dir.display()
+                    )
+                }))
+            }
             Err(error) => {
                 eprintln!("rs-config-render: {error}");
                 error.exit_code().into()

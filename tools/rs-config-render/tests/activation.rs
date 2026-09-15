@@ -950,7 +950,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 16);
+    assert_eq!(tests, 17);
 }
 
 mod prune {
@@ -1258,4 +1258,60 @@ mod prune {
         assert!(lock_at < fence_at, "host lock must precede the fence check");
         assert!(source.contains("let _host_lock ="));
     }
+}
+
+/// Zero dataset counts are only consistent with a receipt that names every
+/// client as IRRDB-disabled; a six-key receipt (rendered before those keys
+/// existed) keeps the original non-zero requirement.
+#[test]
+fn zero_dataset_counts_require_every_client_irrdb_disabled() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let candidate = rig.candidate("candidate-counts", 120);
+    let receipt_path = candidate.join("render-receipt.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    // Two clients so duplicate entries can match the count.
+    receipt["counts"]["clients"] = 2.into();
+    receipt["counts"]["prefixes"] = 0.into();
+    receipt["counts"]["origins"] = 0.into();
+    let write = |receipt: &serde_json::Value| {
+        fs::write(&receipt_path, serde_json::to_vec(receipt).unwrap()).unwrap();
+    };
+    let vli = |id: u64| serde_json::json!({ "vlan_interface_id": id, "name": "member" });
+    write(&receipt);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    receipt["irrdb_disabled_clients"] = serde_json::json!([vli(1)]);
+    write(&receipt);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    let mut legacy = receipt.clone();
+    let object = legacy.as_object_mut().unwrap();
+    object.remove("irrdb_disabled_clients");
+    object.remove("warnings");
+    write(&legacy);
+    assert_refused(rig.run(&candidate, true, &rig.activation));
+    let accepted = [
+        serde_json::json!([{}, {}]),
+        serde_json::json!([vli(1), vli(1)]),
+        serde_json::json!([vli(1), 2]),
+        serde_json::json!([vli(1), vli(0)]),
+    ]
+    .into_iter()
+    .filter(|entries| {
+        receipt["irrdb_disabled_clients"] = entries.clone();
+        write(&receipt);
+        rig.run(&candidate, true, &rig.activation)
+            != Err(Error::Refused("render receipt contract does not match"))
+    })
+    .collect::<Vec<_>>();
+    assert!(
+        accepted.is_empty(),
+        "accepted malformed entries: {accepted:?}"
+    );
+    receipt["irrdb_disabled_clients"] = serde_json::json!([vli(1), vli(2)]);
+    write(&receipt);
+    assert_eq!(
+        rig.run(&candidate, true, &rig.activation),
+        Ok(Status::Activated)
+    );
 }
