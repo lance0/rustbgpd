@@ -478,7 +478,11 @@ struct TransitFree {
     asns: Option<Vec<u32>>,
 }
 
+/// Unlike the permissive structs around it, an unknown key here fails the
+/// parse: every sibling option changes which routes arouteserver accepts, so a
+/// new one must not be dropped silently.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Irrdb {
     #[serde(default = "default_true")]
     enforce_origin_in_as_set: bool,
@@ -488,6 +492,15 @@ struct Irrdb {
     allow_longer_prefixes: bool,
     #[serde(default = "default_true")]
     tag_as_set: bool,
+    /// AS-SET acquisition input; arouteserver resolved it into the bundles.
+    #[serde(default, rename = "peering_db")]
+    _peering_db: bool,
+    #[serde(default)]
+    use_rpki_roas_as_route_objects: IrrdbAlternateSource,
+    #[serde(default)]
+    use_arin_bulk_whois_data: IrrdbAlternateSource,
+    #[serde(default)]
+    use_registrobr_bulk_whois_data: IrrdbAlternateSource,
 }
 
 impl Default for Irrdb {
@@ -497,8 +510,23 @@ impl Default for Irrdb {
             enforce_prefix_in_as_set: true,
             allow_longer_prefixes: false,
             tag_as_set: true,
+            _peering_db: false,
+            use_rpki_roas_as_route_objects: IrrdbAlternateSource::default(),
+            use_arin_bulk_whois_data: IrrdbAlternateSource::default(),
+            use_registrobr_bulk_whois_data: IrrdbAlternateSource::default(),
         }
     }
+}
+
+/// An `irrdb.use_*` alternative to IRR route objects.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct IrrdbAlternateSource {
+    #[serde(default)]
+    enabled: bool,
+    /// Registry dump location (whois sources only); never fetched.
+    #[serde(default, rename = "source")]
+    _source: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1093,16 +1121,33 @@ fn render_inner(
     let site = site
         .map(|input| validate_site_local(&ctx, &resolved, input))
         .transpose()?;
-    let white_list_tag = white_list_tag(&ctx);
+    let white_list_tag = irrdb_tag(&ctx, WHITE_LIST_TAG);
+    let rpki_roa_tag = ctx
+        .cfg
+        .filtering
+        .irrdb
+        .use_rpki_roas_as_route_objects
+        .enabled
+        .then(|| irrdb_tag(&ctx, RPKI_ROA_TAG));
     let mut files = BTreeMap::new();
     files.insert(
         "policy/rs-hygiene.rpol".to_owned(),
-        render_hygiene(&ctx, &white_list_tag, &found_fingerprint),
+        render_hygiene(
+            &ctx,
+            &white_list_tag,
+            rpki_roa_tag.as_deref(),
+            &found_fingerprint,
+        ),
     );
     for rc in &resolved {
         files.insert(
             format!("policy/client-{}.rpol", rc.slug),
-            render_client_rpol(rc, &white_list_tag, &found_fingerprint),
+            render_client_rpol(
+                rc,
+                &white_list_tag,
+                rpki_roa_tag.as_deref(),
+                &found_fingerprint,
+            ),
         );
         if rc.enforce_origin {
             files.insert(
@@ -1546,16 +1591,19 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         }
     }
     check_control_communities(cfg, &mut refusals);
-    if let Some(tag) = cfg.communities.get(WHITE_LIST_TAG) {
+    for name in [WHITE_LIST_TAG, RPKI_ROA_TAG] {
+        let Some(tag) = cfg.communities.get(name) else {
+            continue;
+        };
         if tag.ext.is_some() {
-            refusals.push(format!("communities.{WHITE_LIST_TAG}.ext is unsupported"));
+            refusals.push(format!("communities.{name}.ext is unsupported"));
         }
         for (value, parts, max) in [
             (tag.std.as_deref(), 2, u16::MAX as u64),
             (tag.lrg.as_deref(), 3, u32::MAX as u64),
         ] {
             if value.is_some_and(|value| !valid_reject_community(value, parts, max, false)) {
-                refusals.push(format!("communities.{WHITE_LIST_TAG} is malformed"));
+                refusals.push(format!("communities.{name} is malformed"));
             }
         }
     }
@@ -1622,6 +1670,38 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
              the context carries no RTR cache address"
                 .to_owned(),
         );
+    }
+    let irrdb = &filtering.irrdb;
+    if irrdb.use_rpki_roas_as_route_objects.enabled {
+        if opts.rtr_caches.is_empty() {
+            refusals.push(
+                "irrdb.use_rpki_roas_as_route_objects is enabled but no --rtr-cache endpoint \
+                 was given; the daemon reads ROAs only over RTR"
+                    .to_owned(),
+            );
+        }
+        if !irrdb.enforce_origin_in_as_set {
+            refusals.push(
+                "irrdb.use_rpki_roas_as_route_objects requires \
+                 irrdb.enforce_origin_in_as_set=true; the ROA acceptance is bound to the \
+                 client's AS-SET origin dataset"
+                    .to_owned(),
+            );
+        }
+    }
+    for (name, source) in [
+        ("use_arin_bulk_whois_data", &irrdb.use_arin_bulk_whois_data),
+        (
+            "use_registrobr_bulk_whois_data",
+            &irrdb.use_registrobr_bulk_whois_data,
+        ),
+    ] {
+        if source.enabled {
+            refusals.push(format!(
+                "irrdb.{name} is enabled; registry whois-dump prefixes are not rendered, and \
+                 dropping them would reject routes arouteserver accepts"
+            ));
+        }
     }
     if let Some(tf) = &filtering.transit_free
         && let Some(action) = tf.action.as_deref()
@@ -1737,6 +1817,7 @@ fn community_configured(value: &CommunityValues) -> bool {
 }
 
 const WHITE_LIST_TAG: &str = "route_validated_via_white_list";
+const RPKI_ROA_TAG: &str = "prefix_validated_via_rpki_roas";
 
 /// The daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control matrix
 /// (`rs_control` in the RIB crate), as arouteserver spells it after
@@ -1829,12 +1910,12 @@ fn check_control_communities(cfg: &Cfg, refusals: &mut Vec<String>) {
     }
 }
 
-/// The configured white-list tag, empty unless `irrdb.tag_as_set` is on.
-fn white_list_tag(ctx: &Context) -> Vec<(CommunityKind, String)> {
+/// The configured tag community `name`, empty unless `irrdb.tag_as_set` is on.
+fn irrdb_tag(ctx: &Context, name: &str) -> Vec<(CommunityKind, String)> {
     if !ctx.cfg.filtering.irrdb.tag_as_set {
         return Vec::new();
     }
-    let Some(values) = ctx.cfg.communities.get(WHITE_LIST_TAG) else {
+    let Some(values) = ctx.cfg.communities.get(name) else {
         return Vec::new();
     };
     [
@@ -2447,7 +2528,10 @@ fn render_toml(
          [security.grpc.roles]\noperator = \"operator\"\n",
     );
 
-    if cfg.filtering.rpki_bgp_origin_validation.enabled {
+    // ROAs as route objects read the same RTR table as origin validation.
+    if cfg.filtering.rpki_bgp_origin_validation.enabled
+        || cfg.filtering.irrdb.use_rpki_roas_as_route_objects.enabled
+    {
         out.push_str("\n[rpki]\n");
         for cache in &opts.rtr_caches {
             let _ = write!(
@@ -2766,6 +2850,7 @@ fn render_prefix_set(
 fn render_hygiene(
     ctx: &Context,
     white_list_tag: &[(CommunityKind, String)],
+    rpki_roa_tag: Option<&[(CommunityKind, String)]>,
     fingerprint: &str,
 ) -> String {
     let filtering = &ctx.cfg.filtering;
@@ -2797,6 +2882,14 @@ fn render_hygiene(
             "    # The white-list tag is set by the route server only; members cannot pre-tag.\n\
              \x20   term scrub-white-list-tag {{ {} }}",
             community_actions("remove", white_list_tag)
+        );
+    }
+    if let Some(tag) = rpki_roa_tag.filter(|tag| !tag.is_empty()) {
+        let _ = writeln!(
+            terms,
+            "    # The ROA tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-rpki-roa-tag {{ {} }}",
+            community_actions("remove", tag)
         );
     }
 
@@ -3031,6 +3124,7 @@ fn inactive_family_guard(ctx: &Context) -> String {
 fn render_client_rpol(
     rc: &ResolvedClient<'_>,
     white_list_tag: &[(CommunityKind, String)],
+    rpki_roa_tag: Option<&[(CommunityKind, String)]>,
     fingerprint: &str,
 ) -> String {
     let slug = &rc.slug;
@@ -3104,6 +3198,21 @@ fn render_client_rpol(
         }
     }
 
+    // arouteserver checks ROAs before the white list, so a route matching
+    // both carries the ROA tag. Refusals guarantee the origin dataset.
+    let mut rpki_roa_term = String::new();
+    if let Some(tag) = rpki_roa_tag {
+        let mut actions = community_actions("add", tag);
+        if !actions.is_empty() {
+            actions.push_str("; ");
+        }
+        let _ = writeln!(
+            rpki_roa_term,
+            "    # RPKI ROAs as route objects: an AS-SET origin with a valid ROA needs no IRR route object.\n\
+             \x20   term accept-rpki-roa-as-route-object {{ if route.origin-as in client-{slug}-origins && route.rpki == valid {{ {actions}accept }} }}"
+        );
+    }
+
     // White-listed routes are accepted ahead of IRR enforcement; shared
     // hygiene has already run, so nothing else is bypassed.
     let mut white_list_terms = String::new();
@@ -3137,7 +3246,7 @@ fn render_client_rpol(
     if rc.tag_and_reject {
         let _ = write!(
             out,
-            "\npolicy client-{slug} {{\n{blackhole_terms}{white_list_terms}"
+            "\npolicy client-{slug} {{\n{blackhole_terms}{rpki_roa_term}{white_list_terms}"
         );
         if rc.enforce_origin {
             let _ = writeln!(
@@ -3157,6 +3266,7 @@ fn render_client_rpol(
             out,
             "\npolicy client-{slug} {{\n\
              {blackhole_terms}\
+             {rpki_roa_term}\
              {white_list_terms}\
              \x20   term accept-authorized {{\n\
              \x20       if {} {{ accept }}\n\
@@ -3187,6 +3297,37 @@ fn render_client_rpol(
              \x20   expect client-{slug} == reject\n\
              }}\n"
         );
+    }
+    if rpki_roa_tag.is_some() {
+        let overrides = render_test_dataset_overrides(rc, true);
+        for (name, path, rpki, verdict) in [
+            (
+                "rpki-valid-without-route-object-is-accepted",
+                "64496",
+                "valid",
+                "accept",
+            ),
+            (
+                "rpki-not-found-without-route-object-is-rejected",
+                "64496",
+                "not-found",
+                "reject",
+            ),
+            (
+                "rpki-valid-unregistered-origin-is-rejected",
+                "64497",
+                "valid",
+                "reject",
+            ),
+        ] {
+            let _ = write!(
+                out,
+                "\ntest client-{slug}-{name} {{\n{overrides}\
+                 \x20   route {{ prefix 198.51.100.0/24; as-path \"{path}\"; rpki {rpki} }}\n\
+                 \x20   expect client-{slug} == {verdict}\n\
+                 }}\n"
+            );
+        }
     }
     // The IRR overrides above authorize nothing here, so only the white-list
     // term can accept this route.

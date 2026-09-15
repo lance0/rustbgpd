@@ -284,6 +284,24 @@ exists.
 - If upstream accepts the target later, the renderer's template package
   is the contribution; if not, nothing here is wasted.
 
+## Amendment (2026-09-15): RPKI ROAs as route objects are evaluated per route
+
+The Context paragraph, option B, and the capability-checklist row "RPKI ROAs
+merged as route objects | generator-side (arouteserver does the merge) | N/A to
+daemon" describe arouteserver's `use_rpki_roas_as_route_objects` inaccurately.
+arouteserver does not merge ROAs into the prefix list it generates. Its BIRD
+templates consult the ROA table while evaluating each route and accept a route
+whose origin is in the client's AS-SET when a valid ROA covers it, whether or
+not a route object exists. The daemon primitive is therefore `route.rpki ==
+valid` guarded by the origin dataset, not generator output. `rs-config-render`
+renders that term when the flag is enabled, and refuses the sibling
+`use_arin_bulk_whois_data` and `use_registrobr_bulk_whois_data` sources.
+IXP Manager v7.4 applies the same acceptance unconditionally when RPKI is on,
+after its origin-AS check and before its IRRDB prefix filter; its render mode
+guards the IRR prefix term the same way. The
+[renderer README](../../tools/rs-config-render/README.md) records
+the exact rendered terms and refusals.
+
 ## References
 
 - MANRS IXP Programme, Action 1 (filtering of route announcements)

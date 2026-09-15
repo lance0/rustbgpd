@@ -81,6 +81,17 @@ binds them with safe paths relative to the candidate root. IRR members
 therefore stay out of `.rpol` source while the receipt hashes the dataset files
 alongside every other candidate artifact.
 
+With `router.rpki` on, the client's `reject-irrdb-prefix-filtered` term rejects
+only a route that is outside the client's prefix dataset **and** not RPKI-valid.
+IXP Manager v7.4's BIRD templates accept an RPKI-valid route after the origin-AS
+check and before the IRRDB prefix filter, so a member that maintains ROAs but no
+IRR route object for a prefix is accepted on both servers. The origin-AS term
+still runs first, and shared hygiene still rejects RPKI-invalid routes. Before
+the RTR cache delivers its first End of Data, every route reads `not-found`, so
+routes without a route object are rejected until then; the table update
+refreshes sessions whose import policy reads RPKI state. Without `router.rpki`
+the prefix term is unconditional, as upstream.
+
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
 community and matching rules accumulate after hygiene and IRR checks. Receive
@@ -423,8 +434,8 @@ and against a live run of the pinned arouteserver image by
 | File | Contents |
 |---|---|
 | `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
-| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub a configured `route_validated_via_white_list` tag, invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
-| `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
+| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub the rendered `route_validated_via_white_list` and `prefix_validated_via_rpki_roas` tags, invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
+| `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, an RPKI-valid accept term bound to the origin dataset when `irrdb.use_rpki_roas_as_route_objects` is enabled, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
 | `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members plus `white_list_pref` entries (subtree unless bounded, as arouteserver reads them), one canonical entry per line |
 | `datasets/client-<id>-blackhole-cover.list` | Present only for an active blackhole family; the same-family IRR cover with its effective lower bound and forced `le 32`/`le 128` |
@@ -516,7 +527,11 @@ than `strict`
 `tag` (it accepts invalid routes into the master table), `prepend_rs_as`,
 `perform_graceful_shutdown`,
  per-client `black_list_pref` (dropping a black list would fail open),
- a configured `route_validated_via_white_list.ext` or malformed tag value,
+ a configured `route_validated_via_white_list.ext` or
+ `prefix_validated_via_rpki_roas.ext`, or a malformed tag value,
+ enabled `irrdb.use_arin_bulk_whois_data` or `irrdb.use_registrobr_bulk_whois_data`
+ (registry whois-dump prefixes are not rendered; dropping them would reject
+ routes arouteserver accepts),
  and disabling both IRR enforcement knobs. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
 while converting to `u32` seconds. `block` and `warning` emit the ceilings plus
@@ -577,6 +592,28 @@ The renderer refuses configured `origin_present_in_as_set`,
 off because the daemon cannot preserve those result tags.
 [`tests/interop/m106-rs-white-list-control-differential/`](../../tests/interop/m106-rs-white-list-control-differential/README.md)
 proves both surfaces against arouteserver-rendered BIRD.
+
+`irrdb.use_rpki_roas_as_route_objects` renders rather than refuses. arouteserver
+does not merge ROAs into the prefix list: its templates consult the ROA table
+while evaluating each route, and accept a route whose origin is in the
+client's AS-SET when a valid ROA covers it, route object or not. When the flag
+is enabled, each client policy gets
+`term accept-rpki-roa-as-route-object { if route.origin-as in client-<id>-origins && route.rpki == valid { accept } }`
+after the blackhole terms and, as in arouteserver, ahead of the white list and
+IRR enforcement. With `tag_as_set` on and `prefix_validated_via_rpki_roas`
+configured (standard and/or large), the term adds that tag and shared hygiene
+scrubs it on entry. The daemon reads ROAs only over RTR, so the flag emits
+`[rpki]` and requires `--rtr-cache` even with origin validation disabled; the
+context's `rpki_roas` source settings are not used. The flag also requires
+`irrdb.enforce_origin_in_as_set`, because the acceptance is bound to the origin
+dataset. Before the cache's first End of Data every route reads `not-found`,
+so routes without a route object are rejected until then; the table update
+refreshes sessions whose import policy reads RPKI state. A blackhole request
+still needs the IRR blackhole cover, since the blackhole terms run first.
+
+The general `irrdb` section is parsed strictly. An unknown key there, or under
+one of its three `use_*` options, fails the render with exit 1 naming the key,
+because each of those options changes which routes arouteserver accepts.
 
 The renderer also refuses effective nonzero multihop. An effective
 `rfc8950: true` on an IPv6 session renders the uniform-fleet shape only:

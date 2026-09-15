@@ -41,6 +41,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   previous generation. A settle timeout without that outcome, a dropped or
   additional reload, a daemon restart, a partial apply, or an unreachable
   daemon still returns exit 5.
+- `rs-config-render` no longer rejects an RPKI-valid route that lacks an IRR
+  route object when the incumbent accepts it. In IXP Manager mode with RPKI
+  on, the client's `reject-irrdb-prefix-filtered` term now rejects only a
+  route outside the member's prefix set that is not RPKI-valid, after the
+  origin-AS check, as IXP Manager v7.4's BIRD templates do. In arouteserver
+  mode, `irrdb.use_rpki_roas_as_route_objects` was ignored; it now renders an
+  accept term for an RPKI-valid route whose origin is in the client's AS-SET,
+  tags it with `prefix_validated_via_rpki_roas` when configured with
+  `tag_as_set`, and scrubs that tag on entry. RPKI-invalid routes are still
+  rejected by shared hygiene. Before the RTR cache's first End of Data, every
+  route reads `not-found`, so these routes are rejected until the cache syncs.
 
 ### Upgrade notes
 
@@ -62,6 +73,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp metrics` call per activation, which needs the same gRPC read access as
   `rbgp health`. If `current` was restored but the rejection could not be
   re-proven, exit 5 now leaves `current` on the previous generation.
+- `rs-config-render` output changes for IXP Manager sites with RPKI enabled:
+  each `policy/client-<id>.rpol` prefix term gains `&& route.rpki != valid`
+  and three in-language tests, so candidate hashes change once and members'
+  RPKI-valid routes without IRR route objects are accepted after activation.
+  As in IXP Manager, no option restores the stricter prefix-set-only term.
+- arouteserver contexts with `irrdb.use_rpki_roas_as_route_objects.enabled`
+  now render the ROA accept term, emit `[rpki]`, and require `--rtr-cache`
+  even with origin validation disabled; the flag also requires
+  `irrdb.enforce_origin_in_as_set`. Enabled
+  `irrdb.use_arin_bulk_whois_data` or `irrdb.use_registrobr_bulk_whois_data`
+  now refuses the render (exit 2) instead of being ignored. An unknown key in
+  the general `irrdb` section or under its `use_*` options fails the render
+  with exit 1.
 
 ## [0.70.1] — 2026-09-15
 

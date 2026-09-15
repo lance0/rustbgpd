@@ -1448,6 +1448,290 @@ test outside-window-is-not-white-listed {
     }
 }
 
+fn yaml(text: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(text).unwrap()
+}
+
+fn rpki_roas_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    set_path(
+        &mut value,
+        &[
+            "cfg",
+            "filtering",
+            "irrdb",
+            "use_rpki_roas_as_route_objects",
+        ],
+        yaml("{enabled: true}"),
+    );
+    value
+}
+
+/// Runs one in-language `test` against a rendered client policy (its generated
+/// tests stripped) and returns the terms of `policy` whose guards matched in
+/// that walk: the last one decided the route.
+fn matched_terms(source: &str, policy: &str, test: &str) -> Vec<String> {
+    let policies = source.split("\ntest ").next().unwrap();
+    let file = rustbgpd_policy::rpol::RpolFile::parse(&format!("{policies}\n{test}")).unwrap();
+    let (report, coverage) = file.run_tests_with_coverage();
+    assert!(
+        report.all_passed(),
+        "{:?}\n{policies}\n{test}",
+        report.failures
+    );
+    coverage
+        .policies
+        .iter()
+        .find(|covered| covered.name == policy)
+        .unwrap()
+        .terms
+        .iter()
+        .filter(|term| term.matched > 0)
+        .map(|term| term.name.clone())
+        .collect()
+}
+
+#[test]
+/// Load-bearing: `use_rpki_roas_as_route_objects` accepts a route whose origin
+/// is in the client's AS-SET and whose prefix has a valid ROA but no IRR route
+/// object, ahead of the white list and IRR enforcement (arouteserver 1.23.2
+/// `clients.j2` `verify_<client>_irrdb`). Dropping the term rejects the valid
+/// route; dropping its origin guard accepts an unregistered origin.
+fn rpki_roas_as_route_objects_accept_valid_routes_without_route_objects() {
+    let baseline = render(&to_yaml(&healthy_value()), &rtr_options()).unwrap();
+    let mut disabled = healthy_value();
+    set_path(
+        &mut disabled,
+        &[
+            "cfg",
+            "filtering",
+            "irrdb",
+            "use_rpki_roas_as_route_objects",
+        ],
+        yaml("{enabled: false}"),
+    );
+    assert_eq!(
+        render(&to_yaml(&disabled), &rtr_options()).unwrap().files,
+        baseline.files
+    );
+
+    let rendered = render(&to_yaml(&rpki_roas_value()), &rtr_options()).unwrap();
+    for path in ["config.toml", "policy/rs-hygiene.rpol"] {
+        assert_eq!(rendered.files[path], baseline.files[path], "{path}");
+    }
+    let client = &rendered.files["policy/client-as4242-1.rpol"];
+    let overrides = "dataset client-as4242-1-origins { 4242 } dataset client-as4242-1-prefixes { 192.0.2.0/24 }";
+    let case = |client: &str, path: &str, rpki: &str, verdict: &str| {
+        matched_terms(
+            client,
+            "client-as4242-1",
+            &format!(
+                "test roa-case {{ {overrides} route {{ prefix 198.51.100.0/24; as-path \"{path}\"; rpki {rpki} }} expect client-as4242-1 == {verdict} }}"
+            ),
+        )
+    };
+    assert_eq!(
+        case(client, "4242", "valid", "accept"),
+        ["accept-rpki-roa-as-route-object"]
+    );
+    assert_eq!(case(client, "4242", "not-found", "reject"), ["rest"]);
+    assert_eq!(case(client, "4242", "invalid", "reject"), ["rest"]);
+    assert_eq!(case(client, "4244", "valid", "reject"), ["rest"]);
+    assert!(client.contains(
+        "\npolicy client-as4242-1 {\n\
+\x20   # RPKI ROAs as route objects: an AS-SET origin with a valid ROA needs no IRR route object.\n\
+\x20   term accept-rpki-roa-as-route-object { if route.origin-as in client-as4242-1-origins && route.rpki == valid { accept } }\n\
+\x20   term accept-authorized {\n"
+    ), "{client}");
+    assert!(run_rpol_tests(client).unwrap().all_passed());
+    for test in [
+        "test client-as4242-1-rpki-valid-without-route-object-is-accepted",
+        "test client-as4242-1-rpki-not-found-without-route-object-is-rejected",
+        "test client-as4242-1-rpki-valid-unregistered-origin-is-rejected",
+    ] {
+        assert!(client.contains(test), "missing {test}");
+    }
+    // The invalid route never reaches the client policy: shared hygiene leads
+    // the import chain and rejects it as RPKI-invalid.
+    assert_eq!(
+        matched_terms(
+            &rendered.files["policy/rs-hygiene.rpol"],
+            "rs-hygiene",
+            "test invalid-roa { route { prefix 198.51.100.0/24; as-path \"4242\"; rpki invalid } expect rs-hygiene == reject }",
+        )
+        .last()
+        .map(String::as_str),
+        Some("reject-rpki-invalid")
+    );
+
+    // tag_and_reject keeps the IRR reject reasons for routes without a valid ROA.
+    let mut tagged = rpki_roas_value();
+    set_path(
+        &mut tagged,
+        &["cfg", "filtering", "reject_policy", "policy"],
+        "tag_and_reject".into(),
+    );
+    set_general_community(
+        &mut tagged,
+        "reject_cause",
+        yaml("{std: '65520:dyn_val', lrg: null, ext: null}"),
+    );
+    let tagged = render(&to_yaml(&tagged), &rtr_options()).unwrap();
+    let client = &tagged.files["policy/client-as4242-1.rpol"];
+    assert_eq!(
+        case(client, "4242", "valid", "accept"),
+        ["accept-rpki-roa-as-route-object"]
+    );
+    assert_eq!(
+        case(client, "4242", "not-found", "reject"),
+        ["reject-irrdb-prefix-filtered"]
+    );
+    assert_eq!(
+        case(client, "4244", "valid", "reject"),
+        ["reject-irrdb-origin-as-filtered"]
+    );
+
+    // The tag community is added only with tag_as_set, and scrubbed on entry.
+    let mut community = rpki_roas_value();
+    set_general_community(
+        &mut community,
+        "prefix_validated_via_rpki_roas",
+        yaml("{std: '65530:3', lrg: '65500:65530:3', ext: null}"),
+    );
+    let tagged = render(&to_yaml(&community), &rtr_options()).unwrap();
+    let client = &tagged.files["policy/client-as4242-1.rpol"];
+    assert!(client.contains(
+        "term accept-rpki-roa-as-route-object { if route.origin-as in client-as4242-1-origins && route.rpki == valid { add community 65530:3; add large-community 65500:65530:3; accept } }"
+    ), "{client}");
+    let report = run_rpol_tests(&format!(
+        "{client}\ntest roa-tagged {{ {overrides} route {{ prefix 198.51.100.0/24; as-path \"4242\"; rpki valid }} expect client-as4242-1 == accept with community 65530:3, large-community 65500:65530:3 }}"
+    ))
+    .unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    assert!(tagged.files["policy/rs-hygiene.rpol"].contains(
+        "    term scrub-rpki-roa-tag { remove community 65530:3; remove large-community 65500:65530:3 }\n"
+    ));
+    set_path(
+        &mut community,
+        &["cfg", "filtering", "irrdb", "tag_as_set"],
+        false.into(),
+    );
+    let untagged = render(&to_yaml(&community), &rtr_options()).unwrap();
+    assert!(untagged.files["policy/client-as4242-1.rpol"].contains(
+        "term accept-rpki-roa-as-route-object { if route.origin-as in client-as4242-1-origins && route.rpki == valid { accept } }"
+    ));
+    assert!(!untagged.files["policy/rs-hygiene.rpol"].contains("scrub-rpki-roa-tag"));
+    for (tag, marker) in [
+        (
+            "{std: null, lrg: null, ext: 'rt:65530:3'}",
+            "communities.prefix_validated_via_rpki_roas.ext is unsupported",
+        ),
+        (
+            "{std: 'rs_as:3', lrg: null, ext: null}",
+            "communities.prefix_validated_via_rpki_roas is malformed",
+        ),
+    ] {
+        let mut value = rpki_roas_value();
+        set_general_community(&mut value, "prefix_validated_via_rpki_roas", yaml(tag));
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(items.iter().any(|i| i == marker), "{items:?}");
+    }
+
+    // The ROA lookup needs the RTR cache even without origin validation.
+    let mut roas_only = rpki_roas_value();
+    set_path(
+        &mut roas_only,
+        &["cfg", "filtering", "rpki_bgp_origin_validation", "enabled"],
+        false.into(),
+    );
+    let rendered = render(&to_yaml(&roas_only), &rtr_options()).unwrap();
+    assert!(
+        rendered.files["config.toml"]
+            .contains("\n[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\n")
+    );
+    assert!(!rendered.files["policy/rs-hygiene.rpol"].contains("route.rpki"));
+    let items = refusals(render(&to_yaml(&roas_only), &Options::default()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.contains("use_rpki_roas_as_route_objects") && i.contains("--rtr-cache")),
+        "{items:?}"
+    );
+
+    // The ROA path is bound to the AS-SET origin dataset.
+    let mut no_origin = rpki_roas_value();
+    set_path(
+        &mut no_origin,
+        &["cfg", "filtering", "irrdb", "enforce_origin_in_as_set"],
+        false.into(),
+    );
+    let items = refusals(render(&to_yaml(&no_origin), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.contains("use_rpki_roas_as_route_objects")
+                && i.contains("enforce_origin_in_as_set")),
+        "{items:?}"
+    );
+}
+
+#[test]
+fn registry_whois_dump_sources_are_refused() {
+    for name in ["use_arin_bulk_whois_data", "use_registrobr_bulk_whois_data"] {
+        let mut value = healthy_value();
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "irrdb", name],
+            yaml("{enabled: false, source: null}"),
+        );
+        render(&to_yaml(&value), &rtr_options()).unwrap();
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "irrdb", name],
+            yaml("{enabled: true, source: 'ftp://registry.example/dump.txt'}"),
+        );
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items.iter().any(|i| i.contains(&format!("irrdb.{name}"))),
+            "{name}: {items:?}"
+        );
+    }
+}
+
+#[test]
+fn unknown_irrdb_options_fail_the_parse() {
+    for (path, value) in [
+        (
+            &["cfg", "filtering", "irrdb", "use_future_bulk_data"][..],
+            "{enabled: false}",
+        ),
+        (
+            &[
+                "cfg",
+                "filtering",
+                "irrdb",
+                "use_rpki_roas_as_route_objects",
+            ][..],
+            "{enabled: false, max_age: 1}",
+        ),
+    ] {
+        let mut context = healthy_value();
+        set_path(&mut context, path, yaml(value));
+        match render(&to_yaml(&context), &rtr_options()) {
+            Err(RenderError::Parse(message)) => {
+                let key = if value.contains("max_age") {
+                    "max_age"
+                } else {
+                    "use_future_bulk_data"
+                };
+                assert!(message.contains(key), "{message}");
+            }
+            Err(other) => panic!("expected a parse error, got {other}"),
+            Ok(_) => panic!("unknown irrdb option rendered"),
+        }
+    }
+}
+
 /// The daemon's control matrix as arouteserver spells it for `rs_as`.
 fn set_control_matrix(root: &mut serde_yaml::Value, rs_as: u64) {
     let std16 = rs_as <= u64::from(u16::MAX);
