@@ -109,7 +109,8 @@ tests and dataset bindings), `datasets/client-<id>-origins.list` and
 blackhole-cover dataset when configured), and `render-receipt.json`
 (fingerprint, cardinalities,
 warnings). `--rtr-cache` is required whenever the context enables
-RPKI origin validation — the context carries no cache address. The
+RPKI origin validation or `irrdb.use_rpki_roas_as_route_objects` — the
+context carries no cache address. The
 renderer ships in the release tarball alongside `rustbgpd` and `rbgp`
 ([install](../how-to/deployment.md#install)); from a checkout, build it with
 `cargo build --release -p rs-config-render`.

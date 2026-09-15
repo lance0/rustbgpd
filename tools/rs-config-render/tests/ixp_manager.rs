@@ -125,6 +125,26 @@ fn assert_policy_tests(source: &str, tests: &str) {
     assert!(report.all_passed(), "{:?}", report.failures);
 }
 
+/// Runs one in-language `test` against `source` (its generated client tests
+/// stripped) and returns the terms of `policy` whose guards matched in that
+/// walk: the last one is the term that decided the route.
+fn matched_terms(source: &str, policy: &str, test: &str) -> Vec<String> {
+    let policies = source.split("\ntest client-").next().unwrap();
+    let file = RpolFile::parse(&format!("{policies}\n{test}")).unwrap();
+    let (report, coverage) = file.run_tests_with_coverage();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    coverage
+        .policies
+        .iter()
+        .find(|covered| covered.name == policy)
+        .unwrap()
+        .terms
+        .iter()
+        .filter(|term| term.matched > 0)
+        .map(|term| term.name.clone())
+        .collect()
+}
+
 #[test]
 fn supported_render_is_deterministic_and_explicit() {
     let first = render_document(FIXTURE, 300, &binding(), SchemaVersion::V1).unwrap();
@@ -316,7 +336,7 @@ test as-path-65 {{
         "term reject-irrdb-origin-as-filtered { if !(route.origin-as in client-3-origins) { reject } }"
     ));
     assert!(client.contains(
-        "term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) { reject } }"
+        "term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) && route.rpki != valid { reject } }"
     ));
     assert_terms(
         client,
@@ -356,6 +376,118 @@ test authorized-fallthrough {
     expect client-3 == accept
 }
 "#,
+    );
+}
+
+/// Load-bearing: IXP Manager v7.4 accepts an RPKI-valid route after its
+/// origin-AS check and before its IRRDB prefix filter (`filter_rpki()` in
+/// `neighbors.foil.php`). Dropping the RPKI guard rejects the valid route;
+/// dropping the prefix term accepts the not-found route; moving the guard onto
+/// the origin term accepts the unregistered origin.
+#[test]
+fn rpki_valid_route_without_route_object_passes_the_irrdb_prefix_term() {
+    let files = rendered(&value()).unwrap().files;
+    let client = &files["policy/client-3.rpol"];
+    // Origin 42 is in the member's AS-SET; 31.135.160.0/19 has no route object.
+    let case = |prefix: &str, path: &str, rpki: &str, verdict: &str| {
+        format!(
+            "test roa-case {{\n    dataset client-3-origins {{ 42 }}\n    dataset client-3-prefixes {{ 31.135.128.0/19 }}\n    route {{ prefix {prefix}; as-path \"{path}\"; rpki {rpki} }}\n    expect client-3 == {verdict}\n}}\n"
+        )
+    };
+    for (prefix, path, rpki, verdict, decided_by) in [
+        (
+            "31.135.160.0/19",
+            "42",
+            "valid",
+            "accept",
+            "accept-authorized",
+        ),
+        (
+            "31.135.160.0/19",
+            "42",
+            "not-found",
+            "reject",
+            "reject-irrdb-prefix-filtered",
+        ),
+        (
+            "31.135.160.0/19",
+            "42",
+            "invalid",
+            "reject",
+            "reject-irrdb-prefix-filtered",
+        ),
+        (
+            "31.135.160.0/19",
+            "42 43",
+            "valid",
+            "reject",
+            "reject-irrdb-origin-as-filtered",
+        ),
+        (
+            "31.135.128.0/19",
+            "42",
+            "not-found",
+            "accept",
+            "accept-authorized",
+        ),
+    ] {
+        assert_eq!(
+            matched_terms(client, "client-3", &case(prefix, path, rpki, verdict)),
+            [decided_by],
+            "{prefix} {path} {rpki}"
+        );
+    }
+    assert!(client.contains(
+        "term reject-irrdb-origin-as-filtered { if !(route.origin-as in client-3-origins) { reject } }\n    term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) && route.rpki != valid { reject } }\n"
+    ), "{client}");
+    assert_terms(
+        client,
+        "client-3",
+        &[
+            "reject-first-as-not-peer-as",
+            "reject-irrdb-origin-as-filtered",
+            "reject-irrdb-prefix-filtered",
+            "accept-authorized",
+        ],
+    );
+    // The invalid route never reaches the client policy: the shared hygiene
+    // policy ahead of it in the import chain rejects it as RPKI-invalid.
+    let hygiene = &files["policy/ixp-hygiene.rpol"];
+    assert_eq!(
+        matched_terms(
+            hygiene,
+            "ixp-manager-hygiene",
+            "test invalid-roa { route { prefix 31.135.160.0/19; as-path \"42\"; rpki invalid } expect ixp-manager-hygiene == reject }",
+        ),
+        ["reject-rpki-invalid"]
+    );
+    assert!(files["config.toml"].contains(
+        "import_policy_chain = [\"reject-special-purpose\", \"ixp-hygiene\", \"ixp-manager-hygiene\", \"client-3\"]"
+    ));
+    assert!(run_rpol_tests(client).unwrap().all_passed());
+    for test in [
+        "test client-3-synthetic-rpki-valid-without-route-object",
+        "test client-3-synthetic-rpki-not-found-without-route-object",
+        "test client-3-synthetic-rpki-valid-unregistered-origin",
+    ] {
+        assert!(client.contains(test), "missing {test}");
+    }
+
+    // Without RPKI the prefix filter is unconditional, as upstream.
+    let mut no_rpki = value();
+    no_rpki["router"]["rpki"] = false.into();
+    let client = &rendered(&no_rpki).unwrap().files["policy/client-3.rpol"];
+    assert!(client.contains(
+        "term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) { reject } }"
+    ));
+    assert!(!client.contains("rpki"), "{client}");
+    assert_eq!(
+        matched_terms(
+            client,
+            "client-3",
+            &case("31.135.160.0/19", "42", "valid", "reject")
+        ),
+        ["reject-irrdb-prefix-filtered"]
     );
 }
 
@@ -441,7 +573,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_schema_specific() {
         ),
         (
             "policy/client-3.rpol",
-            "fe84eafd70808b5776f9db5cdeed8579ac944dd6f8816762d46a4cee56017a84",
+            "864c34a5ec993f9c17c7786dba2aba589997576601b582a9c30f5d29f7c13482",
         ),
         (
             "policy/ixp-hygiene.rpol",
@@ -523,7 +655,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "6f5cc57dc100a74de4efea99cf6dda43cfa95cd5f3686b2b116d2cd375b7cb01"
+        "18d694cbc250a566516b1e01bdbe90e3da72790e826778c7dfcde78f46df6c45"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(

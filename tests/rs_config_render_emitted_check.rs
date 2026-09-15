@@ -104,6 +104,80 @@ fn emitted_config_passes_rustbgpd_check_strict() {
     );
 }
 
+fn assert_candidate_passes_checks(files: &std::collections::BTreeMap<String, String>) {
+    for (path, source) in files.iter().filter(|(path, _)| path.ends_with(".rpol")) {
+        let report = rustbgpd_policy::rpol::check_rpol(source);
+        assert!(
+            report.is_ok(),
+            "{path}: diagnostics={:?} tests={:?}",
+            report.diagnostics,
+            report.tests
+        );
+    }
+    let out_dir = tempfile::tempdir().unwrap();
+    for (rel_path, contents) in files {
+        let path = out_dir.path().join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .args(["--check", "--strict"])
+        .arg(out_dir.path().join("config.toml"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("config OK"),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+/// Both renderers' RPKI-valid IRR bypass (arouteserver ROAs as route objects
+/// with its tag and scrub, origin validation off; IXP Manager's guarded prefix
+/// term) compiles, passes its in-language tests, and passes the daemon's
+/// strict check.
+fn rpki_valid_irr_bypass_passes_rpol_and_daemon_checks() {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).unwrap();
+    value["clients"]
+        .as_sequence_mut()
+        .unwrap()
+        .retain(|c| c["id"].as_str() != Some("AS51325_1"));
+    value["irrdb_info"]
+        .as_mapping_mut()
+        .unwrap()
+        .remove(serde_yaml::Value::String("AS51325_bundle".into()));
+    value["cfg"]["filtering"]["rpki_bgp_origin_validation"]["enabled"] = false.into();
+    value["cfg"]["filtering"]["irrdb"]["use_rpki_roas_as_route_objects"] =
+        serde_yaml::from_str("{enabled: true}").unwrap();
+    value["cfg"]["communities"]["prefix_validated_via_rpki_roas"] =
+        serde_yaml::from_str("{std: '65500:3', lrg: '65500:1:3'}").unwrap();
+    let rendered = render(&serde_yaml::to_string(&value).unwrap(), &rtr_options()).unwrap();
+    assert!(rendered.files["config.toml"].contains("\n[rpki]\n[[rpki.cache_servers]]\n"));
+    assert!(rendered.files["policy/rs-hygiene.rpol"].contains("term scrub-rpki-roa-tag"));
+    assert!(
+        rendered.files["policy/client-as4242-1.rpol"]
+            .contains("term accept-rpki-roa-as-route-object")
+    );
+    assert_candidate_passes_checks(&rendered.files);
+
+    let binding = rs_config_render::ixp_manager_host::RenderBinding::new(
+        "b2-rs1-lan1-ipv4",
+        std::path::Path::new("/var/lib/rustbgpd/b2-rs1-lan1-ipv4"),
+    )
+    .unwrap();
+    let candidate = rs_config_render::ixp_manager::render_document(
+        include_bytes!("../tools/rs-config-render/tests/fixtures/ixp-manager-v1-supported.json"),
+        300,
+        &binding,
+        rs_config_render::ixp_manager::SchemaVersion::V1,
+    )
+    .unwrap();
+    assert!(candidate.files["policy/client-3.rpol"].contains("&& route.rpki != valid { reject }"));
+    assert_candidate_passes_checks(&candidate.files);
+}
+
 #[test]
 fn emitted_blackhole_policy_passes_rpol_and_daemon_checks() {
     let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).expect("fixture parses");

@@ -246,7 +246,12 @@ the RFC 9234 `route_server` role, strict next-hop ownership (RFC 7948
 communities, and `interpret_rfc1997` set from the router's IXP Manager
 `rfc1997_passthru` flag (off in this capture, so the server enforces
 `NO_EXPORT` itself; the hand-written example derives passthrough). The
-import chain is hygiene → IXP Manager hygiene → the member's IRR set; every
+import chain is hygiene → IXP Manager hygiene → the member's IRR set. With
+RPKI on, the member's IRR prefix term passes an RPKI-valid route whose origin
+is in the member's AS-SET, as IXP Manager's own BIRD templates do, so a member
+with a ROA but no IRR route object keeps that route after cutover. Until the
+RTR cache's first End of Data every route reads `not-found`, so such routes
+are rejected until the cache syncs and the daemon refreshes the sessions. Every
 export chain ends with `ixp-manager-own-as-export-scrub`, which removes
 large communities under the router ASN and preserves everyone else's.
 `ebgp_requires_policy = true` makes deleting a chain fail closed. The
