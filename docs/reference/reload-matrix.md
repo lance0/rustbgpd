@@ -371,6 +371,10 @@ chains all add/change/remove cleanly via reload.
 | `[bmp]` | restart-required | BMP exporter binds once. |
 | `[mrt]` | restart-required | MRT writer opens its output dir at startup. |
 
+[ADR-0134](../adr/0134-reload-monitoring-and-validation-endpoints.md) proposes
+reload-applying these sections for subsystems already enabled at startup; until
+an implementation ships they remain restart-required.
+
 ## `[gnmi_dialout]`
 
 | Section | Class | Notes |
@@ -540,3 +544,4 @@ before sending the configuration to the daemon.
 - [`docs/adr/0061-opt-in-unicast-linux-fib-integration.md`](../adr/0061-opt-in-unicast-linux-fib-integration.md) — FIB-discard reconciler scope.
 - [`docs/adr/0067-bfd-single-hop.md`](../adr/0067-bfd-single-hop.md) — BFD startup-only runtime.
 - [`docs/adr/0071-bgp-roles-otc.md`](../adr/0071-bgp-roles-otc.md) — RFC 9234 roles + OTC reload semantics.
+- [`docs/adr/0134-reload-monitoring-and-validation-endpoints.md`](../adr/0134-reload-monitoring-and-validation-endpoints.md) — Proposed reload-applied reconciliation for BMP collectors, RPKI RTR caches, and MRT dumps (not shipped).
