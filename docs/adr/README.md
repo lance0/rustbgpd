@@ -157,6 +157,7 @@ states that the whole decision is Superseded.
 | [0131](0131-read-only-mcp-server.md) | Read-only MCP server for the explain surfaces | Accepted | 2026-09-05 | Active |
 | [0132](0132-operator-read-path.md) | Operator reads during configuration transactions | Accepted | 2026-09-12 | Active |
 | [0133](0133-installed-import-counter-reads.md) | Installed import-counter reads | Accepted | 2026-09-13 | Active |
+| [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors and RPKI cache endpoints without session resets | Proposed | 2026-09-15 | Active |
 
 ## Supporting records
 
