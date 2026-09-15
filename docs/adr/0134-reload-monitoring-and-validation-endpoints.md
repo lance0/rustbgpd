@@ -1,383 +1,355 @@
-# ADR-0134: Reload-Apply BMP Collectors and RPKI Cache Endpoints Without Session Resets
+# ADR-0134: Reload-Apply BMP Collectors, RPKI Cache Endpoints, and MRT Dumps
 
-**Status:** Proposed
-**Lifecycle:** Active
+**Status:** Proposed (no runtime behavior is shipped by this ADR)
 **Date:** 2026-09-15
+
+Line citations refer to main at `2db490acb`.
 
 ## Context
 
-On running route servers, route reflectors, and peering edge routers (often
-hosting 500–1,000+ active BGP sessions), three routine monitoring and validation
-adjustments currently demand a full daemon restart:
+On a running route server or route reflector, three routine monitoring and
+validation changes need a daemon restart today:
 
-1. **BMP collectors (`[bmp]`):** Adding a new collector, pointing monitoring at
-   a new relay host, or updating collector query filters.
-2. **RPKI RTR caches (`[rpki]`):** Migrating validator infrastructure (e.g.
-   transitioning between Routinator and StayRTR instances), adding a second cache
-   for high-availability redundancy, or retiring a decommissioned cache endpoint.
-3. **MRT dumps (`[mrt]`):** Enabling periodic diagnostic table dumps, disabling
-   scheduled dumps after an incident investigation settles, or tuning output
-   intervals.
+1. **`[bmp]`:** adding a collector, pointing monitoring at a new collector
+   host, or changing a collector's monitored views.
+2. **`[rpki]`:** replacing an RTR cache (a validator migration), adding a
+   second cache for redundancy, or retiring one.
+3. **`[mrt]`:** changing the dump interval, prefix, compression, or output
+   directory, or stopping periodic dumps after an investigation.
 
-Today, `docs/reference/reload-matrix.md` classifies `[bmp]`, `[rpki]`, and
-`[mrt]` as `restart-required`. When `diff_config` detects changes to these
-sections (`bmp_changed`, `rpki_changed`, `mrt_changed` in `src/config/mod.rs`),
-the entire candidate configuration is treated as requiring a restart.
+The [reload matrix](../reference/reload-matrix.md#rpki-bmp-mrt) classes all
+three sections restart-required. `diff_config` sets `rpki_changed`,
+`bmp_changed`, and `mrt_changed` (`src/config/mod.rs:2199-2206`, computed at
+`:4669-4672`). On SIGHUP those three sections are pinned to their running
+values (`src/reload.rs:1851-1853`) and each difference is logged at `ERROR`
+(`:1942-1950`); the rest of the candidate still applies. `rustbgpd --diff`
+lists them under `restart_required_sections` (`src/config/mod.rs:3801-3809`),
+and config transactions treat them the same way.
 
-A daemon restart tears down and resets every established BGP session across the
-entire fleet. Even when coordinated Graceful Restart
-([ADR-0040](0040-gr-restarting-speaker.md)) is negotiated, restarting forces a
-complete restart cycle: all member sessions disconnect, all inbound routes are
-withdrawn or marked stale, and post-restart recovery incurs a massive wave of
-parallel TCP handshakes, wire decoding, policy pipeline evaluations, and best-path
-calculations. For route-server operators hosting hundreds of members, an
-operational necessity as mundane as pointing telemetry at a new collector
-relay host triggers network-wide churn.
+A restart resets every session. Coordinated graceful restart
+([ADR-0040](0040-gr-restarting-speaker.md)) keeps members' forwarding state,
+but the daemon still re-runs full ingest, policy, and best-path selection for
+the whole fleet, and every member sees its session drop.
 
-### Industry Prior Art
+### Prior art
 
-The operational state-of-the-art avoids BGP session disruption for auxiliary
-monitoring and validation connections:
+- **BIRD:** `configure` "will smoothly switch itself to the new configuration,
+  protocols are reconfigured if possible, restarted otherwise". RPKI, BMP, and
+  MRT are separate protocol instances, so a change to one does not restart the
+  BGP protocols (`doc/bird.sgml`, `cli-configure`;
+  <https://gitlab.nic.cz/labs/bird/-/raw/master/doc/bird.sgml>, checked
+  2026-09-14).
+- **GoBGP:** exposes `AddBmp`/`DeleteBmp`, `AddRpki`/`DeleteRpki`/`ResetRpki`,
+  and `EnableMrt`/`DisableMrt` RPCs
+  (<https://github.com/osrg/gobgp/blob/master/api/gobgp_grpc.pb.go>, checked
+  2026-09-14).
 
-- **BIRD:** In BIRD (`cli-configure`, `doc/bird.sgml`), runtime `configure`
-  smoothly switches to the candidate configuration: protocols are reconfigured
-  if possible, restarted otherwise. BMP, RPKI (RTR), and MRT operate as
-  independent protocol instances. A configuration change modifying or adding an
-  RTR cache or BMP collector reconfigures or restarts that specific protocol
-  subsystem without affecting the BGP protocol instances or tearing down
-  peering sessions.
-- **GoBGP:** GoBGP exposes fine-grained runtime RPCs (`AddBmp`/`DeleteBmp`,
-  `AddRpki`/`DeleteRpki`/`ResetRpki`, and `EnableMrt`/`DisableMrt` defined in
-  `api/gobgp_grpc.pb.go`). Operators can add or retire monitoring endpoints at
-  will via runtime management without resetting BGP sessions.
+### In-tree precedent
 
-### In-Tree Precedent and Capabilities
+`[gnmi_dialout]` is reload-applied. The target set is planned during the
+reload's plan phase (`src/reload.rs:2080-2082`; a bad target set is a clean
+reload failure) and reconciled in the finalize step after the generation is
+acknowledged (`src/reload.rs:1655-1765`, applied at `:1759-1762`).
+`DialoutManager::apply` stops removed targets and reaps their series, starts
+added ones, and leaves unchanged targets and their live connections alone
+(`crates/api/src/gnmi_dialout.rs:267-291`). Config transactions reject the
+section as unsupported and point at SIGHUP (`src/config/mod.rs:3779-3782`).
+[ADR-0041](0041-bmp-exporter.md) lists runtime collector add/remove under
+Deferred, not rejected (`docs/adr/0041-bmp-exporter.md:111`).
 
-rustbgpd already contains the architectural blueprint and core building blocks
-needed to reconcile these endpoints cleanly:
+### What the subsystems do today
 
-1. **`[gnmi_dialout]` reconciliation:** Added in the telemetry arc,
-   `[gnmi_dialout]` is fully `reload-applied`
-   (`docs/reference/reload-matrix.md:378`). On SIGHUP, the daemon plans and
-   applies target diffs via `DialoutManager::apply`
-   (`crates/api/src/gnmi_dialout.rs:267`):
-   - Removed targets are stopped and their Prometheus series reaped.
-   - Added targets are spawned and initiate connection loops.
-   - Changed targets tear down and redial.
-   - Unchanged targets maintain their established TCP sessions without drop or
-     churn.
-   - Preflight validation failures cleanly reject the candidate before any
-     state is mutated.
-2. **Deferred BMP management:** [ADR-0041](0041-bmp-exporter.md) noted runtime
-   collector add/remove under **Deferred**, not rejected. The BMP subsystem
-   already incorporates per-collector connection generation fencing
-   (`generation: Arc<AtomicU64>`), RFC 7854 message fan-out, targeted
-   bootstrap sequencing, and Loc-RIB dump End-of-RIB synchronization.
-3. **Per-cache RPKI runtime inventory:** The RPKI subsystem already maintains
-   isolated per-cache state via `CacheInventoryAttachment`
-   (`crates/rpki/src/vrp_manager.rs`), providing per-cache connection status,
-   retained End-of-Data (EoD) readiness, and contribution metrics.
-4. **Delta-scoped RPKI revalidation:** The VRP and ASPA managers already support
-   cache withdrawal semantics (`VrpUpdate::ServerDown`). When a cache is
-   removed, its contributions are purged from `server_tables` and
-   `server_aspa_tables`, merged snapshots are rebuilt, and delta-scoped
-   revalidation notifies the RIB to update validation state without resetting
-   peering sessions.
+**BMP.** Collectors are keyed by their index in the configuration list
+(`crates/bmp/src/types.rs:286-287`; `crates/bmp/src/manager.rs:217`, used by
+`loc_rib_suppressed` at `:233`, `active_dumps` at `:238`, replay enrollment
+at `:68`, and the connect address check at `:940-947`). Each collector has a
+connection generation the manager advances on connect, disconnect, and fence
+(`manager.rs:206`, `:951`, `:1071`, `:1294`). In-flight Loc-RIB dumps and
+held-back live deltas are bound to that generation (`manager.rs:72-83`,
+`:147-160`, `:1087-1165`); a per-collector fence retires a generation and
+its dump task (`manager.rs:1226-1265`). The per-collector channel holds 4096
+messages (`crates/bmp/src/client.rs:22`). Only the client sends Termination,
+with reason 0, and only on daemon shutdown via the shared reconnect watch
+(`client.rs:136-141`, `:223-229`). Metric reap helpers exist and run from
+the manager's `Drop` (`crates/telemetry/src/metrics.rs:5978`,
+`manager.rs:1312-1318`). The manager, its channels, and the `bmp_tx` handed
+to the peer manager and every session exist only when `[bmp]` has at least
+one collector at startup (`src/main.rs:3991-3992`, `:4412`); RFC 9069 Loc-RIB
+identity and the dump channel are likewise fixed at startup.
+
+Post-policy Adj-RIB-Out mirroring is a per-session flag computed from the
+configured collectors when the transport config is built
+(`src/peer_manager/mod.rs:1422-1426`), read per UPDATE on the write path
+(`crates/transport/src/session/io.rs:283`), and required by outbound replay
+(`crates/transport/src/session/replay.rs:173-176`). Collectors are plain TCP
+(`src/config/schema.rs:642-655`).
+
+**RPKI.** `RpkiConfig` has one field, `cache_servers`
+(`src/config/schema.rs:567-572`); every timer, ceiling, and authentication
+option is per cache (`:575-604`). `CacheInventoryAttachment` tracks per-cache
+connection and accepted End of Data state, but its server set is fixed at
+construction (`crates/rpki/src/vrp_manager.rs:183-212`) and updates for an
+unknown server are ignored (`:393-406`). `RtrClient` has no control channel
+(`crates/rpki/src/rtr_client.rs:204-235`; builders at `:277-327`); the cache's
+End of Data overrides the configured refresh, retry, and expire timers
+(`:673-736`). The VRP manager, inventory, and cache query handle are created
+only when `[rpki]` has caches at startup (`src/main.rs:4184-4196`). Every RTR
+client runs in one supervised `JoinSet`: the first task exit of any kind is
+fatal, the supervisor aborts the rest, and the daemon shuts down with exit 1
+(`src/main.rs:3165-3212`, `:5828-5838`;
+[operations](../reference/operations.md#rpki-subsystem-task-exits-unexpectedly)).
+
+Removing a cache's data today is not delta-scoped. `VrpUpdate::ServerDown`
+drops the server's VRP and ASPA tables and carries no delta
+(`vrp_manager.rs:585-592`, pinned by a test at `:886`, documented at
+`:228-230`), so the RIB revalidates everything. Every distributed update also
+calls `trigger_import_validation_refresh` (`src/main.rs:4212-4230`,
+`:4239-4257`), which soft-resets every established peer whose import chain
+depends on RPKI or ASPA (`src/peer_manager/policy.rs:2677-2745`).
+Distribution is skipped only when the merged table is unchanged
+(`vrp_manager.rs:619-622`). An added cache contributes nothing until its
+first End of Data (`vrp_manager.rs:510-525`), and its readiness gauge starts
+false at spawn (`src/main.rs:4289`).
+
+**MRT.** `MrtManager` owns its writer config, RIB handle, and trigger channel
+(`crates/mrt/src/manager.rs:49-110`); the on-demand trigger sender is an
+`Option` created only when `[mrt]` is configured at startup
+(`src/main.rs:4358-4372`, `:5244`). Dumps are written to a `.tmp` file and
+published by atomic rename (`crates/mrt/src/writer.rs:20-71`). Validation
+checks only that `output_dir` is non-empty and `dump_interval` is positive
+(`src/config/validation.rs:579-590`).
 
 ## Decision
 
-We decide to promote `[bmp]`, `[rpki]`, and `[mrt]` from `restart-required` to
-`reload-applied` configuration sections, executing their runtime adjustments
-without resetting BGP sessions.
+Reconcile `[bmp]`, `[rpki]`, and `[mrt]` on SIGHUP for subsystems that were
+enabled at startup, in the finalize step, the way `[gnmi_dialout]` is
+reconciled today. No BGP session is reset by any of these changes.
 
-Configuration files reloaded via SIGHUP (and transaction-staged `rbgp config
-apply` transactions once classified) remain the authoritative operator surface.
+### Scope boundary
 
-### Explicit Non-Goals
+Enabling `[bmp]`, `[rpki]`, or `[mrt]` from zero remains restart-required,
+and so does adding the first `loc_rib` collector when none was configured at
+startup. The managers, channels, and handles for these subsystems are
+constructed only when they are configured at startup: `bmp_tx` is `None` in
+the peer manager and every session, the VRP manager and cache inventory do
+not exist, and the MRT trigger sender is `None`. Wiring those handles into a
+running daemon is a larger change than reconciling an existing manager and
+is not proposed here. Disabling a subsystem entirely (removing the last
+collector or cache, or removing `[mrt]`) is in scope: the manager stays
+alive with an empty set.
 
-1. **No ad-hoc gRPC CRUD APIs:** We deliberately reject introducing dedicated
-   imperative gRPC methods (such as `AddBmp` or `DeleteRpki`). Maintaining
-   imperative RPC mutation alongside declarative configuration files creates
-   drift and split-brain configuration risk. All runtime mutations must proceed
-   through declarative configuration reconciliation via SIGHUP or unified
-   configuration transactions.
-2. **No new cryptographic transport wrappers:** BMP over TLS and RTR over
-   TLS/SSH were evaluated during competitive analysis and identified as
-   non-gaps. Supported transports remain plain TCP, TCP MD5, and TCP-AO (for
-   authenticated cache connections preflighted against the kernel).
+### Reload integration
 
----
+- **No classifier or route change.** The reconcile runs in
+  `finalize_sighup_authority` after the generation is acknowledged, as
+  dial-out does, including on a `KnownPartial` outcome.
+- **Every fallible check runs in the plan phase**, so a rejected candidate
+  has no side effect: address parsing and duplicate detection (already in
+  validation, `src/config/validation.rs:997-1012`, `:1126-1137`), the kernel
+  MD5/TCP-AO preflight for an added or re-authenticated cache
+  (`preflight_authenticated_dial`, as startup does at `src/main.rs:3824`),
+  and MRT `output_dir` writability (new).
+- **Endpoints are not compensated by generation rollback.** A rejected
+  generation changes no endpoints; an acknowledged generation reconciles them
+  once. This matches dial-out.
+- **SIGHUP only.** The three sections stay `unsupported` in config
+  transactions, like `[gnmi_dialout]` (`src/config/mod.rs:3779-3782`).
 
-### Slice 1: BMP Collector Reconciliation (`[[bmp.collectors]]`) [Size: M]
+### Non-goals
 
-The BMP subsystem shall reconcile configured collectors by diffing the active
-collector set against the reloaded configuration on SIGHUP, following the
-`[gnmi_dialout]` reconciliation model.
+- No gRPC add/remove RPCs for collectors or caches. The configuration file
+  is the surface; an imperative RPC family alongside it invites drift.
+- No BMP over TLS and no RTR over TLS or SSH; transports stay plain TCP for
+  collectors and plain TCP, TCP MD5, or TCP-AO for caches.
+- No Adj-RIB-Out dump when a collector connects. Complete post-policy state
+  comes from `rbgp neighbor replay-outbound` or a `loc_rib` collector.
+- Per-member BFD add/remove on SIGHUP is the same class of problem (a
+  neighbor added by reload that inherits BFD gets no BFD session until
+  restart) but a different actor and slice list; it is tracked separately.
 
-#### Reconciliation Contract
+### Slice 1: BMP collectors (`[[bmp.collectors]]`), size M
 
-1. **Diffing:** Match configured `[[bmp.collectors]]` by their canonical socket
-   address (`address`).
-2. **Removed Collector:**
-   - The manager sends an RFC 7854 BMP Termination message (Reason 0:
-     Administratively down) if the TCP connection is live.
-   - The associated `BmpClient` task is aborted, the TCP connection is closed,
-     and the per-collector channel is dropped.
-   - Prometheus metrics carrying the `collector` label for that address are
-     reaped from `BgpMetrics`.
-3. **Added Collector:**
-   - `BmpManager` allocates an internal collector entry, registers its
-     configured message filters, and initializes its connection generation at 0.
-   - Spawns a new `BmpClient` task targeting the specified address with
-     configured reconnect backoff.
-   - Upon successful TCP connection, the client initiates the RFC 7854 sequence:
-     sends Initiation, replays Peer Up messages for all currently established
-     BGP sessions, and initiates a Loc-RIB dump if configured (`loc_rib = true`).
-4. **Changed Collector:**
-   - If per-collector parameters change (`reconnect_interval`, `version`, or
-     `monitor` filter views), the manager triggers a generation closure and
-     reconnect cycle for that specific collector only.
-   - The collector reconnects, re-sends Initiation, and synchronizes state
-     according to the updated filters.
-5. **Unchanged Collector:**
-   - Live TCP connections, buffered outbound messages, and active streaming are
-     completely untouched.
-   - Unchanged collectors NEVER receive redundant Peer Up replays or
-     unnecessary reconnect cycles.
-6. **Top-Level Attributes (`sys_name`, `sys_descr`):**
-   - RFC 7854 Initiation PDUs advertise `sys_name` and `sys_descr` once at
-     connection setup. Modifying these top-level strings requires redialing all
-     running collectors so they receive fresh Initiation PDUs.
-   - Crucially, redialing collectors MUST NOT reset or bounce any BGP sessions.
+1. **Diffing.** Match collectors by canonical socket address, the same key
+   validation uses to reject duplicates.
+2. **Stable collector ids.** Collector ids stop being list indexes. Each
+   collector gets an id that is never reused for the life of the process, so
+   removing a middle collector cannot shift the id another collector's
+   active dump, suppression entry, replay enrollment, or control event
+   refers to. This is the first change in the slice; the id-shift case is a
+   required regression test.
+3. **Removed collector.** The manager signals that collector's client to
+   stop (new per-collector stop signal; today only the shared shutdown watch
+   exists). The client drains its accepted queue, sends Termination with
+   RFC 7854 §4.5 reason 4 (session permanently administratively closed),
+   closes the socket, and exits. The manager fences the generation through
+   the existing path, drops the entry, and reaps the collector's series with
+   the existing helpers.
+4. **Added collector.** The manager allocates an entry with a fresh id and
+   generation 0 and spawns a client. On connect the existing bootstrap runs:
+   Initiation, Peer Up replay for established sessions, and the Loc-RIB dump
+   when the collector monitors `loc_rib` (`monitor = ["loc_rib"]`,
+   `src/config/schema.rs:647-650`, `:666-675`) and Loc-RIB was configured at
+   startup.
+5. **Changed collector.** Any field change at the same address is a remove
+   followed by an add. The collector sees Termination then a fresh
+   Initiation and bootstrap under its new filter and version. No in-place
+   mutation of a live collector's filter or version is proposed.
+6. **Unchanged collector.** Untouched: no Peer Up replay, no reconnect.
+7. **`sys_name` / `sys_descr`.** Initiation carries them once per connection
+   (`crates/bmp/src/client.rs:268-269`), so a change is a remove-then-add of
+   every collector. BGP sessions are unaffected.
+8. **`rib_out_post` toggle.** The per-session mirroring flag becomes live:
+   the peer manager pushes the new value to established sessions when the
+   count of collectors monitoring `rib_out_post` crosses zero. Mirroring
+   starts with the next UPDATE; the replay gate at
+   `crates/transport/src/session/replay.rs:173-176` reads the same flag.
+   Complete state for a newly added `rib_out_post` collector comes from
+   `rbgp neighbor replay-outbound` or a `loc_rib` collector, not from a
+   dump on connect. The code comment at `src/peer_manager/mod.rs:1422-1425`
+   is updated.
+9. **Stream invariants.** Removal and replacement reuse the existing
+   generation fence and dump cancellation; no second teardown path. The
+   per-collector channel cap and fail-closed behaviour are unchanged.
 
-#### Handling Post-Policy Adj-RIB-Out Mirroring (`bmp_rib_out`)
+### Slice 2: RTR cache endpoints (`[[rpki.cache_servers]]`), size M
 
-Per RFC 8671, mirroring outbound UPDATEs (`BmpMonitorView::RibOutPost`) requires
-the peer session's transport layer to clone outbound messages and emit them onto
-the BMP channel.
+1. **Diffing.** Match caches by socket address. Any other field change
+   (`md5_password`, `tcp_ao`, `refresh_interval`, `retry_interval`,
+   `expire_interval`, `max_expire_interval`) is a remove followed by an add.
+   The cache's End of Data overrides the configured timers anyway, so no
+   in-place timer update is proposed.
+2. **Added cache.** Plan phase: kernel MD5/TCP-AO preflight. Finalize: the
+   cache is registered with the inventory (new: the inventory learns to add
+   and remove servers), its End-of-Data gauge is published false at spawn
+   as at startup, and an `RtrClient` is spawned into the supervised
+   `JoinSet` with its kind registered. The client contributes nothing until
+   its first End of Data, so an add-only reload cannot change any verdict
+   before the cache has data.
+3. **Removed cache.** The client receives an explicit stop signal (new: the
+   client gains a stop input). It closes the socket and returns; the
+   supervisor recognises that exit as requested and does not treat it as
+   fatal. Panics and unexpected returns stay fatal. The
+   [operations contract](../reference/operations.md#rpki-subsystem-task-exits-unexpectedly)
+   is updated to say so. `VrpUpdate::ServerDown` runs through the existing
+   path: the server's tables are dropped, the merged table is rebuilt, and,
+   as today, the RIB revalidates everything and every RPKI/ASPA-dependent
+   established peer is soft-reset once. Delta-scoped removal (wiring the
+   removed set through as the delta) is optional Slice 2 work, not assumed.
+   The inventory entry is removed and the cache's `cache`-labelled series
+   are reaped (new: no RPKI reap helper exists).
+4. **Cache replacement is make-before-break.** When one reload removes a
+   cache and adds another, the removed cache's contribution stays in the
+   merged table until the added cache reaches its first End of Data, with a
+   bounded wait; after the bound, the removal proceeds. Without this, the
+   merged table would empty between removal and the new cache's first End of
+   Data, every route would read NotFound, and every RPKI/ASPA-dependent peer
+   would soft-reset on both transitions. The bound keeps a cache that never
+   answers from pinning stale data past the operator's intent.
+5. **Unchanged cache.** Untouched: connection, session id, serial, and
+   retained data are preserved.
 
-Today, `TransportConfig.bmp_rib_out` is computed once when the session is
-constructed (`src/peer_manager/mod.rs:1426`) and read on the hot write path
-(`crates/transport/src/session/io.rs:283`).
+### Slice 3: MRT dumps (`[mrt]`), size S
 
-- **Contract:** Outbound UPDATE mirroring must not require bouncing BGP sessions
-  when a collector requesting `RibOutPost` is added or removed.
-- **Mechanism:** The peer manager provides an atomic switch (`Arc<AtomicBool>`)
-  or broadcasts an in-session configuration event to active peer sessions. When
-  the aggregate count of collectors requiring `RibOutPost` transitions between 0
-  and >0, the active sessions dynamically toggle outbound mirroring.
-  - Adding the first `RibOutPost` collector begins outbound mirroring
-    immediately without resetting the peer. (Initial Adj-RIB-Out state
-    synchronization for the newly added collector is completed via the
-    replayed outbound route dump or explicit peer replay).
-  - Removing the last `RibOutPost` collector turns off outbound UPDATE cloning,
-    eliminating transport overhead.
+1. **Changed `dump_interval`, `file_prefix`, `compress`, or `output_dir`.**
+   Plan phase: the new `output_dir` must be writable. Finalize: the running
+   manager is stopped and a new one started with the new config; the trigger
+   sender is replaced.
+2. **Removed `[mrt]`.** The manager is stopped and the trigger sender
+   cleared; on-demand dump requests report MRT as not configured.
+3. **In-flight dump on stop.** The dump either finishes and publishes
+   normally or is aborted and its `.tmp` file unlinked. A partial dump is
+   never renamed into place.
+4. **Enabling `[mrt]` from zero** stays restart-required (scope boundary).
 
-#### Generation Fencing and Stream Invariants
+### Compatibility surfaces
 
-Reconciling BMP collectors must strictly preserve established streaming
-invariants:
+Each slice updates the surfaces that state or test the current class:
 
-- **Per-Collector Generation Fencing:** Every collector instance maintains an
-  `Arc<AtomicU64>` generation counter. Any reconnect or redial increments the
-  generation before spawning a new connection cycle.
-- **Loc-RIB Dump End-of-RIB (EoR) Ordering:** In-flight Loc-RIB dumps and
-  buffered live deltas (`ActiveDump`, `loc_rib_buffer`) are bound to the
-  specific generation that requested them. A redialed or removed collector
-  immediately aborts in-flight dump tasks. Live updates occurring after
-  generation start are held back and replayed only after the dump's End-of-RIB
-  marker, ensuring no post-generation updates precede the dump on the wire.
-- **Channel Saturation Isolation:** Slow or stalled collectors continue to fail
-  closed independently at the per-collector channel cap without stalling
-  adjacent collectors or impacting BGP session packet processing.
+- `rustbgpd --diff` text `restart_required_sections`
+  (`src/config/mod.rs:3801-3809`) and JSON `restart_required.rpki_changed`,
+  `bmp_changed`, `mrt_changed` (`:4094-4096`); the reload-applied text and
+  `has_reload_applied_changes` (`:4320-4325`, `:2504-2527`).
+- `rbgp config plan` `diff_json.reload_applied`
+  (`crates/cli/src/commands/config.rs:2429`).
+- The `CacheServer` field docs "Restart-required like the rest of `[rpki]`"
+  (`src/config/schema.rs:580`, `:585`), which feed
+  `docs/reference/rustbgpd.schema.json`.
+- The code comment at `src/peer_manager/mod.rs:1422-1425`.
+- Metric consumers that read per-cache series and would see a removed cache
+  until its series is reaped: `bgp_rpki_cache_end_of_data_ready{cache}` and
+  `bgp_rpki_cache_effective_expire_seconds{cache}`
+  (`crates/telemetry/src/metrics.rs:1997-2011`), read by `rbgp` control
+  (`crates/cli/src/commands/control.rs:58`) and `rbgp doctor`
+  `rpki.vrp_table` (`crates/cli/src/commands/doctor.rs:1229-1250`).
+- The reload matrix rows, `operations.md`, CHANGELOG, and upgrade notes.
+- No new RPCs.
 
----
+## Validation
 
-### Slice 2: RTR Cache Endpoint Reconciliation (`[[rpki.cache_servers]]`) [Size: M]
+Each slice ships with:
 
-The RPKI subsystem shall reconcile cache servers on SIGHUP by comparing active
-RTR clients against candidate `[[rpki.cache_servers]]`.
+1. The reload matrix row moved to reload-applied, with the scope boundary
+   stated.
+2. A failed-reload test: a candidate with an invalid `[bmp]`, `[rpki]`, or
+   `[mrt]` change is rejected in the plan phase and running collectors,
+   caches, and the MRT manager are untouched.
+3. A real-endpoint lane. BMP: the M81 trio
+   (`tests/interop/m81-bmp-trio-gobgp.clab.yml`; pmacct and gobmp are v3
+   semantic oracles, so a v3-to-v4 collector change is asserted through the
+   raw bmpsink collector). RTR: the M84 multi-cache topology
+   (`tests/interop/m84-rtr-multicache.clab.yml`) plus
+   `tests/interop/scripts/test-rtr-tcp-md5.sh` for authenticated caches.
+   Each lane proves no BGP session reset across add, change, and remove.
+4. Negative and edge cases:
+   - the kernel refuses TCP-AO or MD5 for an added cache: rejected in the
+     plan phase, nothing changes;
+   - a middle collector is removed during another collector's Loc-RIB dump;
+   - the same address is removed and re-added in one reload;
+   - the only cache is replaced (make-before-break, then the bounded wait
+     expiring);
+   - a mixed candidate whose generation is rejected: endpoints unchanged;
+   - a `KnownPartial` outcome: the reconcile still runs;
+   - a cache flapping while the reload runs;
+   - a supervised RTR client is removed without a fatal shutdown, while a
+     panic in another client still is fatal.
+5. CHANGELOG and upgrade notes for the class change.
 
-#### Reconciliation Contract
+## Sizing and order
 
-1. **Diffing:** Match configured cache servers by socket address (`address`).
-2. **Added Cache Server:**
-   - Candidate address and authentication options (TCP MD5 or TCP-AO) are
-     preflight-checked against the kernel.
-   - The address is registered with `CacheInventoryAttachment`.
-   - The initial End-of-Data readiness gauge is explicitly published as false:
-     `rpki_cache_end_of_data_ready{cache=...} = 0`.
-   - A new `RtrClient` task is spawned. The client initiates TCP connection,
-     performs RTR Reset Query, and populates initial VRP and ASPA tables.
-3. **Removed Cache Server:**
-   - The associated `RtrClient` task is aborted, active TCP sockets are closed,
-     and any kernel-installed TCP MD5 / TCP-AO keys are cleared.
-   - `VrpManager` receives `VrpUpdate::ServerDown { server }`.
-   - `VrpManager` purges the cache's tables from internal storage
-     (`server_tables.remove(&server)` and `server_aspa_tables.remove(&server)`).
-   - Merged VRP and ASPA tables are recomputed from the remaining active caches.
-   - Merged table deltas are dispatched to the RIB manager. The RIB invokes
-     delta-scoped revalidation over prefixes covered by the withdrawn records,
-     re-evaluating validity states and triggering Route Refresh only where
-     outcomes change. Peering sessions are NOT reset.
-   - Associated Prometheus metrics (`rpki_cache_effective_expire_seconds`,
-     `rpki_cache_end_of_data_ready`) are reaped.
-4. **Changed Cache Server:**
-   - If endpoint identity or authentication changes, the cache is treated as a
-     remove-then-add operation.
-   - If operational timers change (`refresh_interval`, `retry_interval`), the
-     running `RtrClient` is updated in place via its control channel without
-     dropping the live TCP connection or RTR session.
-5. **Unchanged Cache Server:**
-   - Live TCP connections, negotiated RTR session IDs, serial numbers, and
-     cached VRP/ASPA data remain completely uninterrupted.
-6. **Global RPKI Knobs:**
-   - Global validation parameters (`strict` mode enforcement, RFC 8212 fallback
-     interactions, and system-wide `expire_interval` ceilings) remain
-     `restart-required`. Attempting to alter these settings without a restart is
-     rejected during reload preflight.
+| Slice | Work | Size |
+|---|---|---|
+| Slice 1 | BMP: stable ids, per-collector stop and Termination, live `rib_out_post`, reconcile | M |
+| Slice 2 | RTR: supervisor stop path, inventory add/remove, client stop input, make-before-break, metric reap, operations contract | M |
+| Slice 3 | MRT: writability preflight, manager replace/stop, `.tmp` cleanup | S |
 
-#### Readiness and Strictness Fencing
-
-- A newly configured cache server must not cause false readiness reports.
-- When `rpki strict` mode is configured, BGP routes requiring valid RPKI state
-  shall not treat a newly added cache as authoritative until that cache reaches
-  its first successful End of Data (EoD).
-- If existing caches are already healthy and delivering VRPs, adding an
-  additional cache shall not degrade the operational readiness of the running
-  daemon.
-
----
-
-### Slice 3: MRT Dump Configuration (`[mrt]`) [Size: S]
-
-The MRT dump subsystem shall reconcile configuration changes on SIGHUP without
-affecting the BGP routing engine.
-
-#### Reconciliation Contract
-
-1. **Enablement (`None` → `Some(MrtConfig)`):**
-   - The candidate output directory path is validated for filesystem writability
-     during preflight.
-   - `MrtManager` task is spawned with configured interval, file prefix, and
-     compression settings.
-2. **Disabling (`Some(MrtConfig)` → `None`):**
-   - The running `MrtManager` task is aborted.
-   - Any currently open partial dump file is flushed, closed, and finalized.
-3. **Adjustment (`dump_interval`, `file_prefix`, `compress`):**
-   - If output parameters change, the running manager updates its interval
-     timers or restarts its periodic dump loop cleanly.
-   - Peering sessions and RIB states are completely unaffected.
-
----
-
-### Lifecycle, Failure Recovery, and SIGHUP Architecture
-
-#### SIGHUP Reload Route Classification
-
-The route classifier in `src/config/mod.rs` shall be updated:
-
-- Candidate configurations containing changes *only* to `[bmp]`, `[rpki]`, or
-  `[mrt]` do not touch static neighbor state, policy ASTs, or kernel dataplane
-  bindings. They execute along the sequential reload route (or a dedicated
-  auxiliary reconciler stage).
-- Mixed configurations (e.g. updating a neighbor description while adding a BMP
-  collector) execute the generation route for peer updates, followed by the
-  monitoring endpoint reconciliations.
-
-#### Failure Recovery and Atomic Preflight
-
-Preflight validation must run before any state mutation:
-
-1. **Validation:** All candidate IP addresses, ports, directories, and timer
-   ranges are verified during candidate parsing (`Config::load_and_validate`).
-2. **Clean Failure Rejection:** If preflight fails (e.g. invalid IP address,
-   unwritable MRT directory, or contradictory timer bounds), the reload halts
-   immediately. The error is logged, and running BMP collectors, RTR caches, MRT
-   tasks, and BGP sessions continue operating completely unaffected.
-3. **Runtime Connection Failures:** If an added BMP collector or RTR cache
-   fails to establish TCP connectivity at runtime, the failure is handled by the
-   subsystem's standard backoff and retry loop. It NEVER cascades into BGP
-   session failure or daemon instability.
-
----
-
-## Testing Matrix Requirements
-
-Every implementation slice must fulfill the following verification gates before
-acceptance:
-
-1. **Reload Matrix Updates:**
-   - Update `docs/reference/reload-matrix.md` to reflect `reload-applied` status
-     for the reconciled sections.
-2. **Negative / Failed-Reload Proofs:**
-   - Unit and integration tests verifying that a candidate configuration with
-     syntactic or semantic errors in `[bmp]`, `[rpki]`, or `[mrt]` is rejected
-     cleanly, leaving all running collectors, RTR caches, and MRT tasks running
-     with their prior configurations.
-3. **Real-Collector and Real-Cache Integration Lanes:**
-   - **BMP Lane:** Automated multi-collector test using real collector software
-     (pmacct or gobmp in the container test lane). Verify dynamic addition,
-     re-pointing, and removal of collectors while 1,000 routes are processed over
-     live BGP sessions, proving zero BGP session resets occur.
-   - **RPKI Lane:** Automated multi-cache test using real RTR validators
-     (StayRTR and Routinator). Verify:
-     - Adding a second validator reaches EoD and contributes to the merged table
-       without BGP flaps.
-     - Removing a validator purges its specific records, runs delta-scoped
-       revalidation, and updates route validation states without BGP session
-       flaps.
-   - **MRT Lane:** Verify enabling MRT dumps creates valid uncorrupted dump
-     files, adjusting interval updates dump frequency, and disabling stops dumps
-     cleanly.
-4. **Documentation & Release Artifacts:**
-   - Provide explicit CHANGELOG entries and upgrade notes detailing the
-     transition from `restart-required` to `reload-applied`.
-   - Document metric lifecycle semantics (specifically noting that Prometheus
-     series for removed collectors or caches are reaped upon removal).
-
----
-
-## Workload Sizing and Sequencing
-
-| Slice | Workload | Size | Dependencies |
-|---|---|---|---|
-| **ADR-0134** | Architecture and decision record | **S** | None |
-| **Slice 1** | BMP collectors reconcile (`[bmp]`) | **M** | ADR-0134 |
-| **Slice 2** | RTR cache endpoints reconcile (`[rpki]`) | **M** | ADR-0134, Slice 1 patterns |
-| **Slice 3** | MRT dump on/off and interval tuning (`[mrt]`) | **S** | ADR-0134 |
-
-**Sequencing:** Slice 1 (BMP) addresses the most acute operational need
-(telemetry re-pointing on route servers) and establishes the endpoint diffing
-and metric reaping infrastructure. Slice 2 (RTR) follows, integrating with the
-existing `CacheInventoryAttachment` and delta-scoped revalidation. Slice 3 (MRT)
-completes the auxiliary endpoint set.
-
----
+Slice 1 first: it is the acute case for route servers pointing telemetry at
+a new collector, and it establishes the diff, stop, and reap shape in the
+finalize step. Slice 2 follows and is the riskier one because of the
+supervisor and the replacement hazard. Slice 3 is independent.
 
 ## Consequences
 
 ### Positive
 
-- Route server and route reflector operators can adjust monitoring relays, add
-  redundant RPKI caches, and enable diagnostic dumps without dropping active
-  peering sessions.
-- Eliminates unnecessary network-wide route churn and CPU spikes caused by daemon
-  restarts for auxiliary endpoint reconfigurations.
-- Brings rustbgpd operational ergonomics to parity with BIRD and GoBGP.
-- Reuses proven internal patterns: the `[gnmi_dialout]` diffing lifecycle, BMP
-  generation fencing, and RTR delta-scoped revalidation.
+- Collector, cache, and dump changes on an already-enabled subsystem no
+  longer reset sessions or re-run fleet-wide ingest.
+- The reconcile reuses the dial-out finalize shape, the BMP generation
+  fence, and the RTR `ServerDown` path rather than adding parallel ones.
 
 ### Negative
 
-- Introduces additional state reconciliation logic into daemon reload processing.
-- Metric series for removed collectors and RTR caches disappear from `/metrics`,
-  requiring monitoring systems to handle dynamic metric label lifecycles (same
-  behavior as `[gnmi_dialout]`).
+- More reconciliation logic in the finalize step, and three new
+  small pieces of plumbing (collector stop signal, RTR client stop input,
+  inventory add/remove) that must be tested for the supervisor's fatal-exit
+  contract.
+- Series for removed collectors and caches disappear from `/metrics`, as
+  `gnmi_dialout_connected{target}` already does.
+- Removing a cache still soft-resets every RPKI/ASPA-dependent peer once;
+  the slice does not promise delta-scoped removal.
 
 ### Neutral
 
-- Global RPKI configuration knobs (validation mode strictness, RFC 8212
-  interactions, expire ceilings) remain restart-required.
-- SIGHUP and configuration transactions remain the sole operator interface; no
-  divergent gRPC CRUD APIs are introduced.
+- Enabling a subsystem from zero, and the first `loc_rib` collector, stay
+  restart-required.
+- SIGHUP remains the only path; config transactions keep rejecting these
+  sections as unsupported.

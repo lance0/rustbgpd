@@ -157,7 +157,7 @@ states that the whole decision is Superseded.
 | [0131](0131-read-only-mcp-server.md) | Read-only MCP server for the explain surfaces | Accepted | 2026-09-05 | Active |
 | [0132](0132-operator-read-path.md) | Operator reads during configuration transactions | Accepted | 2026-09-12 | Active |
 | [0133](0133-installed-import-counter-reads.md) | Installed import-counter reads | Accepted | 2026-09-13 | Active |
-| [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors and RPKI cache endpoints without session resets | Proposed | 2026-09-15 | Active |
+| [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors, RPKI cache endpoints, and MRT dumps | Proposed | 2026-09-15 | Unstated |
 
 ## Supporting records
 
@@ -171,12 +171,13 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The three records below do not state one of the navigation lifecycles above.
+The four records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
+- [ADR-0134](0134-reload-monitoring-and-validation-endpoints.md)
 
 ## Template
 
