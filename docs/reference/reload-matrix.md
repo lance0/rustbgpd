@@ -371,14 +371,10 @@ chains all add/change/remove cleanly via reload.
 | `[bmp]` | restart-required | BMP exporter binds once. |
 | `[mrt]` | restart-required | MRT writer opens its output dir at startup. |
 
-> **Architectural Forward-Reference ([ADR-0134](../adr/0134-reload-monitoring-and-validation-endpoints.md)):**
-> The daemon architecture is planned to transition `[bmp]`, `[rpki]`, and `[mrt]` from `restart-required` to `reload-applied` without dropping or bouncing established BGP sessions:
->
-> - **`[bmp]` collector reconcile (Slice 1):** Adopts the `[gnmi_dialout]` diffing model on SIGHUP. Added collectors start and send Initiation + Peer Up / Loc-RIB replays; removed collectors send BMP Termination, close TCP, and reap `bmp_*` metrics; changed collectors redial via per-collector generation closure; unchanged collectors keep their live TCP streams without Peer Up replays. Outbound UPDATE mirroring (`bmp_rib_out`) activates dynamically via shared atomic state without session bounces.
-> - **`[rpki]` RTR cache reconcile (Slice 2):** Diffing `[[rpki.cache_servers]]` on SIGHUP allows adding, removing, or repointing RTR caches live. Removing a cache purges its contributions from VRP and ASPA tables and triggers delta-scoped revalidation over affected prefixes without BGP session flaps. Unchanged caches retain active connections, session IDs, serials, and data. Global knobs (expire ceilings, strictness) remain restart-required.
-> - **`[mrt]` dump reconcile (Slice 3):** Dynamically enables, disables, or adjusts dump intervals via writer task control channels on SIGHUP without BGP session restarts.
->
-> These endpoints will execute along the sequential reload route or auxiliary subsystem reconciliation stage, preflighted for zero-effect rejection on validation error.
+[ADR-0134](../adr/0134-reload-monitoring-and-validation-endpoints.md) proposes
+reload-applying these sections for subsystems already enabled at startup; until
+an implementation ships they remain restart-required.
+
 ## `[gnmi_dialout]`
 
 | Section | Class | Notes |
@@ -548,4 +544,4 @@ before sending the configuration to the daemon.
 - [`docs/adr/0061-opt-in-unicast-linux-fib-integration.md`](../adr/0061-opt-in-unicast-linux-fib-integration.md) — FIB-discard reconciler scope.
 - [`docs/adr/0067-bfd-single-hop.md`](../adr/0067-bfd-single-hop.md) — BFD startup-only runtime.
 - [`docs/adr/0071-bgp-roles-otc.md`](../adr/0071-bgp-roles-otc.md) — RFC 9234 roles + OTC reload semantics.
-- [`docs/adr/0134-reload-monitoring-and-validation-endpoints.md`](../adr/0134-reload-monitoring-and-validation-endpoints.md) — Planned reload-applied reconciliation for BMP collectors, RPKI RTR caches, and MRT dumps without session resets.
+- [`docs/adr/0134-reload-monitoring-and-validation-endpoints.md`](../adr/0134-reload-monitoring-and-validation-endpoints.md) — Proposed reload-applied reconciliation for BMP collectors, RPKI RTR caches, and MRT dumps (not shipped).
