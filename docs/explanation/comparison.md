@@ -22,7 +22,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | No | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
-| Latest release (verified 2026-09-14)[^versions] | v0.70.0 (2026-09-13) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
+| Latest release (verified 2026-09-15)[^versions] | v0.70.1 (2026-09-15) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
 
 [^versions]: Dates are the upstream release announcements: FRR
     [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
