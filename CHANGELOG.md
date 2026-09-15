@@ -17,15 +17,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   router connections on the peering LAN, emitting one `[[neighbors]]` block
   per VLAN interface keyed by `vlan_interface_id`. The renderer permits
   repeated customer IDs and ASNs across distinct interfaces and addresses,
-  and accepts `peering_ips` as the member's address set. Sessions operate
-  under `next_hop_ownership = "strict_peer"`; routes announcing a sibling
-  router's address as next hop are rejected with NEXT_HOP (reject reason 6).
+  and requires `peering_ips` to be exactly the member's own interface
+  addresses. A member whose interfaces disagree on IRR filtering or
+  more-specifics is refused. Sessions operate under
+  `next_hop_ownership = "strict_peer"`; routes announcing a sibling router's
+  address as next hop are rejected with the `next_hop_ownership` reason,
+  which the Birdwatcher adapter reports as IXP Manager reject reason 8
+  ("NEXT HOP NOT PEER IP").
 - `rs-config-render` in IXP Manager mode now renders members with IRRDB
-  filtering disabled (`irr_filter: false` / `irrdbfilter` off) under Option 2a:
-  policies enforce hygiene, RPKI-invalid rejection, and first-AS checks while
+  filtering disabled (`irr_filter: false` / `irrdbfilter` off): policies
+  enforce hygiene, RPKI-invalid rejection, and first-AS checks while
   omitting IRR prefix and origin dataset terms. Render receipts record
-  IRRDB-disabled members in `irrdb_disabled_clients` and `warnings`, and a
-  warning is emitted on stderr at render.
+  IRRDB-disabled members in `irrdb_disabled_clients` and `warnings`, and the
+  render command prints each warning on stderr.
+- The IXP Manager export skin emits a customer's UI-filter rows once per
+  router even when the member has several interfaces on the VLAN.
 
 ### Fixed
 
@@ -77,6 +83,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade notes
 
+- `rs-config-render` render receipts gain two keys, `irrdb_disabled_clients`
+  and `warnings`. Activation, `status`, and `recover rollback` accept both
+  the previous six-key shape and the new one, so generations rendered before
+  this release remain valid current generations and rollback targets. Zero
+  `counts.prefixes` or `counts.origins` are accepted only when every client
+  is listed in `irrdb_disabled_clients`.
 - `rbgp config diff` and `rustbgpd --diff` report
   `SIGHUP reload route: generation` for a member join or leave that carries
   `md5_password` or `ttl_security`, where they previously reported

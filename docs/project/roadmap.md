@@ -429,7 +429,8 @@ The pinned v7.4 exporter now also resolves the stock 15-ASN no-transit default,
 exclusions, and explicit-override precedence; a v2-only token removes the
 stock-install refusal while legacy and v1 version skew still fail closed.
 Generic UI-filter semantics, custom-skin
-migration, and multi-address ownership remain open. The external adapter now
+migration, and same-AS sibling next-hop parity remain open; multi-router
+members render one strict-peer session per interface. The external adapter now
 also serves the IXP Manager v7.4 status, live protocol inventory/detail,
 symbols, member received, and member export slice through startup-only direct
 aliases or a bounded file-backed resolver that swaps atomically on Unix SIGHUP

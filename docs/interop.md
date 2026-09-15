@@ -101,10 +101,14 @@ This is a bounded export/render path, not full IXP Manager template or runtime
 compatibility. The renderer refuses applicable enabled production UI filters,
 active BIRD skin customizations, the implicit no-transit default, quarantine or
 non-route-server modes, protocols other than IPv4/IPv6, disabled large
-communities, IRR-disabled or empty clients, missing, malformed, or zero-port
-RPKI caches, wrong-family, duplicate or multi-address client data, unknown
-schema versions or fields, incomplete terminal markers, placeholder or overlong
-effective authentication, and symlink/public input or output paths.
+communities, IRR-enabled clients with an empty IRR answer, missing, malformed,
+or zero-port RPKI caches, wrong-family or duplicate client data, peering
+addresses that are not the member's own, interfaces of one member with
+differing IRR flags, unknown schema versions or fields, incomplete terminal
+markers, placeholder or overlong effective authentication, and symlink/public
+input or output paths. Members with several router connections render one
+session per VLAN interface under strict peer next-hop ownership; IRR-disabled
+members render without IRR terms and are named in the receipt.
 It renders only independently owned rustbgpd policy; no IXP Manager BIRD
 template or GPL source enters the binary or packaged artifacts.
 The generated policy names the pinned active AS-path length/first-AS and IRRDB
@@ -135,8 +139,8 @@ the pinned Bird's Eye daemon plugin against the emitted `_apiurl` and requires
 counted. Alerting content, thresholds, notification routing, and the session
 plugin against a live member session are not covered.
 Ambiguous remote or activation effects remain operator
-owned. Filter translation, custom-skin migration, and multi-address parity
-remain open.
+owned. Filter translation, custom-skin migration, and same-AS sibling
+next-hop parity (ADR-0107) remain open.
 
 ### CI coverage
 

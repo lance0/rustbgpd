@@ -264,21 +264,30 @@ The render refuses (exit 2, no receipt) rather than degrade: active BIRD
 skin overrides, applicable UI filters it cannot translate exactly, the
 legacy implicit no-transit token, quarantine or non-route-server routers,
 clients with IRR enabled but an empty or invalid IRR answer, missing or
-zero-port RPKI caches, wrong-family client data or peering addresses that
-omit the member's session IP, unknown schema fields, placeholder or
-overlong MD5, and symlink or public input/output paths. Each refusal names
-its cause on stderr; the member data is the thing to fix.
+zero-port RPKI caches, wrong-family client data, peering addresses that are
+not exactly the member's own interface addresses, interfaces of one member
+that disagree on IRR filtering or more-specifics, unknown schema fields,
+placeholder or overlong MD5, and symlink or public input/output paths. Each
+refusal names its cause on stderr; the member data is the thing to fix.
 
-Members with multiple router connections on the peering LAN are supported:
-the renderer emits one session per VLAN interface under
-`next_hop_ownership = "strict_peer"`. Each session must announce its own
-router's address as its BGP next hop; routes whose next hop is a sibling
-router's address are rejected with the NEXT_HOP reason (reject reason 6),
-diverging from IXP Manager's upstream BIRD templates which accept and tag
-them with `IXP_LC_INFO_SAME_AS_NEXT_HOP`. Members with IRRDB filtering
-disabled (`irr_filter: false`) are rendered with hygiene, RPKI-invalid
-rejection, and first-AS checks, omitting IRR terms, with a render-time
-warning and receipt note naming the member.
+Members with multiple router connections on the peering LAN render one
+session per VLAN interface. Every interface of the member must carry the
+same `irrdbfilter` and `rsmorespecifics` flags: IXP Manager's BIRD template
+filters every session of an ASN by its first interface's flags, while
+rustbgpd refuses the render when they disagree. Under
+`next_hop_ownership = "strict_peer"` each session must announce its own
+router's address as the BGP next hop. A route whose next hop is a sibling
+router's address is rejected with the daemon's `next_hop_ownership` reason
+(`rbgp rib received <addr> --rejected`), which the Birdwatcher adapter
+reports to IXP Manager as reject reason 8, "NEXT HOP NOT PEER IP"; IXP
+Manager's upstream BIRD templates accept such a route and tag it
+`IXP_LC_INFO_SAME_AS_NEXT_HOP` instead. With `per_client_best` and no
+Add-Path, each router receives its own best path; there is no ECMP toward
+third parties, the same as BIRD. Members with IRRDB filtering disabled
+(`irrdbfilter` off) are rendered with hygiene, RPKI-invalid rejection, and
+first-AS checks and no IRR terms; the render prints a warning and the
+receipt names the member in `irrdb_disabled_clients` and `warnings`.
+
 ## 3. Activate atomically
 
 Pre-create the per-handle state once, and enable the packaged per-handle
@@ -678,10 +687,13 @@ and the adapter at this commit:
   rendered under strict peer next-hop ownership.** Quarantine and
   non-route-server modes, and protocols other than 4/6 are refused at
   render. Members with multiple router connections on the peering LAN are
-  supported with one session per VLAN interface. Under
-  `next_hop_ownership = "strict_peer"`, each router must announce its own
-  next hop; routes whose next hop is a sibling router's address are rejected
-  with NEXT_HOP (reason 6) rather than accepted with
+  supported with one session per VLAN interface whose IRR and
+  more-specifics flags agree (IXP Manager's BIRD template uses the first
+  interface's flags for every session; rustbgpd refuses a disagreement).
+  Under `next_hop_ownership = "strict_peer"`, each router must announce its
+  own next hop; routes whose next hop is a sibling router's address are
+  rejected with the `next_hop_ownership` reason (IXP Manager reject reason 8
+  through the adapter) rather than accepted with
   `IXP_LC_INFO_SAME_AS_NEXT_HOP` as in IXP Manager's BIRD templates (full
   same-AS next-hop parity waits for ADR-0107). Members with IRRDB filtering
   disabled (`irrdbfilter` off) render hygiene, RPKI-invalid rejection, and
