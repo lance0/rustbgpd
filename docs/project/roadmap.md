@@ -122,7 +122,10 @@ its receipt records the release relationship. The
 [2026-09-14 run](../soaks/soak-rs-flagship-24h-2026-09-14.md) qualified the
 v0.70.0 release commit under the current gates (a reanalysis with the
 reload-window cadence rule; the original on-host verdict failed only the
-superseded zero-miss rule). The
+superseded zero-miss rule). v0.70.1 (2026-09-15) is a patch release of
+reload, configuration-path, CLI, and dependency fixes; it shipped on its
+per-change regression tests and main CI without a new 24-hour soak, so the
+flagship receipt still describes v0.70.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
