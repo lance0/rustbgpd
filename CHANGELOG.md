@@ -26,8 +26,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ("NEXT HOP NOT PEER IP").
 - `rs-config-render` in IXP Manager mode now renders members with IRRDB
   filtering disabled (`irr_filter: false` / `irrdbfilter` off): policies
-  enforce hygiene, RPKI-invalid rejection, and first-AS checks while
-  omitting IRR prefix and origin dataset terms. Render receipts record
+  enforce hygiene and first-AS checks, plus RPKI-invalid rejection when the
+  router has RPKI enabled, while omitting IRR prefix and origin dataset
+  terms. On a router with RPKI off, such a member is filtered only by
+  hygiene and the first-AS check. Render receipts record
   IRRDB-disabled members in `irrdb_disabled_clients` and `warnings`, and the
   render command prints each warning on stderr.
 - The IXP Manager export skin emits a customer's UI-filter rows once per

@@ -284,9 +284,11 @@ Manager's upstream BIRD templates accept such a route and tag it
 `IXP_LC_INFO_SAME_AS_NEXT_HOP` instead. With `per_client_best` and no
 Add-Path, each router receives its own best path; there is no ECMP toward
 third parties, the same as BIRD. Members with IRRDB filtering disabled
-(`irrdbfilter` off) are rendered with hygiene, RPKI-invalid rejection, and
-first-AS checks and no IRR terms; the render prints a warning and the
-receipt names the member in `irrdb_disabled_clients` and `warnings`.
+(`irrdbfilter` off) are rendered with hygiene and first-AS checks and no IRR
+terms; RPKI-invalid rejection applies too when the router has RPKI enabled.
+On a router with RPKI off, such a member is filtered only by hygiene and the
+first-AS check. The render prints a warning and the receipt names the member
+in `irrdb_disabled_clients` and `warnings`.
 
 ## 3. Activate atomically
 
@@ -696,10 +698,10 @@ and the adapter at this commit:
   through the adapter) rather than accepted with
   `IXP_LC_INFO_SAME_AS_NEXT_HOP` as in IXP Manager's BIRD templates (full
   same-AS next-hop parity waits for ADR-0107). Members with IRRDB filtering
-  disabled (`irrdbfilter` off) render hygiene, RPKI-invalid rejection, and
-  first-AS checks without IRR terms, recorded in the receipt and logged at
-  render. Filter translation beyond the bounded subset and custom-skin
-  migration remain open.
+  disabled (`irrdbfilter` off) render hygiene and first-AS checks without IRR
+  terms, plus RPKI-invalid rejection only when the router has RPKI enabled;
+  they are recorded in the receipt and logged at render. Filter translation
+  beyond the bounded subset and custom-skin migration remain open.
 - **No shadow/receive-only posture from this path.** IXP Manager mode
   refuses the site-local overlays (`--extra-rpol`/`--merge-toml`) and the
   helper activates only unmodified receipted candidates, so a deny-all

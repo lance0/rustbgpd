@@ -4,10 +4,12 @@
 //! not the announcing session's own address is retained under the
 //! `next_hop_ownership` reason that the cookbook documents.
 //!
-//! The peers live on loopback, and RFC 4271 §6.3 makes a 127/8 NEXT_HOP
-//! invalid before ownership is evaluated, so the accepted own-next-hop and
-//! rejected sibling-next-hop cases are exercised in a lab with routable
-//! member addresses; this test pins the session shape and the reason token.
+//! This test uses loopback member addresses, and both announcements carry a
+//! foreign next hop, so it pins only the two-session shape and the
+//! `next_hop_ownership` reason token. RFC 4271 §6.3 makes a 127/8 NEXT_HOP
+//! invalid before ownership is evaluated, so accepting a member's own next
+//! hop and rejecting a sibling router's next hop both need routable member
+//! addresses; those two cases were proven separately against FRR, not here.
 
 #![cfg(unix)]
 
