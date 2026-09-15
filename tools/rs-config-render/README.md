@@ -450,7 +450,9 @@ Any step failing before the swap (arouteserver exit, render refusal/abort,
 previous configuration running untouched. After the swap, changed IRR data
 and a member joining or leaving (its `[[neighbors]]` entry plus its two
 datasets) apply on that SIGHUP as one runtime generation; unchanged members
-keep their sessions. A candidate that fails to load at SIGHUP is rejected
+keep their sessions. This holds for a member carrying an MD5 session password
+and for a GTSM fleet. Changing the password or GTSM setting of a member
+that stays, together with dataset changes, is rejected before any effect. A candidate that fails to load at SIGHUP is rejected
 before any effect, and a failure part-way restores the prior member set,
 policies, and datasets and rejects the reload. In both cases the daemon keeps
 running the previous configuration while the rejected candidate stays in

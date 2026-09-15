@@ -3647,7 +3647,8 @@ fn runtime_added_neighbor_inbound_auth_error(
         peer_lifecycle_error_to_apply_error(PeerLifecycleError::RestartRequired(format!(
             "added neighbor {} resolves md5_password or ttl_security; inbound listener \
              enforcement is updated only by startup or SIGHUP reload — add this \
-             neighbor through the config file and SIGHUP",
+             neighbor, with any datasets it uses, through the config file and SIGHUP, \
+             which applies the join as one reload generation",
             config.address
         )))
     })

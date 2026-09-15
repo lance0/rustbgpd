@@ -314,7 +314,9 @@ The [operations guide](../reference/operations.md#configuration-reload-sighup)
 describes the current family combinations, dataset compensation, and failure
 handling. The [reload matrix](../reference/reload-matrix.md#sighup-reload-routes)
 separates whole-candidate routing from individual field reload classes.
-Generation settlement never returns a known-partial receipt. Lost accepted
+A failed generation never returns a known-partial receipt. The one known-partial
+generation outcome is an applied generation whose final listener step could not
+withdraw a removed neighbor's MD5 key or GTSM selector. Lost accepted
 acknowledgements or non-authoritative state instead recovery-fence the daemon;
 they are not reported as successful application or restoration.
 

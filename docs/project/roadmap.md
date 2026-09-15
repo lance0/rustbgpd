@@ -1427,8 +1427,8 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   RFC 8955 treats unknown component types as malformed NLRI. Inbound BoRR/EoRR
   channel-full retry was also investigated and rejected: the receive path already
   backpressures with `send().await`. Remaining work also includes rollback for
-  the sequential SIGHUP route (candidates with TCP-AO rotation or listener
-  MD5/GTSM changes, and non-generation changes), which still halts with a
+  the sequential SIGHUP route (candidates with TCP-AO rotation or in-place
+  listener MD5/GTSM edits, and non-generation changes), which still halts with a
   known-partial receipt; the generation route has restored retained state
   since v0.70.0;
   dynamic-neighbor `handle_inbound` split for readability; config snippets /

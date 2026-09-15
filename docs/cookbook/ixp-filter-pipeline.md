@@ -236,6 +236,14 @@ policies, and datasets and rejects the reload (a restore that cannot be proven
 policy, or dataset files fail to load at SIGHUP is rejected before any effect.
 Either way the daemon keeps serving its previous configuration while the
 candidate stays installed on disk, and the next refresh signals it again.
+Member joins and leaves take the same route when the member has an MD5
+session password, and in fleets that render GTSM (`ttl_security = true`) for every member. The daemon installs the
+joining member's listener MD5 key or GTSM selector before it adds the
+session, and withdraws a leaving member's entry only after the session is
+gone. If the reload fails, the prior entries return. Changing the
+password or GTSM setting of a member that stays, in the same refresh as
+dataset changes, is rejected before any effect: apply that edit in its own
+reload.
 The one rendered knob outside the generation is `honor_graceful_shutdown`
 (from `graceful_shutdown.enabled`): a refresh that flips it together with
 member or IRR-data changes is rejected before any effect, so make that site

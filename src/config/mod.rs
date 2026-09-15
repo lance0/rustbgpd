@@ -2314,8 +2314,10 @@ pub struct ConfigDiff {
     /// leave it restart-required.
     pub evpn_runtime_change_class: EvpnRuntimeChangeClass,
     /// The listener's authentication-bearing inbound inventory (MD5 keys or
-    /// enforcing GTSM selectors for static neighbors and dynamic ranges)
-    /// differs. Such a change keeps a reload on the sequential path.
+    /// enforcing GTSM selectors) changed for a static neighbor present in both
+    /// configs or for a dynamic range. Such an edit keeps a reload on the
+    /// sequential path. A static neighbor added or removed with its own key or
+    /// selector does not set this.
     pub listener_inbound_auth_changed: bool,
     /// The executor a SIGHUP of this candidate reaches after preflight, from
     /// the families visible in a diff. Dataset content and the compiled
@@ -3233,6 +3235,96 @@ pub(crate) fn listener_inbound_auth_bearing(
     (md5_keys, ttl_security)
 }
 
+/// Whether the authentication-bearing inventory changed for a selector both
+/// configs cover: an existing static neighbor's MD5 password or GTSM hops, or
+/// any dynamic range's. A static neighbor added or removed together with its
+/// own MD5 key or GTSM selector is not an edit, because the generation route
+/// installs the key before the session is added and withdraws it only after
+/// the session is removed (see [`listener_inbound_auth_staged`]).
+pub(crate) fn listener_inbound_auth_edited(
+    old: &ListenerInboundInventory,
+    new: &ListenerInboundInventory,
+) -> bool {
+    use rustbgpd_transport::TcpAoListenerOwnerKind::Static;
+
+    let static_hosts = |inventory: &ListenerInboundInventory| {
+        inventory
+            .1
+            .iter()
+            .filter(|policy| policy.owner == Static)
+            .map(|policy| (policy.peer, policy.prefix_len))
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let (old_hosts, new_hosts) = (static_hosts(old), static_hosts(new));
+    let whole_neighbor =
+        |selector: &(IpAddr, u8)| old_hosts.contains(selector) != new_hosts.contains(selector);
+    let (old_bearing, new_bearing) = (
+        listener_inbound_auth_bearing(old),
+        listener_inbound_auth_bearing(new),
+    );
+    let md5_edited = old_bearing
+        .0
+        .iter()
+        .filter(|key| !new_bearing.0.contains(key))
+        .chain(
+            new_bearing
+                .0
+                .iter()
+                .filter(|key| !old_bearing.0.contains(key)),
+        )
+        .any(|key| !whole_neighbor(&(key.peer, key.prefix_len)));
+    let gtsm_edited = old_bearing
+        .1
+        .iter()
+        .filter(|policy| !new_bearing.1.contains(policy))
+        .chain(
+            new_bearing
+                .1
+                .iter()
+                .filter(|policy| !old_bearing.1.contains(policy)),
+        )
+        .any(|policy| policy.owner != Static || !whole_neighbor(&(policy.peer, policy.prefix_len)));
+    md5_edited || gtsm_edited
+}
+
+/// The listener inventory a generation installs before it touches sessions:
+/// every candidate key and selector, plus each prior one the candidate drops.
+/// An added neighbor's inbound authentication is then enforced before its
+/// session exists, and a removed neighbor keeps its own until the generation
+/// has removed the session (or re-added it during compensation). The
+/// candidate wins where both carry the same selector.
+pub(crate) fn listener_inbound_auth_staged(
+    prior: &ListenerInboundInventory,
+    candidate: &ListenerInboundInventory,
+) -> ListenerInboundInventory {
+    let mut staged = candidate.clone();
+    staged.0.extend(
+        prior
+            .0
+            .iter()
+            .filter(|key| {
+                !candidate
+                    .0
+                    .iter()
+                    .any(|kept| (kept.peer, kept.prefix_len) == (key.peer, key.prefix_len))
+            })
+            .cloned(),
+    );
+    staged.1.extend(
+        prior
+            .1
+            .iter()
+            .filter(|policy| {
+                !candidate.1.iter().any(|kept| {
+                    (kept.owner, kept.peer, kept.prefix_len)
+                        == (policy.owner, policy.peer, policy.prefix_len)
+                })
+            })
+            .cloned(),
+    );
+    staged
+}
+
 /// The change families a SIGHUP candidate touches, as the reload coordinator
 /// sees them after restart-required pinning.
 ///
@@ -3264,7 +3356,9 @@ pub struct SighupReloadFamilies {
     pub honor_knobs: bool,
     /// A TCP-AO keyring edit (an ordered live rotation at reload time).
     pub tcp_ao: bool,
-    /// Listener inbound MD5/GTSM inventory.
+    /// An in-place listener inbound MD5/GTSM edit: an existing neighbor's or
+    /// range's password or GTSM setting. Whole static neighbors added or
+    /// removed with their own authentication are generation-class.
     pub listener_auth: bool,
 }
 
@@ -3357,8 +3451,11 @@ impl SighupReloadRoute {
 /// refreshes the referencing peers. A generation-class or dataset change
 /// combined with dynamic ranges, EVPN runtime, FIB tables, or the honor
 /// knobs is rejected because those families do not retain and restore
-/// priors. Dataset content or bindings combined with TCP-AO rotation or
-/// listener inbound-auth changes is also rejected. Without dataset changes,
+/// priors. Dataset content or bindings combined with TCP-AO rotation or an
+/// in-place listener inbound-auth edit is also rejected; a static neighbor
+/// added or removed with its own MD5 key or GTSM selector is not such an
+/// edit, and the generation stages its listener inventory around the
+/// session change. Without dataset changes,
 /// those authentication edits keep a generation-class candidate on the
 /// sequential path: they have separate ordered protocols and cannot be
 /// folded into the session reshape primitive. Candidates with no
@@ -4550,8 +4647,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         listener_inbound_auth_inventory(new),
     ) {
         (Ok(old_inventory), Ok(new_inventory)) => {
-            listener_inbound_auth_bearing(&old_inventory)
-                != listener_inbound_auth_bearing(&new_inventory)
+            listener_inbound_auth_edited(&old_inventory, &new_inventory)
         }
         _ => false,
     };

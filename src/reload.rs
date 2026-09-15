@@ -2245,8 +2245,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
         }
     };
     let listener_inventory_changed = current_inventory != desired_inventory;
-    let listener_auth_changed = config::listener_inbound_auth_bearing(&current_inventory)
-        != config::listener_inbound_auth_bearing(&desired_inventory);
+    let listener_auth_edited =
+        config::listener_inbound_auth_edited(&current_inventory, &desired_inventory);
     let listener_replacement = (listener_inventory_changed && tcp_ao_listener.is_some())
         .then_some((desired_inventory, current_inventory));
     let policy_generation_changed = !policy_diff.definitions_added.is_empty()
@@ -2273,7 +2273,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
         fib_tables: fib_tables_changed,
         honor_knobs: honor_graceful_shutdown_changed || honor_blackhole_changed,
         tcp_ao: tcp_ao_rotation_candidate,
-        listener_auth: listener_auth_changed,
+        listener_auth: listener_auth_edited,
     });
     info!(route = %route.describe(), "reload route classified");
     match route {
@@ -4016,26 +4016,36 @@ async fn reload_generation_route(
         effects.limits_rib_tx = Some(rib_tx);
     }
 
-    // Listener inbound inventory: the per-neighbor selectors of the final
-    // roster converge before sessions are touched, exactly as on the
-    // sequential path, so an added peer's inbound connection meets its
-    // selector. Authentication-bearing changes never reach this route.
-    if let Some((listener, ((md5_keys, ttl_security), prior_inventory))) = listener_replacement {
-        if let Err(error) = listener_mutation_step(
-            listener
-                .replace_inbound_auth(md5_keys, ttl_security, || progress.begin_mutation())
-                .await,
-            progress,
-        ) {
-            error!(error = %error, "listener inbound inventory replacement failed before the generation");
-            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
-                RuntimeConfigFenceReason::AcknowledgementLost
-            } else {
-                RuntimeConfigFenceReason::KnownDivergence
-            };
-            return fenced_reload_failure(progress, "listener_auth.apply", error, reason);
+    // Listener inbound inventory: stage the candidate's keys and selectors
+    // together with every prior one the candidate drops before sessions are
+    // touched, so an added peer's inbound connection meets its MD5 key or
+    // GTSM selector and a removed peer keeps its own until its session is
+    // gone. The dropped entries are withdrawn only after the generation
+    // settles. In-place authentication edits never reach this route.
+    let mut listener_trim = None;
+    if let Some((listener, (desired_inventory, prior_inventory))) = listener_replacement {
+        let staged = config::listener_inbound_auth_staged(&prior_inventory, &desired_inventory);
+        if staged != prior_inventory {
+            let (md5_keys, ttl_security) = staged.clone();
+            if let Err(error) = listener_mutation_step(
+                listener
+                    .replace_inbound_auth(md5_keys, ttl_security, || progress.begin_mutation())
+                    .await,
+                progress,
+            ) {
+                error!(error = %error, "listener inbound inventory replacement failed before the generation");
+                let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                    RuntimeConfigFenceReason::AcknowledgementLost
+                } else {
+                    RuntimeConfigFenceReason::KnownDivergence
+                };
+                return fenced_reload_failure(progress, "listener_auth.apply", error, reason);
+            }
+            effects.listener_prior = Some((listener, prior_inventory));
         }
-        effects.listener_prior = Some((listener, prior_inventory));
+        if staged != desired_inventory {
+            listener_trim = Some((listener, desired_inventory));
+        }
     }
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -4068,6 +4078,30 @@ async fn reload_generation_route(
     match reply_rx.await {
         Ok(ReloadGenerationOutcome::Applied(receipt)) => {
             progress.mark_accepted_effect();
+            // The removed sessions are gone: withdraw their listener keys and
+            // selectors. A failure leaves only entries for addresses that are
+            // no longer configured, which the peer manager refuses anyway, so
+            // the adopted generation stands as a known partial.
+            if let Some((listener, (md5_keys, ttl_security))) = listener_trim
+                && let Err(error) = listener_mutation_step(
+                    listener
+                        .replace_inbound_auth(md5_keys, ttl_security, || progress.begin_mutation())
+                        .await,
+                    progress,
+                )
+            {
+                error!(%receipt, error = %error, "reload generation applied, but withdrawing removed neighbors' listener MD5/GTSM entries failed");
+                return acknowledge_partial(
+                    progress,
+                    new_config,
+                    &desired_snapshot,
+                    ReloadStepFailure {
+                        bucket: "listener_auth.withdraw",
+                        target: String::new(),
+                        error,
+                    },
+                );
+            }
             info!(%receipt, "config reload complete (one runtime generation)");
             acknowledged_reload(
                 new_config,

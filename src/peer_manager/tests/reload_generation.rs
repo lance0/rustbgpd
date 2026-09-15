@@ -2400,6 +2400,415 @@ async fn late_failure_after_dataset_binding_remove_reinstates_prior_binding_set(
     harness.shutdown().await;
 }
 
+/// Inbound authentication carried by the member in the listener tests.
+#[derive(Clone, Copy, Debug)]
+enum MemberAuth {
+    Md5,
+    Gtsm,
+}
+
+const AUTH_MEMBER: &str = "127.0.0.99";
+const AUTH_MEMBER_SECRET: &str = "member-99-secret";
+
+/// The dataset member fixture with the member on a loopback address that a
+/// test client can bind, carrying its own MD5 password or GTSM selector.
+fn write_authenticated_member_fixture(
+    fixture: &RsFixture,
+    member: bool,
+    hold_time: u32,
+    auth: MemberAuth,
+) {
+    write_dataset_member_fixture(fixture, member, hold_time);
+    let line = match auth {
+        MemberAuth::Md5 => format!("md5_password = \"{AUTH_MEMBER_SECRET}\""),
+        MemberAuth::Gtsm => "ttl_security = true".to_string(),
+    };
+    let toml = std::fs::read_to_string(&fixture.config_path).unwrap();
+    let record = "address = \"10.0.0.99\"\nremote_asn = 65099";
+    assert_eq!(toml.contains(record), member);
+    let toml = toml.replace(
+        record,
+        &format!("address = \"{AUTH_MEMBER}\"\nremote_asn = 65099\n{line}"),
+    );
+    std::fs::write(&fixture.config_path, toml).unwrap();
+}
+
+/// Whether the listener enforces the member's inbound authentication right
+/// now. MD5: a connection signed with the member's password completes; the
+/// kernel drops a signed SYN when the listener holds no key for its source.
+/// GTSM: the accepted child drops the member's default-TTL segments.
+async fn listener_enforces_member_auth(
+    listener_addr: std::net::SocketAddr,
+    accept_rx: &mut mpsc::Receiver<rustbgpd_transport::AcceptedConnection>,
+    auth: MemberAuth,
+) -> bool {
+    use std::io::Write as _;
+
+    let connect = tokio::task::spawn_blocking(move || -> std::io::Result<std::net::TcpStream> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        if matches!(auth, MemberAuth::Md5) {
+            rustbgpd_transport::set_tcp_md5sig(&socket, listener_addr, AUTH_MEMBER_SECRET)?;
+        }
+        socket.bind(&std::net::SocketAddr::new(AUTH_MEMBER.parse().unwrap(), 0).into())?;
+        socket.connect_timeout(&listener_addr.into(), Duration::from_millis(1500))?;
+        Ok(socket.into())
+    })
+    .await
+    .unwrap();
+    let Ok(mut client) = connect else {
+        assert!(
+            matches!(auth, MemberAuth::Md5),
+            "plain connect failed: {connect:?}"
+        );
+        return false;
+    };
+    let mut accepted = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+        .await
+        .expect("listener accepted the member connection")
+        .expect("accept channel open");
+    match auth {
+        MemberAuth::Md5 => true,
+        MemberAuth::Gtsm => {
+            // Write only after the accept, which installs IP_MINTTL first.
+            client.write_all(b"ping").unwrap();
+            let mut buf = [0u8; 4];
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                accepted.stream.read_exact(&mut buf),
+            )
+            .await
+            .is_err()
+        }
+    }
+}
+
+/// Listener state observed around one generation: before the manager applies
+/// any session effect, and after it settles but before the reload coordinator
+/// sees the result.
+struct ListenerObservation {
+    outcome: crate::reload::SighupReloadOutcome,
+    manager: String,
+    before_sessions: bool,
+    after_sessions: bool,
+}
+
+/// A live BGP listener bound with a prior config's inbound inventory, and the
+/// member authentication the probes use.
+struct MemberListener {
+    handle: rustbgpd_transport::TcpAoListenerHandle,
+    addr: std::net::SocketAddr,
+    accept_rx: mpsc::Receiver<rustbgpd_transport::AcceptedConnection>,
+    task: tokio::task::JoinHandle<()>,
+    auth: MemberAuth,
+}
+
+impl MemberListener {
+    async fn bind(prior: &Config, auth: MemberAuth) -> Self {
+        let (md5_keys, ttl_security) =
+            crate::config::listener_inbound_auth_inventory(prior).unwrap();
+        let (accept_tx, accept_rx) = mpsc::channel(4);
+        let bound = rustbgpd_transport::BgpListener::bind_with_options(
+            "127.0.0.1:0".parse().unwrap(),
+            accept_tx,
+            rustbgpd_transport::ListenerSocketOptions {
+                md5_keys,
+                ttl_security,
+                ..rustbgpd_transport::ListenerSocketOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        Self {
+            handle: bound.tcp_ao_rotation_handle(),
+            addr: bound.local_addr().unwrap(),
+            task: tokio::spawn(bound.run()),
+            accept_rx,
+            auth,
+        }
+    }
+
+    async fn enforces(&mut self) -> bool {
+        listener_enforces_member_auth(self.addr, &mut self.accept_rx, self.auth).await
+    }
+}
+
+/// One real SIGHUP reload of the fixture's current file against `prior`,
+/// with a live listener and the harness manager serving the generation.
+/// With `stop_listener`, the listener task is aborted after the manager
+/// settles, so the coordinator's post-generation listener step cannot reach
+/// the listener.
+async fn reload_with_listener(
+    harness: &mut GenerationHarness,
+    fixture: &RsFixture,
+    prior: &Arc<crate::config::AcceptedConfigSnapshot>,
+    listener: &mut MemberListener,
+    stop_listener: bool,
+) -> ListenerObservation {
+    use crate::reload::{SighupReloadPlan, reload_config_with_tcp_ao};
+
+    let current = harness.mgr.current_config.clone();
+    let desired = Arc::new(
+        crate::config::AcceptedConfigSnapshot::load_for_reload(
+            &fixture.config_path,
+            prior,
+            &current.policy.dataset_bindings,
+        )
+        .unwrap(),
+    );
+    let live_uds = current.global.telemetry.grpc_uds.clone();
+    let (pm_tx, _pm_rx) = mpsc::channel(16);
+    let (internal_tx, mut internal_rx) = mpsc::channel(16);
+    let reload = reload_config_with_tcp_ao(
+        SighupReloadPlan {
+            baseline_runtime: current,
+            desired,
+        },
+        None,
+        live_uds.as_ref(),
+        &pm_tx,
+        Some(&internal_tx),
+        None,
+        None,
+        None,
+        Some(&listener.handle),
+        None,
+    );
+    let serve = async {
+        let Ok(Some(InternalCommand::ApplyReloadGeneration {
+            candidate,
+            actions,
+            datasets,
+            reply,
+        })) = tokio::time::timeout(Duration::from_secs(10), internal_rx.recv()).await
+        else {
+            panic!("the reload did not dispatch a generation");
+        };
+        let before_sessions =
+            listener_enforces_member_auth(listener.addr, &mut listener.accept_rx, listener.auth)
+                .await;
+        let outcome = Box::pin(
+            harness
+                .mgr
+                .apply_reload_generation(*candidate, actions, datasets),
+        )
+        .await;
+        let after_sessions =
+            listener_enforces_member_auth(listener.addr, &mut listener.accept_rx, listener.auth)
+                .await;
+        let manager = format!("{outcome:?}");
+        if stop_listener {
+            listener.task.abort();
+            while !listener.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        }
+        reply.send(outcome).unwrap();
+        (manager, before_sessions, after_sessions)
+    };
+    let (outcome, (manager, before_sessions, after_sessions)) =
+        tokio::join!(Box::pin(reload), serve);
+    ListenerObservation {
+        outcome,
+        manager,
+        before_sessions,
+        after_sessions,
+    }
+}
+
+/// An authenticated member join and leave through a real SIGHUP reload with
+/// a live listener. The member's MD5 key or GTSM selector is installed before
+/// its session is added and withdrawn only after its session is removed. When
+/// a later replacement fails, the prior member set, dataset bindings, and
+/// listener inventory all return: a joining member's entry is withdrawn, and
+/// a leaving member's entry stays installed for its re-added session.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "join, leave, their compensated failures, and the withdrawal failure share one live listener per authentication kind"
+)]
+async fn authenticated_member_generation_stages_and_restores_listener_inventory() {
+    for auth in [MemberAuth::Md5, MemberAuth::Gtsm] {
+        let member = key(AUTH_MEMBER.parse().unwrap());
+        let replaced = key("2001:db8::3".parse().unwrap());
+        let fixture = dataset_generation_fixture();
+        write_authenticated_member_fixture(&fixture, false, 90, auth);
+        let prior = Arc::new(
+            crate::config::AcceptedConfigSnapshot::load(&fixture.config_path, None).unwrap(),
+        );
+        let prior_config = prior.config();
+        let mut listener = MemberListener::bind(&prior_config, auth).await;
+        assert!(!listener.enforces().await);
+        let mut harness = GenerationHarness::new(&prior_config);
+
+        // Join, failing on the group reshape after the member was added.
+        write_authenticated_member_fixture(&fixture, true, 60, auth);
+        harness
+            .mgr
+            .inject_reconfigure_failures
+            .insert(replaced.clone(), 0);
+        let join = reload_with_listener(&mut harness, &fixture, &prior, &mut listener, false).await;
+        assert!(
+            join.before_sessions,
+            "{auth:?}: joining member's entry staged before its session"
+        );
+        assert!(
+            join.manager.starts_with("FullyCompensated"),
+            "{auth:?}: {}",
+            join.manager
+        );
+        assert!(
+            join.after_sessions,
+            "{auth:?}: entry kept until the manager settled"
+        );
+        let crate::reload::SighupReloadOutcome::CleanNoEffect(error) = join.outcome else {
+            panic!(
+                "{auth:?}: compensated join must reject cleanly: {:?}",
+                join.outcome
+            );
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("prior generation restored"),
+            "{auth:?}: {error}"
+        );
+        assert!(
+            !listener.enforces().await,
+            "{auth:?}: joining member's entry withdrawn with the restored inventory"
+        );
+        assert_eq!(harness.mgr.current_config, prior_config);
+        assert_eq!(harness.mgr.current_config.policy.dataset_bindings.len(), 1);
+        assert!(!harness.mgr.peers.contains_key(&member));
+
+        // The identical join applies once the failure clears.
+        harness.mgr.inject_reconfigure_failures.clear();
+        let join = reload_with_listener(&mut harness, &fixture, &prior, &mut listener, false).await;
+        assert!(join.before_sessions && join.after_sessions, "{auth:?}");
+        let crate::reload::SighupReloadOutcome::Acknowledged(adopted) = join.outcome else {
+            panic!("{auth:?}: join must apply: {:?}", join.outcome);
+        };
+        assert!(matches!(
+            adopted.completion,
+            crate::reload::SighupCompletion::Complete
+        ));
+        assert!(listener.enforces().await, "{auth:?}");
+        assert_eq!(harness.mgr.current_config, adopted.runtime);
+        assert!(harness.mgr.peers.contains_key(&member));
+        assert_eq!(harness.mgr.current_config.policy.dataset_bindings.len(), 3);
+        let joined = Arc::new(
+            crate::config::AcceptedConfigSnapshot::load(&fixture.config_path, None).unwrap(),
+        );
+
+        // Leave, failing on the group reshape after the member was removed.
+        write_authenticated_member_fixture(&fixture, false, 90, auth);
+        harness
+            .mgr
+            .inject_reconfigure_failures
+            .insert(replaced.clone(), 0);
+        let leave =
+            reload_with_listener(&mut harness, &fixture, &joined, &mut listener, false).await;
+        assert!(
+            leave.before_sessions,
+            "{auth:?}: leaving member's entry kept before removal"
+        );
+        assert!(
+            leave.manager.starts_with("FullyCompensated"),
+            "{auth:?}: {}",
+            leave.manager
+        );
+        assert!(
+            leave.after_sessions,
+            "{auth:?}: entry present for the re-added session"
+        );
+        assert!(
+            matches!(
+                leave.outcome,
+                crate::reload::SighupReloadOutcome::CleanNoEffect(_)
+            ),
+            "{auth:?}: {:?}",
+            leave.outcome
+        );
+        assert!(
+            listener.enforces().await,
+            "{auth:?}: leaving member's entry stays installed after compensation"
+        );
+        assert!(
+            harness.mgr.peers.contains_key(&member),
+            "{auth:?}: member re-added"
+        );
+        assert_eq!(harness.mgr.current_config.policy.dataset_bindings.len(), 3);
+
+        // The identical leave withdraws the entry only after the session is gone.
+        harness.mgr.inject_reconfigure_failures.clear();
+        let leave =
+            reload_with_listener(&mut harness, &fixture, &joined, &mut listener, false).await;
+        assert!(
+            leave.manager.starts_with("Applied"),
+            "{auth:?}: {}",
+            leave.manager
+        );
+        assert!(
+            leave.after_sessions,
+            "{auth:?}: entry outlives the removed session"
+        );
+        assert!(
+            matches!(
+                &leave.outcome,
+                crate::reload::SighupReloadOutcome::Acknowledged(authority)
+                    if matches!(authority.completion, crate::reload::SighupCompletion::Complete)
+            ),
+            "{auth:?}: leave must apply: {:?}",
+            leave.outcome
+        );
+        assert!(!harness.mgr.peers.contains_key(&member));
+        assert!(
+            !listener.enforces().await,
+            "{auth:?}: entry withdrawn after the generation"
+        );
+
+        // A leave whose withdrawal cannot reach the listener keeps the adopted
+        // generation as a known partial: the member is gone, and only its
+        // unconfigured address keeps a listener entry.
+        write_authenticated_member_fixture(&fixture, true, 90, auth);
+        let rejoin =
+            reload_with_listener(&mut harness, &fixture, &prior, &mut listener, false).await;
+        assert!(
+            rejoin.manager.starts_with("Applied"),
+            "{auth:?}: {}",
+            rejoin.manager
+        );
+        write_authenticated_member_fixture(&fixture, false, 90, auth);
+        let leave =
+            reload_with_listener(&mut harness, &fixture, &joined, &mut listener, true).await;
+        assert!(
+            leave.manager.starts_with("Applied"),
+            "{auth:?}: {}",
+            leave.manager
+        );
+        let crate::reload::SighupReloadOutcome::Acknowledged(authority) = leave.outcome else {
+            panic!(
+                "{auth:?}: the applied leave is adopted: {:?}",
+                leave.outcome
+            );
+        };
+        let crate::reload::SighupCompletion::KnownPartial { failures } = &authority.completion
+        else {
+            panic!("{auth:?}: {:?}", authority.completion);
+        };
+        assert!(
+            format!("{failures:?}").contains("listener_auth.withdraw"),
+            "{auth:?}: {failures:?}"
+        );
+        assert_eq!(harness.mgr.current_config, authority.runtime);
+        assert!(!harness.mgr.peers.contains_key(&member));
+
+        harness.shutdown().await;
+    }
+}
+
 fn prepare_dataset_candidate(
     fixture: &RsFixture,
     prior: &Config,

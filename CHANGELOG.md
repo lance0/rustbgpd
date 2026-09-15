@@ -11,6 +11,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- SIGHUP now applies a route-server member join or leave with its datasets
+  when the member carries `md5_password` or `ttl_security` (GTSM). The change
+  applies as one compensated runtime generation, not as a rejected compound
+  candidate, so `rs-config-render activate` settles these candidates for MD5
+  members and GTSM fleets without a restart, and unchanged members keep their
+  sessions. The daemon installs the joining member's listener MD5 key or GTSM
+  selector before it adds the session, and withdraws a leaving member's entry
+  only after the session is removed. If the generation fails later, the prior
+  member set, dataset bindings, and listener MD5 keys and GTSM selectors are
+  restored. A static neighbor added or removed with its own authentication
+  but without dataset changes also takes the generation route now, instead
+  of the sequential route. Changing the password or GTSM setting of a
+  neighbor that stays configured is still sequential on its own and rejects
+  when combined with dataset changes. The runtime refusal for adding an
+  authenticated neighbor through a config transaction now says that SIGHUP
+  applies the join, datasets included, as one generation.
+
+### Upgrade notes
+
+- `rbgp config diff` and `rustbgpd --diff` report
+  `SIGHUP reload route: generation` for a member join or leave that carries
+  `md5_password` or `ttl_security`, where they previously reported
+  `rejected` (with datasets) or `sequential` (without). Such a reload now
+  needs no restart. A generation that applies but cannot withdraw a departed
+  member's listener entry returns a known-partial receipt with bucket
+  `listener_auth.withdraw`. The entries it leaves cover only addresses that
+  are no longer configured.
+
 ## [0.70.1] — 2026-09-15
 
 ### Security

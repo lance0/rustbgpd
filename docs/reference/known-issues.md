@@ -377,8 +377,8 @@ resolved.
   daemon). Sequential-route candidates — those without generation-class
   changes (for example `[[dynamic_neighbors]]`, EVPN runtime tables,
   `[[fib_tables]]`, or the honor knobs alone), and generation-class
-  changes combined with TCP-AO rotation or listener MD5/GTSM changes while
-  dataset contents are unchanged — still halt at the
+  changes combined with TCP-AO rotation or an MD5/GTSM edit to a neighbor
+  that stays configured while dataset contents are unchanged — still halt at the
   first step failure with an authoritative known-partial receipt; the
   operator fixes the TOML and reloads again, and reverse replay of the
   successful steps is not implemented. Generation-class or dataset changes

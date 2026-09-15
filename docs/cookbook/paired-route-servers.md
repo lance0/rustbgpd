@@ -62,8 +62,10 @@ is your rollback while the first proves the change. Per update:
    and rejected family combinations leave runtime untouched. Member, policy,
    and dataset changes, including a member joining or leaving, take the
    generation route: a later failure restores RS1's prior generation and
-   rejects the reload. Only the sequential route (for example a TCP-AO
-   rotation or listener MD5/GTSM change) can halt with known partial
+   rejects the reload, including for a member with `md5_password` or
+   `ttl_security`. Only the sequential route (for example a TCP-AO rotation,
+   or a changed password or GTSM setting on a member that stays) can halt
+   with known partial
    changes. `rustbgpd --diff` prints the route as `SIGHUP reload route`;
    inspect the reload result and effective configuration before proceeding
    ([SIGHUP reload routes](../reference/reload-matrix.md#sighup-reload-routes)).
