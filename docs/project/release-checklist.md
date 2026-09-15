@@ -65,7 +65,9 @@ diff actually ran before tagging.
       for the name and becomes an ordinary registry baseline automatically
       once that normal release is visible.
 - [ ] **IXP Manager / Bird's Eye contract** — when the IXP Manager,
-      Bird's Eye, renderer, adapter, or interop-doc surface changed,
+      Bird's Eye, renderer, adapter, or interop-doc surface changed, or the
+      daemon surface the oracle builds against changed (`proto/`,
+      `crates/api/`, `crates/policy/`, `crates/cli/`, or `src/config/`),
       `.github/workflows/ixp-compat.yml` ran and is green. It is path-scoped on
       pull requests and main-branch pushes and also supports manual dispatch,
       so confirm the applicable run instead of assuming a green tag build
