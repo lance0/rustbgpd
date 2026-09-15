@@ -72,6 +72,8 @@ mod unix {
         "counts",
         "refusals",
         "host",
+        "irrdb_disabled_clients",
+        "warnings",
         GENERATED,
         "strict_check",
     ];
@@ -184,6 +186,8 @@ mod unix {
             || !exact_keys(&receipt["counts"], COUNT_KEYS)
             || !exact_keys(&receipt["refusals"], REFUSAL_KEYS)
             || !exact_keys(&receipt["strict_check"], &["binary_version", "passed"])
+            || !receipt["irrdb_disabled_clients"].is_array()
+            || !receipt["warnings"].is_array()
             || !matches!(
                 receipt["input"]["schema"].as_str(),
                 Some(
@@ -198,11 +202,11 @@ mod unix {
             || !receipt["input"]["sha256"]
                 .as_str()
                 .is_some_and(valid_digest)
-            || !COUNT_KEYS.iter().all(|key| {
-                receipt["counts"][key]
-                    .as_u64()
-                    .is_some_and(|count| count > 0)
-            })
+            || receipt["counts"]["clients"]
+                .as_u64()
+                .is_none_or(|count| count == 0)
+            || receipt["counts"]["prefixes"].as_u64().is_none()
+            || receipt["counts"]["origins"].as_u64().is_none()
             || receipt["refusals"]["status"] != "passed"
             || !REFUSAL_KEYS[1..]
                 .iter()

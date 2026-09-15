@@ -161,9 +161,11 @@ must not be activated:
             "runtime_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4" },
   "input": { "ixp_manager_version": "7.4.0", "router_handle": "b2-rs1-lan1-ipv4",
              "schema": "rustbgpd.ixp-manager.router-config/v2", "sha256": "072f1678…" },
+  "irrdb_disabled_clients": [],
   "refusals": { "active_ui_filters": 0, "multi_address_clients": 0,
                 "route_server_skin_files": 0, "status": "passed" },
-  "strict_check": { "binary_version": "rustbgpd 0.65.0", "passed": true }
+  "strict_check": { "binary_version": "rustbgpd 0.65.0", "passed": true },
+  "warnings": []
 }
 ```
 
@@ -261,11 +263,22 @@ the candidate is mode 0600 because it carries the members' MD5 secrets.
 The render refuses (exit 2, no receipt) rather than degrade: active BIRD
 skin overrides, applicable UI filters it cannot translate exactly, the
 legacy implicit no-transit token, quarantine or non-route-server routers,
-IRR-disabled or empty clients, missing or zero-port RPKI caches,
-wrong-family or multi-address clients, unknown schema fields, placeholder
-or overlong MD5, and symlink or public input/output paths. Each refusal
-names its cause on stderr; the member data is the thing to fix.
+clients with IRR enabled but an empty or invalid IRR answer, missing or
+zero-port RPKI caches, wrong-family client data or peering addresses that
+omit the member's session IP, unknown schema fields, placeholder or
+overlong MD5, and symlink or public input/output paths. Each refusal names
+its cause on stderr; the member data is the thing to fix.
 
+Members with multiple router connections on the peering LAN are supported:
+the renderer emits one session per VLAN interface under
+`next_hop_ownership = "strict_peer"`. Each session must announce its own
+router's address as its BGP next hop; routes whose next hop is a sibling
+router's address are rejected with the NEXT_HOP reason (reject reason 6),
+diverging from IXP Manager's upstream BIRD templates which accept and tag
+them with `IXP_LC_INFO_SAME_AS_NEXT_HOP`. Members with IRRDB filtering
+disabled (`irr_filter: false`) are rendered with hygiene, RPKI-invalid
+rejection, and first-AS checks, omitting IRR terms, with a render-time
+warning and receipt note naming the member.
 ## 3. Activate atomically
 
 Pre-create the per-handle state once, and enable the packaged per-handle
@@ -551,10 +564,10 @@ Add, for this mode:
 **Render exits 2 and names a refusal.** The member data or the skin is the
 problem, not the daemon: an active BIRD skin override (the exporter lists
 `route_server_skin_files`), a UI filter the bounded subset cannot express,
-a client with IRR disabled or an empty IRR answer, a zero-port RPKI cache,
-multiple addresses on one client. Fix it in IXP Manager; nothing was
-published and no receipt was written — the receipt exists only after a
-strict pass.
+a client with IRR enabled but an empty IRR answer, a zero-port RPKI cache,
+or peering addresses omitting the session address. Fix it in IXP Manager;
+nothing was published and no receipt was written — the receipt exists only
+after a strict pass.
 
 **Activate exits 2.** The candidate is not the renderer's (hand-edited
 files fail the receipt hash recheck — "immutable generation content
@@ -661,11 +674,20 @@ and the adapter at this commit:
   [renderer README](../../tools/rs-config-render/README.md#pruning-retained-generations)).
   The helper does not retry indefinitely, deploy services, or call IXP Manager
   from `activate`.
-- **Single-session clients, IPv4/IPv6 unicast, route-server routers only.**
-  Multi-address clients, quarantine and non-route-server modes, and
-  protocols other than 4/6 are refused at render. Filter translation
-  beyond the bounded subset, custom-skin migration, and multi-address
-  parity remain open.
+- **IPv4/IPv6 unicast, route-server routers only; multi-connection members
+  rendered under strict peer next-hop ownership.** Quarantine and
+  non-route-server modes, and protocols other than 4/6 are refused at
+  render. Members with multiple router connections on the peering LAN are
+  supported with one session per VLAN interface. Under
+  `next_hop_ownership = "strict_peer"`, each router must announce its own
+  next hop; routes whose next hop is a sibling router's address are rejected
+  with NEXT_HOP (reason 6) rather than accepted with
+  `IXP_LC_INFO_SAME_AS_NEXT_HOP` as in IXP Manager's BIRD templates (full
+  same-AS next-hop parity waits for ADR-0107). Members with IRRDB filtering
+  disabled (`irrdbfilter` off) render hygiene, RPKI-invalid rejection, and
+  first-AS checks without IRR terms, recorded in the receipt and logged at
+  render. Filter translation beyond the bounded subset and custom-skin
+  migration remain open.
 - **No shadow/receive-only posture from this path.** IXP Manager mode
   refuses the site-local overlays (`--extra-rpol`/`--merge-toml`) and the
   helper activates only unmodified receipted candidates, so a deny-all

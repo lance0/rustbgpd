@@ -263,7 +263,7 @@ struct Complete {
 #[derive(Debug)]
 pub struct Candidate {
     pub files: BTreeMap<String, String>,
-    metadata: Value,
+    pub metadata: Value,
 }
 
 fn quoted(value: &str) -> String {
@@ -564,7 +564,7 @@ fn validate(
     }
     let mut customers = BTreeMap::new();
     let mut vlis = BTreeSet::new();
-    let mut asns = BTreeSet::new();
+    let mut asns = BTreeMap::new();
     let mut addresses = BTreeSet::new();
     let mut effective = Vec::new();
     for client in &document.clients {
@@ -572,56 +572,76 @@ fn validate(
             .address
             .parse()
             .map_err(|_| Error::Refused("invalid addressing"))?;
+        let peering_ips: Vec<IpAddr> = client
+            .peering_ips
+            .iter()
+            .map(|ip| ip.parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Error::Refused("invalid addressing"))?;
         if client.customer_id == 0
             || client.vlan_interface_id == 0
             || client.asn == 0
             || client.max_prefix == 0
             || (router.protocol == 4) != address.is_ipv4()
-            || customers.insert(client.customer_id, client.asn).is_some()
+            || customers
+                .insert(client.customer_id, client.asn)
+                .is_some_and(|asn| asn != client.asn)
+            || asns
+                .insert(client.asn, client.customer_id)
+                .is_some_and(|cust| cust != client.customer_id)
             || !vlis.insert(client.vlan_interface_id)
-            || !asns.insert(client.asn)
             || !addresses.insert(address)
-            || client.peering_ips.len() != 1
-            || client.peering_ips[0] != client.address
+            || peering_ips.is_empty()
+            || !strictly_sorted(&peering_ips)
+            || !peering_ips.contains(&address)
+            || peering_ips
+                .iter()
+                .any(|ip| (router.protocol == 4) != ip.is_ipv4())
         {
             return Err(Error::Refused("invalid or duplicate client data"));
         }
-        if !client.irr_filter
-            || client.origins.is_empty()
-            || client.origins.contains(&0)
-            || !strictly_sorted(&client.origins)
-        {
-            return Err(Error::Refused("effective IRR origins are unavailable"));
-        }
-        let keys = client
-            .prefixes
-            .iter()
-            .map(|prefix| prefix_key(prefix, router.protocol))
-            .collect::<Option<Vec<_>>>()
-            .ok_or(Error::Refused("invalid addressing"))?;
-        if keys.is_empty() || !strictly_sorted(&keys) {
-            return Err(Error::Refused("effective IRR prefixes are unavailable"));
-        }
-        let prefixes = client
-            .prefixes
-            .iter()
-            .zip(keys)
-            .filter_map(|(prefix, (_, length))| {
-                if client.more_specifics && length > document.policy.minimum_prefix_length {
-                    None
-                } else if client.more_specifics && length < document.policy.minimum_prefix_length {
-                    Some(format!(
-                        "{prefix} le {}",
-                        document.policy.minimum_prefix_length
-                    ))
-                } else {
-                    Some(prefix.clone())
-                }
-            })
-            .collect::<Vec<_>>();
-        if prefixes.is_empty() {
-            return Err(Error::Refused("effective IRR prefixes are unavailable"));
-        }
+        let prefixes = if client.irr_filter {
+            if client.origins.is_empty()
+                || client.origins.contains(&0)
+                || !strictly_sorted(&client.origins)
+            {
+                return Err(Error::Refused("effective IRR origins are unavailable"));
+            }
+            let keys = client
+                .prefixes
+                .iter()
+                .map(|prefix| prefix_key(prefix, router.protocol))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(Error::Refused("invalid addressing"))?;
+            if keys.is_empty() || !strictly_sorted(&keys) {
+                return Err(Error::Refused("effective IRR prefixes are unavailable"));
+            }
+            let prefixes = client
+                .prefixes
+                .iter()
+                .zip(keys)
+                .filter_map(|(prefix, (_, length))| {
+                    if client.more_specifics && length > document.policy.minimum_prefix_length {
+                        None
+                    } else if client.more_specifics
+                        && length < document.policy.minimum_prefix_length
+                    {
+                        Some(format!(
+                            "{prefix} le {}",
+                            document.policy.minimum_prefix_length
+                        ))
+                    } else {
+                        Some(prefix.clone())
+                    }
+                })
+                .collect::<Vec<_>>();
+            if prefixes.is_empty() {
+                return Err(Error::Refused("effective IRR prefixes are unavailable"));
+            }
+            prefixes
+        } else {
+            Vec::new()
+        };
         match &client.auth {
             Auth::None => {}
             Auth::Md5 { .. } if router.skip_md5 => {
@@ -737,8 +757,26 @@ pub fn render_document(
         filters.entry(filter.customer_id).or_default().push(filter);
     }
     files.insert("policy/ixp-hygiene.rpol".into(), render_hygiene(&document));
+    let mut irrdb_disabled_clients = Vec::new();
+    let mut warnings = Vec::new();
     for (client, prefixes) in document.clients.iter().zip(&effective) {
         let slug = client.vlan_interface_id;
+        if !client.irr_filter {
+            let desc = format!("{} (ASN {}, VLI {})", client.name, client.asn, slug);
+            eprintln!(
+                "rs-config-render: warning: member {desc} has IRR filtering disabled; rendering policy without IRR terms"
+            );
+            warnings.push(format!(
+                "member {desc} has IRR filtering disabled; rendering policy without IRR terms"
+            ));
+            irrdb_disabled_clients.push(json!({
+                "customer_id": client.customer_id,
+                "vlan_interface_id": client.vlan_interface_id,
+                "name": client.name,
+                "asn": client.asn,
+                "address": client.address,
+            }));
+        }
         files.insert(
             format!("policy/client-{slug}.rpol"),
             render_client(
@@ -748,14 +786,16 @@ pub fn render_document(
                 document.router.rpki,
             )?,
         );
-        files.insert(
-            format!("datasets/client-{slug}-origins.list"),
-            render_ixp_asn_dataset(&client.origins),
-        );
-        files.insert(
-            format!("datasets/client-{slug}-prefixes.list"),
-            render_ixp_prefix_dataset(prefixes),
-        );
+        if client.irr_filter {
+            files.insert(
+                format!("datasets/client-{slug}-origins.list"),
+                render_ixp_asn_dataset(&client.origins),
+            );
+            files.insert(
+                format!("datasets/client-{slug}-prefixes.list"),
+                render_ixp_prefix_dataset(prefixes),
+            );
+        }
     }
     files.insert(
         "birdwatcher-protocol-aliases.conf".into(),
@@ -770,10 +810,12 @@ pub fn render_document(
             "router_handle": document.router.handle, "sha256": sha256(input)},
         "counts": {"clients": document.clients.len(),
             "prefixes": effective.iter().map(Vec::len).sum::<usize>(),
-            "origins": document.clients.iter().map(|c| c.origins.len()).sum::<usize>()},
+            "origins": document.clients.iter().filter(|c| c.irr_filter).map(|c| c.origins.len()).sum::<usize>()},
         "refusals": {"status": "passed", "active_ui_filters": 0,
             "route_server_skin_files": 0, "multi_address_clients": 0},
-        "host": binding
+        "host": binding,
+        "irrdb_disabled_clients": irrdb_disabled_clients,
+        "warnings": warnings,
     });
     Ok(Candidate { files, metadata })
 }
@@ -827,6 +869,9 @@ fn render_config(
         "]\nexport_chain = [\"ixp-transparent-export\", \"ixp-manager-own-as-export-scrub\"]\n",
     );
     for client in &document.clients {
+        if !client.irr_filter {
+            continue;
+        }
         let slug = client.vlan_interface_id;
         let _ = write!(
             out,
@@ -955,9 +1000,13 @@ fn render_client(
     let compiled_receive = reachable_receive_overlap(&reachable_receive)
         .then(|| compile_receive_cells(&reachable_receive))
         .transpose()?;
-    let mut out = format!(
-        "# GENERATED IXP Manager IRR policy.\ndataset asn-set client-{slug}-origins\ndataset prefix-set client-{slug}-prefixes\n"
-    );
+    let mut out = if client.irr_filter {
+        format!(
+            "# GENERATED IXP Manager IRR policy.\ndataset asn-set client-{slug}-origins\ndataset prefix-set client-{slug}-prefixes\n"
+        )
+    } else {
+        "# GENERATED IXP Manager client policy (IRR filtering disabled).\n".to_owned()
+    };
     if let Some(compiled) = &compiled_receive
         && !compiled.prefixes.is_empty()
     {
@@ -970,11 +1019,19 @@ fn render_client(
     // IXP Manager accepts an RPKI-valid route after the origin check and
     // before the IRRDB prefix filter (`filter_rpki()` in neighbors.foil.php).
     let rpki_valid_bypass = if rpki { " && route.rpki != valid" } else { "" };
-    let _ = write!(
-        out,
-        "policy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes){rpki_valid_bypass} {{ reject }} }}\n",
-        client.asn
-    );
+    if client.irr_filter {
+        let _ = write!(
+            out,
+            "policy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n    term reject-irrdb-origin-as-filtered {{ if !(route.origin-as in client-{slug}-origins) {{ reject }} }}\n    term reject-irrdb-prefix-filtered {{ if !(route.prefix in client-{slug}-prefixes){rpki_valid_bypass} {{ reject }} }}\n",
+            client.asn
+        );
+    } else {
+        let _ = write!(
+            out,
+            "policy client-{slug} {{\n    term reject-first-as-not-peer-as {{ if route.as-path.len >= 1 && !(route.as-path matches \"^{}_\") {{ reject }} }}\n",
+            client.asn
+        );
+    }
     for filter in filters {
         let Some(function) = filter.action_advertise.advertise_function() else {
             continue;
@@ -994,7 +1051,11 @@ fn render_client(
     }
     out.push_str("    term accept-authorized { accept }\n}\n");
     if filters.is_empty() {
-        render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+        if client.irr_filter {
+            render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+        } else {
+            render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn);
+        }
         return Ok(out);
     }
     let _ = writeln!(out, "policy client-{slug}-receive {{");
@@ -1081,7 +1142,11 @@ fn render_client(
         }
     }
     out.push_str("    term accept-unmatched { accept }\n}\n");
-    render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+    if client.irr_filter {
+        render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+    } else {
+        render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn);
+    }
     Ok(out)
 }
 
@@ -1122,6 +1187,21 @@ fn render_ixp_client_tests(out: &mut String, slug: u64, peer_asn: u32, rpki: boo
          \x20   dataset client-{slug}-origins {{ 64498 }}\n\
          \x20   dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}\n\
          \x20   route {{ prefix 198.51.100.0/24; as-path \"{peer_asn} 64497\"; rpki valid }}\n\
+         \x20   expect client-{slug} == reject\n\
+         }}\n"
+    );
+}
+
+fn render_ixp_irr_disabled_client_tests(out: &mut String, slug: u64, peer_asn: u32) {
+    let wrong_asn = if peer_asn == 64496 { 64497 } else { 64496 };
+    let _ = write!(
+        out,
+        "\ntest client-{slug}-synthetic-first-as-authorized {{\n\
+         \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64498\" }}\n\
+         \x20   expect client-{slug} == accept\n\
+         }}\n\
+         \ntest client-{slug}-synthetic-first-as-mismatch {{\n\
+         \x20   route {{ prefix 192.0.2.0/24; as-path \"{wrong_asn} {peer_asn}\" }}\n\
          \x20   expect client-{slug} == reject\n\
          }}\n"
     );

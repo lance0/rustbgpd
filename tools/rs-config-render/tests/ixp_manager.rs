@@ -522,15 +522,16 @@ fn strict_schema_completion_and_refusal_matrix_fail_closed() {
         "/unsupported/route_server_skin_files",
         serde_json::json!(["bird2/standard.foil.php"]),
     );
-    refuses("/clients/0/irr_filter", serde_json::json!(false));
     refuses("/clients/0/origins", serde_json::json!([]));
     refuses("/clients/0/origins/0", serde_json::json!(0));
     refuses("/clients/0/prefixes", serde_json::json!([]));
     refuses("/clients/0/address", serde_json::json!("not-an-ip"));
     refuses("/clients/0/address", serde_json::json!("2001:db8::1"));
+    refuses("/clients/0/peering_ips", serde_json::json!([]));
+    refuses("/clients/0/peering_ips", serde_json::json!(["10.1.0.37"]));
     refuses(
         "/clients/0/peering_ips",
-        serde_json::json!(["10.1.0.36", "10.1.0.37"]),
+        serde_json::json!(["10.1.0.37", "10.1.0.36"]),
     );
     refuses("/clients/0/auth/value", serde_json::json!("changeme"));
     refuses("/clients/0/auth/value", serde_json::json!("x".repeat(81)));
@@ -1528,4 +1529,186 @@ fn missing_checker_is_refused_before_any_write() {
         !out.exists(),
         "an unavailable checker must not leave a candidate"
     );
+}
+
+fn rustbgpd_bin() -> std::path::PathBuf {
+    let mut bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_rs-config-render"));
+    bin.pop();
+    bin.push("rustbgpd");
+    bin
+}
+
+#[cfg(unix)]
+#[test]
+fn multi_connection_member_renders_two_neighbors_and_passes_strict_check() {
+    let mut input = v2_value(V2_SUPPORTED);
+    let mut client2 = input["clients"][0].clone();
+    client2["vlan_interface_id"] = 2.into();
+    client2["address"] = "10.1.0.11".into();
+    client2["peering_ips"] = serde_json::json!(["10.1.0.10", "10.1.0.11"]);
+    input["clients"][0]["peering_ips"] = serde_json::json!(["10.1.0.10", "10.1.0.11"]);
+    input["clients"].as_array_mut().unwrap().push(client2);
+    input["complete"]["client_count"] = 3.into();
+
+    let candidate = rendered_v2(&input).expect("multi-connection member renders cleanly");
+    assert_eq!(candidate.files.len(), 12);
+    assert!(candidate.files.contains_key("policy/client-1.rpol"));
+    assert!(candidate.files.contains_key("policy/client-2.rpol"));
+    assert!(candidate.files.contains_key("policy/client-4.rpol"));
+    assert!(
+        candidate
+            .files
+            .contains_key("datasets/client-1-origins.list")
+    );
+    assert!(
+        candidate
+            .files
+            .contains_key("datasets/client-2-origins.list")
+    );
+    assert!(
+        candidate
+            .files
+            .contains_key("datasets/client-4-origins.list")
+    );
+
+    let config = &candidate.files["config.toml"];
+    assert!(config.contains("address = \"10.1.0.10\""));
+    assert!(config.contains("address = \"10.1.0.11\""));
+    assert!(config.contains("address = \"10.1.0.6\""));
+    assert!(config.contains("remote_asn = 1213"));
+    assert!(config.contains("remote_asn = 112"));
+    assert!(config.contains("next_hop_ownership = \"strict_peer\""));
+
+    let aliases = &candidate.files["birdwatcher-protocol-aliases.conf"];
+    assert!(aliases.contains("pb_0001_as1213=10.1.0.10@master4"));
+    assert!(aliases.contains("pb_0002_as1213=10.1.0.11@master4"));
+    assert!(aliases.contains("pb_0004_as112=10.1.0.6@master4"));
+
+    assert!(
+        run_rpol_tests(&candidate.files["policy/client-1.rpol"])
+            .unwrap()
+            .all_passed()
+    );
+    assert!(
+        run_rpol_tests(&candidate.files["policy/client-2.rpol"])
+            .unwrap()
+            .all_passed()
+    );
+    assert!(
+        run_rpol_tests(&candidate.files["policy/client-4.rpol"])
+            .unwrap()
+            .all_passed()
+    );
+
+    let bin = rustbgpd_bin();
+    if bin.is_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        fs::write(&input_path, serde_json::to_vec_pretty(&input).unwrap()).unwrap();
+        set_mode(&input_path, 0o600);
+        let out = temp.path().join("candidate");
+        let binding =
+            RenderBinding::new("b2-rs1-lan1-ipv4", &temp.path().join("b2-rs1-lan1-ipv4")).unwrap();
+        let count = rs_config_render::ixp_manager::write_checked_candidate(
+            &input_path,
+            &out,
+            300,
+            &bin,
+            &binding,
+            SchemaVersion::V2,
+        )
+        .expect("rustbgpd --check --strict must pass on multi-connection candidate");
+        assert_eq!(count, candidate.files.len());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("render-receipt.json")).unwrap()).unwrap();
+        assert_eq!(receipt["strict_check"]["passed"], true);
+        assert_eq!(receipt["counts"]["clients"], 3);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn irrdb_disabled_member_renders_clean_policy_without_irr_terms() {
+    let mut input = v2_value(V2_SUPPORTED);
+    // Disable IRR filtering for client 1 (AS112, ASN 112, VLI 4)
+    input["clients"][1]["irr_filter"] = false.into();
+    input["clients"][1]["origins"] = serde_json::json!([]);
+    input["clients"][1]["prefixes"] = serde_json::json!([]);
+
+    let candidate = rendered_v2(&input).expect("IRRDB-disabled member renders cleanly");
+    assert_eq!(candidate.files.len(), 7);
+    assert!(
+        candidate
+            .files
+            .contains_key("datasets/client-1-origins.list")
+    );
+    assert!(
+        candidate
+            .files
+            .contains_key("datasets/client-1-prefixes.list")
+    );
+    assert!(
+        !candidate
+            .files
+            .contains_key("datasets/client-4-origins.list")
+    );
+    assert!(
+        !candidate
+            .files
+            .contains_key("datasets/client-4-prefixes.list")
+    );
+
+    let config = &candidate.files["config.toml"];
+    assert!(config.contains("[policy.datasets.client-1-origins]"));
+    assert!(!config.contains("[policy.datasets.client-4-origins]"));
+    assert!(!config.contains("[policy.datasets.client-4-prefixes]"));
+
+    let client4_rpol = &candidate.files["policy/client-4.rpol"];
+    assert!(client4_rpol.contains("IRR filtering disabled"));
+    assert!(!client4_rpol.contains("dataset asn-set"));
+    assert!(!client4_rpol.contains("dataset prefix-set"));
+    assert!(!client4_rpol.contains("reject-irrdb-origin-as-filtered"));
+    assert!(!client4_rpol.contains("reject-irrdb-prefix-filtered"));
+    assert!(client4_rpol.contains("term reject-first-as-not-peer-as"));
+    assert!(client4_rpol.contains("term accept-authorized { accept }"));
+
+    assert!(run_rpol_tests(client4_rpol).unwrap().all_passed());
+
+    let disabled = candidate.metadata["irrdb_disabled_clients"]
+        .as_array()
+        .unwrap();
+    assert_eq!(disabled.len(), 1);
+    assert_eq!(disabled[0]["name"], "AS112");
+    assert_eq!(disabled[0]["asn"], 112);
+    assert_eq!(disabled[0]["vlan_interface_id"], 4);
+
+    let warnings = candidate.metadata["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("AS112"));
+    assert!(warnings[0].as_str().unwrap().contains("112"));
+
+    let bin = rustbgpd_bin();
+    if bin.is_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let input_path = temp.path().join("input.json");
+        fs::write(&input_path, serde_json::to_vec_pretty(&input).unwrap()).unwrap();
+        set_mode(&input_path, 0o600);
+        let out = temp.path().join("candidate");
+        let binding =
+            RenderBinding::new("b2-rs1-lan1-ipv4", &temp.path().join("b2-rs1-lan1-ipv4")).unwrap();
+        let count = rs_config_render::ixp_manager::write_checked_candidate(
+            &input_path,
+            &out,
+            300,
+            &bin,
+            &binding,
+            SchemaVersion::V2,
+        )
+        .expect("rustbgpd --check --strict must pass on candidate with IRRDB-disabled member");
+        assert_eq!(count, candidate.files.len());
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(out.join("render-receipt.json")).unwrap()).unwrap();
+        assert_eq!(receipt["strict_check"]["passed"], true);
+        assert_eq!(receipt["irrdb_disabled_clients"][0]["name"], "AS112");
+    }
 }

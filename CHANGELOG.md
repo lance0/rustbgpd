@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rs-config-render` in IXP Manager mode now renders members with multiple
+  router connections on the peering LAN, emitting one `[[neighbors]]` block
+  per VLAN interface keyed by `vlan_interface_id`. The renderer permits
+  repeated customer IDs and ASNs across distinct interfaces and addresses,
+  and accepts `peering_ips` as the member's address set. Sessions operate
+  under `next_hop_ownership = "strict_peer"`; routes announcing a sibling
+  router's address as next hop are rejected with NEXT_HOP (reject reason 6).
+- `rs-config-render` in IXP Manager mode now renders members with IRRDB
+  filtering disabled (`irr_filter: false` / `irrdbfilter` off) under Option 2a:
+  policies enforce hygiene, RPKI-invalid rejection, and first-AS checks while
+  omitting IRR prefix and origin dataset terms. Render receipts record
+  IRRDB-disabled members in `irrdb_disabled_clients` and `warnings`, and a
+  warning is emitted on stderr at render.
+
 ### Fixed
 
 - SIGHUP now applies a route-server member join or leave with its datasets
