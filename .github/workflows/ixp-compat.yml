@@ -8,6 +8,13 @@ on:
       - "tools/rs-config-render/**"
       - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
+      # The oracle builds rustbgpd, rbgp, and the adapter's gRPC client, so
+      # daemon-side API, policy, CLI, and config changes can break it too.
+      - "proto/**"
+      - "crates/api/**"
+      - "crates/policy/**"
+      - "crates/cli/**"
+      - "src/config/**"
       - ".github/workflows/ixp-compat.yml"
       - "docs/interop.md"
       - "docs/cookbook/ixp-filter-pipeline.md"
@@ -20,6 +27,13 @@ on:
       - "tools/rs-config-render/**"
       - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
+      # The oracle builds rustbgpd, rbgp, and the adapter's gRPC client, so
+      # daemon-side API, policy, CLI, and config changes can break it too.
+      - "proto/**"
+      - "crates/api/**"
+      - "crates/policy/**"
+      - "crates/cli/**"
+      - "src/config/**"
       - ".github/workflows/ixp-compat.yml"
       - "docs/interop.md"
       - "docs/cookbook/ixp-filter-pipeline.md"

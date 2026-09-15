@@ -2,6 +2,8 @@
 # run unfiltered. The public lane must see pure source renames because release
 # documentation cross-references source paths; the embedding lane is cheap
 # enough to share that stronger trigger instead of recreating path filters.
+# The markdown-pinned-tests lane runs the Rust tests that read a changed
+# Markdown file, and compiles nothing when a change touches none of them.
 name: Public docs contract
 
 on:
@@ -23,11 +25,80 @@ jobs:
             job_name: public-docs-contract
           - contract: embedding
             job_name: embedding-doc-contract
+          - contract: markdown-tests
+            job_name: markdown-pinned-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # These tests run here only because this workflow has no path filter.
+      - name: Check this workflow's trigger contract
+        if: matrix.contract == 'markdown-tests'
+        shell: bash
+        run: |
+          actual="$(sed -n '/^on:/,/^permissions:/p' .github/workflows/public-docs-contract.yml | sed '$d')"
+          expected='on:
+            push:
+              branches: [main]
+            pull_request:'
+          if [[ "$actual" != "$expected" ]]; then
+            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
+            echo "Public docs contract must run on every PR and main push, with no path filter" >&2
+            exit 1
+          fi
+      - name: Check the Markdown read by Rust tests is listed
+        if: matrix.contract == 'markdown-tests'
+        run: |
+          python3 -m unittest -v scripts/test_check_markdown_test_pins.py
+          python3 scripts/check_markdown_test_pins.py
+      - name: Select Rust tests that read changed Markdown
+        id: pinned
+        if: matrix.contract == 'markdown-tests'
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE:-$PUSH_BEFORE}"
+          selection="$RUNNER_TEMP/markdown-pinned-tests"
+          if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+            # No diff base (a new branch push): select every listed file.
+            git ls-files '*.md' > "$RUNNER_TEMP/changed"
+          else
+            git diff --name-only --no-renames "$base"...HEAD > "$RUNNER_TEMP/changed"
+          fi
+          python3 scripts/check_markdown_test_pins.py --select \
+            < "$RUNNER_TEMP/changed" > "$selection"
+          if [[ -s "$selection" ]]; then
+            cat "$selection"
+            echo "selection=$selection" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changed Markdown is read by a Rust test."
+          fi
+      - uses: dtolnay/rust-toolchain@v1 # stable
+        if: steps.pinned.outputs.selection
+        with:
+          toolchain: stable
+      - uses: ./.github/actions/install-protobuf
+        if: steps.pinned.outputs.selection
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pinned.outputs.selection
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run Rust tests that read changed Markdown
+        if: steps.pinned.outputs.selection
+        shell: bash
+        env:
+          SELECTION: ${{ steps.pinned.outputs.selection }}
+        run: |
+          set -euo pipefail
+          while read -r -a args; do
+            echo "::group::${args[*]}"
+            cargo test --locked "${args[@]}"
+            echo "::endgroup::"
+          done < "$SELECTION"
       - name: Check published crate boundary
         if: matrix.contract == 'embedding'
         run: |
