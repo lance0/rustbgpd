@@ -3300,6 +3300,14 @@ fn render_client_rpol(
     }
     if rpki_roa_tag.is_some() {
         let overrides = render_test_dataset_overrides(rc, true);
+        // Prefix enforcement is what rejects a not-found route from an
+        // authorized origin. Without it there is no prefix term to fail, so
+        // the route reaches accept-authorized on the origin dataset alone.
+        let (not_found_name, not_found_verdict) = if rc.enforce_prefix {
+            ("rpki-not-found-without-route-object-is-rejected", "reject")
+        } else {
+            ("rpki-not-found-without-route-object-is-accepted", "accept")
+        };
         for (name, path, rpki, verdict) in [
             (
                 "rpki-valid-without-route-object-is-accepted",
@@ -3307,12 +3315,7 @@ fn render_client_rpol(
                 "valid",
                 "accept",
             ),
-            (
-                "rpki-not-found-without-route-object-is-rejected",
-                "64496",
-                "not-found",
-                "reject",
-            ),
+            (not_found_name, "64496", "not-found", not_found_verdict),
             (
                 "rpki-valid-unregistered-origin-is-rejected",
                 "64497",
