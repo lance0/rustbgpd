@@ -171,6 +171,18 @@ async fn unrecognized_receipt_status_fails_closed_after_printing() {
         .store(999, Ordering::SeqCst);
     for args in [
         vec!["--json", "config", "plan", &path],
+        // An explicit token bypasses implicit planning, so this exercises
+        // an unknown final apply receipt rather than an unknown plan.
+        vec![
+            "--json",
+            "config",
+            "apply",
+            &path,
+            "--expected-runtime-snapshot-token",
+            "kv1:planned:1",
+            "--plan-token",
+            "reviewed-plan-token",
+        ],
         vec!["--json", "config", "rollback", "1"],
     ] {
         let output = run(&server.addr, &args).await;
