@@ -302,7 +302,8 @@ pub enum FlowSpecAction {
     TrafficAction {
         /// Sample matching traffic.
         sample: bool,
-        /// Terminal action — do not evaluate further `FlowSpec` rules.
+        /// Terminal Action bit (RFC 8955 §7.3): when set, evaluate subsequent
+        /// `FlowSpec` rules; when unset, stop evaluation after this rule.
         terminal: bool,
     },
     /// Traffic-marking (type 0x8009): set DSCP value.
@@ -1567,18 +1568,20 @@ mod tests {
 
     #[test]
     fn traffic_action_roundtrip() {
-        let action = FlowSpecAction::TrafficAction {
-            sample: true,
-            terminal: false,
-        };
-        let ec = crate::attribute::ExtendedCommunity::from_flowspec_action(&action);
-        let decoded = ec.as_flowspec_action().unwrap();
-        match decoded {
-            FlowSpecAction::TrafficAction { sample, terminal } => {
-                assert!(sample);
-                assert!(!terminal);
-            }
-            _ => panic!("wrong action type"),
+        // RFC 8955 §7.3: T=1 continues evaluation; S=1 enables sampling.
+        for (sample, terminal, flags) in [
+            (false, false, 0x00),
+            (false, true, 0x01),
+            (true, false, 0x02),
+            (true, true, 0x03),
+        ] {
+            let action = FlowSpecAction::TrafficAction { sample, terminal };
+            let ec = crate::attribute::ExtendedCommunity::from_flowspec_action(&action);
+            assert_eq!(
+                ec.as_u64().to_be_bytes(),
+                [0x80, 0x07, 0, 0, 0, 0, 0, flags]
+            );
+            assert_eq!(ec.as_flowspec_action(), Some(action));
         }
     }
 
