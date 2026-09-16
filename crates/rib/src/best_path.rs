@@ -1935,7 +1935,8 @@ mod proptests {
 
     /// Verbatim fixture copy of `best_path_cmp` as it stood BEFORE the
     /// `cmp_chain` refactor (the ORR arc) — the oracle for
-    /// `best_path_cmp_unchanged_without_orr`. Do not "fix" or refactor
+    /// `best_path_cmp_matches_legacy_without_identifier_or_path_id_ties`.
+    /// Do not "fix" or refactor
     /// this copy; its value is that it never changes.
     fn legacy_best_path_cmp(a: &Route, b: &Route) -> Ordering {
         let cmp = stale_rank(a).cmp(&stale_rank(b));
@@ -1985,13 +1986,60 @@ mod proptests {
         a.peer.cmp(&b.peer)
     }
 
+    #[test]
+    fn tied_criteria_use_current_identifier_order_not_legacy_cluster_order() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        // Exercise both substituted identifiers, a mixed pair, and two
+        // advertising-peer identifiers with every earlier criterion tied.
+        for (originator_a, originator_b) in [(true, true), (true, false), (false, false)] {
+            let mut a =
+                crate::test_support::make_route_with_lp(prefix, Ipv4Addr::new(192, 0, 2, 2), 100);
+            let mut b =
+                crate::test_support::make_route_with_lp(prefix, Ipv4Addr::new(192, 0, 2, 1), 100);
+            a.peer_router_id = Ipv4Addr::new(10, 0, 0, 1);
+            b.peer_router_id = Ipv4Addr::new(10, 0, 0, 2);
+            for (route, substitute, cluster_len) in
+                [(&mut a, originator_a, 2), (&mut b, originator_b, 1)]
+            {
+                if substitute {
+                    Arc::make_mut(&mut route.attributes)
+                        .push(PathAttribute::OriginatorId(route.peer_router_id));
+                }
+                Arc::make_mut(&mut route.attributes).push(PathAttribute::ClusterList(
+                    vec![Ipv4Addr::new(10, 0, 0, 9); cluster_len],
+                ));
+            }
+            assert_eq!(legacy_best_path_cmp(&a, &b), Ordering::Greater);
+            assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+            assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+            let reason = if originator_a && originator_b {
+                BestPathReason::LowerOriginatorId
+            } else {
+                BestPathReason::LowerBgpIdentifier
+            };
+            assert_eq!(best_path_cmp_with_reason(&a, &b), (Ordering::Less, reason));
+            assert_eq!(
+                best_path_cmp_with_reason(&b, &a),
+                (Ordering::Greater, reason)
+            );
+        }
+    }
+
     proptest! {
-        /// The `cmp_chain` refactor property: with no ORR costs the
-        /// public comparator is behavior-identical to the pre-refactor
-        /// chain (`legacy_best_path_cmp`, a verbatim fixture copy),
-        /// over the generated route corpus.
+        /// The historical oracle predates effective BGP Identifier ordering
+        /// and the Add-Path identity tie. Compare only their common domain:
+        /// no ORIGINATOR_ID, equal peer identifiers, and equal path IDs.
+        /// Other attributes (including CLUSTER_LIST) remain randomized.
         #[test]
-        fn best_path_cmp_unchanged_without_orr(a in arb_route(), b in arb_route()) {
+        fn best_path_cmp_matches_legacy_without_identifier_or_path_id_ties(
+            mut a in arb_route(), mut b in arb_route()
+        ) {
+            for route in [&mut a, &mut b] {
+                Arc::make_mut(&mut route.attributes)
+                    .retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
+                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                route.path_id = 0;
+            }
             prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
         }
 
