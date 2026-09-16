@@ -607,9 +607,13 @@ scrubs it on entry. The daemon reads ROAs only over RTR, so the flag emits
 context's `rpki_roas` source settings are not used. The flag also requires
 `irrdb.enforce_origin_in_as_set`, because the acceptance is bound to the origin
 dataset. Before the cache's first End of Data every route reads `not-found`,
-so routes without a route object are rejected until then; the table update
-refreshes sessions whose import policy reads RPKI state. A blackhole request
-still needs the IRR blackhole cover, since the blackhole terms run first.
+so the ROA exception cannot accept a route yet. Such a route is rejected only
+when `irrdb.enforce_prefix_in_as_set` is on and no other accept term covers it;
+with prefix enforcement off there is no prefix term to fail, so an authorized
+origin is still accepted and the generated self-check for that case expects
+`accept`. The table update refreshes sessions whose import policy reads RPKI
+state. A blackhole request still needs the IRR blackhole cover, since the
+blackhole terms run first.
 
 The general `irrdb` section is parsed strictly. An unknown key there, or under
 one of its three `use_*` options, fails the render with exit 1 naming the key,

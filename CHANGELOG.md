@@ -75,7 +75,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tags it with `prefix_validated_via_rpki_roas` when configured with
   `tag_as_set`, and scrubs that tag on entry. RPKI-invalid routes are still
   rejected by shared hygiene. Before the RTR cache's first End of Data, every
-  route reads `not-found`, so these routes are rejected until the cache syncs.
+  route reads `not-found`, so these routes are rejected until the cache syncs
+  wherever IRR prefix enforcement is on. In an arouteserver context with
+  `irrdb.enforce_prefix_in_as_set` off there is no prefix term to fail, so an
+  authorized origin is accepted regardless of RPKI state, and the generated
+  in-language self-check for that case expects `accept`.
 - `rbgp config plan`, `config apply`, and `config rollback` now exit 3 when the
   daemon rejects the transaction. A rejected plan previously exited 2, the
   same code as a committable plan, and a rejected apply or rollback exited 0,

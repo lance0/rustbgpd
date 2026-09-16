@@ -1676,6 +1676,44 @@ fn rpki_roas_as_route_objects_accept_valid_routes_without_route_objects() {
 }
 
 #[test]
+fn rpki_roa_generated_tests_respect_disabled_prefix_enforcement() {
+    for reject_policy in ["reject", "tag_and_reject"] {
+        let mut value = rpki_roas_value();
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "irrdb", "enforce_prefix_in_as_set"],
+            false.into(),
+        );
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "reject_policy", "policy"],
+            reject_policy.into(),
+        );
+        if reject_policy == "tag_and_reject" {
+            set_general_community(
+                &mut value,
+                "reject_cause",
+                yaml("{std: '65520:dyn_val', lrg: null, ext: null}"),
+            );
+        }
+        let rendered = render(&to_yaml(&value), &rtr_options()).unwrap();
+        let client = &rendered.files["policy/client-as4242-1.rpol"];
+        // An emitted-test block that vanished would pass the run below
+        // vacuously, so pin the case this renders under prefix enforcement off.
+        assert!(
+            client.contains("test client-as4242-1-rpki-not-found-without-route-object-is-accepted"),
+            "{reject_policy}: {client}"
+        );
+        let report = run_rpol_tests(client).unwrap();
+        assert!(
+            report.all_passed(),
+            "{reject_policy}: {:?}",
+            report.failures
+        );
+    }
+}
+
+#[test]
 fn registry_whois_dump_sources_are_refused() {
     for name in ["use_arin_bulk_whois_data", "use_registrobr_bulk_whois_data"] {
         let mut value = healthy_value();
