@@ -29,6 +29,25 @@ _gate:
     cargo test --locked --workspace
     just docs
 
+# `gate-ci` is the local superset of hosted CI's `ci.yml` checks that need no
+# privileges: `gate` runs the core formatting, lint, workspace test, and
+# rustdoc commands; `test-feature-gated` the feature-gated Cargo commands;
+# `gate-ci-steps` every other named script step of the core and scale/receipt
+# jobs, read from the workflow; and `gate-msrv` the msrv job. What stays
+# CI-only: the published-crate README check (it diffs against the pull request
+# base), the exact v0.64 migration test (it needs the validator binary CI
+# prepares), the privileged kernel job (`just netns` runs it in Docker), and
+# every other workflow, including the interop and kernel labs. The recipes run
+# one after another because `test-feature-gated` includes the Criterion smoke;
+# never start another gate beside it.
+
+# Run `gate` plus the rest of hosted CI's unprivileged `ci.yml` checks, one after another (tens of minutes).
+gate-ci:
+    just gate
+    just test-feature-gated
+    just gate-ci-steps
+    just gate-msrv
+
 # prek's shim also runs `.git/hooks/<hook>.legacy`, so a hook script left by an
 # earlier setup keeps running alongside the configured hooks forever. This
 # repository's leftover was an older `cargo fmt --check` plus `cargo clippy`
@@ -48,6 +67,7 @@ check-devtools:
 check-fast:
     cargo fmt --all -- --check
     python3 -m unittest -v scripts/test_build_lock.py
+    python3 -m unittest -v scripts/test_run_ci_steps.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
@@ -89,8 +109,10 @@ test-integration:
     cargo test --locked --workspace --exclude rustbgpd --test '*'
     cargo test --locked -p rustbgpd --tests
 
+# The library and binary docs are selected together so the binary docs reuse
+# the same private library docs.
+
 # Build the library docs (private items included) and both binary docs.
-# Select them together so binary docs reuse the same private library docs.
 docs:
     cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
 
@@ -147,6 +169,31 @@ test-feature-gated:
     cargo check --locked -p rustbgpd --no-default-features --all-targets
     cargo test --locked -p rustbgpd-wire --features tokio-codec
     cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec
+
+# Run hosted CI's named script steps from the core and scale/receipt jobs, read from ci.yml; needs shellcheck and ripgrep (`--dry-run` lists the steps).
+gate-ci-steps *args:
+    bash scripts/build-lock.sh python3 scripts/run_ci_steps.py {{args}}
+
+# Check every workspace target on the Cargo.toml `rust-version` toolchain, as hosted CI's msrv job does.
+gate-msrv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    msrv="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)"
+    if [[ ! "${msrv}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "expected one workspace rust-version in Cargo.toml, found '${msrv}'" >&2
+        exit 1
+    fi
+    toolchains="$(rustup toolchain list 2>/dev/null || true)"
+    if ! grep -qE "^${msrv//./[.]}-" <<<"${toolchains}"; then
+        echo "Rust ${msrv} (the workspace rust-version) is required; install it with:" >&2
+        echo "  rustup toolchain install ${msrv} --profile minimal" >&2
+        exit 127
+    fi
+    # A separate target directory keeps the two toolchains' artifacts apart,
+    # as CI's separate MSRV cache does.
+    exec bash scripts/build-lock.sh \
+        env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/msrv-${msrv}" \
+        cargo "+${msrv}" check --locked --workspace --all-targets
 
 # Excluded ignored tests: the TCP-AO kernel receipts (transport listener and
 # socket_opts) need CONFIG_TCP_AO and privileges; the four config persistence
