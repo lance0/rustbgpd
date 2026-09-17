@@ -22,7 +22,7 @@ use rustbgpd_api::proto::{
 use rustbgpd_api::runtime_config_settlement::AMBIGUITY_FENCE_GRACE;
 use tonic::{Code, Request, Status, transport::Endpoint};
 
-use support::{RetainOnPanic, rbgp_binary};
+use support::{RetainOnPanic, bound_bgp_addr, bound_grpc_addr, bound_metrics_addr, rbgp_binary};
 
 const CONTROL_ENV: &str = "RUSTBGPD_TEST_SETTLEMENT_CONTROL_DIR";
 const CONTROL_VERSION: &str = "settlement-control-v1";
@@ -512,36 +512,6 @@ fn rbgp_command(grpc: &str, args: &[&str]) -> Command {
     let mut command = Command::new(rbgp_binary());
     command.arg("--addr").arg(grpc).args(args);
     command
-}
-
-fn bound_metrics_addr(log: &str) -> Option<SocketAddr> {
-    log.lines().find_map(|line| {
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        let fields = &entry["fields"];
-        if fields["message"] != "metrics server listening" {
-            return None;
-        }
-        fields["addr"]
-            .as_str()?
-            .parse::<SocketAddr>()
-            .ok()
-            .filter(|addr| addr.ip().is_loopback() && addr.port() != 0)
-    })
-}
-
-fn bound_grpc_addr(log: &str) -> Option<SocketAddr> {
-    log.lines().find_map(|line| {
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        let fields = &entry["fields"];
-        if fields["message"] != "starting gRPC TCP listener" {
-            return None;
-        }
-        fields["bound_addr"]
-            .as_str()?
-            .parse::<SocketAddr>()
-            .ok()
-            .filter(|addr| addr.port() != 0)
-    })
 }
 
 fn config_text(runtime: &Path, grpc_tcp: SocketAddr, token: &Path) -> String {
@@ -1211,6 +1181,39 @@ fn metrics_endpoint_requires_bound_nonzero_loopback_listener_evidence() {
     );
     assert_eq!(
         bound_metrics_addr(log),
+        Some("127.0.0.1:12345".parse().unwrap())
+    );
+}
+
+#[test]
+fn bgp_endpoint_requires_bound_nonzero_loopback_listener_evidence() {
+    for log in [
+        "",
+        "not JSON",
+        r#"{"fields":{"message":"BGP listener bound"}}"#,
+        r#"{"fields":{"message":"BGP listener bound","addr":42}}"#,
+        r#"{"fields":{"message":"BGP listener bound","addr":"invalid"}}"#,
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:0"}}"#,
+        // A legacy dual-family daemon that lost its IPv4 bind warns and
+        // reports only the IPv6 wildcard, which an IPv4 stub cannot dial.
+        concat!(
+            r#"{"fields":{"message":"failed to bind the BGP listener for this address family; inbound BGP sessions of this family will not be accepted","addr":"0.0.0.0:12345"}}"#,
+            "\n",
+            r#"{"fields":{"message":"BGP listener bound","addr":"[::]:12345"}}"#,
+        ),
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:12345"}}"#,
+    ] {
+        assert_eq!(bound_bgp_addr(log), None, "unexpected endpoint from {log}");
+    }
+    let log = concat!(
+        "startup banner\n",
+        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:54321"}}"#,
+        "\n",
+        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:12345","requested_addr":"127.0.0.1:0"}}"#,
+        "\n",
+    );
+    assert_eq!(
+        bound_bgp_addr(log),
         Some("127.0.0.1:12345".parse().unwrap())
     );
 }

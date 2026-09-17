@@ -13,7 +13,6 @@
 mod support;
 
 use std::fs;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -23,7 +22,6 @@ use rs_config_render::activation::{self, Options, Status};
 use rs_config_render::ixp_manager;
 use rs_config_render::ixp_manager_host::{Binding, RenderBinding};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 const ROUTER_HANDLE: &str = "rs1-lan1-ipv4";
 
@@ -51,7 +49,6 @@ fn client(id: u64, address: &str, prefix: &str) -> serde_json::Value {
 
 fn write_candidate(
     dir: &Path,
-    bgp_port: u16,
     clients: &[serde_json::Value],
     checker: &Path,
     binding: &RenderBinding,
@@ -67,7 +64,7 @@ fn write_candidate(
         "router": {
             "handle": ROUTER_HANDLE, "type": "route-server", "protocol": 4,
             "asn": 65501, "router_id": "192.0.2.1", "peering_ip": "127.0.0.1",
-            "listen_port": bgp_port, "vlan_id": 1, "quarantine": false,
+            "vlan_id": 1, "quarantine": false,
             "bgp_lc": true, "rfc1997_passthru": false, "rpki": false, "skip_md5": true
         },
         "policy": {
@@ -88,43 +85,21 @@ fn write_candidate(
     let bytes = serde_json::to_vec_pretty(&doc).expect("serialize fixture");
     ixp_manager::write_checked_candidate_bytes(&bytes, dir, 300, checker, binding)
         .expect("write checked candidate");
+    // The export names no listen port; the daemon picks its own.
+    support::edit_rendered_config(dir, checker, support::daemon_chooses_bgp_port);
 }
 
-/// Add `[global] honor_graceful_shutdown = true`, re-run the strict check, and
-/// re-record the file hash the activation verifies.
+/// Add `[global] honor_graceful_shutdown = true` to the rendered candidate.
 fn enable_honor_graceful_shutdown(dir: &Path, checker: &Path) {
-    let path = dir.join("config.toml");
-    let rendered = fs::read_to_string(&path).expect("read rendered config");
-    let marker = "ebgp_requires_policy = true\n";
-    assert!(rendered.contains(marker), "rendered [global] marker");
-    let config = rendered.replacen(
-        marker,
-        &format!("{marker}honor_graceful_shutdown = true\n"),
-        1,
-    );
-    fs::write(&path, &config).expect("write edited config");
-    let checked = Command::new(checker)
-        .args(["--check", "--strict"])
-        .arg(&path)
-        .output()
-        .expect("run strict check");
-    assert!(
-        checked.status.success(),
-        "edited config must pass the strict check:\n{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
-    let receipt_path = dir.join("render-receipt.json");
-    let mut receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(&receipt_path).expect("read render receipt"))
-            .expect("parse render receipt");
-    let digest: String = Sha256::digest(config.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    receipt["generated_files"]["config.toml"] = digest.into();
-    let mut encoded = serde_json::to_vec_pretty(&receipt).expect("serialize render receipt");
-    encoded.push(b'\n');
-    fs::write(&receipt_path, encoded).expect("write render receipt");
+    support::edit_rendered_config(dir, checker, |rendered| {
+        let marker = "ebgp_requires_policy = true\n";
+        assert!(rendered.contains(marker), "rendered [global] marker");
+        rendered.replacen(
+            marker,
+            &format!("{marker}honor_graceful_shutdown = true\n"),
+            1,
+        )
+    });
 }
 
 fn rbgp(addr: &str, args: &[&str]) -> Output {
@@ -177,10 +152,6 @@ fn real_daemon_rejected_reload_rolls_activate_back() {
     let binding = Binding::new(ROUTER_HANDLE, &runtime, &state, &host, &rbgp_addr)
         .expect("construct valid host binding");
     let render_binding = binding.render_binding();
-    let bgp_port = TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .expect("reserve loopback port")
-        .port();
 
     let activate_sh = root.join("activate.sh");
     fs::write(
@@ -225,7 +196,6 @@ fi
     let member1 = client(1, "127.0.0.2", "198.51.100.0/24");
     write_candidate(
         &candidate,
-        bgp_port,
         std::slice::from_ref(&member1),
         daemon_bin,
         &render_binding,
@@ -237,7 +207,6 @@ fi
     // check accepts the file, the SIGHUP classifier rejects it before any effect.
     write_candidate(
         &candidate,
-        bgp_port,
         &[member1, client(2, "127.0.0.3", "198.51.101.0/24")],
         daemon_bin,
         &render_binding,

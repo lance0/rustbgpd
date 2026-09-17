@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
-use support::{RetainOnPanic, rbgp_binary};
+use support::{RetainOnPanic, bound_metrics_addr, rbgp_binary};
 
 const FIRST_NEIGHBOR: &str = "192.0.2.1";
 const SECOND_NEIGHBOR: &str = "192.0.2.2";
@@ -117,21 +117,6 @@ fn wait_until_serving(grpc_addr: &str, daemon: &mut Daemon) {
         thread::sleep(Duration::from_millis(50));
     }
     panic!("daemon never served gRPC\n{}", daemon.log());
-}
-
-fn bound_metrics_addr(log: &str) -> Option<SocketAddr> {
-    log.lines().find_map(|line| {
-        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
-        let fields = &entry["fields"];
-        if fields["message"] != "metrics server listening" {
-            return None;
-        }
-        fields["addr"]
-            .as_str()?
-            .parse::<SocketAddr>()
-            .ok()
-            .filter(|addr| addr.ip().is_loopback() && addr.port() != 0)
-    })
 }
 
 fn wait_for_metrics_addr(daemon: &mut Daemon) -> SocketAddr {
@@ -536,35 +521,4 @@ fn sighup_bridge_persister_ack_loss_fences_and_exits_once() {
     for _ in 0..3 {
         exercise_sighup_ack_loss("bridge");
     }
-}
-
-#[test]
-fn metrics_endpoint_requires_bound_nonzero_loopback_listener_evidence() {
-    for log in [
-        "",
-        "not JSON",
-        r#"{"fields":{"message":"metrics server listening"}}"#,
-        r#"{"fields":{"message":"metrics server listening","addr":42}}"#,
-        r#"{"fields":{"message":"metrics server listening","addr":"invalid"}}"#,
-        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:0"}}"#,
-        r#"{"fields":{"message":"metrics server listening","addr":"192.0.2.1:12345"}}"#,
-        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:12345"}}"#,
-    ] {
-        assert_eq!(
-            bound_metrics_addr(log),
-            None,
-            "unexpected endpoint from {log}"
-        );
-    }
-    let log = concat!(
-        "startup banner\n",
-        r#"{"fields":{"message":"BGP listener bound","addr":"127.0.0.1:54321"}}"#,
-        "\n",
-        r#"{"fields":{"message":"metrics server listening","addr":"127.0.0.1:12345"}}"#,
-        "\n",
-    );
-    assert_eq!(
-        bound_metrics_addr(log),
-        Some("127.0.0.1:12345".parse().unwrap())
-    );
 }
