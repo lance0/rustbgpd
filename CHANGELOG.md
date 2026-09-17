@@ -37,6 +37,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Linux EVPN dataplane now retries a failed delete of an L3 (all-active
+  Type 5) FDB nexthop or nexthop group on later reconcile passes, as it
+  already did for L2 FDB nexthop groups. Previously the orphaned kernel object
+  stayed until the periodic drift sweep removed it. Retry bookkeeping is also
+  cleared whenever the kernel confirms a delete. Previously, if the drift
+  sweep removed a nexthop whose failed delete was queued for retry, the queued
+  retry could later delete a new L2 FDB nexthop that had reused the same ID.
+  `pending_delete_count` in `ListEvpnNexthops` still counts only L2 FDB
+  nexthop IDs.
+- A peer that advertises the Outbound Route Filtering Send role for an
+  address family outside the session's negotiated MultiProtocol families no
+  longer counts as ORF-negotiated for that family. A peer whose only ORF Send
+  entries were for such families was kept out of update-group sharing for the
+  whole session, and `rbgp rib --prefix P advertised PEER --explain` reported
+  an `orf_pending` stop for such a family, which no ROUTE-REFRESH could lift,
+  instead of the family not being negotiated. Route advertisement was
+  unaffected.
 - SIGHUP now applies a route-server member join or leave with its datasets
   when the member carries `md5_password` or `ttl_security` (GTSM). The change
   applies as one compensated runtime generation, not as a rejected compound
@@ -86,6 +103,48 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same code as a commit. The full receipt, including `--json` output, is
   still printed before the non-zero exit. A receipt with an unrecognized
   status now exits 1 instead of passing as a commit or as changes present.
+- VPNv4/VPNv6 and labeled-unicast best-path selection now breaks a tie
+  between routes from the same peer on the lower Add-Path path identifier, as
+  IPv4/IPv6 unicast selection already did. Two Add-Path routes from one peer
+  with identical attributes previously tied through every step, so the
+  selected route, the Add-Path send ranking, and the Optimal Route Reflection
+  per-vantage choice followed arrival order: withdrawing and re-advertising
+  the selected path could move selection to the other one. FlowSpec selection
+  gains the same final step; FlowSpec does not negotiate Add-Path, so its
+  selection does not change.
+- Durable event history now stops cleanly when its storage thread exits or
+  panics while the daemon runs. Previously the outbox kept accepting events
+  and dropped every batch, while new `SubscribeFromEvent` streams were
+  admitted and never received an event. The outbox now closes producer
+  admission, ends open `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
+  streams with `DATA_LOSS`, and refuses new `SubscribeFromEvent` requests with
+  `UNAVAILABLE`. It logs `event-history storage stopped` and sets the new
+  `bgp_event_outbox_storage_failed` gauge and `bgp_event_outbox_degraded` to
+  `1`. The example Prometheus rules add a critical
+  `BgpEventOutboxStorageFailed` alert. A restart is required to recover. A
+  SQLite commit failure is still a per-batch loss and does not stop the
+  outbox.
+- Event history no longer quarantines its database after a single failed
+  open. It retries once after 200 ms and quarantines only if the retry also
+  fails, so a brief lock or I/O error no longer discards the stored history.
+  A quarantine no longer overwrites an earlier one: an existing
+  `events.db.stale` set moves to `events.db.stale.1` (or the next unused
+  number) first. The configuration reference now documents how to restore a
+  quarantined store by hand.
+- Best-path selection now gives a locally originated route a fixed place at
+  the BGP Identifier step (RFC 4271 §9.1.2.2 step (f)): it ranks ahead of
+  every session-learned route, and two locally originated routes tie there.
+  The step previously had no value for such a route and passed the pair on
+  to the CLUSTER_LIST and peer-address steps, which made the comparison
+  intransitive for a locally originated route that carried a CLUSTER_LIST
+  or a peer address other than `0.0.0.0`. With such a route among iBGP
+  candidates tied down to this step, the selected best path depended on the
+  order the candidates were examined in, and sorting a larger candidate set
+  could panic. The daemon builds every locally originated route with the
+  `0.0.0.0` local peer and no CLUSTER_LIST, and that shape already won the
+  later steps against every session-learned route, so the selected route
+  does not change for them. The unicast, ORR, VPN, labeled-unicast,
+  FlowSpec, BGP-LS, RT-Constrain, and EVPN chains share the change.
 
 ### Upgrade notes
 
@@ -133,6 +192,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A wrapper that applies after `plan` exits 2 no longer reaches an apply the
   daemon would refuse. A wrapper that treats every `plan` exit other than 1
   as "changes present" must handle 3 as a rejection.
+- After an event-history storage failure, event producers see a closed
+  outbox. The accepted events that could not be written count as
+  `bgp_event_outbox_dropped_total{reason="db_error"}`, and events refused after
+  the failure count as `reason="closed"`, the label that previously meant only
+  shutdown. Use `bgp_event_outbox_storage_failed` to tell the two cases apart.
+  New gNMI `Subscribe ON_CHANGE` streams end with `DATA_LOSS` until the daemon
+  restarts.
+- Earlier event-history quarantines are now kept as `events.db.stale.<n>`
+  files, which are full copies of the store and are never deleted
+  automatically. Remove them when they are no longer needed. A failed
+  event-history open now delays startup by 200 ms before quarantine.
+- When a locally originated best route ties a session-learned route down to
+  the BGP Identifier step, explain output now reports `lower_bgp_identifier`
+  with detail `bgp_identifier local < <identifier>` (EVPN:
+  `effective BGP identifier local versus <identifier>`) instead of
+  `shorter_cluster_list` or `lower_peer_address`. When that session-learned
+  route is the runner-up, BMP path marking for a unicast best route carries
+  the "router ID" reason code instead of the peer-address code or no reason
+  code. The selected route is unchanged.
 
 ## [0.70.1] — 2026-09-15
 

@@ -3843,6 +3843,227 @@ async fn l3_all_active_to_single_cleans_up_l3_nhg_state() {
     h.shutdown().await;
 }
 
+// ─── Failed nexthop deletes: the `pending_deletes` retry queue ───
+
+/// Kernel ID of the member nexthop whose gateway is `gateway`.
+fn member_nh_id(handle: &InMemoryHandle, gateway: &str) -> Option<u32> {
+    handle.nexthop_ops().values().find_map(|nh| match nh.kind {
+        rustbgpd_evpn_linux::dataplane::KernelNexthopKind::Member { gateway: gw }
+            if gw == ipa(gateway) =>
+        {
+            Some(nh.id)
+        }
+        _ => None,
+    })
+}
+
+/// Whether the kernel object at `id` is a member nexthop via `gateway`.
+fn is_member_via(handle: &InMemoryHandle, id: u32, gateway: &str) -> bool {
+    handle.nexthop_ops().get(&id).is_some_and(|nh| {
+        matches!(
+            nh.kind,
+            rustbgpd_evpn_linux::dataplane::KernelNexthopKind::Member { gateway: gw }
+                if gw == ipa(gateway)
+        )
+    })
+}
+
+fn spawn_l3_harness() -> Harness {
+    let h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_ip_vrf_status(l3_vrf_id(), l3_ready_status());
+    h.handle.set_l3vxlan_ifindex(l3_vrf_id(), L3_IFINDEX);
+    h
+}
+
+async fn send_l3_all_active(
+    h: &mut Harness,
+    generation: u64,
+    next_hops: &[&str],
+) -> rustbgpd_evpn::DataplaneReport {
+    h.intent_tx
+        .send(l3_intent(
+            generation,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(next_hops.iter().map(|s| ipa(s)).collect()),
+        ))
+        .unwrap();
+    let report = wait_for_generation(h, generation).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    report
+}
+
+async fn advance_past_drift_interval(h: &mut Harness) {
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+}
+
+// A pass runs: L2 apply, pending-delete drain, drift sweep (when due),
+// L3 apply, drain again. The L3 tests below count injected
+// `del_nexthop` failures against that order.
+
+// An L3 member delete that fails is queued and retried on later
+// passes rather than waiting for the 60 s drift sweep (virtual time
+// never advances here). The allocator slot stays reserved while the
+// kernel object is live, and the successful retry releases it back to
+// the L3 tag range.
+#[tokio::test(start_paused = true)]
+async fn l3_nhg_failed_member_delete_retries_on_next_pass() {
+    let mut h = spawn_l3_harness();
+    send_l3_all_active(&mut h, 1, &["10.0.0.2", "10.0.0.3", "10.0.0.4"]).await;
+    let stale = member_nh_id(&h.handle, "10.0.0.4").expect("member installed");
+
+    // Fail the apply-time delete, the same-pass retry, and the first
+    // retry on the next pass.
+    for _ in 0..3 {
+        h.handle.inject_del_nexthop_failure_io(stale);
+    }
+    let report = send_l3_all_active(&mut h, 2, &["10.0.0.2", "10.0.0.3"]).await;
+    assert!(h.handle.nexthop_ops().contains_key(&stale));
+    assert_eq!(
+        report.fdb_nexthops.pending_delete_count, 0,
+        "the L2 FDB nexthop status must not count L3 retries"
+    );
+
+    // Next pass: the new member must not take the still-live ID, and
+    // the post-apply retry deletes the orphan.
+    send_l3_all_active(&mut h, 3, &["10.0.0.2", "10.0.0.3", "10.0.0.5"]).await;
+    assert_ne!(member_nh_id(&h.handle, "10.0.0.5"), Some(stale));
+    assert!(
+        !h.handle.nexthop_ops().contains_key(&stale),
+        "failed L3 member delete was not retried; nhs={:?}",
+        h.handle.nexthop_ops()
+    );
+
+    // The retry released the slot back to the L3 allocator.
+    send_l3_all_active(&mut h, 4, &["10.0.0.2", "10.0.0.3", "10.0.0.5", "10.0.0.6"]).await;
+    assert_eq!(
+        member_nh_id(&h.handle, "10.0.0.6"),
+        Some(stale),
+        "retried L3 delete did not release the allocator slot"
+    );
+
+    h.shutdown().await;
+}
+
+// A queued L3 delete whose orphan the drift sweep deletes first must
+// leave the retry queue with it: once the slot is reused, a stale
+// queue entry would delete the new live member.
+#[tokio::test(start_paused = true)]
+async fn l3_nhg_drift_cleaned_pending_delete_spares_reused_id() {
+    let mut h = spawn_l3_harness();
+    send_l3_all_active(&mut h, 1, &["10.0.0.2", "10.0.0.3", "10.0.0.4"]).await;
+    let stale = member_nh_id(&h.handle, "10.0.0.4").expect("member installed");
+
+    // Fail both deletes in the withdraw pass and the first drain of
+    // the drift pass; the drift sweep's own delete then succeeds.
+    for _ in 0..3 {
+        h.handle.inject_del_nexthop_failure_io(stale);
+    }
+    send_l3_all_active(&mut h, 2, &["10.0.0.2", "10.0.0.3"]).await;
+    assert!(h.handle.nexthop_ops().contains_key(&stale));
+
+    // Queue the intent before the clock jump so one pass runs the
+    // drift sweep and then reuses the freed slot for the new member.
+    h.intent_tx
+        .send(l3_intent(
+            3,
+            l3_ip_vrfs(),
+            l3_all_active_prefixes(vec![ipa("10.0.0.2"), ipa("10.0.0.3"), ipa("10.0.0.5")]),
+        ))
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    let report = wait_for_generation(&mut h, 3).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(report.fdb_nhg_drift_counters.orphans_cleaned, 1);
+    assert!(
+        is_member_via(&h.handle, stale, "10.0.0.5"),
+        "reused ID {stale:#x} must hold the new member; nhs={:?}",
+        h.handle.nexthop_ops()
+    );
+
+    h.shutdown().await;
+}
+
+// The reverse overlap: the drift sweep adopts a queued orphan but its
+// delete fails, then the queue's retry succeeds. The adoption record
+// must go with it, or a later sweep deletes the reused ID.
+#[tokio::test(start_paused = true)]
+async fn l3_nhg_drained_pending_delete_clears_drift_adoption() {
+    let mut h = spawn_l3_harness();
+    send_l3_all_active(&mut h, 1, &["10.0.0.2", "10.0.0.3", "10.0.0.4"]).await;
+    let stale = member_nh_id(&h.handle, "10.0.0.4").expect("member installed");
+
+    // Fail both deletes in the withdraw pass, then the first drain and
+    // the sweep in the drift pass; that pass's second drain succeeds.
+    for _ in 0..4 {
+        h.handle.inject_del_nexthop_failure_io(stale);
+    }
+    send_l3_all_active(&mut h, 2, &["10.0.0.2", "10.0.0.3"]).await;
+    advance_past_drift_interval(&mut h).await;
+    assert!(!h.handle.nexthop_ops().contains_key(&stale));
+
+    send_l3_all_active(&mut h, 3, &["10.0.0.2", "10.0.0.3", "10.0.0.5"]).await;
+    assert!(is_member_via(&h.handle, stale, "10.0.0.5"));
+    advance_past_drift_interval(&mut h).await;
+    assert!(
+        is_member_via(&h.handle, stale, "10.0.0.5"),
+        "drift sweep deleted reused ID {stale:#x}; nhs={:?}",
+        h.handle.nexthop_ops()
+    );
+
+    h.shutdown().await;
+}
+
+// L2 counterpart of `l3_nhg_drift_cleaned_pending_delete_spares_reused_id`.
+#[tokio::test(start_paused = true)]
+async fn fdb_nhg_drift_cleaned_pending_delete_spares_reused_id() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let l2_intent = |generation: u64, aliases: &[&str]| {
+        let mut macs = RemoteMacTable::builder();
+        macs.insert(vni(100), mac(1), entry_multi_homed("10.0.0.2", aliases, 7))
+            .unwrap();
+        let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+        intent(generation, inst, macs.build())
+    };
+
+    h.intent_tx
+        .send(l2_intent(1, &["10.0.0.3", "10.0.0.4"]))
+        .unwrap();
+    let report = wait_for_generation(&mut h, 1).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let stale = member_nh_id(&h.handle, "10.0.0.4").expect("member installed");
+
+    for _ in 0..3 {
+        h.handle.inject_del_nexthop_failure_io(stale);
+    }
+    h.intent_tx.send(l2_intent(2, &["10.0.0.3"])).unwrap();
+    let report = wait_for_generation(&mut h, 2).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(report.fdb_nexthops.pending_delete_count, 1);
+    advance_past_drift_interval(&mut h).await;
+    assert!(
+        !h.handle.nexthop_ops().contains_key(&stale),
+        "drift sweep should have deleted the orphan"
+    );
+
+    h.intent_tx
+        .send(l2_intent(3, &["10.0.0.3", "10.0.0.5"]))
+        .unwrap();
+    let report = wait_for_generation(&mut h, 3).await;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(
+        is_member_via(&h.handle, stale, "10.0.0.5"),
+        "reused ID {stale:#x} must hold the new member; nhs={:?}",
+        h.handle.nexthop_ops()
+    );
+    assert_eq!(report.fdb_nexthops.pending_delete_count, 0);
+
+    h.shutdown().await;
+}
+
 fn sum_l3_adoption_counters(
     reports: &[rustbgpd_evpn::DataplaneReport],
 ) -> rustbgpd_evpn::L3AdoptionCounters {

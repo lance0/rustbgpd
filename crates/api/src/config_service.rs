@@ -21,9 +21,9 @@ use crate::peer_types::{
 use crate::proto;
 use crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext;
 use crate::server::{
-    ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn, ConfigTransactionApplyContext,
-    ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
-    ConfigTransactionStatusFn,
+    AccessMode, ConfigHistoryListFn, ConfigRollbackFn, ConfigTransactionAbortFn,
+    ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
+    ConfigTransactionConfirmFn, ConfigTransactionStatusFn, read_only_rejection,
 };
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
@@ -48,6 +48,7 @@ async fn request_peer_manager<T>(
 }
 
 pub struct ConfigService {
+    access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     transaction_apply: Option<ConfigTransactionApplyFn>,
     transaction_confirm: Option<ConfigTransactionConfirmFn>,
@@ -61,8 +62,9 @@ pub struct ConfigService {
 
 impl ConfigService {
     #[must_use]
-    pub fn new(peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
+    pub fn new(access_mode: AccessMode, peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
         Self {
+            access_mode,
             peer_mgr_tx,
             transaction_apply: None,
             transaction_confirm: None,
@@ -282,6 +284,9 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<tonic::Streaming<proto::StreamApplyConfigTransactionRequest>>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         stream::apply::stream_apply_config_transaction(
             self.stream_plan.as_ref(),
             self.stream_plan_authenticated_transport,
@@ -295,6 +300,9 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::ApplyConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         set_request_summary(
             &request,
             apply_config_transaction_summary(
@@ -323,6 +331,9 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::ConfirmConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfirmConfigTransactionResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         set_request_summary(
             &request,
             confirm_config_transaction_summary(&request.get_ref().confirm_id),
@@ -344,6 +355,9 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::AbortConfigTransactionRequest>,
     ) -> Result<Response<proto::AbortConfigTransactionResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         set_request_summary(
             &request,
             abort_config_transaction_summary(&request.get_ref().confirm_id),
@@ -399,6 +413,9 @@ impl proto::config_service_server::ConfigService for ConfigService {
         &self,
         request: Request<proto::RollbackConfigTransactionRequest>,
     ) -> Result<Response<proto::ConfigTransactionApplyResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         set_request_summary(
             &request,
             rollback_config_transaction_summary(
@@ -446,7 +463,7 @@ mod tests {
     use super::*;
     use prost::Message as _;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::time::Duration;
 
     use crate::audit::GrpcAuditHandle;
@@ -522,7 +539,7 @@ mod tests {
 
         for request_kind in [RequestKind::Diff, RequestKind::Plan, RequestKind::Effective] {
             let (tx, mut rx) = mpsc::channel(1);
-            let svc = ConfigService::new(tx);
+            let svc = ConfigService::new(AccessMode::ReadWrite, tx);
             let request = tokio::spawn(async move {
                 match request_kind {
                     RequestKind::Diff => svc
@@ -675,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_forwards_candidate_to_peer_manager() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig {
                 candidate_toml,
@@ -717,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn get_effective_config_returns_peer_manager_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
                 panic!("expected EffectiveRuntimeConfig command");
@@ -743,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn get_effective_config_maps_serialization_failure_to_internal() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::EffectiveRuntimeConfig { reply }) = rx.recv().await else {
                 panic!("expected EffectiveRuntimeConfig command");
@@ -803,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn plan_config_transaction_forwards_candidate_and_token() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         let server = tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
@@ -857,7 +874,7 @@ mod tests {
         // A stale expected token is an optimistic-concurrency failure, not a
         // malformed request — same mapping as the apply path.
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -884,7 +901,7 @@ mod tests {
     async fn plan_config_transaction_maps_validation_error_to_invalid_argument() {
         // A candidate validation error (not a token race) stays InvalidArgument.
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -908,7 +925,7 @@ mod tests {
     #[tokio::test]
     async fn plan_config_transaction_audit_summary_redacts_candidate_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::PlanConfigTransaction { reply, .. }) = rx.recv().await
             else {
@@ -958,7 +975,7 @@ mod tests {
     #[tokio::test]
     async fn apply_config_transaction_without_hook_fails_closed_but_audited() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::ApplyConfigTransactionRequest {
             candidate_toml: "[global]\nmd5_password = \"secret\"\n".to_string(),
@@ -984,7 +1001,7 @@ mod tests {
     #[tokio::test]
     async fn apply_config_transaction_forwards_to_hook() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx).with_transaction_hooks(
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
             Some(Arc::new(|request, _context| {
                 Box::pin(async move {
                     assert_eq!(request.candidate_toml, "candidate");
@@ -1034,7 +1051,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_transaction_control_hooks_forward_requests() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx).with_transaction_hooks(
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
             None,
             Some(Arc::new(|request, context| {
                 Box::pin(async move {
@@ -1146,22 +1163,26 @@ mod tests {
             continued,
         };
         let (tx, _rx) = mpsc::channel(1);
-        let svc = Arc::new(ConfigService::new(tx).with_transaction_hooks(
-            None,
-            Some(Arc::new({
-                let probe = probe.clone();
-                move |_, context| probe.hook::<proto::ConfirmConfigTransactionResponse>(&context)
-            })),
-            Some(Arc::new({
-                let probe = probe.clone();
-                move |_, context| probe.hook::<proto::AbortConfigTransactionResponse>(&context)
-            })),
-            None,
-            None,
-            Some(Arc::new(move |_, context| {
-                probe.hook::<proto::ConfigTransactionApplyResponse>(&context)
-            })),
-        ));
+        let svc = Arc::new(
+            ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
+                None,
+                Some(Arc::new({
+                    let probe = probe.clone();
+                    move |_, context| {
+                        probe.hook::<proto::ConfirmConfigTransactionResponse>(&context)
+                    }
+                })),
+                Some(Arc::new({
+                    let probe = probe.clone();
+                    move |_, context| probe.hook::<proto::AbortConfigTransactionResponse>(&context)
+                })),
+                None,
+                None,
+                Some(Arc::new(move |_, context| {
+                    probe.hook::<proto::ConfigTransactionApplyResponse>(&context)
+                })),
+            ),
+        );
 
         macro_rules! assert_detached {
             ($method:ident, $request:expr) => {{
@@ -1190,7 +1211,7 @@ mod tests {
     #[tokio::test]
     async fn confirmed_transaction_control_hooks_fail_closed_without_executor() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
 
         let err = svc
             .confirm_config_transaction(Request::new(proto::ConfirmConfigTransactionRequest {
@@ -1220,7 +1241,7 @@ mod tests {
     #[tokio::test]
     async fn history_and_rollback_hooks_forward_requests() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx).with_transaction_hooks(
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx).with_transaction_hooks(
             None,
             None,
             None,
@@ -1292,7 +1313,7 @@ mod tests {
     #[tokio::test]
     async fn history_and_rollback_fail_closed_without_executor() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
 
         let err = svc
             .list_config_history(Request::new(proto::ListConfigHistoryRequest {}))
@@ -1314,10 +1335,88 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
 
+    type CountingHook<Request, Context, Reply> = Arc<
+        dyn Fn(
+                Request,
+                Context,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Reply, ConfigTransactionApplyError>>
+                        + Send,
+                >,
+            > + Send
+            + Sync,
+    >;
+
+    fn counting_hook<Request, Context, Reply: Default + Send + 'static>(
+        calls: &Arc<AtomicUsize>,
+    ) -> CountingHook<Request, Context, Reply> {
+        let calls = Arc::clone(calls);
+        Arc::new(move |_request, _context| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Reply::default()) })
+        })
+    }
+
+    /// The handler refuses every transaction mutation on a read-only service
+    /// without the tower layer, and never reaches an executor; reads stay open.
+    #[tokio::test]
+    async fn read_only_service_rejects_transaction_mutations_before_executors() {
+        let (tx, _rx) = mpsc::channel(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let svc = ConfigService::new(AccessMode::ReadOnly, tx).with_transaction_hooks(
+            Some(counting_hook(&calls)),
+            Some(counting_hook(&calls)),
+            Some(counting_hook(&calls)),
+            None,
+            Some(Arc::new(|_request| {
+                Box::pin(async { Ok(proto::ListConfigHistoryResponse::default()) })
+            })),
+            Some(counting_hook(&calls)),
+        );
+
+        let results = [
+            svc.apply_config_transaction(Request::new(
+                proto::ApplyConfigTransactionRequest::default(),
+            ))
+            .await
+            .map(drop),
+            svc.confirm_config_transaction(Request::new(
+                proto::ConfirmConfigTransactionRequest::default(),
+            ))
+            .await
+            .map(drop),
+            svc.abort_config_transaction(Request::new(
+                proto::AbortConfigTransactionRequest::default(),
+            ))
+            .await
+            .map(drop),
+            svc.rollback_config_transaction(Request::new(
+                proto::RollbackConfigTransactionRequest::default(),
+            ))
+            .await
+            .map(drop),
+        ];
+        for result in results {
+            let error = result.unwrap_err();
+            assert_eq!(
+                (error.code(), error.message()),
+                (
+                    tonic::Code::PermissionDenied,
+                    "listener is read-only; mutating RPCs are not permitted"
+                )
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        svc.list_config_history(Request::new(proto::ListConfigHistoryRequest {}))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn rollback_audit_summary_hides_comment_body() {
         let (tx, _rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         let audit_handle = GrpcAuditHandle::default();
         let mut request = Request::new(proto::RollbackConfigTransactionRequest {
             index: 3,
@@ -1347,7 +1446,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_audit_summary_redacts_candidate_toml() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1380,7 +1479,7 @@ mod tests {
     #[tokio::test]
     async fn diff_runtime_config_audit_summary_redacts_tcp_ao_key() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1418,7 +1517,7 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
     #[tokio::test]
     async fn diff_runtime_config_maps_peer_manager_error_to_invalid_argument() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");
@@ -1441,7 +1540,7 @@ tcp_ao = { key = "ao-secret", algorithm = "hmac-sha-1-96" }
     #[tokio::test]
     async fn diff_runtime_config_maps_internal_render_error_to_internal() {
         let (tx, mut rx) = mpsc::channel(1);
-        let svc = ConfigService::new(tx);
+        let svc = ConfigService::new(AccessMode::ReadWrite, tx);
         tokio::spawn(async move {
             let Some(PeerManagerCommand::DiffRuntimeConfig { reply, .. }) = rx.recv().await else {
                 panic!("expected DiffRuntimeConfig command");

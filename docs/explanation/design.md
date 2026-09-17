@@ -431,7 +431,7 @@ Best-path rules (implemented), applied in order:
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
 5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
-5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)): ORIGINATOR_ID substitutes for the advertising peer's BGP Identifier when present (RFC 4456 §9); locally originated routes skip this step. Explain reports `lower_originator_id` when both routes carried ORIGINATOR_ID and `lower_bgp_identifier` otherwise
+5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)): ORIGINATOR_ID substitutes for the advertising peer's BGP Identifier when present (RFC 4456 §9); a locally originated route has no BGP Identifier and ranks ahead of every session-learned route at this step. Explain reports `lower_originator_id` when both routes carried ORIGINATOR_ID and `lower_bgp_identifier` otherwise
 5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
 6. Lowest peer address (tiebreaker)
 7. Lowest inbound Add-Path path identifier (same-peer route identity only; reported as `lower_path_id` in explain)
@@ -508,7 +508,7 @@ Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a para
 
 **Reflection reuses existing RFC 4456 helper.** `stage_evpn_routes` builds a synthetic `Route` probe carrying only peer / router-id / origin-type metadata and passes it to the existing `should_suppress_ibgp_inner`. Same pattern FlowSpec uses — no EVPN-specific reflection logic.
 
-**Best-path: type-specific head + shared BGP body.** `evpn_tiebreak_simple` runs the stale rank and a Type-2-specific MAC Mobility head (sticky flag + sequence per RFC 7432 §15.1), then falls through to the same chain as unicast (LocalPref → AS_PATH → ORIGIN → MED → eBGP>iBGP → effective BGP Identifier → CLUSTER_LIST length → peer address, with the identifier step skipped for a pair that includes a locally originated route). Type 1/4 DF-election tiebreaks are not implemented — the RR reflects, downstream VTEPs elect. Types 3/5 have no type-specific head.
+**Best-path: type-specific head + shared BGP body.** `evpn_tiebreak_simple` runs the stale rank and a Type-2-specific MAC Mobility head (sticky flag + sequence per RFC 7432 §15.1), then falls through to the same chain as unicast (LocalPref → AS_PATH → ORIGIN → MED → eBGP>iBGP → effective BGP Identifier → CLUSTER_LIST length → peer address, with a locally originated route ranked ahead of every received route at the identifier step). Type 1/4 DF-election tiebreaks are not implemented — the RR reflects, downstream VTEPs elect. Types 3/5 have no type-specific head.
 
 **Policy uses placeholder prefix.** EVPN `RouteContext` carries a synthesized `0.0.0.0/0` prefix — the existing context fields (extended communities, communities, AS_PATH, peer metadata) are what operators actually filter on. RT-based filtering works through the existing `match_community` clause. A dedicated `match_evpn_route_type` clause shipped in v0.11.0 and matches the RFC 7432 §7 / RFC 9136 route type directly.
 
