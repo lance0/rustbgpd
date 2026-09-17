@@ -34,6 +34,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   render command prints each warning on stderr.
 - The IXP Manager export skin emits a customer's UI-filter rows once per
   router even when the member has several interfaces on the VLAN.
+- `just gate-ci` runs `just gate` plus the other `ci.yml` checks that need no
+  privileges: `just test-feature-gated`, the new `just gate-ci-steps`, which
+  runs the named script steps of the core and scale/receipt jobs straight
+  from the workflow, and the new `just gate-msrv`, which checks the workspace
+  on the `rust-version` toolchain. `CONTRIBUTING.md` lists the checks that
+  remain CI-only.
 
 ### Fixed
 

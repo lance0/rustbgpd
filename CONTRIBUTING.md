@@ -45,10 +45,11 @@ fails until you do.
 ### Optional local task runner
 
 The repository includes an optional [`just`](https://just.systems/) task
-runner for a curated local baseline. It does not add a build dependency, and
-the recipes are not a full CI or pre-merge replica. The contract checks require
-Python 3.11 or newer. Install `just` outside the repository if you want the
-shortcuts:
+runner for a curated local baseline. It does not add a build dependency.
+`just gate` is the everyday baseline, and `just gate-ci` extends it to the
+unprivileged checks in `.github/workflows/ci.yml`; neither replaces hosted CI
+(see the boundary below). The contract checks require Python 3.11 or newer.
+Install `just` outside the repository if you want the shortcuts:
 
 ```bash
 cargo install --locked just
@@ -115,18 +116,44 @@ The recipes intentionally expose their direct commands:
 - `just lab <name> <phase>` drives a guided local lab from `labs/`: `name` is
   `quickstart`, `ixp`, `rr`, or `monitoring`, and `phase` is `up`, `verify`,
   `break`, `explain`, or `down`.
+- `just gate-msrv` runs `cargo check --locked --workspace --all-targets` on
+  the toolchain named by the workspace `rust-version` in `Cargo.toml`, as the
+  `msrv` CI job does, in a separate `msrv-<version>` target subdirectory. It
+  exits with an install hint when that toolchain is missing
+  (`rustup toolchain install <version> --profile minimal`).
+- `just gate-ci-steps [job...]` runs every named script step of the `core`
+  and `scale_receipts` CI jobs in workflow order, read directly from
+  `ci.yml`: the workflow and installer contracts, the SRv6 receipt replays,
+  the committed performance-receipt verifiers, and the scale-harness and
+  receipt-classifier checks. `scripts/run_ci_steps.py` lists the steps it
+  skips and why, and fails when a listed step no longer exists or a new step
+  needs hosted-only context. The steps need `shellcheck` and `ripgrep`, and
+  the scale step starts a local daemon. `just gate-ci-steps --dry-run` prints
+  the plan.
+- `just gate-ci` runs `just gate`, `just test-feature-gated`,
+  `just gate-ci-steps`, and `just gate-msrv` in sequence. It takes tens of
+  minutes and includes the Criterion smoke, so do not run another gate
+  beside it.
 - `just fuzz-list` prints every cargo-fuzz `<crate> <target>` pair from the
   fail-closed inventory in `scripts/check_fuzz_target_inventory.py`.
   `just fuzz <crate> <target> [args]` runs one listed target from its owning
   crate on the pinned nightly toolchain and passes any extra arguments to
   libFuzzer.
 
-Hosted checks remain authoritative and cover more than these recipes: the
-declared MSRV, platform and workflow contracts, receipt classifiers, and
-privileged interoperability lanes. In particular, the exact v0.64 migration
-test only runs when `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64
-binary that CI prepares. Privileged network-namespace tests require Linux,
-`EVPN_LINUX_NETNS=1`, and `CAP_NET_ADMIN` plus `CAP_SYS_ADMIN`; use
+Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
+checks that need no privileges or pull-request context; these stay CI-only:
+
+- the published-crate README freshness check, which diffs against the pull
+  request base;
+- the exact v0.64 migration test, which runs only when
+  `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI
+  prepares;
+- the privileged kernel job in `ci.yml`, plus every other workflow under
+  `.github/workflows/`, such as the interop, kernel-dataplane, container, and
+  release lanes.
+
+Privileged network-namespace tests require Linux, `EVPN_LINUX_NETNS=1`, and
+`CAP_NET_ADMIN` plus `CAP_SYS_ADMIN`; use
 `crates/evpn-linux/tests/docker/run-netns-tests.sh` (or `just netns`) as
 documented in that harness's README. Neither prerequisite is installed or
 enabled by `just gate`.
