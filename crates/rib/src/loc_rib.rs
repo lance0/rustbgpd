@@ -2895,10 +2895,6 @@ mod tests {
         let mut r_nh = r1.clone();
         r_nh.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99));
 
-        // Same peer, same preference fields, new community set.
-        let mut r_attr = r1.clone();
-        Arc::make_mut(&mut r_attr.attributes).push(PathAttribute::Communities(vec![0x0001_0001]));
-
         let mut loc = LocRib::new();
         // First install — always a change.
         assert!(loc.recompute(prefix, [&r1].into_iter()));
@@ -2913,13 +2909,43 @@ mod tests {
             loc.get(&prefix).unwrap().next_hop,
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))
         );
-        // Attribute payload changed — must be detected.
-        assert!(
-            loc.recompute(prefix, [&r_attr].into_iter()),
-            "same-peer attribute change must be detected"
+        // Attribute-only replacements must not also change the next-hop.
+        // Exercise both families using the same preference-bearing payload.
+        let mut v6 = crate::test_support::make_v6_route(
+            Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48),
+            "2001:db8::1".parse().unwrap(),
         );
-        // Same input again — no change.
-        assert!(!loc.recompute(prefix, [&r_attr.clone()].into_iter()));
+        v6.attributes = Arc::clone(&r_nh.attributes);
+        for baseline in [r_nh, v6] {
+            let mut community = baseline.clone();
+            Arc::make_mut(&mut community.attributes)
+                .push(PathAttribute::Communities(vec![0x0001_0001]));
+            let mut as_path = baseline.clone();
+            for attr in Arc::make_mut(&mut as_path.attributes) {
+                if let PathAttribute::AsPath(path) = attr {
+                    *path = AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                    };
+                }
+            }
+            for replacement in [community, as_path] {
+                assert_ne!(baseline.attributes, replacement.attributes);
+                assert_eq!(baseline.next_hop, replacement.next_hop);
+                assert_eq!(best_path_cmp(&baseline, &replacement), Ordering::Equal);
+                let mut loc = LocRib::new();
+                assert!(loc.recompute(baseline.prefix, [&baseline].into_iter()));
+                assert!(
+                    loc.recompute(baseline.prefix, [&replacement].into_iter()),
+                    "attribute-only replacement must be detected for {}",
+                    baseline.prefix
+                );
+                let installed = loc.get(&baseline.prefix).unwrap();
+                assert_eq!(installed.attributes, replacement.attributes);
+                assert_eq!(installed.next_hop, baseline.next_hop);
+                // Identical replays must not generate another change.
+                assert!(!loc.recompute(baseline.prefix, [&replacement].into_iter()));
+            }
+        }
     }
 
     #[test]
