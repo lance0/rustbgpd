@@ -126,6 +126,38 @@ pub fn bound_bgp_addr(log: &str) -> Option<SocketAddr> {
     })
 }
 
+/// Block until the daemon's gRPC unix socket at `sock` accepts a connection.
+///
+/// The daemon binds and logs its BGP listener before it serves gRPC, so a
+/// bound BGP port is no evidence that `grpc.sock` exists yet; a CLI call in
+/// that window fails with "socket does not exist". The daemon binds and
+/// listens on the socket before it reports listener startup, so a successful
+/// connect means the listener is up. Panics if the daemon exits first or the
+/// socket never accepts.
+#[cfg(unix)]
+pub fn wait_until_grpc_socket_accepts(sock: &Path, daemon: &mut std::process::Child) {
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if std::os::unix::net::UnixStream::connect(sock).is_ok() {
+            return;
+        }
+        if let Some(status) = daemon.try_wait().expect("query daemon status") {
+            panic!(
+                "rustbgpd exited with {status} before serving {}",
+                sock.display()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rustbgpd never served its gRPC socket at {}",
+            sock.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Hand the BGP port choice of a rendered IXP Manager candidate to the daemon.
 ///
 /// The renderer refuses an export that asks for port 0, so tests render the
