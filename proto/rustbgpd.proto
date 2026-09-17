@@ -3263,7 +3263,12 @@ message FlowSpecTrafficRate {
 }
 
 message FlowSpecTrafficAction {
+  // Sample bit (RFC 8955 §7.3): enable traffic sampling and logging for
+  // this Flow Specification. Only effective when set.
   bool sample = 1;
+  // Terminal Action bit (RFC 8955 §7.3): when set, subsequent Flow
+  // Specifications are still evaluated; when unset, evaluation stops at
+  // this Flow Specification.
   bool terminal = 2;
 }
 
