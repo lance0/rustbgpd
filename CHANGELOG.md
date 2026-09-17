@@ -155,6 +155,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every other `rbgp` command, instead of `error:`. Scripts that match the
   lowercase prefix on import failures need updating. Exit codes are
   unchanged.
+- The event-history outbox now releases its `event_id` allocator explicitly
+  when a batch insert fails after ids were assigned, so the rolled-back batch
+  is counted as a per-batch loss and the next batch commits. Previously, in
+  debug builds, the allocator's leak check panicked the storage thread on that
+  rollback, which closed the outbox until restart. Release builds were
+  unaffected.
 - The `[[fib_tables]]` reconciler now wakes for install-candidate changes
   that keep the winning best path. An equal-cost member added, withdrawn,
   lost to a session drop, or re-advertised with a new next hop under
