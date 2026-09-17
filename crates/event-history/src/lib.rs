@@ -71,6 +71,8 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 pub use error::EventHistoryError;
+#[doc(hidden)]
+pub use storage::set_probe_retry_hook;
 pub use storage::{PersistedEvent, QueryFilter, RetentionOutcome};
 
 /// Default capacity for each producer's mpsc channel into EHM.

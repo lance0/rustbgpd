@@ -11,6 +11,7 @@
 //! [`crate::run_actor`] holds the only [`StoreHandle`]; broadcast subscribers
 //! never call into storage.
 
+use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,6 +42,29 @@ use crate::{Category, EventEnvelope, Severity, SynchronousMode};
 /// Pause before the single retry of a failed primary open, so a brief lock or
 /// I/O error does not quarantine a healthy store.
 const PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
+
+thread_local! {
+    /// See [`set_probe_retry_hook`].
+    static ON_PROBE_RETRY: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+}
+
+/// Test seam: run `hook` on this thread the next time a failed primary DB open
+/// is retried, before the second attempt.
+///
+/// The retry is logged too, but a log line is not a usable observation point
+/// for a test: `tracing` caches callsite interest process-wide, so whichever
+/// thread reaches the retry callsite first decides whether it stays enabled.
+/// A concurrent test in the same binary that reaches it with no subscriber
+/// installed disables it for every later thread, and a thread-local subscriber
+/// then never sees the event even though the retry happened on its own thread.
+///
+/// The hook is registered per thread because [`open_with_recovery`] runs
+/// synchronously on the thread that calls [`crate::EventHistoryManager::start`],
+/// so concurrent tests in one process never observe each other's retries.
+#[doc(hidden)]
+pub fn set_probe_retry_hook(hook: impl FnMut() + 'static) {
+    ON_PROBE_RETRY.with_borrow_mut(|slot| *slot = Some(Box::new(hook)));
+}
 
 /// Operations the async side can send to the blocking storage thread.
 pub(crate) enum StoreOp {
@@ -563,6 +587,11 @@ fn open_with_recovery(
             error = %first_err,
             "primary DB open failed; retrying once before quarantine"
         );
+        ON_PROBE_RETRY.with_borrow_mut(|slot| {
+            if let Some(hook) = slot.as_mut() {
+                hook();
+            }
+        });
         std::thread::sleep(PROBE_RETRY_DELAY);
         probe_open(path, synchronous)
     });
