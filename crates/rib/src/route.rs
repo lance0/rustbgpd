@@ -469,10 +469,9 @@ impl BgpLsRibRoute {
 ///
 /// The wire [`VpnRouteKey`] carries the AFI-scoped Route Distinguisher plus IP
 /// prefix (the family is implicit in the prefix). The MPLS label stack is route
-/// *data*, not identity, so it is not part of the key. `path_id` is reserved for
-/// a future Add-Path-enabled slice and is always zero until negotiation grows
-/// that capability — kept as a RIB-layer wrapper so the wire route identity stays
-/// a pure RD + prefix.
+/// *data*, not identity, so it is not part of the key. `path_id` carries the
+/// RFC 7911 Add-Path path identifier (zero when Add-Path is not in use) — kept
+/// as a RIB-layer wrapper so the wire route identity stays a pure RD + prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VpnRibRouteKey {
     /// Wire route identity: Route Distinguisher + VPN IP prefix (V4/V6).
@@ -788,7 +787,7 @@ impl LabeledRibRoute {
 /// The wire [`RtcNlri`] is the full route identity — a 0–96-bit prefix over
 /// origin AS + Route Target. `path_id` is reserved for a future
 /// Add-Path-enabled slice and is always zero until negotiation grows that
-/// capability, mirroring [`VpnRibRouteKey`].
+/// capability.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RtcRibRouteKey {
     /// Wire route identity: the RT membership NLRI itself.
