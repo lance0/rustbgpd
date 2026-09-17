@@ -121,6 +121,9 @@ struct State {
     /// FIFO injection. Tests use this to validate the "failed dump
     /// leaves the latch unset" path.
     l3_adoption_dump_failures: u32,
+    /// Nexthop IDs whose next `del_nexthop` fails with a transient
+    /// I/O error. Each entry is consumed by one call for that ID.
+    del_nexthop_failures: Vec<u32>,
     /// Successful L3 `apply` calls in arrival order. The ADR-0079
     /// reap-order test asserts route → neighbor → FDB teardown
     /// sequencing, which no end-state map can capture.
@@ -244,6 +247,7 @@ impl InMemoryDataplane {
                 ip_vrf_statuses: HashMap::new(),
                 l3vxlan_ifindexes: BTreeMap::new(),
                 l3_adoption_dump_failures: 0,
+                del_nexthop_failures: Vec::new(),
                 l3_op_log: Vec::new(),
             })),
             events_rx,
@@ -1126,6 +1130,10 @@ impl NexthopOps for InMemoryDataplane {
         if let Some(e) = take_universal_failure(&mut state) {
             return Err(e);
         }
+        if let Some(idx) = state.del_nexthop_failures.iter().position(|f| *f == id) {
+            state.del_nexthop_failures.remove(idx);
+            return Err(ErrorTemplate::Io.realize());
+        }
         // Idempotent: dropping a non-existent entry is fine, matching
         // the slice-2 `NexthopSocket::del` ENOENT-as-ACK contract.
         state.nexthop_ops.remove(&id);
@@ -1444,6 +1452,18 @@ impl InMemoryHandle {
     #[must_use]
     pub fn force_remove_nexthop_op(&self, id: u32) -> Option<KernelNexthop> {
         self.state.lock().expect("poisoned").nexthop_ops.remove(&id)
+    }
+
+    /// Fail the next `del_nexthop(id)` with a transient I/O error.
+    /// Queue the same ID again to fail successive calls. Unlike the
+    /// targetless FIFO injections, this cannot be consumed by an
+    /// unrelated operation earlier in the same pass.
+    pub fn inject_del_nexthop_failure_io(&self, id: u32) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .del_nexthop_failures
+            .push(id);
     }
 
     /// Out-of-band kernel-side group-member-set mutation. Replaces
