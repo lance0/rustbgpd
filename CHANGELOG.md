@@ -86,6 +86,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same code as a commit. The full receipt, including `--json` output, is
   still printed before the non-zero exit. A receipt with an unrecognized
   status now exits 1 instead of passing as a commit or as changes present.
+- VPNv4/VPNv6 and labeled-unicast best-path selection now breaks a tie
+  between routes from the same peer on the lower Add-Path path identifier, as
+  IPv4/IPv6 unicast selection already did. Two Add-Path routes from one peer
+  with identical attributes previously tied through every step, so the
+  selected route, the Add-Path send ranking, and the Optimal Route Reflection
+  per-vantage choice followed arrival order: withdrawing and re-advertising
+  the selected path could move selection to the other one. FlowSpec selection
+  gains the same final step; FlowSpec does not negotiate Add-Path, so its
+  selection does not change.
 
 ### Upgrade notes
 
