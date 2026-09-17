@@ -109,6 +109,10 @@ impl PersistenceRig {
     /// Not `async`: everything here is either synchronous or a `tokio::spawn`,
     /// which only needs the caller's runtime, so the rig is fully wired the
     /// moment this returns.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the inline seed config is the one fixture every rig scenario shares"
+    )]
     fn start() -> Self {
         let dir = tempfile::tempdir().expect("temp config dir");
         let config_path = dir.path().join("config.toml");
@@ -142,6 +146,10 @@ receive_max = 8
 families = ["ipv6_unicast"]
 route_reflector_client = true
 graceful_restart = false
+
+[peer_groups.long-hold]
+hold_time = 180
+min_hold_time = 120
 
 [[neighbors]]
 address = "10.0.0.2"
@@ -605,6 +613,64 @@ async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
     assert_eq!(rig.session_history().await, history_before);
     rig.unseal_config_dir();
     assert!(!rig.staged_temp_path().exists());
+}
+
+/// `min_hold_time` above the effective `hold_time` (explicit, daemon default,
+/// or peer-group inherited) is rejected on the gRPC add path before any
+/// session, disk, or history effect; the boundary and inverted pairs succeed.
+#[tokio::test]
+async fn presence_create_rejects_min_hold_time_above_effective_hold_time() {
+    let rig = PersistenceRig::start();
+    let config_before = rig.config_bytes();
+    let history_before = rig.session_history().await;
+
+    let rejected = [
+        ("10.0.0.20", 90, 120, ""),
+        ("10.0.0.21", 0, 120, ""),
+        ("10.0.0.22", 90, 0, "long-hold"),
+    ];
+    for (address, hold_time, min_hold_time, peer_group) in rejected {
+        let error = rig
+            .add_presence_neighbor(
+                rustbgpd_api::proto::NeighborConfig {
+                    address: address.into(),
+                    remote_asn: 65020,
+                    hold_time,
+                    min_hold_time: (min_hold_time != 0).then_some(min_hold_time),
+                    peer_group: peer_group.into(),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
+        assert!(
+            error.message().contains("min_hold_time 120")
+                && error.message().contains("hold_time 90"),
+            "{address}: {error}"
+        );
+        assert!(rig.peer(address).await.is_none());
+        assert_eq!(rig.config_bytes(), config_before);
+        assert_eq!(rig.session_history().await, history_before);
+    }
+
+    for (address, hold_time, min_hold_time) in [("10.0.0.23", 120, 90), ("10.0.0.24", 90, 90)] {
+        rig.add_presence_neighbor(
+            rustbgpd_api::proto::NeighborConfig {
+                address: address.into(),
+                remote_asn: 65020,
+                hold_time,
+                min_hold_time: Some(min_hold_time),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{address}: {error}"));
+        let peer = rig.peer(address).await.unwrap();
+        assert_eq!(peer.min_hold_time.map(u32::from), Some(min_hold_time));
+    }
 }
 
 #[test]
