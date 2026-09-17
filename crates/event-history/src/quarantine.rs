@@ -8,9 +8,10 @@
 //!    `events.db.stale-shm` so a fresh DB can take its place. The main
 //!    file naming matches the `*.json.stale` convention in
 //!    `src/fib_runtime.rs:1140-1142` so operators inherit one
-//!    quarantine idiom across the daemon. No timestamp suffix — a
-//!    second quarantine overwrites the first; operators rename manually
-//!    if they need forensic preservation.
+//!    quarantine idiom across the daemon. A new quarantine never
+//!    overwrites an older one: an existing `events.db.stale` set moves to
+//!    `events.db.stale.<n>` first, taking the lowest unused `n`, so the
+//!    highest number is the most recent earlier copy.
 //!
 //! 2. **Sidecar.** A tiny file at `<runtime_state_dir>/events.last_id`
 //!    carrying just the allocator value as ASCII. Written via the
@@ -77,32 +78,30 @@ pub(crate) fn sidecar_path(events_db: &Path) -> PathBuf {
     )
 }
 
+/// The SQLite file set for `db`: the database, its WAL, and its
+/// shared-memory file. WAL side files are part of the database state, so
+/// they move with it under the names SQLite expects for the new path;
+/// metadata recovery then sees committed-but-not-checkpointed updates.
+fn file_set(db: &Path) -> [PathBuf; 3] {
+    [db.to_path_buf(), wal_path(db), shm_path(db)]
+}
+
 /// Move the SQLite file set:
 ///
 /// - `events.db` → `events.db.stale`
 /// - `events.db-wal` → `events.db.stale-wal`
 /// - `events.db-shm` → `events.db.stale-shm`
 ///
-/// Overwrites any existing stale files. Returns OK even if the events DB
-/// doesn't exist (idempotent on the "nothing to quarantine" case).
+/// An existing quarantine set is first rotated to `events.db.stale.<n>`.
+/// Returns OK even if the events DB doesn't exist (idempotent on the
+/// "nothing to quarantine" case).
 pub(crate) fn quarantine_db(events_db: &Path) -> Result<(), EventHistoryError> {
     if !events_db.exists() {
         return Ok(());
     }
     let target = stale_path(events_db);
-    rename_overwrite(events_db, &target)?;
-
-    // WAL mode side files are part of the database state. Rename them to
-    // the names SQLite expects when opening `events.db.stale` so metadata
-    // recovery sees committed-but-not-checkpointed allocator updates.
-    let wal = wal_path(events_db);
-    if wal.exists() {
-        rename_overwrite(&wal, &wal_path(&target))?;
-    }
-    let shm = shm_path(events_db);
-    if shm.exists() {
-        rename_overwrite(&shm, &shm_path(&target))?;
-    }
+    rotate_quarantine(&target)?;
+    move_file_set(events_db, &target)?;
     warn!(
         events_db = %events_db.display(),
         quarantined_to = %target.display(),
@@ -111,17 +110,44 @@ pub(crate) fn quarantine_db(events_db: &Path) -> Result<(), EventHistoryError> {
     Ok(())
 }
 
-fn rename_overwrite(from: &Path, to: &Path) -> Result<(), EventHistoryError> {
-    if to.exists() {
-        fs::remove_file(to).map_err(|source| EventHistoryError::Io {
-            path: to.to_path_buf(),
-            source,
-        })?;
+/// Move an existing quarantine set to the lowest unused
+/// `<stale>.<n>` so the next quarantine cannot overwrite it.
+fn rotate_quarantine(stale: &Path) -> Result<(), EventHistoryError> {
+    let occupied = |db: &Path| file_set(db).iter().any(|file| file.exists());
+    if !occupied(stale) {
+        return Ok(());
     }
-    fs::rename(from, to).map_err(|source| EventHistoryError::Io {
-        path: to.to_path_buf(),
-        source,
-    })
+    let mut n = 1_u32;
+    let rotated = loop {
+        let mut candidate = stale.as_os_str().to_os_string();
+        candidate.push(format!(".{n}"));
+        let candidate = PathBuf::from(candidate);
+        if !occupied(&candidate) {
+            break candidate;
+        }
+        n += 1;
+    };
+    move_file_set(stale, &rotated)?;
+    warn!(
+        quarantine = %stale.display(),
+        preserved_as = %rotated.display(),
+        "kept the previous events DB quarantine"
+    );
+    Ok(())
+}
+
+/// Rename every present member of `from`'s file set to the matching
+/// member of `to`'s. Callers ensure `to`'s set is unoccupied.
+fn move_file_set(from: &Path, to: &Path) -> Result<(), EventHistoryError> {
+    for (file, target) in file_set(from).iter().zip(file_set(to)) {
+        if file.exists() {
+            fs::rename(file, &target).map_err(|source| EventHistoryError::Io {
+                path: target,
+                source,
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Read the sidecar's allocator value, if the sidecar exists and
@@ -284,6 +310,43 @@ mod tests {
         assert_eq!(
             fs::read(dir.path().join("events.db.stale-shm")).unwrap(),
             b"shm"
+        );
+    }
+
+    #[test]
+    fn quarantine_db_keeps_every_earlier_quarantine() {
+        let dir = TempDir::new().unwrap();
+        let events = dir.path().join("events.db");
+        for generation in ["first", "second", "third"] {
+            fs::write(&events, generation).unwrap();
+            fs::write(wal_path(&events), generation).unwrap();
+            quarantine_db(&events).unwrap();
+        }
+        let read = |name: &str| fs::read_to_string(dir.path().join(name)).unwrap();
+        assert_eq!(read("events.db.stale"), "third");
+        assert_eq!(read("events.db.stale-wal"), "third");
+        assert_eq!(read("events.db.stale.1"), "first");
+        assert_eq!(read("events.db.stale.1-wal"), "first");
+        assert_eq!(read("events.db.stale.2"), "second");
+        assert_eq!(read("events.db.stale.2-wal"), "second");
+    }
+
+    #[test]
+    fn quarantine_db_rotates_an_orphaned_side_file() {
+        // A leftover stale WAL without its database is still evidence.
+        let dir = TempDir::new().unwrap();
+        let events = dir.path().join("events.db");
+        fs::write(dir.path().join("events.db.stale-wal"), b"orphan").unwrap();
+        fs::write(&events, b"garbage").unwrap();
+        quarantine_db(&events).unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("events.db.stale.1-wal")).unwrap(),
+            b"orphan"
+        );
+        assert!(!dir.path().join("events.db.stale.1").exists());
+        assert_eq!(
+            fs::read(dir.path().join("events.db.stale")).unwrap(),
+            b"garbage"
         );
     }
 

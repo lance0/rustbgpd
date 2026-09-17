@@ -98,6 +98,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `BgpEventOutboxStorageFailed` alert. A restart is required to recover. A
   SQLite commit failure is still a per-batch loss and does not stop the
   outbox.
+- Event history no longer quarantines its database after a single failed
+  open. It retries once after 200 ms and quarantines only if the retry also
+  fails, so a brief lock or I/O error no longer discards the stored history.
+  A quarantine no longer overwrites an earlier one: an existing
+  `events.db.stale` set moves to `events.db.stale.1` (or the next unused
+  number) first. The configuration reference now documents how to restore a
+  quarantined store by hand.
 
 ### Upgrade notes
 
@@ -152,6 +159,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shutdown. Use `bgp_event_outbox_storage_failed` to tell the two cases apart.
   New gNMI `Subscribe ON_CHANGE` streams end with `DATA_LOSS` until the daemon
   restarts.
+- Earlier event-history quarantines are now kept as `events.db.stale.<n>`
+  files, which are full copies of the store and are never deleted
+  automatically. Remove them when they are no longer needed. A failed
+  event-history open now delays startup by 200 ms before quarantine.
 
 ## [0.70.1] — 2026-09-15
 

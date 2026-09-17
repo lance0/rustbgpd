@@ -42,7 +42,9 @@ one SQLite transaction, and serves cursor-based replay through the
   refusal (mirrors the `GR_RESTART_MARKER_V*` version-fence pattern in
   `src/main.rs`).
 - `quarantine.rs` — corrupted-DB detection + `.stale` rename for
-  `events.db`, `events.db-wal`, and `events.db-shm`, plus diagnostic
+  `events.db`, `events.db-wal`, and `events.db-shm` (an earlier
+  quarantine set rotates to `.stale.<n>` rather than being overwritten),
+  plus diagnostic
   sidecar (`events.last_id`) atomic write, matching the
   `fib-owned.json` pattern in `src/fib_runtime.rs`.
 - `error.rs` — `EventHistoryError`. Single type covering SQL,
@@ -76,7 +78,8 @@ one SQLite transaction, and serves cursor-based replay through the
   stops while the actor runs, EHM latches `EhmState::storage_failed`, closes
   producer admission, records a loss, refuses new cursor subscriptions with
   `StorageUnavailable`, and stops the actor.
-- **Allocator recovery ladder.** Primary DB → quarantine fallback.
+- **Allocator recovery ladder.** Primary DB (a failed open is retried
+  once before quarantine) → quarantine fallback.
   `events.last_id` is a diagnostic hint only in v1 because it can lag
   committed events. If both authoritative sources fail AND prior
   allocation evidence exists (`events.db.stale` or `events.last_id`),

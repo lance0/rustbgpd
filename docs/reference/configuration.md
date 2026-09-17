@@ -4420,8 +4420,14 @@ batch_interval_ms = 50          # batch-commit time threshold
 
 When the events DB fails to open or is corrupted:
 
-- The bad file is renamed to `events.db.stale` (matches the
-  `*.json.stale` convention from `fib-owned.json`).
+- EHM retries the open once after 200 ms, so a brief lock or I/O error
+  does not quarantine a healthy store.
+- If the retry also fails, the database and its `-wal` / `-shm` files are
+  renamed to `events.db.stale` (matches the `*.json.stale` convention from
+  `fib-owned.json`). An earlier quarantine is never overwritten: its files
+  first move to `events.db.stale.1`, or the next unused number, so the
+  highest number is the most recent earlier copy. Each copy is a full
+  store; delete old copies once you no longer need them.
 - The allocator anchor is recovered via authoritative DB metadata:
   primary DB metadata, then quarantine fallback. `events.last_id` is
   written as a diagnostic hint, but it may lag committed events and is
@@ -4439,6 +4445,32 @@ requests with `UNAVAILABLE`, ends open durable streams with `DATA_LOSS`, and
 sets `bgp_event_outbox_storage_failed` and `bgp_event_outbox_degraded` to `1`.
 Events produced from then until a restart are lost. Restart the daemon to
 recover.
+
+#### Restoring a quarantined store
+
+EHM does not restore a quarantined store automatically. If the quarantined
+copy is intact and you want its history back, restore it by hand. Run these
+commands in the directory that holds `events.db`:
+
+1. Stop the daemon.
+2. Check the copy. This must print `ok`:
+   `sqlite3 -readonly events.db.stale 'PRAGMA integrity_check;'`
+3. Note the `last_event_id` of both stores. Skip `events.db` if it does not
+   exist:
+   `sqlite3 -readonly events.db.stale "SELECT value FROM metadata WHERE key = 'last_event_id';"`
+   `sqlite3 -readonly events.db "SELECT value FROM metadata WHERE key = 'last_event_id';"`
+4. Move the replacement files (`events.db`, `events.db-wal`,
+   `events.db-shm`) to another name.
+5. Rename `events.db.stale`, `events.db.stale-wal`, and
+   `events.db.stale-shm` (whichever exist) to `events.db`, `events.db-wal`,
+   and `events.db-shm`.
+6. If the replacement store's value from step 3 is higher, set the restored
+   store to that value so that no `event_id` is reused:
+   `sqlite3 events.db "UPDATE metadata SET value = '<value>' WHERE key = 'last_event_id';"`
+7. Start the daemon.
+
+Events committed only to the replacement store are not in the restored
+history; they remain in the files moved aside in step 4.
 
 ### Best-effort under overload
 
