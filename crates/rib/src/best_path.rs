@@ -1945,6 +1945,46 @@ mod proptests {
             )
     }
 
+    /// A route pair that ties on every criterion *above* step 5.5 by
+    /// construction, so the tail of the decision chain — effective BGP
+    /// Identifier, `CLUSTER_LIST` length, peer address, inbound Add-Path
+    /// identifier — is actually reached.
+    ///
+    /// Two independent [`arb_route`] draws essentially never agree on
+    /// `LOCAL_PREF` *and* MED *and* the four categorical states, so under
+    /// `arb_route()` alone a property over the tail decides nothing: every
+    /// pair is settled by step 4 or earlier. Here `b` inherits `a`'s stale
+    /// tier, RPKI and ASPA states, origin class, `LOCAL_PREF`, `AS_PATH`,
+    /// `ORIGIN` and MED, and keeps its own independently drawn
+    /// `ORIGINATOR_ID`, `CLUSTER_LIST`, peer address, peer BGP Identifier
+    /// and path ID.
+    fn arb_tie_biased_pair() -> impl Strategy<Value = (Route, Route)> {
+        (arb_route(), arb_route(), 1u8..=4, 0u32..=2).prop_map(|(a, mut b, rid_oct, path_id)| {
+            let is_tail = |attr: &PathAttribute| {
+                matches!(
+                    attr,
+                    PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+                )
+            };
+            let mut attributes: Vec<PathAttribute> = a
+                .attributes
+                .iter()
+                .filter(|at| !is_tail(at))
+                .cloned()
+                .collect();
+            attributes.extend(b.attributes.iter().filter(|at| is_tail(at)).cloned());
+            b.attributes = Arc::new(attributes);
+            b.is_stale = a.is_stale;
+            b.is_llgr_stale = a.is_llgr_stale;
+            b.validation_state = a.validation_state;
+            b.aspa_state = a.aspa_state;
+            b.origin_type = a.origin_type;
+            b.peer_router_id = peer_router_id_for(a.origin_type, rid_oct);
+            b.path_id = path_id;
+            (a, b)
+        })
+    }
+
     /// Verbatim fixture copy of `best_path_cmp` as it stood BEFORE the
     /// `cmp_chain` refactor (the ORR arc) — the oracle for
     /// `best_path_cmp_matches_legacy_without_identifier_or_path_id_ties`.
@@ -2053,6 +2093,37 @@ mod proptests {
                 route.path_id = 0;
             }
             prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
+        }
+
+        /// The same equivalence over pairs that tie down to the tail, so
+        /// `CLUSTER_LIST` length and peer address genuinely decide. The
+        /// broad draw above never gets that far: independently drawn pairs
+        /// are settled by the stale tier, the RPKI or ASPA state, or
+        /// `LOCAL_PREF`, and sampling found none reaching past `AS_PATH`.
+        #[test]
+        fn best_path_cmp_matches_legacy_on_tie_biased_pairs(
+            (mut a, mut b) in arb_tie_biased_pair()
+        ) {
+            for route in [&mut a, &mut b] {
+                Arc::make_mut(&mut route.attributes)
+                    .retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
+                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                route.path_id = 0;
+            }
+            prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
+        }
+
+        /// The two hand-maintained ladders must agree on the steps the
+        /// legacy oracle cannot police: the effective BGP Identifier
+        /// (step 5.5) and the Add-Path identifier tie, neither of which
+        /// exists in the frozen fixture. Tie-biased pairs keep their own
+        /// identifiers and path IDs, so both steps decide here.
+        #[test]
+        fn with_reason_agrees_with_plain_cmp_on_tie_biased_pairs(
+            (a, b) in arb_tie_biased_pair()
+        ) {
+            let (ord, _) = best_path_cmp_with_reason(&a, &b);
+            prop_assert_eq!(ord, best_path_cmp(&a, &b));
         }
 
         /// With both costs unknown the ORR comparator degenerates to
