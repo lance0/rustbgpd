@@ -204,7 +204,7 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
 
     let log_path = root.join("daemon.log");
     let log = fs::File::create(&log_path).expect("daemon log");
-    let _daemon = Daemon(
+    let mut daemon = Daemon(
         Command::new(daemon_bin)
             .arg(candidate.join("config.toml"))
             .stdout(Stdio::from(log.try_clone().expect("clone log")))
@@ -222,7 +222,11 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
         "daemon reports and serves its BGP listener: {daemon_addr:?}"
     );
     let daemon_addr = daemon_addr.expect("bound BGP listener");
-    let grpc = format!("unix://{}", runtime.join("grpc.sock").display());
+    // The BGP listener binds before gRPC serves; `rbgp` asserts success, so
+    // the socket must accept before the first call below.
+    let grpc_sock = runtime.join("grpc.sock");
+    support::wait_until_grpc_socket_accepts(&grpc_sock, &mut daemon.0);
+    let grpc = format!("unix://{}", grpc_sock.display());
     // Router A announces with a next hop that is neither of the member's
     // addresses; router B announces a second prefix the same way.
     let _router_a = router(ROUTER_A, daemon_addr, [45, 45, 45], FOREIGN_NEXT_HOP);
