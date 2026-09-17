@@ -22,6 +22,13 @@ INJECTED_PREFIX="192.0.2.53/32"
 REMOTE_LL="fe80::2"
 REMOTE_LL2="fe80::3"
 LOCAL_LL="fe80::1"
+# Budget for every wait that observes the kernel FIB or ListFibRoutes.
+# Adding or removing an equal-cost path that does not move the winning best
+# path publishes no Loc-RIB best-change event, so the multipath row follows the
+# FIB reconciler's 30 s periodic backstop rather than the sub-second event
+# wake. A 30 s budget therefore sits exactly on that period; 60 s clears it
+# with margin while still failing on a route that never converges.
+FIB_WAIT_SECS=60
 
 resolve_grpc_addr
 start_rustbgpd
@@ -155,7 +162,7 @@ wait_grpc_next_hops() {
     local addr=${PREFIX%/*}
     local plen=${PREFIX#*/}
     log "Waiting for $PREFIX gRPC next_hops count -> $expected_count..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local json count
         if json=$(grpc_list_fib 2>/dev/null); then
             count=$(printf '%s\n' "$json" | jq -r --arg addr "$addr" --argjson plen "$plen" '
@@ -175,7 +182,7 @@ wait_grpc_next_hops() {
 
 wait_kernel_ecmp() {
     log "Waiting for $PREFIX kernel ECMP via $REMOTE_LL dev eth1 + $REMOTE_LL2 dev eth2..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local route
         route=$(kernel_route)
         if echo "$route" | grep -q "proto bgp" \
@@ -197,7 +204,7 @@ wait_kernel_single() {
     local withdrawn_dev=$2
     local survivor_ll=$3
     log "Waiting for $PREFIX to collapse to $survivor_ll dev $survivor_dev..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local route
         route=$(kernel_route)
         if echo "$route" | grep -q "proto bgp" \
