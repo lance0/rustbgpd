@@ -1916,6 +1916,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_insert_failure_after_ids_are_assigned_is_a_per_batch_loss() {
+        // Load-bearing break: the allocator's drop assert treats a rolled-back
+        // batch as a leak, so an INSERT failure after ids were assigned
+        // panicked the storage thread in debug builds and turned a per-batch
+        // loss into a dead store. `sqlite_append_failure_is_a_per_batch_loss…`
+        // above fails before any id is assigned and cannot reach that assert.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let manager = EventHistoryManager::start(test_config(path.clone(), 1))
+            .await
+            .unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        let mut committed = manager.subscribe();
+        sender.try_send(event(Category::Route, 1)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, committed.recv())
+            .await
+            .expect("committed event backstop elapsed")
+            .unwrap();
+
+        // Occupy the next event_id (2) behind the allocator's back so the
+        // next batch assigns it and then fails on the primary key.
+        let foreign = rusqlite::Connection::open(&path).unwrap();
+        foreign
+            .execute(
+                "INSERT INTO events (
+                    event_id, timestamp_ns, category, event_type, severity,
+                    schema_version, daemon_boot_id, payload
+                 ) VALUES (2, 0, 'route', 'foreign', 'info', 1, 'foreign', X'')",
+                [],
+            )
+            .unwrap();
+        let mut losses = state.subscribe_loss_generation();
+        sender.try_send(event(Category::Route, 2)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, losses.changed())
+            .await
+            .expect("insert failure loss backstop elapsed")
+            .unwrap();
+        assert!(state.degraded());
+        assert!(
+            !state.storage_failed(),
+            "a rolled-back batch must not stop the storage thread"
+        );
+
+        foreign
+            .execute("DELETE FROM events WHERE event_id = 2", [])
+            .unwrap();
+        sender.try_send(event(Category::Route, 3)).unwrap();
+        let recovered = tokio::time::timeout(TEST_BACKSTOP, committed.recv())
+            .await
+            .expect("recovered commit backstop elapsed")
+            .unwrap();
+        assert_eq!(recovered.event_id, 2, "rolled-back ids were never issued");
+        assert_eq!(recovered.envelope.payload, vec![3]);
+        let persisted = manager
+            .query_persisted(0, u64::MAX, 10, QueryFilter::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            persisted.iter().map(|p| p.event_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn shutdown_drains_every_accepted_event_with_live_sender() {
         // Load-bearing breaks: the old batch_size*2 cap loses five events;
         // omitting the receiver close leaves the drain with nothing to end
