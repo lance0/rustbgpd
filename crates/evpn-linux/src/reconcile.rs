@@ -2645,7 +2645,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             );
         }
         self.dataplane.del_nexthop(tracked_id).await?;
-        self.state.nh_id_alloc.release_l3(tracked_id);
+        forget_deleted_nhid(&mut self.state, tracked_id);
         for ip in members {
             if self.state.l3_groups.vtep_nh_is_orphan(&ip)
                 && let Some(id) = self.state.l3_groups.drop_vtep_nh(&ip)
@@ -6782,7 +6782,7 @@ where
             .await?;
     }
     dataplane.del_nexthop(group.id).await?;
-    state.nh_id_alloc.release_l3(group.id);
+    forget_deleted_nhid(state, group.id);
     let delta = state
         .l3_groups
         .record_route_unref_from_group(group_key, route);
@@ -9201,5 +9201,191 @@ mod managed_netdev_tests {
             let row = rows.iter().find(|row| row.name == name).unwrap();
             assert_eq!(row.state, state, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod l3_delete_bookkeeping_tests {
+    //! The two L3 paths that delete a *tracked* group and propagate a
+    //! failed delete instead of queueing it. Nothing reachable puts a
+    //! tracked group's ID into the retry sets, so these tests seed
+    //! that state directly and check the confirmed delete clears it:
+    //! a stale entry would delete whichever object reuses the ID.
+
+    use super::*;
+    use crate::dataplane::{KernelNexthop, KernelNexthopKind, NexthopOps};
+    use crate::in_memory::{InMemoryDataplane, InMemoryHandle};
+    use rustbgpd_evpn::Ipv4Prefix;
+
+    const IFINDEX: u32 = 42;
+
+    struct Fixture {
+        actor: ReconcileActor<InMemoryDataplane>,
+        handle: InMemoryHandle,
+        _intent_tx: watch::Sender<Arc<DataplaneIntent>>,
+        _report_rx: mpsc::Receiver<DataplaneReport>,
+    }
+
+    fn fixture() -> Fixture {
+        let dataplane = InMemoryDataplane::new();
+        let handle = dataplane.handle();
+        let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (report_tx, report_rx) = mpsc::channel(1);
+        let actor = ReconcileActor::new(
+            ReconcileActorConfig::for_tests(),
+            dataplane,
+            intent_rx,
+            report_tx,
+            CancellationToken::new(),
+        );
+        Fixture {
+            actor,
+            handle,
+            _intent_tx: intent_tx,
+            _report_rx: report_rx,
+        }
+    }
+
+    fn vrf() -> IpVrfId {
+        IpVrfId::new(101).unwrap()
+    }
+
+    fn router_mac() -> MacAddress {
+        MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01])
+    }
+
+    fn key() -> crate::group_state::L3NhgKey {
+        crate::group_state::L3NhgKey::new(vrf(), IFINDEX, router_mac())
+    }
+
+    fn route() -> crate::group_state::L3RouteKey {
+        let prefix = Ipv4Prefix::new(std::net::Ipv4Addr::new(198, 51, 100, 0), 24);
+        (vrf(), EvpnIpPrefixValue::V4(prefix))
+    }
+
+    fn members() -> [IpAddr; 2] {
+        ["10.0.0.2".parse().unwrap(), "10.0.0.3".parse().unwrap()]
+    }
+
+    async fn install(f: &mut Fixture) -> u32 {
+        apply_install_l3_fdb_nhg(
+            &mut f.actor.dataplane,
+            &mut f.actor.state,
+            route(),
+            key(),
+            router_mac(),
+            IFINDEX,
+            &members(),
+        )
+        .await
+        .unwrap();
+        f.actor.state.l3_groups.group(&key()).unwrap().id
+    }
+
+    fn is_group(handle: &InMemoryHandle, id: u32) -> bool {
+        matches!(
+            handle.nexthop_ops().get(&id),
+            Some(KernelNexthop {
+                kind: KernelNexthopKind::Group { .. },
+                ..
+            })
+        )
+    }
+
+    /// After the confirmed delete, the same shape must come back at
+    /// the same ID (slot released) and survive both retry passes.
+    async fn assert_reused_id_survives(f: &mut Fixture, id: u32) {
+        assert_eq!(install(f).await, id, "released slot is reused");
+        f.actor.drain_pending_deletes().await;
+        let _ = f.actor.cleanup_unreferenced_l3_adoptions().await;
+        assert!(
+            is_group(&f.handle, id),
+            "stale retry entry deleted the object that reused {id:#x}; nhs={:?}",
+            f.handle.nexthop_ops()
+        );
+    }
+
+    #[tokio::test]
+    async fn l3_group_last_unref_clears_retry_bookkeeping() {
+        let mut f = fixture();
+        let id = install(&mut f).await;
+        f.actor.state.pending_deletes.insert(id);
+
+        apply_remove_l3_fdb_nhg(
+            &mut f.actor.dataplane,
+            &mut f.actor.state,
+            route(),
+            key(),
+            router_mac(),
+            IFINDEX,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(!f.handle.nexthop_ops().contains_key(&id));
+        assert!(
+            !f.actor.state.pending_deletes.contains(&id),
+            "confirmed delete must leave the retry queue"
+        );
+        assert_reused_id_survives(&mut f, id).await;
+    }
+
+    #[tokio::test]
+    async fn l3_adoption_reap_clears_retry_bookkeeping() {
+        let mut f = fixture();
+        // Crash-leftover shape as adoption reconstructs it: the group,
+        // its members and its row exist in the kernel; the group is
+        // tracked with no route refs.
+        let mut member_ids = Vec::new();
+        for ip in members() {
+            let mid = f.actor.state.nh_id_alloc.alloc_l3_vtep_nh().unwrap();
+            f.actor.dataplane.add_nexthop_member(mid, ip).await.unwrap();
+            f.actor.state.l3_groups.record_member_install(ip, mid);
+            member_ids.push(mid);
+        }
+        let id = f.actor.state.nh_id_alloc.alloc_l3_nhg().unwrap();
+        f.actor
+            .dataplane
+            .add_nexthop_group(id, &member_ids)
+            .await
+            .unwrap();
+        f.actor
+            .dataplane
+            .install_l3_fdb_nhg_row(IFINDEX, router_mac(), id)
+            .await
+            .unwrap();
+        f.actor
+            .state
+            .l3_groups
+            .record_group_install(key(), id, members().into_iter().collect());
+        f.actor.state.pending_deletes.insert(id);
+        f.actor.state.adopted_l3_unreferenced.insert(
+            id,
+            KernelNexthop {
+                id,
+                kind: KernelNexthopKind::Group { member_ids },
+            },
+        );
+
+        f.actor
+            .reap_adopted_l3_fdb_nhg(key(), IFINDEX, router_mac(), id)
+            .await
+            .unwrap();
+
+        assert!(
+            f.handle.nexthop_ops().is_empty(),
+            "{:?}",
+            f.handle.nexthop_ops()
+        );
+        assert!(
+            !f.actor.state.pending_deletes.contains(&id),
+            "confirmed delete must leave the retry queue"
+        );
+        assert!(
+            !f.actor.state.adopted_l3_unreferenced.contains_key(&id),
+            "confirmed delete must leave the adoption set"
+        );
+        assert_reused_id_survives(&mut f, id).await;
     }
 }
