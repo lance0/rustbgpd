@@ -86,6 +86,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same code as a commit. The full receipt, including `--json` output, is
   still printed before the non-zero exit. A receipt with an unrecognized
   status now exits 1 instead of passing as a commit or as changes present.
+- `rbgp config import` now prefixes its stderr errors with `Error:`, like
+  every other `rbgp` command, instead of `error:`. Scripts that match the
+  lowercase prefix on import failures need updating. Exit codes are
+  unchanged.
 
 ### Upgrade notes
 

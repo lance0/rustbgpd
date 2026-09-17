@@ -1079,6 +1079,45 @@ fn run_import_json_requires_out() {
     assert_eq!(run_import("/nonexistent/x.conf", None, None, true), 1);
 }
 
+/// Direct-exit import failures carry the CLI's standard `Error:` prefix.
+#[test]
+fn run_import_errors_use_the_standard_prefix() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = |name: &str| dir.path().join(name).to_str().expect("utf8").to_owned();
+    let (missing, unknown, frr, unwritable) = (
+        path("missing.conf"),
+        path("unknown.conf"),
+        path("frr.conf"),
+        path("absent-dir/config.toml"),
+    );
+    std::fs::write(&unknown, "hello world\n").expect("write source");
+    std::fs::write(&frr, FRR).expect("write source");
+    for (args, prefix) in [
+        (
+            vec!["--json", "config", "import", &missing],
+            "Error: --json prints the import report",
+        ),
+        (vec!["config", "import", &missing], "Error: cannot read "),
+        (
+            vec!["config", "import", &unknown],
+            "Error: cannot determine source format",
+        ),
+        (
+            vec!["config", "import", &frr, "--out", &unwritable],
+            "Error: cannot write ",
+        ),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(&args)
+            .output()
+            .expect("run rbgp");
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.starts_with(prefix), "{args:?}: {stderr}");
+    }
+}
+
 #[test]
 fn run_import_writes_config_and_exits_2_on_skips() {
     let dir = tempfile::tempdir().expect("tempdir");
