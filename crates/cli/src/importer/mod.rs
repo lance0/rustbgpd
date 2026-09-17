@@ -675,7 +675,7 @@ fn run_import_with_writer(
 ) -> i32 {
     if json && out.is_none() {
         eprintln!(
-            "error: --json prints the import report on stdout; pass --out PATH for the \
+            "Error: --json prints the import report on stdout; pass --out PATH for the \
              translated config"
         );
         return 1;
@@ -683,7 +683,7 @@ fn run_import_with_writer(
     let contents = match std::fs::read_to_string(source) {
         Ok(contents) => contents,
         Err(e) => {
-            eprintln!("error: cannot read {source}: {e}");
+            eprintln!("Error: cannot read {source}: {e}");
             return 1;
         }
     };
@@ -700,14 +700,14 @@ fn run_import_with_writer(
     let imported = match imported {
         Ok(imported) => imported,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("Error: {e}");
             return e.exit_code();
         }
     };
     match out {
         Some(path) => {
             if let Err(e) = std::fs::write(path, &imported.config_toml) {
-                eprintln!("error: cannot write {path}: {e}");
+                eprintln!("Error: cannot write {path}: {e}");
                 return 1;
             }
         }
@@ -717,7 +717,7 @@ fn run_import_with_writer(
                 .and_then(|()| stdout.flush())
             {
                 if error.kind() != std::io::ErrorKind::BrokenPipe {
-                    eprintln!("error: cannot write imported config: {error}");
+                    eprintln!("Error: cannot write imported config: {error}");
                 }
                 return 1;
             }
@@ -727,7 +727,7 @@ fn run_import_with_writer(
         let rendered = match serde_json::to_string_pretty(&imported.report) {
             Ok(rendered) => rendered,
             Err(error) => {
-                eprintln!("error: cannot encode import JSON output: {error}");
+                eprintln!("Error: cannot encode import JSON output: {error}");
                 return 1;
             }
         };
@@ -737,7 +737,7 @@ fn run_import_with_writer(
             .and_then(|()| stdout.flush())
         {
             if error.kind() != std::io::ErrorKind::BrokenPipe {
-                eprintln!("error: cannot write import JSON output: {error}");
+                eprintln!("Error: cannot write import JSON output: {error}");
             }
             return 1;
         }

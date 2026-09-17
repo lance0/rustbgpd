@@ -145,6 +145,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   later steps against every session-learned route, so the selected route
   does not change for them. The unicast, ORR, VPN, labeled-unicast,
   FlowSpec, BGP-LS, RT-Constrain, and EVPN chains share the change.
+- `rbgp config import` now prefixes its stderr errors with `Error:`, like
+  every other `rbgp` command, instead of `error:`. Scripts that match the
+  lowercase prefix on import failures need updating. Exit codes are
+  unchanged.
 
 ### Upgrade notes
 
