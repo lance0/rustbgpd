@@ -67,8 +67,9 @@ equal-cost multipath classification. The RFC 4271 §9.1.2.2 step (f)
 identifier comparison reports as `lower_originator_id` when both routes
 carried ORIGINATOR_ID and as `lower_bgp_identifier` when at least one
 side was compared by its advertising peer's BGP Identifier (RFC 4456 §9
-substitution); it precedes `shorter_cluster_list`, and a pair that
-includes a locally originated route skips it:
+substitution); it precedes `shorter_cluster_list`, and a locally
+originated route, which has no BGP Identifier, wins it against any
+session-learned route (detail `bgp_identifier local < ...`):
 
 ```console
 $ rbgp rib --prefix 203.0.113.0/24 --explain

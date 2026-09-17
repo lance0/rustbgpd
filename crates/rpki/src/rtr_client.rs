@@ -46,8 +46,10 @@ const MAX_PDU_LEN: usize = 65_535;
 
 // 8210bis §6 legal bounds for the End of Data timing parameters. The
 // refresh/retry minimums are 1 s, which every non-zero value already
-// satisfies; zero is handled as "not provided" (see
-// `apply_eod_timers`).
+// satisfies; an End of Data zero is handled as "not provided" (see
+// `apply_eod_timers`), and a configured zero is raised to the minimum
+// (see `configured_interval`).
+const REFRESH_RETRY_MIN_SECS: u64 = 1;
 const REFRESH_MAX_SECS: u64 = 86_400;
 const RETRY_MAX_SECS: u64 = 7_200;
 const EXPIRE_MIN_SECS: u64 = 600;
@@ -183,9 +185,12 @@ pub enum VrpUpdate {
 pub struct RtrClientConfig {
     /// TCP address of the RTR cache server.
     pub server_addr: SocketAddr,
-    /// Seconds between Serial Query polls.
+    /// Seconds between Serial Query polls. Values below the RFC 8210 §6
+    /// minimum of 1 second are raised to 1 second with a warning.
     pub refresh_interval: u64,
-    /// Seconds before retrying after a failed connection.
+    /// Seconds before retrying after a failed connection. Values below the
+    /// RFC 8210 §6 minimum of 1 second are raised to 1 second with a
+    /// warning.
     pub retry_interval: u64,
     /// Seconds after which cached VRPs are considered stale.
     pub expire_interval: u64,
@@ -234,6 +239,21 @@ pub struct RtrClient {
     dialer: Option<RtrDialer>,
 }
 
+/// Raise a configured refresh/retry interval to the §6 minimum, warning
+/// with both values: zero would poll or reconnect with no delay.
+fn configured_interval(server: SocketAddr, timer: &'static str, value: u64) -> Duration {
+    if value < REFRESH_RETRY_MIN_SECS {
+        warn!(
+            server = %server,
+            timer,
+            value,
+            raised = REFRESH_RETRY_MIN_SECS,
+            "RTR configured timer below the §6 minimum, raised"
+        );
+    }
+    Duration::from_secs(value.max(REFRESH_RETRY_MIN_SECS))
+}
+
 /// Boxed connection opener installed by [`RtrClient::with_dialer`].
 type RtrDialer = Box<
     dyn Fn(SocketAddr) -> Pin<Box<dyn Future<Output = std::io::Result<TcpStream>> + Send>>
@@ -246,8 +266,12 @@ impl RtrClient {
     #[must_use]
     pub fn new(config: RtrClientConfig, vrp_tx: mpsc::Sender<VrpUpdate>) -> Self {
         Self {
-            refresh_interval: Duration::from_secs(config.refresh_interval),
-            retry_interval: Duration::from_secs(config.retry_interval),
+            refresh_interval: configured_interval(
+                config.server_addr,
+                "refresh",
+                config.refresh_interval,
+            ),
+            retry_interval: configured_interval(config.server_addr, "retry", config.retry_interval),
             expire_interval: Duration::from_secs(
                 config
                     .max_expire_interval
@@ -1602,6 +1626,15 @@ mod tests {
         }
     }
 
+    /// A client that reconnects with no delay, for tests that drive
+    /// reconnects in real time. `RtrClient::new` raises a configured zero
+    /// retry to the §6 minimum, so this sets the private field directly.
+    fn zero_retry_client(addr: SocketAddr, vrp_tx: mpsc::Sender<VrpUpdate>) -> RtrClient {
+        let mut client = RtrClient::new(test_config(addr, 60, 1, 3600), vrp_tx);
+        client.retry_interval = Duration::ZERO;
+        client
+    }
+
     fn entry(addr: Ipv4Addr, prefix_len: u8, max_len: u8, asn: u32) -> VrpEntry {
         VrpEntry {
             prefix: std::net::IpAddr::V4(addr),
@@ -2414,7 +2447,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -2502,7 +2535,7 @@ mod tests {
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
         // Long expire interval: the flush below must be eager, not the
         // expiry path. Zero retry: reconnect immediately.
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -2616,7 +2649,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -3725,6 +3758,26 @@ mod tests {
         assert_eq!(secs(&client), (3600, 600, 7200));
     }
 
+    /// §6 minimum Refresh and Retry Interval is 1 s: a configured zero is
+    /// raised to it instead of polling or reconnecting with no delay, and
+    /// the minimum itself is kept.
+    #[test]
+    fn configured_zero_refresh_and_retry_raise_to_the_section_6_minimum() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let intervals = |refresh, retry| {
+            let client =
+                RtrClient::new(test_config(addr, refresh, retry, 3600), mpsc::channel(1).0);
+            (client.refresh_interval, client.retry_interval)
+        };
+        let one = Duration::from_secs(1);
+        assert_eq!(intervals(0, 0), (one, one));
+        assert_eq!(intervals(1, 1), (one, one));
+        assert_eq!(
+            intervals(60, 5),
+            (Duration::from_secs(60), Duration::from_secs(5))
+        );
+    }
+
     /// §6 timer acceptance rules, asserted on the effective intervals:
     /// zero fields stay "not provided" (configured values untouched),
     /// values above the §6 maxima clamp down, an expire below the §6
@@ -3865,7 +3918,7 @@ mod tests {
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
         // Long expire interval: any flush observed is eager, never the
         // expiry path. Zero retry: reconnect immediately.
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -3990,8 +4043,8 @@ mod tests {
             tokio::spawn(VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx).run());
 
         // expire 3600: the flush below must be eager, not expiry.
-        let client_a = RtrClient::new(test_config(addr_a, 60, 0, 3600), vrp_tx.clone());
-        let client_b = RtrClient::new(test_config(addr_b, 60, 0, 3600), vrp_tx);
+        let client_a = zero_retry_client(addr_a, vrp_tx.clone());
+        let client_b = zero_retry_client(addr_b, vrp_tx);
         let handle_a = tokio::spawn(client_a.run());
         let handle_b = tokio::spawn(client_b.run());
 
@@ -4119,7 +4172,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -4177,7 +4230,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -4222,7 +4275,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();
@@ -4278,7 +4331,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
-        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client = zero_retry_client(addr, vrp_tx);
         let client_handle = tokio::spawn(client.run());
 
         let (mut stream, _) = listener.accept().await.unwrap();

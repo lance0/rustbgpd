@@ -5,6 +5,12 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `RtrClient::new` now raises a `RtrClientConfig::refresh_interval` or
+  `retry_interval` below the RFC 8210 §6 minimum of 1 second to 1 second
+  and logs a warning. A zero value previously polled the cache or
+  reconnected with no delay between attempts. Values of 1 second or more
+  are unchanged.
+
 ## 0.3.0 - 2026-09-13
 
 - Prepared the wire dependency move to `0.21.0`. Public signatures expose

@@ -387,6 +387,21 @@ groups:
             since start. Check bgp_event_outbox_dropped_total and
             bgp_event_outbox_open_failures_total, then the daemon log.
 
+      - alert: BgpEventOutboxStorageFailed
+        # Latches when the event-history storage thread stops at runtime;
+        # the outbox then refuses every event until the daemon restarts.
+        expr: bgp_event_outbox_storage_failed == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Event outbox storage stopped on {{ $labels.instance }}"
+          description: >-
+            The event-history storage on {{ $labels.instance }} stopped while
+            the daemon was running. Producer events are being dropped and
+            durable cursor subscriptions are refused. Check the daemon log
+            and crash reports, then restart the daemon.
+
       - alert: MrtDumpStale
         # mrt_last_dump_success_timestamp_seconds stays 0 until the first
         # successful dump, so dump age is anchored on process start until

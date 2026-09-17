@@ -703,6 +703,7 @@ struct BgpMetricsInner {
     event_outbox_latest_event_id: IntGauge,
     event_outbox_open_failures: IntCounter,
     event_outbox_degraded: IntGauge,
+    event_outbox_storage_failed: IntGauge,
     /// Number of `SubscribeFromEvent` requests that emitted a
     /// leading `StreamLagEvent` because the client cursor was
     /// older than the retained floor. Operator signal that
@@ -2580,6 +2581,12 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let event_outbox_storage_failed = IntGauge::new(
+            "bgp_event_outbox_storage_failed",
+            "1 = the event-history storage thread stopped while the daemon was running; the outbox refuses producer events and durable cursor subscriptions until restart. 0 = no runtime storage failure observed.",
+        )
+        .expect("valid metric definition");
+
         let event_outbox_cursor_gap = IntCounter::new(
             "bgp_event_outbox_cursor_gap_total",
             "SubscribeFromEvent requests that emitted a leading StreamLagEvent because the client cursor was older than the retained floor. Operator signal that [event_history].max_events / max_bytes is undersized for the collector reconnect SLA (ADR-0072).",
@@ -3197,6 +3204,9 @@ impl BgpMetrics {
             .register(Box::new(event_outbox_degraded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(event_outbox_storage_failed.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(event_outbox_cursor_gap.clone()))
             .expect("metric not already registered");
 
@@ -3408,6 +3418,7 @@ impl BgpMetrics {
             event_outbox_latest_event_id,
             event_outbox_open_failures,
             event_outbox_degraded,
+            event_outbox_storage_failed,
             event_outbox_cursor_gap,
         }))
     }
@@ -6065,6 +6076,13 @@ impl BgpMetrics {
     }
 
     pub fn mark_event_outbox_degraded(&self) {
+        self.0.event_outbox_degraded.set(1);
+    }
+
+    /// Latch the runtime storage-failure gauge. A dead store is also a
+    /// durability-impacting failure, so the degraded gauge latches too.
+    pub fn mark_event_outbox_storage_failed(&self) {
+        self.0.event_outbox_storage_failed.set(1);
         self.0.event_outbox_degraded.set(1);
     }
 

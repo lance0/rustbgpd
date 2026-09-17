@@ -45,9 +45,9 @@ fn stale_rank(route: &Route) -> u8 {
 /// otherwise the BGP Identifier of the peer that advertised it.
 ///
 /// Locally originated routes have no advertising speaker — their
-/// `peer_router_id` is the `0.0.0.0` injection sentinel, not a BGP
-/// Identifier — so they yield `None` and the step is skipped for any
-/// pair that includes one.
+/// `peer_router_id` is an injection placeholder (usually `0.0.0.0`), not
+/// a BGP Identifier — so they yield `None`, which [`compare_bgp_identifier`]
+/// ranks ahead of every identifier.
 #[must_use]
 pub(crate) fn effective_bgp_identifier(
     origin_type: RouteOrigin,
@@ -63,23 +63,32 @@ pub(crate) fn effective_bgp_identifier(
 /// Decide step (f) for a pair of routes, each given as
 /// `(origin_type, originator_id, peer_router_id)`.
 ///
-/// `None` when the step does not decide: equal effective identifiers, or
-/// either route locally originated. The reason is
-/// [`BestPathReason::LowerOriginatorId`] when both routes carried
-/// `ORIGINATOR_ID` and [`BestPathReason::LowerBgpIdentifier`] when at
-/// least one side fell back to its peer's BGP Identifier.
+/// A locally originated route ranks ahead of every session-learned route
+/// at this step, and two locally originated routes tie. Every route
+/// therefore has a key here: without one, a local route tied two
+/// session routes that the step orders, and the comparator was not
+/// transitive. Local routes already won the later `CLUSTER_LIST` and
+/// peer-address steps against session routes (they carry no
+/// `CLUSTER_LIST` and the `0.0.0.0` local peer), so this decides no
+/// daemon-built pair differently.
+///
+/// `None` when the step does not decide (equal keys). The reason is
+/// [`BestPathReason::LowerOriginatorId`] when both routes were compared
+/// by `ORIGINATOR_ID` and [`BestPathReason::LowerBgpIdentifier`]
+/// otherwise.
 #[must_use]
 pub(crate) fn compare_bgp_identifier(
     a: (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr),
     b: (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr),
 ) -> Option<(Ordering, BestPathReason)> {
-    let id_a = effective_bgp_identifier(a.0, a.1, a.2)?;
-    let id_b = effective_bgp_identifier(b.0, b.1, b.2)?;
+    let id_a = effective_bgp_identifier(a.0, a.1, a.2);
+    let id_b = effective_bgp_identifier(b.0, b.1, b.2);
+    // `Option` orders `None` (locally originated) before any identifier.
     let cmp = id_a.cmp(&id_b);
     if cmp == Ordering::Equal {
         return None;
     }
-    let reason = if a.1.is_some() && b.1.is_some() {
+    let reason = if id_a.and(a.1).is_some() && id_b.and(b.1).is_some() {
         BestPathReason::LowerOriginatorId
     } else {
         BestPathReason::LowerBgpIdentifier
@@ -384,8 +393,8 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
                 effective_bgp_identifier(a.origin_type, a.originator_id(), a.peer_router_id),
                 effective_bgp_identifier(b.origin_type, b.originator_id(), b.peer_router_id),
             );
-            // Defensive: `None` (locally originated) never reaches this
-            // reason because the comparator skips the step for that pair.
+            // `None` is a locally originated route, which the comparator
+            // ranks first; `Option` ordering keeps the symbol consistent.
             let show =
                 |id: Option<Ipv4Addr>| id.map_or_else(|| "local".to_string(), |id| id.to_string());
             format!(
@@ -478,8 +487,8 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 ///    this comparator never runs it
 ///    5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)):
 ///    `ORIGINATOR_ID` when present, else the advertising peer's BGP
-///    Identifier (RFC 4456 §9); skipped for a pair that includes a
-///    locally originated route
+///    Identifier (RFC 4456 §9); a locally originated route ranks ahead
+///    of every session-learned route
 ///    5.6. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
 /// 6. Lowest peer address (tiebreaker)
 ///    Final identity tie: lowest inbound Add-Path identifier
@@ -556,8 +565,8 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
     }
 
     // 5. eBGP over iBGP (only RouteOrigin::Ebgp gets preference here;
-    //    RouteOrigin::Local sorts equal to iBGP — local routes win via
-    //    LOCAL_PREF or shorter AS_PATH, not an explicit origin preference)
+    //    RouteOrigin::Local sorts equal to iBGP — local routes are
+    //    preferred only from step 5.5 on, not by an earlier origin step)
     let cmp = b.is_ebgp().cmp(&a.is_ebgp());
     if cmp != Ordering::Equal {
         return cmp;
@@ -580,8 +589,8 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
     }
 
     // 5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)):
-    //      ORIGINATOR_ID substitutes when present (RFC 4456 §9); a pair
-    //      with a locally originated route skips the step.
+    //      ORIGINATOR_ID substitutes when present (RFC 4456 §9); a
+    //      locally originated route ranks ahead of any identifier.
     if let Some((cmp, _)) = compare_bgp_identifier(bgp_identity(a), bgp_identity(b)) {
         return cmp;
     }
@@ -1116,18 +1125,23 @@ mod tests {
         assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
     }
 
-    /// Locally originated routes have no advertising speaker: step (f) is
-    /// skipped for the pair and the `0.0.0.0` peer sentinel decides,
-    /// exactly as it did before the identifier step existed.
+    /// Locally originated routes have no advertising speaker and no BGP
+    /// Identifier: step (f) ranks them ahead of a session-learned route,
+    /// even one carrying `ORIGINATOR_ID`, a shorter `CLUSTER_LIST` and a
+    /// lower peer address.
     #[test]
-    fn local_route_skips_bgp_identifier_step() {
-        let mut local = base_route(Ipv4Addr::UNSPECIFIED);
-        local.origin_type = RouteOrigin::Local;
-        let mut learned = with_router_id(
-            base_route(Ipv4Addr::new(10, 0, 0, 1)),
-            Ipv4Addr::new(1, 1, 1, 1),
+    fn local_route_ranks_first_at_bgp_identifier_step() {
+        let local = with_cluster_list(
+            with_local(base_route(Ipv4Addr::new(10, 0, 0, 2))),
+            vec![Ipv4Addr::new(10, 0, 0, 100)],
         );
-        learned.origin_type = RouteOrigin::Ibgp;
+        let learned = with_ibgp(with_originator_id(
+            with_router_id(
+                base_route(Ipv4Addr::new(10, 0, 0, 1)),
+                Ipv4Addr::new(1, 1, 1, 1),
+            ),
+            Ipv4Addr::new(1, 1, 1, 1),
+        ));
         assert_eq!(
             effective_bgp_identifier(
                 local.origin_type,
@@ -1136,14 +1150,70 @@ mod tests {
             ),
             None
         );
+        let reason = BestPathReason::LowerBgpIdentifier;
         assert_eq!(
             best_path_cmp_with_reason(&local, &learned),
-            (Ordering::Less, BestPathReason::LowerPeerAddress)
+            (Ordering::Less, reason)
         );
         assert_eq!(
             best_path_cmp_with_reason(&learned, &local),
-            (Ordering::Greater, BestPathReason::LowerPeerAddress)
+            (Ordering::Greater, reason)
         );
+        assert_eq!(
+            best_path_reason_detail(reason, &local, &learned),
+            "bgp_identifier local < 1.1.1.1"
+        );
+        // Two locally originated routes tie at the step.
+        let other_local = with_local(base_route(Ipv4Addr::new(10, 0, 0, 3)));
+        assert_eq!(
+            best_path_cmp_with_reason(&other_local, &local),
+            (Ordering::Less, BestPathReason::ShorterClusterList)
+        );
+    }
+
+    /// Regression: a locally originated route once had no key at step
+    /// (f), so it tied two iBGP routes that the step itself ordered and the
+    /// comparator was intransitive (`a < b`, `b < c`, `a > c`). A `min_by`
+    /// fold over the three then chose a different best path for each
+    /// iteration order. Local now ranks ahead of both at that step.
+    #[test]
+    fn local_route_identifier_step_is_transitive() {
+        let ibgp = |peer: u8, id: u8| {
+            with_ibgp(with_router_id(
+                base_route(Ipv4Addr::new(192, 0, 2, peer)),
+                Ipv4Addr::new(10, 0, 0, id),
+            ))
+        };
+        let a = ibgp(1, 3);
+        let b = with_local(with_router_id(
+            base_route(Ipv4Addr::new(192, 0, 2, 2)),
+            Ipv4Addr::new(10, 0, 0, 2),
+        ));
+        let c = ibgp(3, 1);
+
+        // The winner's peer for each of the six iteration orders.
+        let winners: Vec<IpAddr> = [
+            [&a, &b, &c],
+            [&a, &c, &b],
+            [&b, &a, &c],
+            [&b, &c, &a],
+            [&c, &a, &b],
+            [&c, &b, &a],
+        ]
+        .into_iter()
+        .map(|order| {
+            let best = order.into_iter().min_by(|x, y| best_path_cmp(x, y));
+            best.unwrap().peer
+        })
+        .collect();
+        assert_eq!(winners, vec![b.peer; 6]);
+        for (x, y) in [(&b, &a), (&b, &c), (&c, &a)] {
+            assert_eq!(
+                best_path_cmp_with_reason(x, y),
+                (Ordering::Less, BestPathReason::LowerBgpIdentifier)
+            );
+            assert_eq!(best_path_cmp(y, x), Ordering::Greater);
+        }
     }
 
     #[test]
@@ -1945,44 +2015,128 @@ mod proptests {
             )
     }
 
-    /// A route pair that ties on every criterion *above* step 5.5 by
-    /// construction, so the tail of the decision chain — effective BGP
-    /// Identifier, `CLUSTER_LIST` length, peer address, inbound Add-Path
-    /// identifier — is actually reached.
+    /// Rebuild `b` so it ties `a` on every criterion *above* step 5.5, so
+    /// the tail of the decision chain — effective BGP Identifier,
+    /// `CLUSTER_LIST` length, peer address, inbound Add-Path identifier —
+    /// is actually reached.
     ///
     /// Two independent [`arb_route`] draws essentially never agree on
     /// `LOCAL_PREF` *and* MED *and* the four categorical states, so under
     /// `arb_route()` alone a property over the tail decides nothing: every
     /// pair is settled by step 4 or earlier. Here `b` inherits `a`'s stale
-    /// tier, RPKI and ASPA states, origin class, `LOCAL_PREF`, `AS_PATH`,
-    /// `ORIGIN` and MED, and keeps its own independently drawn
-    /// `ORIGINATOR_ID`, `CLUSTER_LIST`, peer address, peer BGP Identifier
-    /// and path ID.
+    /// tier, RPKI and ASPA states, `LOCAL_PREF`, `AS_PATH`, `ORIGIN` and
+    /// MED, takes `origin_type` (which must be in `a`'s step 5 class), and
+    /// keeps its own independently drawn `ORIGINATOR_ID`, `CLUSTER_LIST`,
+    /// peer address, peer BGP Identifier and path ID.
+    fn tie_above_identifier(
+        a: &Route,
+        mut b: Route,
+        origin_type: RouteOrigin,
+        rid_oct: u8,
+        path_id: u32,
+    ) -> Route {
+        debug_assert_eq!(
+            origin_type == RouteOrigin::Ebgp,
+            a.origin_type == RouteOrigin::Ebgp
+        );
+        let is_tail = |attr: &PathAttribute| {
+            matches!(
+                attr,
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+            )
+        };
+        let mut attributes: Vec<PathAttribute> = a
+            .attributes
+            .iter()
+            .filter(|at| !is_tail(at))
+            .cloned()
+            .collect();
+        attributes.extend(b.attributes.iter().filter(|at| is_tail(at)).cloned());
+        b.attributes = Arc::new(attributes);
+        b.is_stale = a.is_stale;
+        b.is_llgr_stale = a.is_llgr_stale;
+        b.validation_state = a.validation_state;
+        b.aspa_state = a.aspa_state;
+        b.origin_type = origin_type;
+        b.peer_router_id = peer_router_id_for(origin_type, rid_oct);
+        b.path_id = path_id;
+        b
+    }
+
+    /// The shape every locally originated route has in the daemon: the
+    /// `0.0.0.0` local peer and injection sentinel, and neither
+    /// `ORIGINATOR_ID` nor `CLUSTER_LIST` (injection and the local
+    /// originators never set them, and reflection adds them only on
+    /// export).
+    fn production_local(mut route: Route) -> Route {
+        route.origin_type = RouteOrigin::Local;
+        route.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        route.peer_router_id = Ipv4Addr::UNSPECIFIED;
+        Arc::make_mut(&mut route.attributes).retain(|attr| {
+            !matches!(
+                attr,
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+            )
+        });
+        route
+    }
+
+    /// A route pair tied above step 5.5, both of `a`'s origin class.
     fn arb_tie_biased_pair() -> impl Strategy<Value = (Route, Route)> {
-        (arb_route(), arb_route(), 1u8..=4, 0u32..=2).prop_map(|(a, mut b, rid_oct, path_id)| {
-            let is_tail = |attr: &PathAttribute| {
-                matches!(
-                    attr,
-                    PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
-                )
-            };
-            let mut attributes: Vec<PathAttribute> = a
-                .attributes
-                .iter()
-                .filter(|at| !is_tail(at))
-                .cloned()
-                .collect();
-            attributes.extend(b.attributes.iter().filter(|at| is_tail(at)).cloned());
-            b.attributes = Arc::new(attributes);
-            b.is_stale = a.is_stale;
-            b.is_llgr_stale = a.is_llgr_stale;
-            b.validation_state = a.validation_state;
-            b.aspa_state = a.aspa_state;
-            b.origin_type = a.origin_type;
-            b.peer_router_id = peer_router_id_for(a.origin_type, rid_oct);
-            b.path_id = path_id;
+        (arb_route(), arb_route(), 1u8..=4, 0u32..=2).prop_map(|(a, b, rid_oct, path_id)| {
+            let b = tie_above_identifier(&a, b, a.origin_type, rid_oct, path_id);
             (a, b)
         })
+    }
+
+    /// A route drawn for [`arb_tie_biased_triple`]: an origin that ties
+    /// with anything but eBGP at step 5 (iBGP or Local), its peer BGP
+    /// Identifier octet and path ID, and whether a Local draw takes the
+    /// daemon's [`production_local`] shape instead of an arbitrary peer
+    /// and tail.
+    fn arb_tail_member() -> impl Strategy<Value = (Route, RouteOrigin, u8, u32, bool)> {
+        (
+            arb_route(),
+            prop_oneof![Just(RouteOrigin::Ibgp), Just(RouteOrigin::Local)],
+            1u8..=4,
+            0u32..=2,
+            any::<bool>(),
+        )
+    }
+
+    /// Three routes tied above step 5.5: all eBGP when `a` is, otherwise
+    /// any mix of iBGP and locally originated routes (both non-eBGP, so
+    /// step 5 ties them), with Local routes in both the production and
+    /// arbitrary shapes.
+    fn arb_tie_biased_triple() -> impl Strategy<Value = (Route, Route, Route)> {
+        (
+            arb_route(),
+            arb_tail_member(),
+            arb_tail_member(),
+            any::<bool>(),
+        )
+            .prop_map(|(a, b, c, a_production)| {
+                let a = if a.origin_type == RouteOrigin::Local && a_production {
+                    production_local(a)
+                } else {
+                    a
+                };
+                let member = |(route, origin, rid_oct, path_id, production)| {
+                    let origin = if a.origin_type == RouteOrigin::Ebgp {
+                        RouteOrigin::Ebgp
+                    } else {
+                        origin
+                    };
+                    let route = tie_above_identifier(&a, route, origin, rid_oct, path_id);
+                    if origin == RouteOrigin::Local && production {
+                        production_local(route)
+                    } else {
+                        route
+                    }
+                };
+                let (b, c) = (member(b), member(c));
+                (a, b, c)
+            })
     }
 
     /// Verbatim fixture copy of `best_path_cmp` as it stood BEFORE the
@@ -2162,6 +2316,43 @@ mod proptests {
             if ab == Greater && bc == Greater {
                 prop_assert_eq!(ac, Greater);
             }
+        }
+
+        /// `transitivity` over the chain's tail. The broad draw above
+        /// never ties three routes down to step 5.5, so it cannot see an
+        /// intransitive tiebreaker; these triples always get there, with
+        /// locally originated routes mixed among iBGP routes.
+        #[test]
+        fn transitivity_on_tie_biased_triples((a, b, c) in arb_tie_biased_triple()) {
+            use std::cmp::Ordering::*;
+            for (x, y, z) in [(&a, &b, &c), (&a, &c, &b), (&b, &a, &c)] {
+                let xy = best_path_cmp(x, y);
+                let yz = best_path_cmp(y, z);
+                let xz = best_path_cmp(x, z);
+                if xy != Greater && yz != Greater {
+                    let expected = if xy == Equal && yz == Equal { Equal } else { Less };
+                    prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+                }
+                if xy != Less && yz != Less {
+                    let expected = if xy == Equal && yz == Equal { Equal } else { Greater };
+                    prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+                }
+            }
+        }
+
+        /// Every locally originated route the daemon builds ranks ahead of
+        /// every session-learned route it ties above step 5.5 — with or
+        /// without an identifier key for Local, since its empty
+        /// `CLUSTER_LIST` and `0.0.0.0` peer already win the later steps.
+        #[test]
+        fn production_local_route_leads_tied_session_routes(
+            (mut session, local) in arb_tie_biased_pair(), rid_oct in 1u8..=4
+        ) {
+            session.origin_type = RouteOrigin::Ibgp;
+            session.peer_router_id = peer_router_id_for(RouteOrigin::Ibgp, rid_oct);
+            let local = production_local(local);
+            prop_assert_eq!(best_path_cmp(&local, &session), Ordering::Less);
+            prop_assert_eq!(best_path_cmp(&session, &local), Ordering::Greater);
         }
 
         #[test]

@@ -880,6 +880,32 @@ tests:
                 bgp_event_outbox_open_failures_total, then the daemon
                 log.
 
+  # ── BgpEventOutboxStorageFailed ───────────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_event_outbox_storage_failed{instance="edge1:9179"}'
+        values: "0 0 1x10"
+      - series: 'bgp_event_outbox_storage_failed{instance="edge2:9179"}'
+        values: "0x12"
+    alert_rule_test:
+      # Pending, not yet firing (for: 1m).
+      - eval_time: 2m
+        alertname: BgpEventOutboxStorageFailed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: BgpEventOutboxStorageFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Event outbox storage stopped on edge1:9179"
+              description: >-
+                The event-history storage on edge1:9179 stopped while the
+                daemon was running. Producer events are being dropped and
+                durable cursor subscriptions are refused. Check the daemon
+                log and crash reports, then restart the daemon.
+
   # ── MrtDumpStale ──────────────────────────────────────────
   # Age is anchored on process start until the first success: edge1 never
   # succeeds after starting at 5m and fires 2x interval later; edge2

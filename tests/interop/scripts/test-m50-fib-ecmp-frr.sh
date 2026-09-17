@@ -25,6 +25,13 @@ METRIC=200
 PREFIX="203.0.113.50/32"
 NH1="10.0.0.2"
 NH2="10.0.1.2"
+# Budget for every wait that observes the kernel FIB or ListFibRoutes.
+# Adding or removing an equal-cost path that does not move the winning best
+# path publishes no Loc-RIB best-change event, so the multipath row follows the
+# FIB reconciler's 30 s periodic backstop rather than the sub-second event
+# wake. A 30 s budget therefore sits exactly on that period; 60 s clears it
+# with margin while still failing on a route that never converges.
+FIB_WAIT_SECS=60
 
 resolve_grpc_addr
 start_rustbgpd
@@ -56,7 +63,7 @@ dump_state_on_failure() {
 # RTPROT_BGP + metric shape on the row.
 wait_kernel_ecmp() {
     log "Waiting for ECMP route $PREFIX with both $NH1 and $NH2..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local route
         route=$(kernel_route)
         if echo "$route" | grep -q "proto bgp" \
@@ -78,7 +85,7 @@ wait_kernel_ecmp() {
 wait_kernel_single() {
     local survivor=$1
     log "Waiting for $PREFIX to collapse to single next-hop via $survivor..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local route
         route=$(kernel_route)
         if echo "$route" | grep -q "proto bgp" \
@@ -104,7 +111,7 @@ wait_grpc_next_hops() {
     local addr=${PREFIX%/*}
     local plen=${PREFIX#*/}
     log "Waiting for $PREFIX gRPC next_hops count -> $expected_count..."
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$FIB_WAIT_SECS"); do
         local json count
         if json=$(grpc_fib_routes 2>/dev/null); then
             count=$(printf '%s\n' "$json" | jq -r --arg addr "$addr" --argjson plen "$plen" '
