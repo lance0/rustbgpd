@@ -91,8 +91,9 @@ pub struct NegotiatedSession {
     pub effective_add_path_send_limits: HashMap<(Afi, Safi), u32>,
     /// Families for which we negotiated receiving Address-Prefix ORF entries
     /// from the peer (RFC 5291/5292): we advertised Receive and the peer
-    /// advertised Send. Outbound advertisement for these families is gated
-    /// until the peer sends a Route Refresh (RFC 5291 §6).
+    /// advertised Send, limited to `negotiated_families`. Outbound
+    /// advertisement for these families is gated until the peer sends a Route
+    /// Refresh (RFC 5291 §6).
     pub negotiated_orf_recv: Vec<(Afi, Safi)>,
 }
 

@@ -37,6 +37,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A peer that advertises the Outbound Route Filtering Send role for an
+  address family outside the session's negotiated MultiProtocol families no
+  longer counts as ORF-negotiated for that family. A peer whose only ORF Send
+  entries were for such families was kept out of update-group sharing for the
+  whole session, and `rbgp rib --prefix P advertised PEER --explain` reported
+  an `orf_pending` stop for such a family, which no ROUTE-REFRESH could lift,
+  instead of the family not being negotiated. Route advertisement was
+  unaffected.
 - SIGHUP now applies a route-server member join or leave with its datasets
   when the member carries `md5_password` or `ttl_security` (GTSM). The change
   applies as one compensated runtime generation, not as a rejected compound
@@ -86,6 +94,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same code as a commit. The full receipt, including `--json` output, is
   still printed before the non-zero exit. A receipt with an unrecognized
   status now exits 1 instead of passing as a commit or as changes present.
+- VPNv4/VPNv6 and labeled-unicast best-path selection now breaks a tie
+  between routes from the same peer on the lower Add-Path path identifier, as
+  IPv4/IPv6 unicast selection already did. Two Add-Path routes from one peer
+  with identical attributes previously tied through every step, so the
+  selected route, the Add-Path send ranking, and the Optimal Route Reflection
+  per-vantage choice followed arrival order: withdrawing and re-advertising
+  the selected path could move selection to the other one. FlowSpec selection
+  gains the same final step; FlowSpec does not negotiate Add-Path, so its
+  selection does not change.
 - `rbgp config import` now prefixes its stderr errors with `Error:`, like
   every other `rbgp` command, instead of `error:`. Scripts that match the
   lowercase prefix on import failures need updating. Exit codes are
