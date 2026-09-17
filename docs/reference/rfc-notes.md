@@ -1103,6 +1103,10 @@ carries inactive (absent), unlimited (zero), or finite.
 - Multi-path send: rank-based path IDs (best=1, second=2, ...).
 - `send_max` caps paths per prefix per peer.
 - Both IPv4 body NLRI and IPv6 MP_REACH/MP_UNREACH supported.
+- A received path identifier carries no preference (§2). Unicast, VPN, and
+  labeled-unicast selection compares it only as the last step, after the
+  peer address, so otherwise-equal routes from one peer rank the same
+  whatever order they arrived in.
 - See ADR-0033.
 
 ---

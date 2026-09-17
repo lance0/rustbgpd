@@ -1033,8 +1033,11 @@ fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
         return cmp;
     }
 
-    // 6. Lowest peer address (final tiebreaker)
-    cmp_ipaddr(&a.peer, &b.peer)
+    // 6. Lowest peer address, then inbound Add-Path identifier (always
+    //    zero today: FlowSpec does not negotiate Add-Path). The identifier
+    //    has no preference semantics (RFC 7911 §2); it only makes distinct
+    //    same-peer routes a total order.
+    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
@@ -1240,7 +1243,11 @@ fn vpn_cmp_chain(
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer, &b.peer)
+    // Lowest peer address, then inbound Add-Path identifier: the family
+    // negotiates Add-Path, so one peer can hold several otherwise-tied
+    // routes. The identifier has no preference semantics (RFC 7911 §2);
+    // it only makes the order total, independent of candidate order.
+    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
@@ -1399,7 +1406,11 @@ fn labeled_cmp_chain(
         return cmp;
     }
 
-    cmp_ipaddr(&a.peer, &b.peer)
+    // Lowest peer address, then inbound Add-Path identifier: the family
+    // negotiates Add-Path, so one peer can hold several otherwise-tied
+    // routes. The identifier has no preference semantics (RFC 7911 §2);
+    // it only makes the order total, independent of candidate order.
+    cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
 fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
@@ -2141,6 +2152,275 @@ mod tests {
 
         assert!(loc.remove_labeled(&labeled_nlri([10, 0, 2, 0], 24, 100).key()));
         assert_eq!(loc.labeled_len(), 0);
+    }
+
+    // ---- Add-Path path identifier as the terminal tiebreaker -----------
+    //
+    // VPN (SAFI 128) and labeled unicast (SAFI 4) negotiate Add-Path, so
+    // one peer can hold several routes for the same identity. Two such
+    // routes with identical attributes tie through the whole ladder; the
+    // inbound path identifier must decide, as it does for unicast, or the
+    // winner depends on candidate iteration order.
+
+    /// Candidate set for the order-independence checks: a same-peer
+    /// Add-Path group that ties to the path identifier, a second peer that
+    /// ties on everything but the address, and one clearly worse route.
+    /// Entries are `(peer_oct, path_id, local_pref)`.
+    const PATH_ID_TIE_SET: [(u8, u32, u32); 6] = [
+        (2, 9, 100),
+        (1, 9, 100),
+        (1, 3, 50),
+        (2, 7, 100),
+        (1, 7, 100),
+        (1, 8, 100),
+    ];
+
+    /// Count the ordered pairs that tie through every step before the path
+    /// identifier: distinct identifiers, and `Equal` once they are made
+    /// equal. Proves the order checks reach the comparator tail.
+    fn path_id_decided_pairs<T: Clone>(
+        routes: &[T],
+        path_id: impl Fn(&T) -> u32,
+        set_path_id: impl Fn(&mut T, u32),
+        cmp: impl Fn(&T, &T) -> Ordering,
+    ) -> usize {
+        let mut decided = 0;
+        for a in routes {
+            for b in routes {
+                if path_id(a) == path_id(b) {
+                    continue;
+                }
+                let mut b_same_id = b.clone();
+                set_path_id(&mut b_same_id, path_id(a));
+                if cmp(a, &b_same_id) == Ordering::Equal {
+                    decided += 1;
+                }
+            }
+        }
+        decided
+    }
+
+    /// Every rotation of the candidates, forwards and reversed, must select
+    /// the same winner and produce the same ranking. Each candidate leads
+    /// in some rotation, so any tie `min_by` resolves by position shows up.
+    fn assert_selection_order_independent<T: Clone, K: std::fmt::Debug + PartialEq>(
+        routes: &[T],
+        select: impl Fn(&[T]) -> K,
+        rank: impl Fn(&mut [T]) -> Vec<K>,
+    ) {
+        let mut expected = None;
+        for mut order in [routes.to_vec(), routes.iter().rev().cloned().collect()] {
+            for _ in 0..order.len() {
+                order.rotate_left(1);
+                let got = (select(order.as_slice()), rank(order.clone().as_mut_slice()));
+                match &expected {
+                    None => expected = Some(got),
+                    Some(want) => assert_eq!(&got, want, "selection depends on candidate order"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vpn_same_peer_add_path_tie_breaks_on_lower_path_id() {
+        let nlri = vpn_nlri([10, 0, 11, 0], 24, 100);
+        let mut path_7 = make_vpn_route(nlri.clone(), 1, 100);
+        path_7.path_id = 7;
+        let mut path_9 = make_vpn_route(nlri, 1, 100);
+        path_9.path_id = 9;
+
+        assert_eq!(vpn_tiebreak(&path_7, &path_9), Ordering::Less);
+        assert_eq!(vpn_tiebreak(&path_9, &path_7), Ordering::Greater);
+        assert_eq!(vpn_tiebreak(&path_7, &path_7), Ordering::Equal);
+        // Equal or unknown ORR costs fall through to the identifier ...
+        assert_eq!(
+            vpn_tiebreak_orr(&path_7, &path_9, Some(10), Some(10)),
+            Ordering::Less
+        );
+        assert_eq!(
+            vpn_tiebreak_orr(&path_9, &path_7, None, None),
+            Ordering::Greater
+        );
+        // ... and a decisive ORR cost still precedes it.
+        assert_eq!(
+            vpn_tiebreak_orr(&path_7, &path_9, Some(20), Some(10)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn labeled_same_peer_add_path_tie_breaks_on_lower_path_id() {
+        let nlri = labeled_nlri([10, 0, 11, 0], 24, 100);
+        let mut path_7 = make_labeled_route(nlri.clone(), 1, 100);
+        path_7.path_id = 7;
+        let mut path_9 = make_labeled_route(nlri, 1, 100);
+        path_9.path_id = 9;
+
+        assert_eq!(labeled_tiebreak(&path_7, &path_9), Ordering::Less);
+        assert_eq!(labeled_tiebreak(&path_9, &path_7), Ordering::Greater);
+        assert_eq!(labeled_tiebreak(&path_7, &path_7), Ordering::Equal);
+        assert_eq!(
+            labeled_tiebreak_orr(&path_7, &path_9, Some(10), Some(10)),
+            Ordering::Less
+        );
+        assert_eq!(
+            labeled_tiebreak_orr(&path_9, &path_7, None, None),
+            Ordering::Greater
+        );
+        assert_eq!(
+            labeled_tiebreak_orr(&path_7, &path_9, Some(20), Some(10)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn flowspec_same_peer_tie_breaks_on_lower_path_id() {
+        let mut path_7 =
+            make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
+        path_7.path_id = 7;
+        let mut path_9 = path_7.clone();
+        path_9.path_id = 9;
+
+        assert_eq!(flowspec_tiebreak(&path_7, &path_9), Ordering::Less);
+        assert_eq!(flowspec_tiebreak(&path_9, &path_7), Ordering::Greater);
+        assert_eq!(flowspec_tiebreak(&path_7, &path_7), Ordering::Equal);
+    }
+
+    /// The Adj-RIB-In yields a peer's Add-Path routes in arrival order, so
+    /// a withdraw and re-advertisement of the current best moves it to the
+    /// back. The selection must not follow it.
+    #[test]
+    fn recompute_vpn_add_path_winner_survives_readvertisement() {
+        let nlri = vpn_nlri([10, 0, 12, 0], 24, 100);
+        let key = nlri.key();
+        let mut path_7 = make_vpn_route(nlri.clone(), 1, 100);
+        path_7.path_id = 7;
+        let mut path_9 = make_vpn_route(nlri, 1, 100);
+        path_9.path_id = 9;
+        let mut rib = crate::adj_rib_in::AdjRibIn::new(path_7.peer);
+        let mut loc = LocRib::new();
+
+        rib.insert_vpn(path_7.clone());
+        rib.insert_vpn(path_9);
+        assert!(loc.recompute_vpn(key, rib.iter_vpn_for_nlri(&key)));
+        assert_eq!(loc.get_vpn(&key).unwrap().path_id, 7);
+
+        assert!(rib.withdraw_vpn(&path_7.key()));
+        assert!(loc.recompute_vpn(key, rib.iter_vpn_for_nlri(&key)));
+        assert_eq!(loc.get_vpn(&key).unwrap().path_id, 9);
+
+        rib.insert_vpn(path_7);
+        let changed = loc.recompute_vpn(key, rib.iter_vpn_for_nlri(&key));
+        assert_eq!(
+            loc.get_vpn(&key).unwrap().path_id,
+            7,
+            "re-advertised lower path_id must win again regardless of arrival order"
+        );
+        assert!(changed);
+    }
+
+    #[test]
+    fn recompute_labeled_add_path_winner_survives_readvertisement() {
+        let nlri = labeled_nlri([10, 0, 12, 0], 24, 100);
+        let key = nlri.key();
+        let mut path_7 = make_labeled_route(nlri.clone(), 1, 100);
+        path_7.path_id = 7;
+        let mut path_9 = make_labeled_route(nlri, 1, 100);
+        path_9.path_id = 9;
+        let mut rib = crate::adj_rib_in::AdjRibIn::new(path_7.peer);
+        let mut loc = LocRib::new();
+
+        rib.insert_labeled(path_7.clone());
+        rib.insert_labeled(path_9);
+        assert!(loc.recompute_labeled(key, rib.iter_labeled_for_prefix(&key)));
+        assert_eq!(loc.get_labeled(&key).unwrap().path_id, 7);
+
+        assert!(rib.withdraw_labeled(&path_7.key()));
+        assert!(loc.recompute_labeled(key, rib.iter_labeled_for_prefix(&key)));
+        assert_eq!(loc.get_labeled(&key).unwrap().path_id, 9);
+
+        rib.insert_labeled(path_7);
+        let changed = loc.recompute_labeled(key, rib.iter_labeled_for_prefix(&key));
+        assert_eq!(
+            loc.get_labeled(&key).unwrap().path_id,
+            7,
+            "re-advertised lower path_id must win again regardless of arrival order"
+        );
+        assert!(changed);
+    }
+
+    #[test]
+    fn recompute_vpn_add_path_selection_is_order_independent() {
+        let nlri = vpn_nlri([10, 0, 13, 0], 24, 100);
+        let key = nlri.key();
+        let routes: Vec<VpnRibRoute> = PATH_ID_TIE_SET
+            .iter()
+            .map(|&(peer_oct, path_id, local_pref)| {
+                let mut route = make_vpn_route(nlri.clone(), peer_oct, local_pref);
+                // One BGP Identifier for every peer, so the peer address and
+                // path identifier steps both get exercised.
+                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                route.path_id = path_id;
+                route
+            })
+            .collect();
+
+        let decided =
+            path_id_decided_pairs(&routes, |r| r.path_id, |r, id| r.path_id = id, vpn_tiebreak);
+        // Peer 1 holds three tied paths (6 ordered pairs), peer 2 two (2).
+        assert_eq!(decided, 8, "same-peer tied pairs reaching the path_id step");
+
+        assert_selection_order_independent(
+            &routes,
+            |order| {
+                let mut loc = LocRib::new();
+                loc.recompute_vpn(key, order.iter());
+                let best = loc.get_vpn(&key).unwrap();
+                (best.peer, best.path_id)
+            },
+            |order| {
+                order.sort_by(vpn_tiebreak);
+                order.iter().map(|r| (r.peer, r.path_id)).collect()
+            },
+        );
+    }
+
+    #[test]
+    fn recompute_labeled_add_path_selection_is_order_independent() {
+        let nlri = labeled_nlri([10, 0, 13, 0], 24, 100);
+        let key = nlri.key();
+        let routes: Vec<LabeledRibRoute> = PATH_ID_TIE_SET
+            .iter()
+            .map(|&(peer_oct, path_id, local_pref)| {
+                let mut route = make_labeled_route(nlri.clone(), peer_oct, local_pref);
+                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                route.path_id = path_id;
+                route
+            })
+            .collect();
+
+        let decided = path_id_decided_pairs(
+            &routes,
+            |r| r.path_id,
+            |r, id| r.path_id = id,
+            labeled_tiebreak,
+        );
+        // Peer 1 holds three tied paths (6 ordered pairs), peer 2 two (2).
+        assert_eq!(decided, 8, "same-peer tied pairs reaching the path_id step");
+
+        assert_selection_order_independent(
+            &routes,
+            |order| {
+                let mut loc = LocRib::new();
+                loc.recompute_labeled(key, order.iter());
+                let best = loc.get_labeled(&key).unwrap();
+                (best.peer, best.path_id)
+            },
+            |order| {
+                order.sort_by(labeled_tiebreak);
+                order.iter().map(|r| (r.peer, r.path_id)).collect()
+            },
+        );
     }
 
     fn rtc_test_nlri(local_admin: u32) -> RtcNlri {
