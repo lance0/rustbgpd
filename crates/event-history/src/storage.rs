@@ -482,8 +482,10 @@ impl StoreHandle {
 /// Spawn the blocking storage thread on the current tokio runtime.
 ///
 /// `path` is the events DB. If opening fails (corruption, permission
-/// denied, schema downgrade), quarantines and reopens fresh — caller
-/// learns which path was taken via [`StorageInit::had_quarantine`].
+/// denied), quarantines and reopens fresh — caller learns which path
+/// was taken via [`StorageInit::had_quarantine`]. A newer on-disk
+/// schema is returned as [`EventHistoryError::SchemaDowngrade`] with
+/// the store left in place.
 ///
 /// The returned `JoinHandle` resolves when the storage thread exits
 /// (after a `StoreOp::Shutdown` or unrecoverable error).
@@ -535,7 +537,8 @@ pub(crate) struct StorageInit {
 ///   async side keeps the error path off the blocking thread.
 /// - A failed primary open is retried once after [`PROBE_RETRY_DELAY`];
 ///   the pause blocks the calling thread, once, at startup. Only a second
-///   failure quarantines the DB.
+///   failure quarantines the DB. A schema downgrade is neither retried nor
+///   quarantined; it is returned as is.
 /// - If the primary fails to open, we attempt quarantine metadata before
 ///   creating a fresh DB. The sidecar is a diagnostic hint only because
 ///   it can lag committed events.
@@ -581,7 +584,19 @@ fn open_with_recovery(
     }
 
     // Try the primary path, then once more before treating it as broken.
+    // A newer on-disk schema is neither transient nor corruption: the
+    // store is intact and belongs to a newer daemon, so it stays where
+    // it is and the error reaches startup (ADR-0072 downgrade fence).
     let probed = probe_open(path, synchronous).or_else(|first_err| {
+        if let EventHistoryError::SchemaDowngrade { on_disk, supported } = first_err {
+            error!(
+                events_db = %path.display(),
+                on_disk,
+                supported,
+                "events DB was written by a newer daemon; leaving it in place and refusing to open"
+            );
+            return Err(first_err);
+        }
         warn!(
             events_db = %path.display(),
             error = %first_err,
@@ -601,6 +616,7 @@ fn open_with_recovery(
             initial_allocator: allocator,
             recovered_via_fallback: false,
         }),
+        Err(primary_err @ EventHistoryError::SchemaDowngrade { .. }) => Err(primary_err),
         Err(primary_err) => {
             warn!(
                 events_db = %path.display(),
@@ -1201,6 +1217,51 @@ fn oldest_event_id_blocking(conn: &Connection) -> Result<Option<u64>, EventHisto
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newer_on_disk_schema_refuses_to_open_without_quarantining() {
+        // Load-bearing break: the recovery ladder treated the downgrade
+        // fence like corruption, so a store written by a newer daemon was
+        // moved to `.stale` and replaced by an empty one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let stale = stale_path(&path);
+        let sidecar = sidecar_path(&path);
+        let mut conn = Connection::open(&path).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
+        conn.execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'schema_version'",
+            params![(CURRENT_SCHEMA_VERSION + 1).to_string()],
+        )
+        .unwrap();
+        drop(conn);
+        std::fs::write(&sidecar, "7\n").unwrap();
+
+        let result = open_with_recovery(&path, SynchronousMode::Full);
+
+        assert!(
+            !stale.exists(),
+            "a newer-schema store must stay in place, not move to {}",
+            stale.display()
+        );
+        assert!(path.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.contains("stale"))
+            .collect();
+        assert!(leftovers.is_empty(), "no quarantine set: {leftovers:?}");
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "7\n");
+        assert!(
+            matches!(
+                result,
+                Err(EventHistoryError::SchemaDowngrade { on_disk, supported })
+                    if on_disk == CURRENT_SCHEMA_VERSION + 1
+                        && supported == CURRENT_SCHEMA_VERSION
+            ),
+            "expected SchemaDowngrade, got {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn closed_store_and_dropped_reply_are_storage_unavailable() {

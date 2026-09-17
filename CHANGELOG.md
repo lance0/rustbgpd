@@ -155,8 +155,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every other `rbgp` command, instead of `error:`. Scripts that match the
   lowercase prefix on import failures need updating. Exit codes are
   unchanged.
+- The event-history outbox no longer quarantines an `events.db` whose
+  `schema_version` is newer than the daemon supports. The open now fails with
+  a message naming both versions and the two remedies (upgrade the daemon, or
+  move the store aside by hand); with `[event_history].required = true` the
+  daemon exits 1, otherwise it continues in live-only mode. Previously the
+  recovery ladder treated the newer store like corruption, moved it to
+  `events.db.stale`, and started an empty one. No released daemon has bumped
+  the schema version yet, so this only affects a future downgrade.
 
 ### Upgrade notes
+
+- A daemon downgraded onto an `events.db` written by a newer daemon now stops
+  (`required = true`) or runs live-only (`required = false`) with the store
+  untouched, instead of moving the store aside and starting an empty one.
+  Upgrade the daemon again, or move `events.db` and its `-wal` / `-shm` files
+  aside before starting the older daemon.
 
 - `rs-config-render` render receipts gain two keys, `irrdb_disabled_clients`
   and `warnings`. Activation, `status`, and `recover rollback` accept both

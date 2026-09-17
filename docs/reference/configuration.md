@@ -4438,6 +4438,18 @@ When the events DB fails to open or is corrupted:
   (`required = true`). The allocator never restarts at 1 silently.
 - `bgp_event_outbox_degraded` flips to `1` and does not auto-
   clear in v1; operator restarts to clear.
+- Prior allocation evidence means `events.db.stale` or `events.last_id`.
+  Numbered copies (`events.db.stale.<n>`) are archives and are not consulted.
+
+A store written by a newer daemon is not corruption and is never quarantined.
+When `schema_version` in `events.db` is higher than the daemon supports, the
+open fails with `events.db schema version <on disk> is newer than the
+supported version <supported>; upgrade the daemon or move the store aside
+before starting`. With `required = true` the daemon exits 1; with
+`required = false` it logs the error and continues in live-only mode. Either
+way the store stays in place: upgrade the daemon again, or move `events.db`
+and its `-wal` / `-shm` files aside by hand (for example to
+`events.db.stale-downgrade`) before starting the older daemon.
 
 If the storage thread stops while the daemon runs (for example, after a
 panic), the outbox closes producer admission, refuses new `SubscribeFromEvent`

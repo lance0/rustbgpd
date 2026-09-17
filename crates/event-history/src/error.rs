@@ -13,9 +13,11 @@ pub enum EventHistoryError {
     Sqlite(#[from] rusqlite::Error),
 
     /// On-disk `schema_version` is higher than this daemon supports.
-    /// Operator must upgrade the binary or quarantine the DB.
+    /// The store is left in place; the operator upgrades the binary or
+    /// moves the DB aside by hand.
     #[error(
-        "events.db schema version {on_disk} is higher than supported {supported}; refusing to start"
+        "events.db schema version {on_disk} is newer than the supported version {supported}; \
+         upgrade the daemon or move the store aside before starting"
     )]
     SchemaDowngrade { on_disk: u32, supported: u32 },
 
