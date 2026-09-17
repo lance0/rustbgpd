@@ -37,6 +37,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The Linux EVPN dataplane now retries a failed delete of an L3 (all-active
+  Type 5) FDB nexthop or nexthop group on later reconcile passes, as it
+  already did for L2 FDB nexthop groups. Previously the orphaned kernel object
+  stayed until the periodic drift sweep removed it. Retry bookkeeping is also
+  cleared whenever the kernel confirms a delete. Previously, if the drift
+  sweep removed a nexthop whose failed delete was queued for retry, the queued
+  retry could later delete a new L2 FDB nexthop that had reused the same ID.
+  `pending_delete_count` in `ListEvpnNexthops` still counts only L2 FDB
+  nexthop IDs.
 - SIGHUP now applies a route-server member join or leave with its datasets
   when the member carries `md5_password` or `ttl_security` (GTSM). The change
   applies as one compensated runtime generation, not as a rejected compound
