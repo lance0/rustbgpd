@@ -516,10 +516,11 @@ impl LocRib {
 
     /// Recompute the selected BGP-LS route for a key from the given candidates.
     ///
-    /// Uses the same family-agnostic BGP preference chain as `FlowSpec`: stale
-    /// rank, `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
-    /// originator ID, then peer address. The opaque BGP-LS NLRI identity remains
-    /// the map key and is not parsed for selection.
+    /// Selection uses the preference chain in `bgpls_tiebreak`: stale rank,
+    /// `LOCAL_PREF`, `AS_PATH` length, ORIGIN, MED, eBGP over iBGP, effective
+    /// BGP Identifier (`ORIGINATOR_ID` when present; a locally originated route
+    /// ranks first), `CLUSTER_LIST` length, then peer address. The opaque
+    /// BGP-LS NLRI identity remains the map key and is not parsed for selection.
     pub fn recompute_bgpls<'a>(
         &mut self,
         key: BgpLsRouteKey,
@@ -575,9 +576,11 @@ impl LocRib {
 
     /// Recompute the best VPNv4/VPNv6 route for `key` from the candidates.
     ///
-    /// Uses the same family-agnostic BGP preference chain as BGP-LS: stale rank,
-    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
-    /// originator ID, then peer address. The MPLS label stack is route data, not
+    /// Selection uses the preference chain in `vpn_cmp_chain` (no ORR costs):
+    /// stale rank, `LOCAL_PREF`, `AS_PATH` length, ORIGIN, MED, eBGP over iBGP,
+    /// effective BGP Identifier (`ORIGINATOR_ID` when present; a locally
+    /// originated route ranks first), `CLUSTER_LIST` length, peer address, then
+    /// inbound Add-Path path identifier. The MPLS label stack is route data, not
     /// a selection input; a same-peer relabel is caught by the `nlri` change
     /// check so the reflected label stays current.
     pub fn recompute_vpn<'a>(
@@ -663,11 +666,13 @@ impl LocRib {
     /// Recompute the best labeled-unicast route for `key` from the
     /// candidates.
     ///
-    /// Uses the same family-agnostic BGP preference chain as VPN: stale rank,
-    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
-    /// originator ID, then peer address. The MPLS label stack is route data,
-    /// not a selection input; a same-peer relabel is caught by the `nlri`
-    /// change check so the reflected label stays current.
+    /// Selection uses the preference chain in `labeled_cmp_chain` (no ORR
+    /// costs): stale rank, `LOCAL_PREF`, `AS_PATH` length, ORIGIN, MED, eBGP
+    /// over iBGP, effective BGP Identifier (`ORIGINATOR_ID` when present; a
+    /// locally originated route ranks first), `CLUSTER_LIST` length, peer
+    /// address, then inbound Add-Path path identifier. The MPLS label stack is
+    /// route data, not a selection input; a same-peer relabel is caught by the
+    /// `nlri` change check so the reflected label stays current.
     pub fn recompute_labeled<'a>(
         &mut self,
         key: Prefix,
@@ -725,9 +730,10 @@ impl LocRib {
 
     /// Recompute the best RT-Constrain route for `key` from the candidates.
     ///
-    /// Uses the same family-agnostic BGP preference chain as VPN: stale rank,
-    /// `LOCAL_PREF`, `AS_PATH`, `ORIGIN`, MED, eBGP/iBGP, cluster length,
-    /// originator ID, then peer address.
+    /// Selection uses the preference chain in `rtc_tiebreak`: stale rank,
+    /// `LOCAL_PREF`, `AS_PATH` length, ORIGIN, MED, eBGP over iBGP, effective
+    /// BGP Identifier (`ORIGINATOR_ID` when present; a locally originated route
+    /// ranks first), `CLUSTER_LIST` length, then peer address.
     pub fn recompute_rtc<'a>(
         &mut self,
         key: RtcRibRouteKey,
@@ -973,11 +979,10 @@ fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
 ///
-/// Uses the same preference chain as unicast `best_path_cmp`:
-/// stale → `LOCAL_PREF` → `AS_PATH` length → ORIGIN → MED →
-/// eBGP>iBGP → BGP Identifier → `CLUSTER_LIST` → peer address.
-///
-/// RPKI validation is not applicable to `FlowSpec` routes.
+/// Uses the unicast `best_path_cmp` chain without its RPKI and ASPA steps,
+/// which do not apply to `FlowSpec` routes: stale → `LOCAL_PREF` →
+/// `AS_PATH` length → ORIGIN → MED → eBGP>iBGP → effective BGP Identifier →
+/// `CLUSTER_LIST` length → peer address → inbound Add-Path path identifier.
 fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
     // 0. Three-tier freshness: fresh > GR-stale > LLGR-stale
     //    (RFC 4724 §4.2 / RFC 9494 §4.7).
