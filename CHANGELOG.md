@@ -131,6 +131,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `events.db.stale` set moves to `events.db.stale.1` (or the next unused
   number) first. The configuration reference now documents how to restore a
   quarantined store by hand.
+- Best-path selection now gives a locally originated route a fixed place at
+  the BGP Identifier step (RFC 4271 §9.1.2.2 step (f)): it ranks ahead of
+  every session-learned route, and two locally originated routes tie there.
+  The step previously had no value for such a route and passed the pair on
+  to the CLUSTER_LIST and peer-address steps, which made the comparison
+  intransitive for a locally originated route that carried a CLUSTER_LIST
+  or a peer address other than `0.0.0.0`. With such a route among iBGP
+  candidates tied down to this step, the selected best path depended on the
+  order the candidates were examined in, and sorting a larger candidate set
+  could panic. The daemon builds every locally originated route with the
+  `0.0.0.0` local peer and no CLUSTER_LIST, and that shape already won the
+  later steps against every session-learned route, so the selected route
+  does not change for them. The unicast, ORR, VPN, labeled-unicast,
+  FlowSpec, BGP-LS, RT-Constrain, and EVPN chains share the change.
 
 ### Upgrade notes
 
@@ -189,6 +203,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files, which are full copies of the store and are never deleted
   automatically. Remove them when they are no longer needed. A failed
   event-history open now delays startup by 200 ms before quarantine.
+- When a locally originated best route ties a session-learned route down to
+  the BGP Identifier step, explain output now reports `lower_bgp_identifier`
+  with detail `bgp_identifier local < <identifier>` (EVPN:
+  `effective BGP identifier local versus <identifier>`) instead of
+  `shorter_cluster_list` or `lower_peer_address`. When that session-learned
+  route is the runner-up, BMP path marking for a unicast best route carries
+  the "router ID" reason code instead of the peer-address code or no reason
+  code. The selected route is unchanged.
 
 ## [0.70.1] — 2026-09-15
 

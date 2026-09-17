@@ -808,10 +808,9 @@ fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
 /// peer address.
 ///
 /// The identifier step compares `ORIGINATOR_ID` when present, else the
-/// advertising peer's BGP Identifier (RFC 4456 §9), and is skipped for
-/// any pair that includes a locally originated VTEP route: its
-/// `peer_router_id` is the `0.0.0.0` injection sentinel, not a BGP
-/// Identifier.
+/// advertising peer's BGP Identifier (RFC 4456 §9), and ranks a locally
+/// originated VTEP route ahead of every received route: its
+/// `peer_router_id` is an injection placeholder, not a BGP Identifier.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     evpn_cmp_with_reason(a, b).0
 }
@@ -882,8 +881,8 @@ pub(crate) fn evpn_cmp_with_reason(
         _ => {}
     }
     // 6. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f);
-    //    ORIGINATOR_ID substitutes per RFC 4456 §9). Skipped for a pair
-    //    that includes a locally originated route.
+    //    ORIGINATOR_ID substitutes per RFC 4456 §9). A locally originated
+    //    route ranks ahead of any identifier.
     if let Some((cmp, reason)) = compare_bgp_identifier(
         (a.origin_type, a.originator_id(), a.peer_router_id),
         (b.origin_type, b.originator_id(), b.peer_router_id),
@@ -928,11 +927,17 @@ pub(crate) fn evpn_reason_detail(
         R::LowerOrigin => format!("origin {:?} versus {:?}", a.origin(), b.origin()),
         R::LowerMed => format!("med {} versus {}", a.med(), b.med()),
         R::EbgpOverIbgp => format!("eBGP {} versus {}", a.is_ebgp(), b.is_ebgp()),
-        R::LowerOriginatorId | R::LowerBgpIdentifier => format!(
-            "effective BGP identifier {} versus {}",
-            a.originator_id().unwrap_or(a.peer_router_id),
-            b.originator_id().unwrap_or(b.peer_router_id)
-        ),
+        R::LowerOriginatorId | R::LowerBgpIdentifier => {
+            let show = |route: &EvpnRibRoute| {
+                crate::best_path::effective_bgp_identifier(
+                    route.origin_type,
+                    route.originator_id(),
+                    route.peer_router_id,
+                )
+                .map_or_else(|| "local".to_string(), |id| id.to_string())
+            };
+            format!("effective BGP identifier {} versus {}", show(a), show(b))
+        }
         R::ShorterClusterList => format!(
             "cluster_list length {} versus {}",
             a.cluster_list().len(),
@@ -3503,34 +3508,32 @@ mod tests {
         );
     }
 
-    /// A locally originated route carries the `0.0.0.0` injection sentinel
-    /// as `peer_router_id`, which is not a BGP Identifier. The identifier
-    /// step is skipped for any pair that includes one, so the pair falls
-    /// through to `CLUSTER_LIST` length: the received route with the
-    /// shorter list wins even though `0.0.0.0` would have won a naive
-    /// identifier comparison.
+    /// A locally originated route has no BGP Identifier (its
+    /// `peer_router_id` is an injection placeholder), so the identifier
+    /// step ranks it ahead of a received route — here even one with a
+    /// shorter `CLUSTER_LIST` and a lower identifier than the placeholder.
     #[test]
-    fn evpn_local_route_skips_identifier_step() {
+    fn evpn_local_route_ranks_first_at_identifier_step() {
         let mut local = make_evpn_type2(
-            0,
+            9,
             vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
                 10, 0, 0, 100,
             )])],
         );
         local.origin_type = RouteOrigin::Local;
-        local.peer_router_id = Ipv4Addr::UNSPECIFIED;
         let received = make_evpn_type2(2, vec![]);
-        assert_eq!(evpn_tiebreak_simple(&received, &local), Ordering::Less);
-        assert_eq!(evpn_tiebreak_simple(&local, &received), Ordering::Greater);
-
-        // With equal CLUSTER_LIST lengths the pair falls through to the
-        // peer-address step, where the sentinel `0.0.0.0` is lowest.
-        let mut local_plain = make_evpn_type2(0, vec![]);
-        local_plain.origin_type = RouteOrigin::Local;
-        local_plain.peer_router_id = Ipv4Addr::UNSPECIFIED;
+        let reason = crate::best_path::BestPathReason::LowerBgpIdentifier;
         assert_eq!(
-            evpn_tiebreak_simple(&local_plain, &received),
-            Ordering::Less
+            evpn_cmp_with_reason(&local, &received),
+            (Ordering::Less, reason)
+        );
+        assert_eq!(
+            evpn_cmp_with_reason(&received, &local),
+            (Ordering::Greater, reason)
+        );
+        assert_eq!(
+            evpn_reason_detail(reason, &local, &received),
+            "effective BGP identifier local versus 10.0.0.2"
         );
     }
 
