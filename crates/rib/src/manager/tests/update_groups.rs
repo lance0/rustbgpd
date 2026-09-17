@@ -3064,6 +3064,21 @@ async fn abandoned_authoritative_replacement_batch_is_skipped() {
     drop(response);
     let captured = StdArc::new(Mutex::new(Vec::new()));
     tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        // Sibling tests reach this skip callsite with no subscriber installed
+        // (a dropped reply on their own thread), and whichever thread registers
+        // a callsite first caches its interest process-wide; a no-subscriber
+        // thread caches `Interest::never()`, which drops the event on the macro
+        // fast path. Warm the callsite on a throwaway manager, then re-register
+        // it against this subscriber; a callsite registers once, so the
+        // measured call below cannot lose that race afterwards.
+        let (_warm_tx, warm_rx) = mpsc::channel(1);
+        let mut warm = RibManager::new(warm_rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let (warm_reply, warm_response) = oneshot::channel();
+        drop(warm_response);
+        warm.handle_replace_peer_export_policies_authoritatively(vec![], warm_reply);
+        tracing::callsite::rebuild_interest_cache();
+        captured.lock().unwrap().clear();
+
         manager.handle_replace_peer_export_policies_authoritatively(
             vec![crate::update::PeerExportPolicyReplacement {
                 peer,
