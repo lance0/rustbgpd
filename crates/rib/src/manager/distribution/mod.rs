@@ -5584,6 +5584,21 @@ impl RibManager {
             .filter(|prefix| !self.selection_deferred(prefix_family(prefix)))
             .copied()
             .collect();
+        // FIB install-candidate wake. Route events fire only when the
+        // Loc-RIB best `(peer, path_id)` or its payload changes; an
+        // equal-cost member added, withdrawn, or re-advertised with a new
+        // next hop keeps the best and would otherwise reach the kernel on
+        // the reconciler's periodic backstop. The FIB re-queries its
+        // candidates on wake, so the signal is a bare generation bump per
+        // affected batch. Coarse by design: the RIB does not hold the
+        // FIB's previous candidate set (it depends on the per-table ECMP
+        // cap and relax/weighted knobs), so a precise diff would need new
+        // per-prefix state; the reconciler's debounce coalesces the extra
+        // wakes, and best-path churn already woke it through route events.
+        if !best_changed.is_empty() || !all_affected.is_empty() {
+            self.fib_candidate_changes_tx
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
         if best_changed.is_empty()
             && all_affected.is_empty()
             && self.dirty_peers.is_empty()
