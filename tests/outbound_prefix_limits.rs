@@ -775,6 +775,43 @@ where
     None
 }
 
+/// Poll the SIGHUP outcome counter until `outcome` reads `want`. SIGHUP is
+/// fire-and-forget, and a signal that lands while another reload owns the
+/// lane is dropped as `ignored_in_flight`, so a phase must see its own reload
+/// settle before it asserts what that reload did or did not change.
+async fn wait_reload_outcome(
+    metrics: SocketAddr,
+    outcome: &str,
+    want: f64,
+) -> Result<Duration, String> {
+    const SERIES: &str = "bgp_sighup_reload_outcomes_total";
+    let start = Instant::now();
+    let mut last = String::from("no scrape");
+    while start.elapsed() < CONVERGE_TIMEOUT {
+        if let Ok(text) = scrape(metrics).await {
+            if sample(&text, SERIES, &[("outcome", outcome)]) == Some(want) {
+                return Ok(start.elapsed());
+            }
+            last = text
+                .lines()
+                .filter(|line| line.starts_with(SERIES))
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "{outcome} never reached {want} within {CONVERGE_TIMEOUT:?}; last: {last}"
+    ))
+}
+
+fn after_sighup(waited: &Result<Duration, String>) -> String {
+    match waited {
+        Ok(elapsed) => format!("{:.3}s after SIGHUP", elapsed.as_secs_f64()),
+        Err(error) => error.clone(),
+    }
+}
+
 /// Everything the daemon reports at one phase boundary.
 struct Evidence {
     metrics: String,
@@ -1202,6 +1239,14 @@ async fn outbound_prefix_limits_bound_the_wire_and_survive_reload_edits() {
     // -- Phase: a lowering below current usage is rejected atomically -------
     std::fs::copy(&config_lower, &config_live).expect("stage lowering config");
     kill(daemon.pid(), Signal::SIGHUP).expect("send SIGHUP");
+    // "Unchanged" below is only evidence once this reload is known to have
+    // run and been rejected; the settle window then covers any stray effect.
+    let rejected = wait_reload_outcome(metrics, "rejected_no_effect", 1.0).await;
+    checks.assert(
+        "lower.reload_rejected_without_effect",
+        rejected.is_ok(),
+        after_sighup(&rejected),
+    );
     tokio::time::sleep(SETTLE).await;
     let lowered = collect(&rbgp, metrics).await.expect("collect lower");
 
@@ -1264,11 +1309,13 @@ async fn outbound_prefix_limits_bound_the_wire_and_survive_reload_edits() {
     // -- Phase: a raise recovers the withheld intent ------------------------
     std::fs::copy(&config_raise, &config_live).expect("stage raise config");
     kill(daemon.pid(), Signal::SIGHUP).expect("send SIGHUP");
-    let recovery = wait_for(|| {
-        let (v4, v6, ..) = ctx.obs[GROUPED_CAPPED].snapshot();
-        v4 == V4_ROUTES && v6 == V6_ROUTES
-    })
-    .await;
+    let (recovery, completed) = tokio::join!(
+        wait_for(|| {
+            let (v4, v6, ..) = ctx.obs[GROUPED_CAPPED].snapshot();
+            v4 == V4_ROUTES && v6 == V6_ROUTES
+        }),
+        wait_reload_outcome(metrics, "complete", 1.0),
+    );
     checks.assert(
         "recovered.capped_reached_the_raised_maximum",
         recovery.is_some(),
@@ -1276,6 +1323,11 @@ async fn outbound_prefix_limits_bound_the_wire_and_survive_reload_edits() {
             || format!("no recovery within {CONVERGE_TIMEOUT:?}"),
             |elapsed| format!("{:.3}s after SIGHUP", elapsed.as_secs_f64()),
         ),
+    );
+    checks.assert(
+        "recovered.reload_completed",
+        completed.is_ok(),
+        after_sighup(&completed),
     );
     tokio::time::sleep(SETTLE).await;
     let raised = collect(&rbgp, metrics).await.expect("collect recovered");
