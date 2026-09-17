@@ -86,6 +86,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same code as a commit. The full receipt, including `--json` output, is
   still printed before the non-zero exit. A receipt with an unrecognized
   status now exits 1 instead of passing as a commit or as changes present.
+- Durable event history now stops cleanly when its storage thread exits or
+  panics while the daemon runs. Previously the outbox kept accepting events
+  and dropped every batch, while new `SubscribeFromEvent` streams were
+  admitted and never received an event. The outbox now closes producer
+  admission, ends open `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
+  streams with `DATA_LOSS`, and refuses new `SubscribeFromEvent` requests with
+  `UNAVAILABLE`. It logs `event-history storage stopped` and sets the new
+  `bgp_event_outbox_storage_failed` gauge and `bgp_event_outbox_degraded` to
+  `1`. The example Prometheus rules add a critical
+  `BgpEventOutboxStorageFailed` alert. A restart is required to recover. A
+  SQLite commit failure is still a per-batch loss and does not stop the
+  outbox.
 
 ### Upgrade notes
 
@@ -133,6 +145,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A wrapper that applies after `plan` exits 2 no longer reaches an apply the
   daemon would refuse. A wrapper that treats every `plan` exit other than 1
   as "changes present" must handle 3 as a rejection.
+- After an event-history storage failure, event producers see a closed
+  outbox. The accepted events that could not be written count as
+  `bgp_event_outbox_dropped_total{reason="db_error"}`, and events refused after
+  the failure count as `reason="closed"`, the label that previously meant only
+  shutdown. Use `bgp_event_outbox_storage_failed` to tell the two cases apart.
+  New gNMI `Subscribe ON_CHANGE` streams end with `DATA_LOSS` until the daemon
+  restarts.
 
 ## [0.70.1] — 2026-09-15
 

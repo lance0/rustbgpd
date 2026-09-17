@@ -1691,13 +1691,14 @@ any `WatchEvents` subscriber is alive.
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_event_outbox_committed_total{category}` | Events durably committed to the local outbox, per category. Increments inside EHM after the SQLite transaction commits — not on producer enqueue. |
-| `bgp_event_outbox_dropped_total{category, reason}` | Events lost before durable storage, or committed events skipped during durable cursor delivery. `reason` is `queue_full`, `closed`, `db_error`, `shutdown_timeout`, `decode_failure`, `opaque_codec`, or `source_lagged`. `shutdown_timeout` means an accepted event remained actor-queued or in an accepted producer handoff when the coordinated shutdown deadline expired; an append already owned by the actor has unknown outcome and is not counted as a definite per-category drop. `source_lagged` fires when an upstream broadcast receiver (FIB or BFD bridge) reports `Lagged(missed)` — those missed events never reached the bridge body and therefore never reached EHM; the counter increments by `missed`. `queue_full`, `db_error`, `shutdown_timeout`, decode/codec failures, and `source_lagged` flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. |
+| `bgp_event_outbox_dropped_total{category, reason}` | Events lost before durable storage, or committed events skipped during durable cursor delivery. `reason` is `queue_full`, `closed`, `db_error`, `shutdown_timeout`, `decode_failure`, `opaque_codec`, or `source_lagged`. `shutdown_timeout` means an accepted event remained actor-queued or in an accepted producer handoff when the coordinated shutdown deadline expired; an append already owned by the actor has unknown outcome and is not counted as a definite per-category drop. `source_lagged` fires when an upstream broadcast receiver (FIB or BFD bridge) reports `Lagged(missed)` — those missed events never reached the bridge body and therefore never reached EHM; the counter increments by `missed`. `queue_full`, `db_error`, `shutdown_timeout`, decode/codec failures, and `source_lagged` flip `bgp_event_outbox_degraded` to `1`; shutdown-time `closed` drops do not. After a runtime storage failure, events that were already accepted count as `db_error` and producers count refused events as `closed`; `bgp_event_outbox_storage_failed` distinguishes these from shutdown. |
 | `bgp_event_outbox_queue_depth{category}` | Accepted pending events in the EHM producer queue by category, including a producer handoff between its admission CAS and `permit.send`. Climbs before drops start — early-warning signal. |
 | `bgp_event_outbox_db_size_bytes` | Combined size of `events.db` + WAL on disk, refreshed after commits and retention passes. `[event_history].max_bytes` is the scheduled size-retention target; a bounded pass can finish while the store remains above it. |
 | `bgp_event_outbox_retention_evicted_total{reason}` | Events evicted by the retention pass. `reason` is `count_cap` or `byte_cap`. |
 | `bgp_event_outbox_latest_event_id` | The latest committed `event_id`. Forward progress indicator. |
 | `bgp_event_outbox_open_failures_total` | DB-open failures across the process lifetime. Typically 0 or 1; non-zero means EHM went into recovery or pass-through at startup. |
 | `bgp_event_outbox_degraded` | `1` once the outbox has seen durability-impacting loss, a committed-event delivery skip, or DB open/recovery/quarantine failure since start. Expected shutdown `reason=closed` drops are excluded. The signal does not auto-clear in v1; restart clears the latch. |
+| `bgp_event_outbox_storage_failed` | `1` once the event-history storage thread stopped (exited or panicked) while the daemon was running. The outbox then refuses producer events and durable cursor subscriptions, and `bgp_event_outbox_degraded` is also `1`. Restart the daemon to recover; the signal does not auto-clear. |
 | `bgp_event_outbox_cursor_gap_total` | `SubscribeFromEvent` requests whose leading frame was a `StreamLagEvent` (the requested cursor was older than the retention floor). Operator signal that `[event_history].max_events` / `max_bytes` is undersized for the collector reconnect SLA. |
 
 **`FAILED_PRECONDITION` on `SubscribeFromEvent`** means one of:
@@ -1722,6 +1723,16 @@ any `WatchEvents` subscriber is alive.
 stopped accepting work or failed to reply. Inspect daemon health and logs,
 restart if necessary, and resume from the last received top-level `event_id`.
 Events already delivered remain valid; the terminal status is emitted once.
+
+**`UNAVAILABLE` at `SubscribeFromEvent` admission** means the storage thread
+has already stopped: `bgp_event_outbox_storage_failed` is `1` and the daemon
+log has the error `event-history storage stopped` (after a panic, also a
+crash report). From that point the outbox accepts no producer events, so the
+events produced before the restart are lost. Streams that were open when the
+storage stopped end with `DATA_LOSS`, and gNMI `Subscribe ON_CHANGE` streams,
+including new ones, end the same way. Restart the daemon, then reconcile
+collectors against authoritative state before resuming from their last
+`event_id`.
 
 **Sizing retention** — `max_events` and `max_bytes` are retention targets
 evaluated during each scheduled pass. The count target is evaluated first and

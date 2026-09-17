@@ -2227,7 +2227,9 @@ Durable `SubscribeFromEvent` compatibility:
 
 If the storage actor becomes unavailable after admission and no producer loss
 has been observed, the stream ends with gRPC `UNAVAILABLE`. Resume from the
-last received top-level `event_id` after restoring the daemon. Allocator
+last received top-level `event_id` after restoring the daemon. Once the
+storage thread has stopped, admission itself returns `UNAVAILABLE`, and open
+streams end with `DATA_LOSS` because producer events are refused until restart. Allocator
 pass-through remains `FAILED_PRECONDITION`; post-admission producer loss retains
 `DATA_LOSS` precedence.
 

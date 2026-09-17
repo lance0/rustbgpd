@@ -72,7 +72,10 @@ one SQLite transaction, and serves cursor-based replay through the
   same envelope.
 - **Storage loss is not pass-through.** A closed storage mailbox or dropped
   reply terminates cursor replay with `StorageUnavailable`; `PassThrough` is
-  reserved for an unrecoverable allocator anchor.
+  reserved for an unrecoverable allocator anchor. When the storage thread
+  stops while the actor runs, EHM latches `EhmState::storage_failed`, closes
+  producer admission, records a loss, refuses new cursor subscriptions with
+  `StorageUnavailable`, and stops the actor.
 - **Allocator recovery ladder.** Primary DB → quarantine fallback.
   `events.last_id` is a diagnostic hint only in v1 because it can lag
   committed events. If both authoritative sources fail AND prior

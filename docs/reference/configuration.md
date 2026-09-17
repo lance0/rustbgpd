@@ -4433,6 +4433,13 @@ When the events DB fails to open or is corrupted:
 - `bgp_event_outbox_degraded` flips to `1` and does not auto-
   clear in v1; operator restarts to clear.
 
+If the storage thread stops while the daemon runs (for example, after a
+panic), the outbox closes producer admission, refuses new `SubscribeFromEvent`
+requests with `UNAVAILABLE`, ends open durable streams with `DATA_LOSS`, and
+sets `bgp_event_outbox_storage_failed` and `bgp_event_outbox_degraded` to `1`.
+Events produced from then until a restart are lost. Restart the daemon to
+recover.
+
 ### Best-effort under overload
 
 On a full producer queue, EHM drops the event, increments

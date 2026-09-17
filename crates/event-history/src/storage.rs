@@ -112,6 +112,11 @@ pub(crate) enum StoreOp {
 
     /// Graceful shutdown — drain anything pending, checkpoint WAL, close.
     Shutdown { reply: oneshot::Sender<()> },
+
+    /// Test-only: make the storage thread panic inside its next `Append`,
+    /// while that append's reply is still owned.
+    #[cfg(test)]
+    TestPanicOnAppend,
 }
 
 /// What `StoreOp::Append` returns to the caller.
@@ -392,6 +397,12 @@ impl StoreHandle {
             .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
+    /// Resolves once the storage thread no longer receives operations: it
+    /// exited or panicked. Cancel-safe; resolves immediately once closed.
+    pub(crate) async fn closed(&self) {
+        self.tx.closed().await;
+    }
+
     pub(crate) async fn shutdown(&self) {
         let (reply, rx) = oneshot::channel();
         if self.tx.send(StoreOp::Shutdown { reply }).await.is_ok() {
@@ -399,6 +410,14 @@ impl StoreHandle {
             self.test_hooks.shutdown.after_send().await;
             let _ = rx.await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_panic_on_next_append(&self) {
+        self.tx
+            .send(StoreOp::TestPanicOnAppend)
+            .await
+            .expect("storage thread accepts the injected panic");
     }
 
     #[cfg(test)]
@@ -663,10 +682,17 @@ fn run_storage_thread(
     );
 
     let sidecar = sidecar_path(path);
+    #[cfg(test)]
+    let mut panic_on_append = false;
 
     while let Some(op) = rx.blocking_recv() {
         match op {
             StoreOp::Append { envelopes, reply } => {
+                #[cfg(test)]
+                assert!(
+                    !panic_on_append,
+                    "injected event-history storage-thread panic during append"
+                );
                 let outcome = append_batch_blocking(&mut conn, path, &envelopes, daemon_boot_id);
                 let _ = reply.send(outcome);
             }
@@ -727,6 +753,8 @@ fn run_storage_thread(
                 let _ = reply.send(());
                 break;
             }
+            #[cfg(test)]
+            StoreOp::TestPanicOnAppend => panic_on_append = true,
         }
     }
 

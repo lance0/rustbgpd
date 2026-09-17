@@ -1140,6 +1140,7 @@ serves `/livez` and `/readyz` for orchestrators. Key counters operators watch:
   `bgp_event_outbox_db_size_bytes`,
   `bgp_event_outbox_latest_event_id`,
   `bgp_event_outbox_degraded`,
+  `bgp_event_outbox_storage_failed`,
   `bgp_event_outbox_cursor_gap_total`. The degraded gauge is
   the alert-on-this signal — flips to `1` on a durability-impacting
   drop, decode/codec failure, or open failure since process start;

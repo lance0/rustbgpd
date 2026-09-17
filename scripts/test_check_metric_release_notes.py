@@ -26,7 +26,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         added, removed = check.validate_release_notes(baseline, current, section)
 
         self.assertEqual(len(baseline), 217)
-        self.assertEqual(added, set())
+        self.assertEqual(added, {"bgp_event_outbox_storage_failed"})
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
