@@ -1844,6 +1844,18 @@ mod proptests {
         ]
     }
 
+    /// The `peer_router_id` a route of this origin can actually carry: the
+    /// BGP Identifier of the advertising peer for a session-learned route,
+    /// the `0.0.0.0` injection sentinel for a locally originated one.
+    /// Pairing a session origin with the sentinel manufactures a route the
+    /// daemon never builds, and with it best-path outcomes that cannot occur.
+    fn peer_router_id_for(origin_type: RouteOrigin, octet: u8) -> Ipv4Addr {
+        match origin_type {
+            RouteOrigin::Local => Ipv4Addr::UNSPECIFIED,
+            RouteOrigin::Ebgp | RouteOrigin::Ibgp => Ipv4Addr::new(192, 0, 2, octet),
+        }
+    }
+
     fn arb_stale_tier() -> impl Strategy<Value = (bool, bool)> {
         // (is_stale, is_llgr_stale): fresh, GR-stale, LLGR-stale.
         prop_oneof![
@@ -1870,7 +1882,7 @@ mod proptests {
             prop::collection::vec(1u32..=65535, 0..5), // as_path ASNs
             arb_origin(),
             0u32..=1000,                   // MED
-            arb_route_origin(),            // origin_type
+            (arb_route_origin(), 1u8..=4), // origin_type + peer BGP Identifier octet
             proptest::option::of(1u8..=4), // originator_id last octet
             0u8..=3,                       // cluster_list length
             arb_stale_tier(),
@@ -1884,7 +1896,7 @@ mod proptests {
                     asns,
                     origin,
                     med,
-                    origin_type,
+                    (origin_type, rid_oct),
                     oid_oct,
                     cl_len,
                     (is_stale, is_llgr_stale),
@@ -1921,7 +1933,7 @@ mod proptests {
                         attributes: Arc::new(attributes),
                         received_at: Instant::now(),
                         origin_type,
-                        peer_router_id: Ipv4Addr::UNSPECIFIED,
+                        peer_router_id: peer_router_id_for(origin_type, rid_oct),
                         is_stale,
                         is_llgr_stale,
                         path_id: 0,
