@@ -305,14 +305,14 @@ struct ActorState {
     /// BUM maps: changing the desired bridge shape clears the
     /// suppression.
     managed_permanent_failures: BTreeMap<ManagedNetdevOpKey, DataplaneOp>,
-    /// IDs whose kernel `del_nexthop` failed during steady-state
-    /// FDB-NHG GC (Install drift heal, `UpdateFdbNhgMembers`,
-    /// `RemoveFdbNhg` group teardown). The allocator slot is *not*
-    /// released until the delete actually lands, so a future
-    /// `alloc_vtep_nh` / `alloc_nhg` can't hand out an ID that's
-    /// still live in the kernel. Drained once per reconcile pass
-    /// after the apply phase — successes release the slot + drop
-    /// from the set, persistent failures keep retrying.
+    /// IDs whose kernel `del_nexthop` failed transiently during
+    /// steady-state L2 or L3 FDB-NHG GC (drift heal, member updates,
+    /// group teardown, partial-install rollback). The allocator slot
+    /// is *not* released until the delete actually lands, so the
+    /// allocator can't hand out an ID that's still live in the
+    /// kernel. Drained once per reconcile pass after the apply phase
+    /// — successes release the slot + drop from the set, persistent
+    /// failures keep retrying.
     pending_deletes: BTreeSet<u32>,
     /// `(VNI, MAC)` keys we've already warned about for the
     /// ADR-0059 IPv6-alias fallback. The diff pass emits the set of
@@ -1877,6 +1877,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 l3_pass_had_failures,
             )
             .await;
+
+            // L3 FDB-NHG GC runs after this pass's first drain, so
+            // retry anything it just queued now, as the L2 GC gets.
+            self.drain_pending_deletes().await;
         } else {
             self.state.last_l3_drop_counts.clear();
             // No L3 intent — clear any leftover retry entries so a
@@ -2224,22 +2228,21 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     async fn drain_pending_deletes(&mut self) {
         // Drain in dependency order: NHG IDs first, then VTEP member
         // IDs. `BTreeSet<u32>` iterates ascending, and our tag scheme
-        // puts members at `0x3000_xxxx` and groups at `0x4000_xxxx`
-        // — naive iteration would delete members before their parent
-        // group, which the kernel can reject with `EINVAL` and which
-        // also defeats ADR-0059 §5 invariant 2 (FDB row → group →
-        // members). Partition by `is_nhg` first.
-        let (groups, members): (Vec<u32>, Vec<u32>) = self
-            .state
-            .pending_deletes
-            .iter()
-            .copied()
-            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_nhg(*id));
+        // puts members (`0x3000_xxxx` / L3 `0x5000_xxxx`) below their
+        // groups (`0x4000_xxxx` / L3 `0x6000_xxxx`) — naive iteration
+        // would delete members before their parent group, which the
+        // kernel can reject with `EINVAL` and which also defeats
+        // ADR-0059 §5 invariant 2 (FDB row → group → members).
+        // Partition by group tag first.
+        let (groups, members): (Vec<u32>, Vec<u32>) =
+            self.state.pending_deletes.iter().copied().partition(|id| {
+                crate::nh_id_alloc::NhIdAllocator::is_nhg(*id)
+                    || crate::nh_id_alloc::NhIdAllocator::is_l3_nhg(*id)
+            });
         for id in groups.into_iter().chain(members) {
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
-                    self.state.nh_id_alloc.release(id);
-                    self.state.pending_deletes.remove(&id);
+                    forget_deleted_nhid(&mut self.state, id);
                     tracing::debug!(id, "pending_deletes: drained on retry");
                 }
                 Err(e) => {
@@ -2386,8 +2389,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // reconcile pass retries.
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
-                    self.state.nh_id_alloc.release(id);
-                    self.state.adopted_unreferenced.remove(&id);
+                    forget_deleted_nhid(&mut self.state, id);
                     self.state.fdb_nhg_drift_since_report.orphans_cleaned += 1;
                 }
                 Err(e) => {
@@ -2580,8 +2582,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         for id in stale_groups.into_iter().chain(stale_members) {
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
-                    self.state.nh_id_alloc.release_l3(id);
-                    self.state.adopted_l3_unreferenced.remove(&id);
+                    forget_deleted_nhid(&mut self.state, id);
                     self.state.fdb_nhg_drift_since_report.orphans_cleaned += 1;
                 }
                 Err(e) => {
@@ -2649,7 +2650,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             if self.state.l3_groups.vtep_nh_is_orphan(&ip)
                 && let Some(id) = self.state.l3_groups.drop_vtep_nh(&ip)
             {
-                try_del_and_release_l3_alloc(
+                try_del_and_release_alloc(
                     &mut self.dataplane,
                     &mut self.state,
                     id,
@@ -6481,7 +6482,16 @@ fn build_fdb_nexthop_status(state: &ActorState) -> FdbNexthopDataplaneStatus {
     FdbNexthopDataplaneStatus {
         groups,
         orphan_nexthops_count: u32::try_from(state.adopted_unreferenced.len()).unwrap_or(u32::MAX),
-        pending_delete_count: u32::try_from(state.pending_deletes.len()).unwrap_or(u32::MAX),
+        // L2 only, like `orphan_nexthops_count`: this surface reports
+        // ADR-0059 FDB-NHG state, and the shared queue also holds L3 IDs.
+        pending_delete_count: u32::try_from(
+            state
+                .pending_deletes
+                .iter()
+                .filter(|id| crate::nh_id_alloc::NhIdAllocator::is_l2_ours(**id))
+                .count(),
+        )
+        .unwrap_or(u32::MAX),
         drift_recovery_disabled: state.drift_disabled,
     }
 }
@@ -6696,8 +6706,7 @@ where
                 if state.l3_groups.vtep_nh_is_orphan(&ip)
                     && let Some(member_id) = state.l3_groups.drop_vtep_nh(&ip)
                 {
-                    try_del_and_release_l3_alloc(dataplane, state, member_id, "l3_member_drift")
-                        .await;
+                    try_del_and_release_alloc(dataplane, state, member_id, "l3_member_drift").await;
                 }
             }
         }
@@ -6795,7 +6804,7 @@ async fn cleanup_l3_ref_delta<D>(
         if state.l3_groups.vtep_nh_is_orphan(&ip)
             && let Some(id) = state.l3_groups.drop_vtep_nh(&ip)
         {
-            try_del_and_release_l3_alloc(dataplane, state, id, "l3_group_unref").await;
+            try_del_and_release_alloc(dataplane, state, id, "l3_group_unref").await;
         }
     }
 }
@@ -6812,12 +6821,12 @@ async fn rollback_l3_partial_install<D>(
         && let Some((tracked_id, _members)) = state.l3_groups.drop_unreferenced_group(&group_key)
     {
         debug_assert_eq!(tracked_id, expected_id, "L3 rollback ID mismatch");
-        try_del_and_release_l3_alloc(dataplane, state, tracked_id, "l3_rollback_group").await;
+        try_del_and_release_alloc(dataplane, state, tracked_id, "l3_rollback_group").await;
     }
     for (ip, id) in new_members.iter().rev() {
         if state.l3_groups.vtep_nh_is_orphan(ip) {
             state.l3_groups.drop_vtep_nh(ip);
-            try_del_and_release_l3_alloc(dataplane, state, *id, "l3_rollback_member").await;
+            try_del_and_release_alloc(dataplane, state, *id, "l3_rollback_member").await;
         }
     }
 }
@@ -7516,14 +7525,30 @@ async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
     }
 }
 
-/// Best-effort delete of a tagged kernel nexthop, releasing the
-/// allocator slot only if the delete succeeded. On `Err` the slot
-/// stays reserved (so a future `alloc_vtep_nh` / `alloc_nhg` cannot
-/// hand out an ID still live in the kernel). Transient failures get
-/// queued into `state.pending_deletes` for retry on the next
-/// reconcile pass — permanent failures (e.g., `PermissionDenied`,
-/// `KernelTooOld`) are NOT queued because retrying can't help; they
-/// log once at warn and the kernel orphan stays until operator
+/// Bookkeeping once the kernel confirms tagged nexthop `id` is gone:
+/// release its allocator slot in the ID's own tag domain (L2 or L3)
+/// and drop it from every retry set. A stale retry entry is unsafe
+/// once the slot is free — the allocator can hand the same ID to a
+/// new object, which the stale entry would then delete.
+fn forget_deleted_nhid(state: &mut ActorState, id: u32) {
+    if crate::nh_id_alloc::NhIdAllocator::is_l3_ours(id) {
+        state.nh_id_alloc.release_l3(id);
+    } else {
+        state.nh_id_alloc.release(id);
+    }
+    state.pending_deletes.remove(&id);
+    state.adopted_unreferenced.remove(&id);
+    state.adopted_l3_unreferenced.remove(&id);
+}
+
+/// Best-effort delete of a tagged L2 or L3 kernel nexthop, releasing
+/// the allocator slot only if the delete succeeded. On `Err` the slot
+/// stays reserved (so the allocator cannot hand out an ID still live
+/// in the kernel). Transient failures get queued into
+/// `state.pending_deletes` for retry on the next reconcile pass —
+/// permanent failures (e.g., `PermissionDenied`, `KernelTooOld`) are
+/// NOT queued because retrying can't help; they log once at warn and
+/// the kernel orphan stays until the drift sweep or operator
 /// intervention. See `drain_pending_deletes`.
 async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
     dataplane: &mut D,
@@ -7533,16 +7558,7 @@ async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
 ) {
     use crate::error::FailureClass;
     match dataplane.del_nexthop(id).await {
-        Ok(()) => {
-            state.nh_id_alloc.release(id);
-            // Clear any stale retry queue entry for this ID — if a
-            // prior pass enqueued it after a transient failure and
-            // the current pass succeeded via the steady-state path,
-            // `drain_pending_deletes` would otherwise re-attempt the
-            // delete (kernel returns ENOENT → success per slice 2's
-            // idempotent ACK, but spams the log on every pass).
-            state.pending_deletes.remove(&id);
-        }
+        Ok(()) => forget_deleted_nhid(state, id),
         Err(e) => match e.class() {
             FailureClass::Permanent => {
                 tracing::warn!(
@@ -7604,25 +7620,6 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
             // VNI 0 is invalid in the domain type, so VNI 1 is the
             // harmless report placeholder for non-L2-FDB ops.
             rustbgpd_evpn::EvpnInstanceId::new(1).expect("VNI 1 is always valid")
-        }
-    }
-}
-
-async fn try_del_and_release_l3_alloc<D: crate::dataplane::NexthopOps>(
-    dataplane: &mut D,
-    state: &mut ActorState,
-    id: u32,
-    site: &'static str,
-) {
-    match dataplane.del_nexthop(id).await {
-        Ok(()) => state.nh_id_alloc.release_l3(id),
-        Err(e) => {
-            tracing::warn!(
-                ?e,
-                id = format_args!("0x{id:08x}"),
-                site,
-                "L3 FDB-NHG GC: del_nexthop failed; allocator slot retained"
-            );
         }
     }
 }

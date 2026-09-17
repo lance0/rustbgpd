@@ -14,6 +14,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 // Re-export for cursor.rs / lib.rs — they hand Arc<EventEnvelope> to
 // append so payload bytes aren't cloned a second time on the
@@ -36,6 +37,10 @@ use crate::quarantine::{
 };
 use crate::sequence::Allocator;
 use crate::{Category, EventEnvelope, Severity, SynchronousMode};
+
+/// Pause before the single retry of a failed primary open, so a brief lock or
+/// I/O error does not quarantine a healthy store.
+const PROBE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Operations the async side can send to the blocking storage thread.
 pub(crate) enum StoreOp {
@@ -112,6 +117,11 @@ pub(crate) enum StoreOp {
 
     /// Graceful shutdown — drain anything pending, checkpoint WAL, close.
     Shutdown { reply: oneshot::Sender<()> },
+
+    /// Test-only: make the storage thread panic inside its next `Append`,
+    /// while that append's reply is still owned.
+    #[cfg(test)]
+    TestPanicOnAppend,
 }
 
 /// What `StoreOp::Append` returns to the caller.
@@ -392,6 +402,12 @@ impl StoreHandle {
             .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
+    /// Resolves once the storage thread no longer receives operations: it
+    /// exited or panicked. Cancel-safe; resolves immediately once closed.
+    pub(crate) async fn closed(&self) {
+        self.tx.closed().await;
+    }
+
     pub(crate) async fn shutdown(&self) {
         let (reply, rx) = oneshot::channel();
         if self.tx.send(StoreOp::Shutdown { reply }).await.is_ok() {
@@ -399,6 +415,14 @@ impl StoreHandle {
             self.test_hooks.shutdown.after_send().await;
             let _ = rx.await;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_panic_on_next_append(&self) {
+        self.tx
+            .send(StoreOp::TestPanicOnAppend)
+            .await
+            .expect("storage thread accepts the injected panic");
     }
 
     #[cfg(test)]
@@ -485,6 +509,9 @@ pub(crate) struct StorageInit {
 /// - We open the DB twice in the success path (first to probe, second
 ///   inside the blocking thread). The probe is cheap; doing it on the
 ///   async side keeps the error path off the blocking thread.
+/// - A failed primary open is retried once after [`PROBE_RETRY_DELAY`];
+///   the pause blocks the calling thread, once, at startup. Only a second
+///   failure quarantines the DB.
 /// - If the primary fails to open, we attempt quarantine metadata before
 ///   creating a fresh DB. The sidecar is a diagnostic hint only because
 ///   it can lag committed events.
@@ -529,8 +556,17 @@ fn open_with_recovery(
         return recover_after_quarantine(path, &stale, &sidecar, synchronous);
     }
 
-    // Try the primary path.
-    match probe_open(path, synchronous) {
+    // Try the primary path, then once more before treating it as broken.
+    let probed = probe_open(path, synchronous).or_else(|first_err| {
+        warn!(
+            events_db = %path.display(),
+            error = %first_err,
+            "primary DB open failed; retrying once before quarantine"
+        );
+        std::thread::sleep(PROBE_RETRY_DELAY);
+        probe_open(path, synchronous)
+    });
+    match probed {
         Ok(allocator) => Ok(StorageInit {
             had_quarantine: false,
             initial_allocator: allocator,
@@ -540,7 +576,7 @@ fn open_with_recovery(
             warn!(
                 events_db = %path.display(),
                 error = %primary_err,
-                "primary DB open failed; entering recovery ladder"
+                "primary DB open failed again; entering recovery ladder"
             );
             // Quarantine the broken file, then enter the recovery
             // ladder. `quarantine_db` no-ops if path doesn't exist
@@ -663,10 +699,17 @@ fn run_storage_thread(
     );
 
     let sidecar = sidecar_path(path);
+    #[cfg(test)]
+    let mut panic_on_append = false;
 
     while let Some(op) = rx.blocking_recv() {
         match op {
             StoreOp::Append { envelopes, reply } => {
+                #[cfg(test)]
+                assert!(
+                    !panic_on_append,
+                    "injected event-history storage-thread panic during append"
+                );
                 let outcome = append_batch_blocking(&mut conn, path, &envelopes, daemon_boot_id);
                 let _ = reply.send(outcome);
             }
@@ -727,6 +770,8 @@ fn run_storage_thread(
                 let _ = reply.send(());
                 break;
             }
+            #[cfg(test)]
+            StoreOp::TestPanicOnAppend => panic_on_append = true,
         }
     }
 

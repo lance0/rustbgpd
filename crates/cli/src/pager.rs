@@ -120,6 +120,8 @@ fn run_pager(
         .as_mut()
         .expect("piped pager stdin")
         .write_all(payload.as_bytes());
+    // `Child::wait` closes the stdin pipe before waiting, so a pager that
+    // reads until EOF, such as `cat`, exits instead of deadlocking.
     let status = child.wait()?;
     classify_pager_result(write_result, status)
 }
@@ -191,6 +193,63 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "pager exited with status 1");
+    }
+
+    /// Runs the pager on a helper thread so a pager still waiting for stdin
+    /// EOF fails the test instead of hanging the test binary.
+    #[cfg(unix)]
+    fn run_pager_with_deadline(argv: &[&str], payload: String) -> Result<(), CliError> {
+        let label = argv.join(" ");
+        let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_pager(
+                &argv,
+                &payload,
+                PagerMode::Always,
+                &mut Vec::new(),
+            ));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "pager `{label}` did not exit within 30s; its stdin was not closed before wait"
+                )
+            })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cat_pager_receives_eof_and_does_not_hang() {
+        run_pager_with_deadline(&["cat"], "payload line 1\npayload line 2\n".into()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn eof_waiting_pager_receives_the_full_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("paged.txt");
+        // Larger than a pipe buffer, so delivery spans several reads.
+        let payload: String = (0..20_000).map(|n| format!("route {n}\n")).collect();
+        run_pager_with_deadline(
+            &["sh", "-c", "cat > \"$0\"", capture.to_str().unwrap()],
+            payload.clone(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brokenpipe_on_success_is_ignored() {
+        let status = Command::new("/bin/true").status().unwrap();
+        assert!(
+            classify_pager_result(
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
+                status,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

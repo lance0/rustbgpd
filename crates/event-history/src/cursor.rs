@@ -201,8 +201,10 @@ impl EventHistoryManager {
     /// # Errors
     ///
     /// Returns [`EventHistoryError::PassThrough`] when EHM is in
-    /// pass-through mode (no durable backing). Live-only is still
-    /// possible by calling [`Self::subscribe`] directly.
+    /// pass-through mode (no durable backing), and
+    /// [`EventHistoryError::StorageUnavailable`] once the storage thread has
+    /// stopped. Live-only is still possible by calling [`Self::subscribe`]
+    /// directly.
     #[expect(
         clippy::unused_async,
         clippy::unused_async_trait_impl,
@@ -237,6 +239,11 @@ pub(crate) fn subscribe_from_event_inner(
 ) -> Result<EventSubscription, EventHistoryError> {
     if state.pass_through() {
         return Err(EventHistoryError::PassThrough);
+    }
+    // Refuse at admission rather than accept a stream that can only fail
+    // mid-replay or never receive a live event.
+    if state.storage_failed() {
+        return Err(EventHistoryError::StorageUnavailable);
     }
 
     // The broadcast receiver was already attached by the caller —

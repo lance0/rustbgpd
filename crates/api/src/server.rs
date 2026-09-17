@@ -2095,7 +2095,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone())
+        ConfigService::new(access_mode, peer_mgr_tx.clone())
             .with_transaction_hooks(
                 config_transaction_apply.clone(),
                 config_transaction_confirm.clone(),
@@ -2351,7 +2351,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(ConfigServiceServer::with_interceptor(
-        ConfigService::new(peer_mgr_tx.clone())
+        ConfigService::new(access_mode, peer_mgr_tx.clone())
             .with_transaction_hooks(
                 config_transaction_apply.clone(),
                 config_transaction_confirm.clone(),

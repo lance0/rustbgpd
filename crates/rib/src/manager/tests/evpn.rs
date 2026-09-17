@@ -1337,13 +1337,12 @@ async fn next_evpn_announce_next_hop(
     msg.evpn_announce[0].next_hop
 }
 
-/// A locally injected EVPN route carries the `0.0.0.0` injection sentinel
-/// as `peer_router_id`, so the identifier step is skipped for any pair
-/// that includes it and the pair falls through to `CLUSTER_LIST` length.
-/// A received route for the same key with the shorter list wins and is
-/// what the reflector's other client receives.
+/// A locally injected EVPN route has no BGP Identifier, so the identifier
+/// step ranks it ahead of a received route for the same key — even one
+/// with a shorter `CLUSTER_LIST` — and the reflector's other client
+/// switches to the injected route.
 #[tokio::test]
-async fn inject_evpn_local_route_yields_to_shorter_cluster_list() {
+async fn inject_evpn_local_route_ranks_first_at_identifier_step() {
     let (tx, rx) = mpsc::channel(64);
     let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
     let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
@@ -1354,12 +1353,20 @@ async fn inject_evpn_local_route_yields_to_shorter_cluster_list() {
     let _source_rx = evpn_rr_client_up(&tx, source).await;
     let mut client_rx = evpn_rr_client_up(&tx, client).await;
 
+    // Same key from a client, no CLUSTER_LIST.
     let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x07];
+    let received = make_evpn_macip(source, mac, None, false);
+    let key = received.key();
+    evpn_routes_received(&tx, source, received).await;
+    assert_eq!(
+        next_evpn_announce_next_hop(&mut client_rx, "received route").await,
+        IpAddr::V4(source)
+    );
+
     let mut local = make_evpn_macip(Ipv4Addr::UNSPECIFIED, mac, None, false);
     local.origin_type = crate::route::RouteOrigin::Local;
     let local = with_evpn_cluster_list(local, &[Ipv4Addr::new(10, 0, 0, 200)]);
-    let key = local.key();
-
+    assert_eq!(local.key(), key);
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectEvpn {
         route: local,
@@ -1372,18 +1379,8 @@ async fn inject_evpn_local_route_yields_to_shorter_cluster_list() {
         .expect("inject reply")
         .expect("inject succeeds");
     assert_eq!(
-        next_evpn_announce_next_hop(&mut client_rx, "injected route").await,
+        next_evpn_announce_next_hop(&mut client_rx, "injected route replaces received").await,
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
-    );
-
-    // Same key from a client, no CLUSTER_LIST: the shorter list wins over
-    // the local route because the identifier step is skipped for the pair.
-    let received = make_evpn_macip(source, mac, None, false);
-    assert_eq!(received.key(), key);
-    evpn_routes_received(&tx, source, received).await;
-    assert_eq!(
-        next_evpn_announce_next_hop(&mut client_rx, "received route replaces local").await,
-        IpAddr::V4(source)
     );
 
     drop(tx);

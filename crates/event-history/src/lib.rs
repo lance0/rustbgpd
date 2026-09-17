@@ -732,7 +732,9 @@ impl EventHistoryHandle {
     /// # Errors
     ///
     /// Returns [`EventHistoryError::PassThrough`] when EHM is in
-    /// pass-through mode (no durable backing).
+    /// pass-through mode (no durable backing), and
+    /// [`EventHistoryError::StorageUnavailable`] once the storage thread has
+    /// stopped.
     pub fn subscribe_from_event(
         &self,
         req: SubscribeRequest,
@@ -781,9 +783,9 @@ pub struct EhmState {
     /// Latest committed `event_id`. Updated atomically after each
     /// batch commit so [`Self::latest_event_id`] is lock-free.
     latest_event_id: AtomicU64,
-    /// Flipped to true on the first drop, the first open failure, or
-    /// when EHM enters pass-through. Never auto-clears in v1 — the
-    /// operator restarts to clear.
+    /// Flipped to true on the first drop, the first open failure, a
+    /// runtime storage failure, or when EHM enters pass-through. Never
+    /// auto-clears in v1 — the operator restarts to clear.
     degraded: AtomicBool,
     /// Process-local wake boundary for irreversible event loss. Unlike
     /// `degraded`, every detected loss advances this generation.
@@ -792,6 +794,12 @@ pub struct EhmState {
     /// only). Set when the allocator anchor is unrecoverable AND a
     /// prior stale file exists.
     pass_through: AtomicBool,
+    /// True once the storage thread stopped (exited or panicked) while the
+    /// actor was running. Producer admission is closed and durable cursor
+    /// admission returns [`EventHistoryError::StorageUnavailable`]. Distinct
+    /// from `pass_through`, which is reserved for an unrecoverable allocator
+    /// anchor. Never clears in v1.
+    storage_failed: AtomicBool,
 }
 
 impl EhmState {
@@ -810,6 +818,13 @@ impl EhmState {
         self.pass_through.load(Ordering::Acquire)
     }
 
+    /// Whether the storage thread has stopped at runtime. See
+    /// [`Self::subscribe_loss_generation`] for how live consumers observe it.
+    #[must_use]
+    pub fn storage_failed(&self) -> bool {
+        self.storage_failed.load(Ordering::Acquire)
+    }
+
     /// Record an irreversible event loss. Public so out-of-crate producers
     /// (the EHM-backed RIB sink, the BFD bridge, etc.) can signal loss before
     /// it reaches the outbox. The degraded latch never auto-clears, while the
@@ -822,9 +837,18 @@ impl EhmState {
 
     /// Subscribe to losses detected after this call. Earlier generations are
     /// considered seen, allowing a fresh snapshot to establish a new baseline.
+    ///
+    /// After a storage failure no later event can be persisted, so no fresh
+    /// baseline exists: the receiver starts out changed. The failure latch is
+    /// set before its loss is recorded, so a subscriber racing the failure
+    /// observes it one way or the other.
     #[must_use]
     pub fn subscribe_loss_generation(&self) -> watch::Receiver<u64> {
-        self.loss_generation.subscribe()
+        let mut losses = self.loss_generation.subscribe();
+        if self.storage_failed() {
+            losses.mark_changed();
+        }
+        losses
     }
 }
 
@@ -1140,6 +1164,28 @@ fn record_shutdown_loss(
     }
 }
 
+/// Latch a runtime storage failure: the storage thread no longer serves
+/// operations, so neither accepted nor future events can be persisted until
+/// restart. Admission closes before the caller records the loss, so a stream
+/// woken by that loss cannot be replaced by a newly admitted one.
+fn record_storage_failure(
+    state: &EhmState,
+    queue_depths: &QueueDepths,
+    metrics: Option<&BgpMetrics>,
+) {
+    if state.storage_failed.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    queue_depths.close();
+    if let Some(metrics) = metrics {
+        metrics.mark_event_outbox_storage_failed();
+    }
+    error!(
+        "event-history storage stopped; refusing producer events and durable cursor \
+         subscriptions until restart"
+    );
+}
+
 fn mark_accepted_complete(progress: &ShutdownProgress) {
     progress.accepted_complete.store(true, Ordering::Release);
 }
@@ -1282,6 +1328,19 @@ async fn run_actor(
                         break;
                     },
                     () = &mut batch_deadline => break,
+                    // Watchdog: the storage thread exited or panicked. Its
+                    // closed mailbox is the only way to see that while idle.
+                    () = store.closed() => {
+                        record_storage_failure(&state, &queue_depths, config.metrics.as_ref());
+                        state.record_loss();
+                        begin_actor_shutdown(
+                            tokio::time::Instant::now() + SHUTDOWN_TIMEOUT,
+                            &mut shutdown_deadline,
+                            &mut rx,
+                            &mut retention_task,
+                        );
+                        break;
+                    }
                     changed = shutdown_rx.changed() => {
                         let deadline = shutdown_deadline_from(changed, &shutdown_rx);
                         begin_actor_shutdown(
@@ -1444,6 +1503,20 @@ async fn run_actor(
                 Ok(Err(e)) => {
                     error!(error = %e, "batch commit failed; events dropped");
                     record_commit_failure_metrics(config.metrics.as_ref(), &shared);
+                    // `StorageUnavailable` only comes from a closed storage
+                    // mailbox or a reply dropped by a dying storage thread;
+                    // SQLite commit failures arrive as other variants and stay
+                    // per-batch losses.
+                    if matches!(e, EventHistoryError::StorageUnavailable) {
+                        record_storage_failure(&state, &queue_depths, config.metrics.as_ref());
+                        // Drain accepted events as drops, then stop.
+                        begin_actor_shutdown(
+                            tokio::time::Instant::now() + SHUTDOWN_TIMEOUT,
+                            &mut shutdown_deadline,
+                            &mut rx,
+                            &mut retention_task,
+                        );
+                    }
                     state.record_loss();
                 }
                 Err(_) => {
@@ -1461,7 +1534,9 @@ async fn run_actor(
         }
     }
 
-    if let Some(deadline) = shutdown_deadline {
+    if let Some(deadline) = shutdown_deadline
+        && !state.storage_failed()
+    {
         match tokio::time::timeout_at(deadline, store.flush_sidecar()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => warn!(error = %e, "final sidecar flush failed"),
@@ -1682,9 +1757,85 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_error_advances_loss_generation() {
-        // Load-bearing break: replacing `record_loss` in the actor's append-error
-        // branch with only the degraded latch exceeds the generation backstop.
+    async fn storage_thread_panic_mid_append_closes_admission_and_reports_failure() {
+        // Load-bearing breaks: without the failure latch the producer keeps
+        // being admitted into a store that cannot persist; without the cursor
+        // gate a new subscription is admitted; dropping `record_loss` from the
+        // append-error branch leaves the loss wake to the backstop.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 1);
+        config.metrics = Some(metrics.clone());
+        let mut manager = EventHistoryManager::start(config).await.unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        let mut committed = manager.subscribe();
+        sender.try_send(event(Category::Route, 1)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, committed.recv())
+            .await
+            .expect("committed event backstop elapsed")
+            .unwrap();
+
+        let mut losses = state.subscribe_loss_generation();
+        manager.storage.test_panic_on_next_append().await;
+        sender.try_send(event(Category::Route, 2)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, losses.changed())
+            .await
+            .expect("storage panic loss backstop elapsed")
+            .unwrap();
+
+        assert!(
+            matches!(
+                sender.try_send(event(Category::Route, 3)),
+                Err(mpsc::error::TrySendError::Closed(_))
+            ),
+            "producer admission must close once the storage thread has died"
+        );
+        assert!(state.storage_failed());
+        assert!(state.degraded());
+        assert!(
+            !state.pass_through(),
+            "storage loss is not allocator pass-through"
+        );
+        assert!(matches!(
+            manager
+                .subscribe_from_event(SubscribeRequest::default())
+                .await,
+            Err(EventHistoryError::StorageUnavailable)
+        ));
+        assert!(
+            state.subscribe_loss_generation().has_changed().unwrap(),
+            "a loss subscriber arriving after the failure must observe it"
+        );
+        assert_eq!(
+            gauge_value(&metrics, "bgp_event_outbox_storage_failed"),
+            1.0
+        );
+        assert!(metrics.event_outbox_degraded());
+
+        let storage = manager.storage_join.take().unwrap();
+        let joined = tokio::time::timeout(TEST_BACKSTOP, storage)
+            .await
+            .expect("storage thread join backstop elapsed");
+        assert!(
+            joined.is_err_and(|error| error.is_panic()),
+            "the storage thread must have panicked"
+        );
+        tokio::time::timeout(TEST_BACKSTOP, manager.shutdown())
+            .await
+            .expect("shutdown never returned");
+        assert_eq!(state.latest_event_id(), 1);
+        assert_eq!(
+            metric_value(&metrics, "bgp_event_outbox_dropped_total", "route"),
+            Some(1.0),
+            "the event lost with the storage thread is counted once"
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_stop_while_idle_is_detected_without_an_append() {
+        // Load-bearing break: without the closed-mailbox watchdog an idle
+        // actor never notices, so the loss wake exceeds the backstop.
         let dir = tempfile::tempdir().unwrap();
         let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 1))
             .await
@@ -1693,18 +1844,72 @@ mod tests {
         let mut losses = state.subscribe_loss_generation();
 
         manager.storage.shutdown().await;
-        manager
-            .sender()
-            .try_send(event(Category::Route, 1))
-            .unwrap();
         tokio::time::timeout(TEST_BACKSTOP, losses.changed())
             .await
-            .expect("append-error loss generation backstop elapsed")
+            .expect("idle storage stop was never detected")
             .unwrap();
-        assert_eq!(*losses.borrow_and_update(), 1);
+        assert!(state.storage_failed());
         assert!(state.degraded());
+        assert!(matches!(
+            manager.sender().try_send(event(Category::Route, 1)),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
         assert_eq!(state.latest_event_id(), 0);
 
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_failure_is_a_per_batch_loss_not_a_dead_store() {
+        // Load-bearing break: treating every append error as a dead store
+        // closes admission on a recoverable commit failure.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let manager = EventHistoryManager::start(test_config(path.clone(), 1))
+            .await
+            .unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        let mut committed = manager.subscribe();
+        sender.try_send(event(Category::Route, 1)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, committed.recv())
+            .await
+            .expect("committed event backstop elapsed")
+            .unwrap();
+        let set_allocator = |value: &str| {
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute(
+                    "UPDATE metadata SET value = ?1 WHERE key = 'last_event_id'",
+                    [value],
+                )
+                .unwrap();
+        };
+
+        set_allocator("not-a-number");
+        let mut losses = state.subscribe_loss_generation();
+        sender.try_send(event(Category::Route, 2)).unwrap();
+        tokio::time::timeout(TEST_BACKSTOP, losses.changed())
+            .await
+            .expect("commit failure loss backstop elapsed")
+            .unwrap();
+        assert!(state.degraded());
+        assert!(!state.storage_failed());
+
+        set_allocator("1");
+        sender.try_send(event(Category::Route, 3)).unwrap();
+        let recovered = tokio::time::timeout(TEST_BACKSTOP, committed.recv())
+            .await
+            .expect("recovered commit backstop elapsed")
+            .unwrap();
+        assert_eq!(recovered.event_id, 2);
+        assert_eq!(recovered.envelope.payload, vec![3]);
+        assert!(
+            manager
+                .subscribe_from_event(SubscribeRequest::default())
+                .await
+                .is_ok()
+        );
         manager.shutdown().await;
     }
 
