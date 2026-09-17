@@ -193,52 +193,48 @@ mod tests {
         assert_eq!(error.to_string(), "pager exited with status 1");
     }
 
+    /// Runs the pager on a helper thread so a pager still waiting for stdin
+    /// EOF fails the test instead of hanging the test binary.
     #[cfg(unix)]
-    #[test]
-    fn cat_pager_receives_eof_and_does_not_hang() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let (tx, rx) = mpsc::channel();
-        let payload = "payload line 1\npayload line 2\n".to_string();
+    fn run_pager_with_deadline(argv: &[&str], payload: String) -> Result<(), CliError> {
+        let label = argv.join(" ");
+        let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_owned()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = run_pager(
-                &["cat".into()],
+            let _ = tx.send(run_pager(
+                &argv,
                 &payload,
                 PagerMode::Always,
                 &mut Vec::new(),
-            );
-            let _ = tx.send(result);
+            ));
         });
-
-        let result = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("cat did not receive EOF within 5s — stdin pipe was not closed before wait");
-        assert!(result.is_ok());
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "pager `{label}` did not exit within 30s; its stdin was not closed before wait"
+                )
+            })
     }
 
     #[cfg(unix)]
     #[test]
-    fn early_exiting_pager_proves_pipe_closed_on_small_input() {
-        use std::sync::mpsc;
-        use std::time::Duration;
+    fn cat_pager_receives_eof_and_does_not_hang() {
+        run_pager_with_deadline(&["cat"], "payload line 1\npayload line 2\n".into()).unwrap();
+    }
 
-        let (tx, rx) = mpsc::channel();
-        let payload = "x".to_string();
-        std::thread::spawn(move || {
-            let result = run_pager(
-                &["head".into(), "-c".into(), "1".into()],
-                &payload,
-                PagerMode::Always,
-                &mut Vec::new(),
-            );
-            let _ = tx.send(result);
-        });
-
-        let result = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("head -c 1 did not exit within 5s — stdin pipe was not closed before wait");
-        assert!(result.is_ok());
+    #[cfg(unix)]
+    #[test]
+    fn eof_waiting_pager_receives_the_full_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let capture = dir.path().join("paged.txt");
+        // Larger than a pipe buffer, so delivery spans several reads.
+        let payload: String = (0..20_000).map(|n| format!("route {n}\n")).collect();
+        run_pager_with_deadline(
+            &["sh", "-c", "cat > \"$0\"", capture.to_str().unwrap()],
+            payload.clone(),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&capture).unwrap(), payload);
     }
 
     #[cfg(unix)]
