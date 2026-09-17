@@ -302,39 +302,22 @@ async fn corrupted_db_with_only_sidecar_refuses_to_resume_allocator() {
     );
 }
 
-/// Test subscriber that runs `on_retry` synchronously, on the thread that
-/// logs it, whenever EHM announces its single retry of the primary open.
-struct OnProbeRetry<F>(F);
-
-impl<F: Fn() + Send + Sync + 'static> tracing::Subscriber for OnProbeRetry<F> {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut retrying = false;
-        event.record(
-            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                retrying |= field.name() == "message"
-                    && format!("{value:?}").contains("retrying once before quarantine");
-            },
-        );
-        if retrying {
-            (self.0)();
-        }
-    }
-
-    fn enter(&self, _: &tracing::span::Id) {}
-
-    fn exit(&self, _: &tracing::span::Id) {}
+/// Count EHM's single retry of the primary open on this thread, and run
+/// `also` at the same point.
+///
+/// This uses the crate's thread-local retry hook rather than a scoped
+/// `tracing` subscriber on the retry's log line: callsite interest is cached
+/// process-wide, so a sibling test that reaches the same callsite first with
+/// no subscriber installed silently disables it for this thread too, and the
+/// retry goes unobserved even though it happened.
+fn count_probe_retries(mut also: impl FnMut() + 'static) -> Arc<AtomicUsize> {
+    let retries = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&retries);
+    rustbgpd_event_history::set_probe_retry_hook(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+        also();
+    });
+    retries
 }
 
 async fn write_committed_events(cfg: EventHistoryConfig, count: u8) {
@@ -366,17 +349,14 @@ async fn transient_primary_open_failure_is_retried_without_quarantine() {
     write_committed_events(cfg.clone(), 3).await;
 
     // A directory where SQLite expects the WAL makes the next open of this
-    // WAL-mode database fail. The subscriber removes it when EHM announces
-    // the retry, so exactly the first attempt fails.
+    // WAL-mode database fail. The hook removes it when EHM retries, so
+    // exactly the first attempt fails.
     let wal = dir.path().join("events.db-wal");
     let _ = fs::remove_file(&wal);
     fs::create_dir(&wal).unwrap();
-    let retries = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&retries);
-    let _subscriber = tracing::subscriber::set_default(OnProbeRetry(move || {
-        observed.fetch_add(1, Ordering::AcqRel);
+    let retries = count_probe_retries(move || {
         let _ = fs::remove_dir(&wal);
-    }));
+    });
 
     let manager = EventHistoryManager::start(cfg)
         .await
@@ -401,11 +381,7 @@ async fn repeated_open_failure_quarantines_and_keeps_the_earlier_copy() {
     fs::write(dir.path().join("events.db.stale"), b"earlier copy").unwrap();
     fs::write(dir.path().join("events.db.stale-wal"), b"earlier wal").unwrap();
     fs::write(&db_path, b"not a valid sqlite database").unwrap();
-    let retries = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&retries);
-    let _subscriber = tracing::subscriber::set_default(OnProbeRetry(move || {
-        observed.fetch_add(1, Ordering::AcqRel);
-    }));
+    let retries = count_probe_retries(|| {});
 
     let err = EventHistoryManager::start(EventHistoryConfig {
         path: db_path.clone(),
