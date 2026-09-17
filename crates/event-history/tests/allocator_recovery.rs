@@ -8,8 +8,12 @@
 //! - When all authoritative recovery paths fail AND a prior `.stale`
 //!   exists, EHM enters pass-through (`required = false`) or refuses to
 //!   start (`required = true`).
+//! - A primary open failure is retried once before quarantine, and a
+//!   quarantine never overwrites an earlier one.
 
 use std::fs;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rustbgpd_event_history::{
@@ -296,4 +300,128 @@ async fn corrupted_db_with_only_sidecar_refuses_to_resume_allocator() {
         matches!(err, EventHistoryError::PassThrough),
         "sidecar alone must not authorize allocator restart, got {err:?}"
     );
+}
+
+/// Test subscriber that runs `on_retry` synchronously, on the thread that
+/// logs it, whenever EHM announces its single retry of the primary open.
+struct OnProbeRetry<F>(F);
+
+impl<F: Fn() + Send + Sync + 'static> tracing::Subscriber for OnProbeRetry<F> {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut retrying = false;
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                retrying |= field.name() == "message"
+                    && format!("{value:?}").contains("retrying once before quarantine");
+            },
+        );
+        if retrying {
+            (self.0)();
+        }
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+async fn write_committed_events(cfg: EventHistoryConfig, count: u8) {
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+    let mut committed = manager.subscribe();
+    for _ in 0..count {
+        manager.sender().try_send(make_envelope()).unwrap();
+    }
+    for _ in 0..count {
+        tokio::time::timeout(Duration::from_secs(60), committed.recv())
+            .await
+            .expect("commit backstop elapsed")
+            .unwrap();
+    }
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn transient_primary_open_failure_is_retried_without_quarantine() {
+    // Load-bearing break: without the retry the first failure quarantines a
+    // healthy store and startup ends in pass-through.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("events.db");
+    let cfg = EventHistoryConfig {
+        path: db_path.clone(),
+        batch_interval: Duration::from_millis(5),
+        ..EventHistoryConfig::default()
+    };
+    write_committed_events(cfg.clone(), 3).await;
+
+    // A directory where SQLite expects the WAL makes the next open of this
+    // WAL-mode database fail. The subscriber removes it when EHM announces
+    // the retry, so exactly the first attempt fails.
+    let wal = dir.path().join("events.db-wal");
+    let _ = fs::remove_file(&wal);
+    fs::create_dir(&wal).unwrap();
+    let retries = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&retries);
+    let _subscriber = tracing::subscriber::set_default(OnProbeRetry(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+        let _ = fs::remove_dir(&wal);
+    }));
+
+    let manager = EventHistoryManager::start(cfg)
+        .await
+        .expect("a transient open failure must not reach the recovery ladder");
+    assert_eq!(
+        retries.load(Ordering::Acquire),
+        1,
+        "the first open must fail and be retried once"
+    );
+    assert!(!dir.path().join("events.db.stale").exists());
+    assert!(!manager.state().degraded());
+    assert_eq!(drain_and_count(&manager).await, vec![1, 2, 3]);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_open_failure_quarantines_and_keeps_the_earlier_copy() {
+    // Load-bearing break: overwriting the existing quarantine destroys the
+    // earlier forensic copy.
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("events.db");
+    fs::write(dir.path().join("events.db.stale"), b"earlier copy").unwrap();
+    fs::write(dir.path().join("events.db.stale-wal"), b"earlier wal").unwrap();
+    fs::write(&db_path, b"not a valid sqlite database").unwrap();
+    let retries = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&retries);
+    let _subscriber = tracing::subscriber::set_default(OnProbeRetry(move || {
+        observed.fetch_add(1, Ordering::AcqRel);
+    }));
+
+    let err = EventHistoryManager::start(EventHistoryConfig {
+        path: db_path.clone(),
+        required: false,
+        ..EventHistoryConfig::default()
+    })
+    .await
+    .unwrap_err();
+    // The new quarantine carries no allocator anchor, so prior-allocation
+    // evidence forces pass-through.
+    assert!(matches!(err, EventHistoryError::PassThrough));
+    assert_eq!(retries.load(Ordering::Acquire), 1);
+    assert!(!db_path.exists());
+    let read = |name: &str| fs::read(dir.path().join(name)).unwrap();
+    assert_eq!(read("events.db.stale"), b"not a valid sqlite database");
+    assert_eq!(read("events.db.stale.1"), b"earlier copy");
+    assert_eq!(read("events.db.stale.1-wal"), b"earlier wal");
+    assert!(!dir.path().join("events.db.stale-wal").exists());
 }

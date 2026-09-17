@@ -112,6 +112,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the selected path could move selection to the other one. FlowSpec selection
   gains the same final step; FlowSpec does not negotiate Add-Path, so its
   selection does not change.
+- Durable event history now stops cleanly when its storage thread exits or
+  panics while the daemon runs. Previously the outbox kept accepting events
+  and dropped every batch, while new `SubscribeFromEvent` streams were
+  admitted and never received an event. The outbox now closes producer
+  admission, ends open `SubscribeFromEvent` and gNMI `Subscribe ON_CHANGE`
+  streams with `DATA_LOSS`, and refuses new `SubscribeFromEvent` requests with
+  `UNAVAILABLE`. It logs `event-history storage stopped` and sets the new
+  `bgp_event_outbox_storage_failed` gauge and `bgp_event_outbox_degraded` to
+  `1`. The example Prometheus rules add a critical
+  `BgpEventOutboxStorageFailed` alert. A restart is required to recover. A
+  SQLite commit failure is still a per-batch loss and does not stop the
+  outbox.
+- Event history no longer quarantines its database after a single failed
+  open. It retries once after 200 ms and quarantines only if the retry also
+  fails, so a brief lock or I/O error no longer discards the stored history.
+  A quarantine no longer overwrites an earlier one: an existing
+  `events.db.stale` set moves to `events.db.stale.1` (or the next unused
+  number) first. The configuration reference now documents how to restore a
+  quarantined store by hand.
 
 ### Upgrade notes
 
@@ -159,6 +178,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A wrapper that applies after `plan` exits 2 no longer reaches an apply the
   daemon would refuse. A wrapper that treats every `plan` exit other than 1
   as "changes present" must handle 3 as a rejection.
+- After an event-history storage failure, event producers see a closed
+  outbox. The accepted events that could not be written count as
+  `bgp_event_outbox_dropped_total{reason="db_error"}`, and events refused after
+  the failure count as `reason="closed"`, the label that previously meant only
+  shutdown. Use `bgp_event_outbox_storage_failed` to tell the two cases apart.
+  New gNMI `Subscribe ON_CHANGE` streams end with `DATA_LOSS` until the daemon
+  restarts.
+- Earlier event-history quarantines are now kept as `events.db.stale.<n>`
+  files, which are full copies of the store and are never deleted
+  automatically. Remove them when they are no longer needed. A failed
+  event-history open now delays startup by 200 ms before quarantine.
 
 ## [0.70.1] — 2026-09-15
 
