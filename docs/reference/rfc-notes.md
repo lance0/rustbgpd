@@ -728,10 +728,13 @@ Interpretation decisions:
   runs after eBGP-over-iBGP (and the RFC 9107 ORR interior-cost step when
   one applies) and before the shorter-CLUSTER_LIST comparison, which in
   turn precedes step (g), lowest peer address.
-- Locally originated routes have no advertising speaker and skip the
-  step: any pair that includes one falls through to the CLUSTER_LIST and
-  peer-address comparisons unchanged. The daemon's own BGP Identifier is
-  not substituted.
+- Locally originated routes have no advertising speaker and no BGP
+  Identifier. The step ranks every one of them ahead of every
+  session-learned route, and two of them tie, so every route has a
+  position and the ordering stays transitive. The daemon's own BGP
+  Identifier is not substituted. FRR, BIRD, and GoBGP all prefer local
+  routes over learned ones before this step; rustbgpd keeps them on the
+  same side without moving that preference earlier.
 - Explain output and BMP path marking report the step as
   `lower_originator_id` when both routes carried ORIGINATOR_ID and as
   `lower_bgp_identifier` otherwise; both map to the same path-marking
@@ -1453,9 +1456,9 @@ carries inactive (absent), unlimited (zero), or finite.
   Identifier (RFC 4456 §9), the same substitution the unicast, VPN,
   labeled-unicast, FlowSpec, BGP-LS, and RT-Constrain chains apply (see
   the RFC 4271 §9.1.2.2 notes under Milestone 1). Every family uses this
-  order, and every family skips the identifier step for a pair that
-  includes a locally originated route: a locally originated VTEP route
-  carries the `0.0.0.0` injection sentinel, not a BGP Identifier.
+  order, and every family ranks a locally originated route ahead of
+  every received route at the identifier step: a locally originated VTEP
+  route carries an injection placeholder, not a BGP Identifier.
 - **Initial dump on session up:** when an iBGP EVPN session reaches
   Established, the existing Adj-RIB-In is replayed to the new peer
   through the same Adj-RIB-Out path that handles steady-state
