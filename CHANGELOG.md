@@ -161,6 +161,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   debug builds, the allocator's leak check panicked the storage thread on that
   rollback, which closed the outbox until restart. Release builds were
   unaffected.
+- The `[[fib_tables]]` reconciler now wakes for install-candidate changes
+  that keep the winning best path. An equal-cost member added, withdrawn,
+  lost to a session drop, or re-advertised with a new next hop under
+  `maximum_paths > 1` reaches the kernel on the event path (about 200 ms
+  debounce) instead of waiting for the 30 s periodic pass. The RIB
+  publishes a payload-free candidate-change signal, bumped once per unicast
+  distribution batch, beside the existing route events; the reconciler
+  treats both as the same wake and the periodic pass remains the backstop.
+  Route events themselves are unchanged: they still report best-path
+  changes only. The interop ECMP lanes wait 30 s for a kernel row again.
 
 ### Upgrade notes
 

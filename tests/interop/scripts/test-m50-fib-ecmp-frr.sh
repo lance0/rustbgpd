@@ -26,12 +26,14 @@ PREFIX="203.0.113.50/32"
 NH1="10.0.0.2"
 NH2="10.0.1.2"
 # Budget for every wait that observes the kernel FIB or ListFibRoutes.
-# Adding or removing an equal-cost path that does not move the winning best
-# path publishes no Loc-RIB best-change event, so the multipath row follows the
-# FIB reconciler's 30 s periodic backstop rather than the sub-second event
-# wake. A 30 s budget therefore sits exactly on that period; 60 s clears it
-# with margin while still failing on a route that never converges.
-FIB_WAIT_SECS=60
+# Every install-candidate change reaches the FIB reconciler on the event path:
+# a moved best path through the Loc-RIB route event, and an equal-cost member
+# added or removed under an unchanged best path through the RIB's candidate
+# change signal, both coalesced by the 200 ms debounce. The 30 s periodic pass
+# is only a backstop, so a 30 s budget leaves ample margin for the event path
+# while still failing on a route that never converges — and it fails, rather
+# than masks, a change that silently fell back to the periodic pass.
+FIB_WAIT_SECS=30
 
 resolve_grpc_addr
 start_rustbgpd

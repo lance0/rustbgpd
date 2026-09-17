@@ -40,7 +40,7 @@ use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
     BgpLs, Eor, Labeled, Orf, PolicyContext, Refresh, Routes, Rtc, Vpn,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 /// Release owned temporary elements while the actor still owns readiness.
@@ -766,6 +766,11 @@ pub struct RibManager {
     /// Current ASPA table for path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<Arc<RouteEvent>>,
+    /// FIB install-candidate change generation. Bumped once per unicast
+    /// distribution batch (`distribute_changes_inner`) so the FIB
+    /// reconciler wakes for candidate changes that keep the Loc-RIB best
+    /// and therefore publish no route event.
+    fib_candidate_changes_tx: watch::Sender<u64>,
     /// Currently surfaced unicast export-policy denials. This keeps
     /// route-level policy-filtered events transition-based instead of
     /// re-emitting on every dirty or forced outbound resync.
@@ -1736,6 +1741,7 @@ impl RibManager {
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
+            fib_candidate_changes_tx: watch::channel(0).0,
             policy_filtered_routes: HashMap::new(),
             export_policy_stats: HashMap::new(),
             route_event_history: VecDeque::new(),
@@ -3005,6 +3011,9 @@ impl RibManager {
             } => self.handle_explain_advertised_route(peer, prefix, rd, labeled, source, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
+            }
+            RibUpdate::SubscribeFibCandidateChanges { reply } => {
+                let _ = reply.send(self.fib_candidate_changes_tx.subscribe());
             }
             RibUpdate::QueryRouteEventHistory {
                 peer,
