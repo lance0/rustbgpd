@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `validate_open` now limits `NegotiatedSession::negotiated_orf_recv` to the
+  address families in the negotiated MultiProtocol intersection, matching the
+  Add-Path, Extended Next Hop, and Graceful Restart handling. A peer that
+  advertises ORF Send for a family it did not negotiate no longer produces an
+  ORF receive entry for that family.
+
 ## 0.8.0 - 2026-09-13
 
 - Prepared the wire dependency move to `0.21.0`. Public signatures expose

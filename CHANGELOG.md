@@ -37,6 +37,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A peer that advertises the Outbound Route Filtering Send role for an
+  address family outside the session's negotiated MultiProtocol families no
+  longer counts as ORF-negotiated for that family. A peer whose only ORF Send
+  entries were for such families was kept out of update-group sharing for the
+  whole session, and `rbgp rib --prefix P advertised PEER --explain` reported
+  an `orf_pending` stop for such a family, which no ROUTE-REFRESH could lift,
+  instead of the family not being negotiated. Route advertisement was
+  unaffected.
 - SIGHUP now applies a route-server member join or leave with its datasets
   when the member carries `md5_password` or `ttl_security` (GTSM). The change
   applies as one compensated runtime generation, not as a rejected compound
