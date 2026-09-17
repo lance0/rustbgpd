@@ -724,7 +724,7 @@ mod tests {
     use crate::config_service::ConfigService;
     use crate::proto::config_service_client::ConfigServiceClient;
     use crate::proto::config_service_server::ConfigServiceServer;
-    use crate::server::{AuthInterceptor, ConfigTransactionApplyFn};
+    use crate::server::{AccessMode, AuthInterceptor, ConfigTransactionApplyFn};
     use rustbgpd_telemetry::BgpMetrics;
 
     type AuthClient = ConfigServiceClient<InterceptedService<Channel, ClientAuth>>;
@@ -792,6 +792,7 @@ mod tests {
             None,
             AuthTier::SensitiveRead,
             PrincipalRole::Observer,
+            AccessMode::ReadWrite,
         )
         .await
     }
@@ -803,6 +804,7 @@ mod tests {
         transaction_apply: Option<ConfigTransactionApplyFn>,
         max_tier: AuthTier,
         role: PrincipalRole,
+        access_mode: AccessMode,
     ) -> ListenerHandle {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -816,7 +818,7 @@ mod tests {
         )
         .with_roles(roles)
         .with_bearer_token(Some("stream-secret"));
-        let service = ConfigService::new(peer_mgr_tx)
+        let service = ConfigService::new(access_mode, peer_mgr_tx)
             .with_transaction_hooks(transaction_apply, None, None, None, None, None)
             .with_stream_plan(Some(state), authenticated_transport);
         let audit_observer = Arc::new(Mutex::new(None));
@@ -1309,6 +1311,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let marker = b"STREAM_APPLY_CANDIDATE_MARKER";
@@ -1594,6 +1597,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let token_text = token.to_string();
@@ -1659,6 +1663,7 @@ mod tests {
             None,
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let held = state.try_admit().unwrap();
@@ -1702,6 +1707,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let error = listener
@@ -1724,6 +1730,62 @@ mod tests {
         assert!(has_token(&state, token));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(state.try_admit().is_ok());
+    }
+
+    /// The handler refuses on a read-only service even when the tower layer's
+    /// tier ceiling admits the call.
+    #[tokio::test]
+    async fn read_only_handler_rejects_apply_admitted_by_the_tower_layer() {
+        let runtime = TempDir::new().unwrap();
+        let state = state_at(runtime.path(), StreamLimits::default());
+        let candidate = b"candidate";
+        let token = state
+            .issue_token(
+                PrincipalRole::Observer,
+                "kv1:runtime:7".to_string(),
+                Sha256::digest(candidate).into(),
+                candidate.len() as u64,
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = Arc::clone(&calls);
+        let hook: ConfigTransactionApplyFn = Arc::new(move |_request, context| {
+            hook_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let _context = context;
+                Ok(applied_response())
+            })
+        });
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let listener = spawn_listener_with_apply(
+            Arc::clone(&state),
+            peer_tx,
+            true,
+            Some(hook),
+            AuthTier::OperatorOnly,
+            PrincipalRole::Operator,
+            AccessMode::ReadOnly,
+        )
+        .await;
+        let error = listener
+            .client
+            .clone()
+            .stream_apply_config_transaction(futures::stream::iter(apply_frames(
+                candidate,
+                &token.to_string(),
+                "kv1:runtime:7",
+            )))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (error.code(), error.message()),
+            (
+                tonic::Code::PermissionDenied,
+                "listener is read-only; mutating RPCs are not permitted"
+            )
+        );
+        assert!(has_token(&state, token));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1764,6 +1826,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let token_text = token.to_string();
@@ -1844,6 +1907,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let candidate = b"candidate";
@@ -1950,6 +2014,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
         let candidate = b"candidate";
@@ -2139,6 +2204,7 @@ mod tests {
             Some(hook),
             AuthTier::OperatorOnly,
             PrincipalRole::Operator,
+            AccessMode::ReadWrite,
         )
         .await;
 
