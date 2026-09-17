@@ -840,8 +840,38 @@ fn append_batch_blocking(
 
     let txn = conn.transaction()?;
     let mut allocator = Allocator::load(&txn)?;
-    let mut assigned_ids = Vec::with_capacity(envelopes.len());
+    let assigned_ids = match insert_batch(&txn, &mut allocator, envelopes, daemon_boot_id) {
+        Ok(ids) => ids,
+        Err(e) => {
+            // Dropping `txn` rolls the batch back, so the assigned ids
+            // never reach disk; release them instead of tripping the
+            // allocator's leak assert.
+            allocator.abandon();
+            return Err(e);
+        }
+    };
 
+    let new_high_water = allocator.finalize(&txn)?;
+    txn.commit()?;
+
+    Ok(AppendOutcome {
+        assigned_ids,
+        new_high_water,
+        daemon_boot_id: daemon_boot_id.clone(),
+        db_size_bytes: file_size(db_path),
+    })
+}
+
+/// Assign an id to every envelope and insert the rows inside `txn`.
+/// Returns the ids in envelope order; any error leaves the caller to
+/// roll the transaction back.
+fn insert_batch(
+    txn: &rusqlite::Transaction<'_>,
+    allocator: &mut Allocator,
+    envelopes: &[Arc<EventEnvelope>],
+    daemon_boot_id: &Arc<str>,
+) -> Result<Vec<u64>, EventHistoryError> {
+    let mut assigned_ids = Vec::with_capacity(envelopes.len());
     {
         let mut insert_event = txn.prepare(
             "INSERT INTO events (
@@ -900,16 +930,7 @@ fn append_batch_blocking(
             }
         }
     }
-
-    let new_high_water = allocator.finalize(&txn)?;
-    txn.commit()?;
-
-    Ok(AppendOutcome {
-        assigned_ids,
-        new_high_water,
-        daemon_boot_id: daemon_boot_id.clone(),
-        db_size_bytes: file_size(db_path),
-    })
+    Ok(assigned_ids)
 }
 
 fn query_blocking(
