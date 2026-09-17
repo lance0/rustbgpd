@@ -120,6 +120,8 @@ fn run_pager(
         .as_mut()
         .expect("piped pager stdin")
         .write_all(payload.as_bytes());
+    // `Child::wait` closes the stdin pipe before waiting, so a pager that
+    // reads until EOF, such as `cat`, exits instead of deadlocking.
     let status = child.wait()?;
     classify_pager_result(write_result, status)
 }
