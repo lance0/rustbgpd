@@ -757,18 +757,29 @@ fn occupy(addr: std::net::SocketAddr) -> std::net::TcpListener {
 /// daemon must keep serving IPv4 instead of failing startup.
 #[tokio::test]
 async fn dual_bind_serves_ipv4_when_ipv6_family_unavailable() {
-    let occupier = occupy("[::1]:0".parse().unwrap());
-    let port = occupier.local_addr().unwrap().port();
-
-    let (accept_tx, mut accept_rx) = mpsc::channel(4);
-    let listener = BgpListener::bind_dual_with_options(
-        format!("127.0.0.1:{port}").parse().unwrap(),
-        format!("[::1]:{port}").parse().unwrap(),
-        accept_tx,
-        rustbgpd_transport::ListenerSocketOptions::default(),
-    )
-    .await
-    .expect("IPv6 bind failure must degrade, not fail startup");
+    // Find a port where the v6 side is occupied and the v4 side is free:
+    // sibling tests in this binary draw from the same ephemeral pool.
+    let mut attempt = 0;
+    let (listener, mut accept_rx, _occupier) = loop {
+        let occupier = occupy("[::1]:0".parse().unwrap());
+        let port = occupier.local_addr().unwrap().port();
+        let (accept_tx, accept_rx) = mpsc::channel(4);
+        match BgpListener::bind_dual_with_options(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            format!("[::1]:{port}").parse().unwrap(),
+            accept_tx,
+            rustbgpd_transport::ListenerSocketOptions::default(),
+        )
+        .await
+        {
+            Ok(listener) => break (listener, accept_rx, occupier),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                attempt += 1;
+                assert!(attempt < 10, "no port with free v4 side found: {error}");
+            }
+            Err(error) => panic!("IPv6 bind failure must degrade, not fail startup: {error}"),
+        }
+    };
     let addrs = listener.local_addrs();
     assert_eq!(addrs.len(), 1, "exactly one family bound: {addrs:?}");
     assert!(addrs[0].is_ipv4());
@@ -863,21 +874,36 @@ async fn dual_bind_fails_when_both_families_unavailable() {
 
 #[tokio::test]
 async fn strict_explicit_listener_binds_two_same_family_addresses_on_one_port() {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let addresses = vec![
-        format!("127.0.0.2:{port}").parse().unwrap(),
-        format!("127.0.0.3:{port}").parse().unwrap(),
-    ];
-    let (tx, _rx) = mpsc::channel(1);
-    let listener = BgpListener::bind_strict_with_options(
-        addresses.clone(),
-        tx,
-        rustbgpd_transport::ListenerSocketOptions::default(),
-    )
-    .await
-    .unwrap();
+    // The probed port is free only until the probe closes, and sibling tests
+    // in this binary draw from the same ephemeral pool: retry a taken port.
+    let mut attempt = 0;
+    let (listener, addresses, _rx) = loop {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let addresses: Vec<std::net::SocketAddr> = vec![
+            format!("127.0.0.2:{port}").parse().unwrap(),
+            format!("127.0.0.3:{port}").parse().unwrap(),
+        ];
+        let (tx, rx) = mpsc::channel(1);
+        match BgpListener::bind_strict_with_options(
+            addresses.clone(),
+            tx,
+            rustbgpd_transport::ListenerSocketOptions::default(),
+        )
+        .await
+        {
+            Ok(listener) => break (listener, addresses, rx),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                attempt += 1;
+                assert!(
+                    attempt < 10,
+                    "no port free on both addresses found: {error}"
+                );
+            }
+            Err(error) => panic!("strict same-family bind failed: {error}"),
+        }
+    };
     assert_eq!(listener.local_addrs(), addresses);
 }
 
