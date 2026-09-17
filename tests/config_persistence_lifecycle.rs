@@ -34,11 +34,10 @@
 //! test fails at the end if any check failed, so one failure does not hide the
 //! rest of the picture.
 
-#[allow(dead_code)]
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -215,7 +214,6 @@ impl Obs {
 }
 
 struct Ctx {
-    daemon: SocketAddr,
     obs: Vec<Obs>,
 }
 
@@ -328,13 +326,17 @@ fn eor_markers() -> Vec<Message> {
     ]
 }
 
-async fn establish(ctx: Arc<Ctx>, i: usize) -> Result<mpsc::Sender<Message>, String> {
+async fn establish(
+    ctx: Arc<Ctx>,
+    i: usize,
+    daemon: SocketAddr,
+) -> Result<mpsc::Sender<Message>, String> {
     let local = peer_addr(i);
     let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
     sock.bind(SocketAddr::new(local.into(), 0))
         .map_err(|e| format!("bind {local}: {e}"))?;
     let mut stream = sock
-        .connect(ctx.daemon)
+        .connect(daemon)
         .await
         .map_err(|e| format!("connect from {local}: {e}"))?;
     stream.set_nodelay(true).ok();
@@ -560,13 +562,16 @@ fn record_link_drop(ctx: &Arc<Ctx>, i: usize) {
     }
 }
 
-/// Dial every stub and have the source announce its table. Called at cold
-/// start and after each deliberate daemon restart.
-async fn connect_fleet(ctx: &Arc<Ctx>) -> Result<Vec<mpsc::Sender<Message>>, String> {
+/// Dial every stub at `daemon` and have the source announce its table.
+/// Called at cold start and after each deliberate daemon restart.
+async fn connect_fleet(
+    ctx: &Arc<Ctx>,
+    daemon: SocketAddr,
+) -> Result<Vec<mpsc::Sender<Message>>, String> {
     let mut senders = Vec::new();
     for i in 0..PEERS {
         ctx.obs[i].reset();
-        senders.push(establish(Arc::clone(ctx), i).await?);
+        senders.push(establish(Arc::clone(ctx), i, daemon).await?);
     }
     for msg in source_table() {
         senders[SOURCE]
@@ -626,8 +631,8 @@ impl Daemon {
     }
 
     /// Ready means a real gRPC round trip answered, not merely that the socket
-    /// exists.
-    async fn wait_ready(&mut self, rbgp: &Rbgp) -> Result<(), String> {
+    /// exists, and the metrics endpoint this start chose is in the log.
+    async fn wait_ready(&mut self, rbgp: &Rbgp) -> Result<SocketAddr, String> {
         let start = Instant::now();
         while start.elapsed() < CONVERGE_TIMEOUT {
             if let Some(child) = self.child.as_mut()
@@ -635,12 +640,13 @@ impl Daemon {
             {
                 return Err(format!("daemon exited during startup: {status}"));
             }
-            if rbgp
-                .try_run(&["global"])
-                .await
-                .is_ok_and(|(code, ..)| code == 0)
+            if let Some(metrics) = support::bound_metrics_addr(&self.log_text())
+                && rbgp
+                    .try_run(&["global"])
+                    .await
+                    .is_ok_and(|(code, ..)| code == 0)
             {
-                return Ok(());
+                return Ok(metrics);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -692,9 +698,12 @@ impl Daemon {
 /// Restart the daemon and redial, recording both the listener outcome and the
 /// session recovery as checks. Returns the new pid.
 ///
-/// A daemon whose BGP listener failed to bind keeps running and answers gRPC,
-/// so the failure has to be asserted explicitly or it would surface only as an
-/// unexplained connection refusal much later.
+/// Every start chooses a fresh BGP port, so the redial dials the port the
+/// restarted daemon reported in its own bound-listener event, and that event
+/// is a named check. The pinned listen address already makes a bind failure
+/// fatal at startup; the check also catches a daemon that answers gRPC
+/// without the loopback listener the stubs need, which would otherwise
+/// surface only as an unexplained connection refusal much later.
 async fn restart_and_redial(
     checks: &mut Checks,
     lab: &Lab,
@@ -712,17 +721,24 @@ async fn restart_and_redial(
         pid != old_pid,
         format!("before={old_pid} after={pid}"),
     );
-    let log = daemon.log_text();
+    let bound = support::bound_bgp_addr(&daemon.log_text());
     checks.assert(
         &format!("{phase}.bgp_listener_bound"),
-        !log.contains("failed to bind BGP listener"),
-        if log.contains("failed to bind BGP listener") {
-            "the restarted daemon could not bind its BGP listen port".to_string()
-        } else {
-            "bound".to_string()
-        },
+        bound.is_some(),
+        bound.map_or_else(
+            || "the restarted daemon reported no loopback BGP listener".to_string(),
+            |addr| format!("bound={addr}"),
+        ),
     );
-    match connect_fleet(ctx).await {
+    let Some(bound) = bound else {
+        checks.assert(
+            &format!("{phase}.sessions_and_wire_recovered"),
+            false,
+            "no BGP listener to redial".to_string(),
+        );
+        return Ok(pid);
+    };
+    match connect_fleet(ctx, bound).await {
         Ok(dialled) => {
             *senders = dialled;
             let reconverged = wait_for(|| OBSERVERS.iter().all(|i| ctx.obs[*i].converged())).await;
@@ -996,8 +1012,6 @@ struct Lab {
     config: PathBuf,
     state_dir: PathBuf,
     out: PathBuf,
-    port: u16,
-    metrics: SocketAddr,
 }
 
 impl Lab {
@@ -1681,6 +1695,7 @@ async fn phase_commit_confirm_restart(
 async fn phase_rejected_mutation(
     checks: &mut Checks,
     lab: &Lab,
+    metrics: SocketAddr,
     ctx: &Arc<Ctx>,
 ) -> Result<(), String> {
     let subject = peer_addr(SUBJECT).to_string();
@@ -1691,7 +1706,7 @@ async fn phase_rejected_mutation(
     tokio::time::sleep(SETTLE).await;
 
     let before_json = lab.rbgp.run(&["-j", "neighbor", &subject]).await?;
-    let before_metrics = scrape(lab.metrics).await?;
+    let before_metrics = scrape(metrics).await?;
     let config_before = lab.config_bytes();
     let history_before = history_entries(&lab.rbgp.run(&["-j", "config", "history"]).await?).len();
     let subject_wire_before = ctx.obs[SUBJECT].identity();
@@ -1733,7 +1748,7 @@ async fn phase_rejected_mutation(
     tokio::time::sleep(SETTLE).await;
 
     let after_json = lab.rbgp.run(&["-j", "neighbor", &subject]).await?;
-    let after_metrics = scrape(lab.metrics).await?;
+    let after_metrics = scrape(metrics).await?;
     let config_after = lab.config_bytes();
     let staged_left = lab.staged_temp().exists();
     let subject_wire_after = ctx.obs[SUBJECT].identity();
@@ -1910,14 +1925,6 @@ async fn phase_rejected_mutation(
 // The test.
 // ---------------------------------------------------------------------------
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("read loopback port")
-        .port()
-}
-
 /// Short-path runtime dir: the gRPC UDS must fit `sockaddr_un.sun_path`,
 /// which a tempdir under a deep build path may not.
 struct RunDir {
@@ -1943,18 +1950,23 @@ impl Drop for RunDir {
     }
 }
 
-fn template_config(port: u16, metrics: SocketAddr, state_dir: &Path) -> String {
+/// Every daemon start picks its own BGP and metrics ports (`0`) and the test
+/// reads them back from that start's log. One pinned IPv4 listen address
+/// makes any BGP bind failure fatal at startup instead of leaving a daemon
+/// that serves `[::]` only.
+fn template_config(state_dir: &Path) -> String {
     let state_dir = state_dir.display();
     format!(
         r#"# Generated by tests/config_persistence_lifecycle.rs — do not edit.
 [global]
 asn = 65500
 router_id = "10.255.0.2"
-listen_port = {port}
+listen_port = 0
+listen_addresses = ["127.0.0.1"]
 runtime_state_dir = "{state_dir}"
 
 [global.telemetry]
-prometheus_addr = "{metrics}"
+prometheus_addr = "127.0.0.1:0"
 log_format = "json"
 
 [global.telemetry.grpc_uds]
@@ -2013,8 +2025,10 @@ async fn run(
     ctx: &Arc<Ctx>,
 ) -> Result<(), String> {
     daemon.start().await?;
-    daemon.wait_ready(&lab.rbgp).await?;
-    let mut senders = connect_fleet(ctx).await?;
+    let metrics = daemon.wait_ready(&lab.rbgp).await?;
+    let bgp = support::bound_bgp_addr(&daemon.log_text())
+        .ok_or("the daemon reported no loopback BGP listener")?;
+    let mut senders = connect_fleet(ctx, bgp).await?;
 
     let converged = wait_for(|| OBSERVERS.iter().all(|i| ctx.obs[*i].converged()))
         .await
@@ -2040,7 +2054,7 @@ async fn run(
     // Phase order is deliberate: everything that needs the original, never
     // interrupted sessions runs before the first restart, so a restart-path
     // failure cannot silently weaken the rejected-mutation evidence.
-    phase_rejected_mutation(checks, lab, ctx).await?;
+    phase_rejected_mutation(checks, lab, metrics, ctx).await?;
     phase_history_and_rollback(checks, lab, ctx).await?;
     phase_commit_confirm_success(checks, lab).await?;
     phase_commit_confirm_timeout(checks, lab, ctx).await?;
@@ -2127,16 +2141,13 @@ async fn config_persistence_history_rollback_and_commit_confirm_hold_on_the_wire
         dir: confdir.clone(),
     };
 
-    let port = free_port();
-    let metrics: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
-
     // The shipped config is a TEMPLATE. Persistence writes a temp file
     // alongside the config and renames it, so the directory the daemon reads
     // from must be writable — the template is copied into the daemon's own
     // writable state volume, exactly as the quick-start and the container
     // images do.
     let config = confdir.join("config.toml");
-    std::fs::write(&config, template_config(port, metrics, &state_dir)).expect("deploy config");
+    std::fs::write(&config, template_config(&state_dir)).expect("deploy config");
     let check = std::process::Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
         .arg("--check")
         .arg(&config)
@@ -2154,11 +2165,8 @@ async fn config_persistence_history_rollback_and_commit_confirm_hold_on_the_wire
         config,
         state_dir,
         out: rundir.path.clone(),
-        port,
-        metrics,
     };
     let ctx = Arc::new(Ctx {
-        daemon: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), lab.port),
         obs: (0..PEERS).map(|_| Obs::new()).collect(),
     });
     let mut daemon = Daemon {
@@ -2249,7 +2257,7 @@ fn toml_neighbor_addresses_ignores_other_keys() {
 router_id = "10.0.0.1"
 
 [global.telemetry]
-prometheus_addr = "127.0.0.1:19189"
+prometheus_addr = "127.0.0.1:0"
 
 [[neighbors]]
 address = "127.9.2.1"

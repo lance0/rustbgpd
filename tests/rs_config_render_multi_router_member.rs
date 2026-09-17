@@ -18,7 +18,7 @@ mod support;
 
 use std::fs;
 use std::io::Write as _;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -148,11 +148,6 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
         fs::create_dir(path).expect("create directory");
         set_mode(path, 0o700);
     }
-    let bgp_port = TcpListener::bind("127.0.0.1:0")
-        .expect("reserve port")
-        .local_addr()
-        .expect("port")
-        .port();
     let client = |vli: u64, address: Ipv4Addr| {
         json!({
             "customer_id": 1, "vlan_interface_id": vli, "name": "TwoRouterMember",
@@ -168,7 +163,7 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
         "ixp_manager": {"version": "7.4.0"},
         "router": {
             "handle": HANDLE, "type": "route-server", "protocol": 4, "asn": 65500,
-            "router_id": "192.0.2.1", "peering_ip": "127.0.0.1", "listen_port": bgp_port,
+            "router_id": "192.0.2.1", "peering_ip": "127.0.0.1",
             "vlan_id": 1, "quarantine": false, "bgp_lc": true, "rfc1997_passthru": false,
             "rpki": false, "skip_md5": true
         },
@@ -194,6 +189,8 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
         &binding,
     )
     .expect("two-router member renders and passes the strict check");
+    // The export names no listen port; the daemon picks its own.
+    support::edit_rendered_config(&candidate, daemon_bin, support::daemon_chooses_bgp_port);
     let config = fs::read_to_string(candidate.join("config.toml")).expect("rendered config");
     assert_eq!(config.matches("[[neighbors]]").count(), 2, "{config}");
     assert_eq!(config.matches("remote_asn = 65001").count(), 2, "{config}");
@@ -205,7 +202,8 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
         "{config}"
     );
 
-    let log = fs::File::create(root.join("daemon.log")).expect("daemon log");
+    let log_path = root.join("daemon.log");
+    let log = fs::File::create(&log_path).expect("daemon log");
     let _daemon = Daemon(
         Command::new(daemon_bin)
             .arg(candidate.join("config.toml"))
@@ -214,12 +212,16 @@ fn two_router_member_sessions_establish_and_foreign_next_hops_are_rejected() {
             .spawn()
             .expect("spawn rustbgpd"),
     );
-    let daemon_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bgp_port);
+    let mut daemon_addr = None;
     assert!(
-        wait_until(Duration::from_secs(20), || TcpStream::connect(daemon_addr)
-            .is_ok()),
-        "daemon listens on {daemon_addr}"
+        wait_until(Duration::from_secs(20), || {
+            daemon_addr =
+                support::bound_bgp_addr(&fs::read_to_string(&log_path).unwrap_or_default());
+            daemon_addr.is_some_and(|addr| TcpStream::connect(addr).is_ok())
+        }),
+        "daemon reports and serves its BGP listener: {daemon_addr:?}"
     );
+    let daemon_addr = daemon_addr.expect("bound BGP listener");
     let grpc = format!("unix://{}", runtime.join("grpc.sock").display());
     // Router A announces with a next hop that is neither of the member's
     // addresses; router B announces a second prefix the same way.

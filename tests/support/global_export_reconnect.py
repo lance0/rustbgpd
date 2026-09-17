@@ -34,6 +34,26 @@ def prefixes(data):
     return result
 
 
+def bound_bgp_port(log_path, daemon):
+    """Port from the daemon's own "BGP listener bound" log event.
+
+    The config asks for port 0, so the daemon that serves the port picks it; a
+    port reserved by binding and releasing it first can be taken in between.
+    """
+    deadline = time.monotonic() + 15
+    while True:
+        for line in log_path.read_text().splitlines():
+            try:
+                fields = json.loads(line).get("fields", {})
+            except ValueError:
+                continue
+            if fields.get("message") == "BGP listener bound":
+                return int(fields["addr"].rsplit(":", 1)[1])
+        assert daemon.poll() is None, "daemon exited before binding its BGP listener"
+        assert time.monotonic() < deadline, "daemon did not report its BGP listener"
+        time.sleep(.1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=Path)
@@ -44,10 +64,6 @@ def main():
     args.out.mkdir(mode=0o700, exist_ok=True)
     args.out.chmod(0o700)
     (args.out / "state").mkdir(mode=0o700)
-    with socket.socket() as bgp, socket.socket() as metrics:
-        bgp.bind(("127.0.0.1", 0))
-        metrics.bind(("127.0.0.1", 0))
-        bgp_port, metrics_port = bgp.getsockname()[1], metrics.getsockname()[1]
     addr = "unix://" + str(args.out / "state/grpc.sock")
     config = f'''config_epoch = 2
 [global]
@@ -55,11 +71,11 @@ asn = 65001
 ebgp_requires_policy = true
 router_id = "192.0.2.1"
 cluster_id = "192.0.2.1"
-listen_port = {bgp_port}
+listen_port = 0
 listen_addresses = ["127.0.0.1"]
 runtime_state_dir = "{args.out}/state"
 [global.telemetry]
-prometheus_addr = "127.0.0.1:{metrics_port}"
+prometheus_addr = "127.0.0.1:0"
 log_format = "json"
 [global.telemetry.grpc_uds]
 path = "{args.out}/state/grpc.sock"
@@ -199,6 +215,7 @@ action = "deny"
         observe(label, expected)
 
     try:
+        bgp_port = bound_bgp_port(log_path, daemon)
         connect(2)
         connect(3)
         sessions[2].sendall(announcement)

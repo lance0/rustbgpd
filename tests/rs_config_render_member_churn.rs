@@ -25,7 +25,7 @@
 mod support;
 
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -98,15 +98,7 @@ fn set_mode(path: &Path, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("set permissions");
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("reserve loopback port")
-        .local_addr()
-        .expect("read loopback port")
-        .port()
-}
-
-fn ixp_manager_json(bgp_port: u16, members: &[&MemberSpec]) -> Vec<u8> {
+fn ixp_manager_json(members: &[&MemberSpec]) -> Vec<u8> {
     let clients: Vec<_> = members
         .iter()
         .map(|m| {
@@ -142,7 +134,6 @@ fn ixp_manager_json(bgp_port: u16, members: &[&MemberSpec]) -> Vec<u8> {
             "asn": ROUTER_ASN,
             "router_id": "192.0.2.1",
             "peering_ip": "127.0.0.1",
-            "listen_port": bgp_port,
             "vlan_id": 1,
             "quarantine": false,
             "bgp_lc": true,
@@ -177,7 +168,6 @@ fn ixp_manager_json(bgp_port: u16, members: &[&MemberSpec]) -> Vec<u8> {
 
 fn write_candidate(
     candidate_dir: &Path,
-    bgp_port: u16,
     members: &[&MemberSpec],
     gtsm: bool,
     checker: &Path,
@@ -189,48 +179,22 @@ fn write_candidate(
     fs::create_dir_all(candidate_dir).expect("create candidate dir");
     set_mode(candidate_dir, 0o700);
 
-    let json_bytes = ixp_manager_json(bgp_port, members);
+    let json_bytes = ixp_manager_json(members);
     ixp_manager::write_checked_candidate_bytes(&json_bytes, candidate_dir, 300, checker, binding)
         .expect("write checked candidate");
-    if gtsm {
-        enable_gtsm_fleet(candidate_dir, checker);
-    }
-}
-
-/// The IXP Manager export carries no GTSM flag, so emulate the other
-/// renderer's fleet-wide `gtsm` output on every rendered member, then re-run
-/// the strict check and re-record the file hash the activation verifies.
-fn enable_gtsm_fleet(candidate_dir: &Path, checker: &Path) {
-    use sha2::{Digest, Sha256};
-
-    let config_path = candidate_dir.join("config.toml");
-    let rendered = fs::read_to_string(&config_path).expect("read rendered config");
-    let marker = "route_server_client = true\n";
-    assert!(rendered.contains(marker), "rendered member marker");
-    let config = rendered.replace(marker, &format!("{marker}ttl_security = true\n"));
-    fs::write(&config_path, &config).expect("write GTSM fleet config");
-    let checked = Command::new(checker)
-        .args(["--check", "--strict"])
-        .arg(&config_path)
-        .output()
-        .expect("run strict check");
-    assert!(
-        checked.status.success(),
-        "GTSM fleet config must pass the strict check:\n{}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
-    let receipt_path = candidate_dir.join("render-receipt.json");
-    let mut receipt: serde_json::Value =
-        serde_json::from_slice(&fs::read(&receipt_path).expect("read render receipt"))
-            .expect("parse render receipt");
-    let digest: String = Sha256::digest(config.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    receipt["generated_files"]["config.toml"] = digest.into();
-    let mut encoded = serde_json::to_vec_pretty(&receipt).expect("serialize render receipt");
-    encoded.push(b'\n');
-    fs::write(&receipt_path, encoded).expect("write render receipt");
+    // The export names no listen port, so the daemon picks one and the test
+    // reads it back from the daemon log. The export also carries no GTSM
+    // flag, so `gtsm` emulates the other renderer's fleet-wide `gtsm` output
+    // on every rendered member.
+    support::edit_rendered_config(candidate_dir, checker, |rendered| {
+        let config = support::daemon_chooses_bgp_port(rendered);
+        if !gtsm {
+            return config;
+        }
+        let marker = "route_server_client = true\n";
+        assert!(config.contains(marker), "rendered member marker");
+        config.replace(marker, &format!("{marker}ttl_security = true\n"))
+    });
 }
 
 fn rbgp(grpc_addr: &str, args: &[&str]) -> Output {
@@ -530,9 +494,6 @@ async fn member_churn(member3: &'static MemberSpec, gtsm: bool) {
         .expect("construct valid host binding");
     let render_binding = binding.render_binding();
 
-    let bgp_port = free_port();
-    let daemon_bgp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bgp_port);
-
     // Write the activation script used by `activate` on initial start and reload.
     let activate_sh = root.join("activate.sh");
     let script_content = format!(
@@ -563,7 +524,6 @@ fi
     // =========================================================================
     write_candidate(
         &candidate,
-        bgp_port,
         &[&MEMBER_1, &MEMBER_2],
         gtsm,
         daemon_bin,
@@ -600,6 +560,10 @@ fi
         initial_receipt["phases"]["runtime_equal"], true,
         "initial activation must record runtime_equal = true"
     );
+    // The daemon binds BGP before it serves the gRPC the activation waited on.
+    let daemon_bgp_addr =
+        support::bound_bgp_addr(&fs::read_to_string(&daemon_log).unwrap_or_default())
+            .expect("the activated daemon reports its bound BGP listener");
 
     // =========================================================================
     // Phase 2: Connect 2 live eBGP members and wait for Established
@@ -664,7 +628,6 @@ fi
     // =========================================================================
     write_candidate(
         &candidate,
-        bgp_port,
         &[&MEMBER_1, &MEMBER_2, member3],
         gtsm,
         daemon_bin,
@@ -829,7 +792,6 @@ fi
 
     write_candidate(
         &candidate,
-        bgp_port,
         &[&MEMBER_1, &MEMBER_2],
         gtsm,
         daemon_bin,
