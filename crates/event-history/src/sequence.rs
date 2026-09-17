@@ -70,11 +70,13 @@ pub(crate) fn write_allocator(conn: &Connection, new_value: u64) -> Result<(), E
 ///
 /// Construction reads the persisted value; [`Self::next`] mints the
 /// next `event_id`; [`Self::finalize`] persists the new high-water
-/// mark inside the same SQL transaction the caller will commit.
+/// mark inside the same SQL transaction the caller will commit, and
+/// [`Self::abandon`] releases the ids when that transaction rolls back
+/// instead.
 ///
-/// Designed so the caller cannot forget to persist — `finalize` takes
-/// `self` and `&Connection`, and `Drop` would only fire if `finalize`
-/// is never called (which is itself a bug the test suite catches).
+/// Designed so the caller cannot forget to decide — both consume
+/// `self`, and `Drop` fires only when neither was called (which is
+/// itself a bug the test suite catches).
 #[derive(Debug)]
 pub(crate) struct Allocator {
     /// The last-assigned `event_id` at the time we read the metadata.
@@ -84,7 +86,9 @@ pub(crate) struct Allocator {
     /// Snapshot of the persisted value when constructed. Diagnostic
     /// only; used by tests.
     initial: u64,
-    finalized: bool,
+    /// Set once the caller decided the outcome of the assigned ids,
+    /// through either `finalize` or `abandon`.
+    released: bool,
 }
 
 impl Allocator {
@@ -97,7 +101,7 @@ impl Allocator {
         Ok(Self {
             next_to_assign: initial,
             initial,
-            finalized: false,
+            released: false,
         })
     }
 
@@ -114,11 +118,20 @@ impl Allocator {
     }
 
     /// Persist the new high-water mark to the metadata table. Caller
-    /// must commit the surrounding transaction afterward.
+    /// must commit the surrounding transaction afterward. A failed
+    /// write leaves the transaction to roll back, so the ids are
+    /// released either way.
     pub(crate) fn finalize(mut self, conn: &Connection) -> Result<u64, EventHistoryError> {
+        self.released = true;
         write_allocator(conn, self.next_to_assign)?;
-        self.finalized = true;
         Ok(self.next_to_assign)
+    }
+
+    /// Release the assigned ids without persisting them. The only
+    /// legitimate caller is a batch whose transaction rolls back: the
+    /// ids never reached disk, so the next load re-assigns them.
+    pub(crate) fn abandon(mut self) {
+        self.released = true;
     }
 
     /// The persisted value at load time. Diagnostic only.
@@ -130,18 +143,20 @@ impl Allocator {
 
 impl Drop for Allocator {
     fn drop(&mut self) {
-        // An un-finalized allocator means the caller assigned IDs but
-        // never persisted them. Subsequent loads would re-assign the
-        // same IDs — silent corruption.
+        // An unreleased allocator means the caller assigned IDs and
+        // then neither persisted them (`finalize`) nor rolled the batch
+        // back on purpose (`abandon`). A commit without the high-water
+        // mark would let subsequent loads re-assign the same IDs —
+        // silent corruption.
         //
         // Debug-build assert is the right tool here: tests catch it,
         // release builds don't panic (the surrounding transaction
         // either committed-with-finalize or rolled back, so the IDs
         // aren't actually leaked to disk).
-        if !self.finalized && self.next_to_assign != self.initial {
+        if !self.released && self.next_to_assign != self.initial {
             debug_assert!(
                 false,
-                "Allocator dropped without finalize() after assigning ids ({} -> {})",
+                "Allocator dropped without finalize() or abandon() after assigning ids ({} -> {})",
                 self.initial, self.next_to_assign
             );
         }
@@ -196,6 +211,29 @@ mod tests {
             alloc.finalize(&conn).unwrap();
         }
         assert_eq!(read_allocator(&conn).unwrap(), Some(5));
+    }
+
+    #[test]
+    fn abandon_releases_assigned_ids_without_persisting() {
+        let conn = open_bootstrapped();
+        let mut alloc = Allocator::load(&conn).unwrap();
+        alloc.next().unwrap();
+        alloc.next().unwrap();
+        alloc.abandon();
+        assert_eq!(read_allocator(&conn).unwrap(), Some(0));
+        let mut alloc = Allocator::load(&conn).unwrap();
+        assert_eq!(alloc.next().unwrap(), 1, "abandoned ids are re-assigned");
+        alloc.finalize(&conn).unwrap();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "Allocator dropped without finalize() or abandon()")]
+    fn drop_after_assigning_without_finalize_or_abandon_panics() {
+        let conn = open_bootstrapped();
+        let mut alloc = Allocator::load(&conn).unwrap();
+        alloc.next().unwrap();
+        drop(alloc);
     }
 
     #[test]
