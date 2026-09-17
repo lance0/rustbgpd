@@ -326,7 +326,14 @@ pub fn validate_open(
         })
         .flatten()
         .collect();
-    let negotiated_orf_recv = negotiate_orf_receive(&our_orf_caps, &peer_orf_caps);
+    // ORF entries arrive only in ROUTE-REFRESH (RFC 5291 §4), which is
+    // ignored for a family outside the MultiProtocol intersection (RFC 2918
+    // §4): keep only negotiated families, as the filters above do.
+    let negotiated_orf_recv: Vec<(Afi, Safi)> =
+        negotiate_orf_receive(&our_orf_caps, &peer_orf_caps)
+            .into_iter()
+            .filter(|family| negotiated_families.contains(family))
+            .collect();
 
     Ok(NegotiatedSession {
         peer_asn,
@@ -358,7 +365,7 @@ pub fn validate_open(
 }
 
 /// Compute the (AFI,SAFI) families where rustbgpd will receive Address-Prefix
-/// ORF entries from the peer (RFC 5291 §4 capability intersection): we
+/// ORF entries from the peer (RFC 5291 §6 capability intersection): we
 /// advertised the Receive role for ORF-Type 64 and the peer advertised the
 /// Send (or Both) role for the same family. Only the standard type 64 is
 /// considered — rustbgpd never advertises the legacy type 128.
@@ -1665,6 +1672,45 @@ mod tests {
             .push(orf_cap(OrfSendReceive::Send, OrfType::AddressPrefixLegacy));
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(neg.negotiated_orf_recv.is_empty());
+    }
+
+    #[test]
+    fn validate_open_orf_receive_limited_to_negotiated_families() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.prefix_orf_receive = true;
+        // Peer advertises MultiProtocol for ipv4/unicast only, but ORF Send
+        // for both ipv4/unicast and ipv6/unicast.
+        let mut open = peer_open();
+        open.capabilities.push(Capability::OutboundRouteFilter(vec![
+            OrfCapEntry {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                orf_types: vec![OrfCapType {
+                    orf_type: OrfType::AddressPrefix,
+                    send_receive: OrfSendReceive::Send,
+                }],
+            },
+            OrfCapEntry {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                orf_types: vec![OrfCapType {
+                    orf_type: OrfType::AddressPrefix,
+                    send_receive: OrfSendReceive::Send,
+                }],
+            },
+        ]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(
+            !neg.negotiated_families
+                .contains(&(Afi::Ipv6, Safi::Unicast))
+        );
+        assert_eq!(
+            neg.negotiated_orf_recv,
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            "ORF receive must not be negotiated for a family outside the MP intersection"
+        );
     }
 
     #[test]
