@@ -113,6 +113,17 @@ negotiated MultiProtocol intersection.
 `rustbgpd-wire 0.21.0` with no direct FSM API or runtime behavior change; see
 the "0.21.0 compatibility note" in the wire README.
 
+`rustbgpd-fsm 0.8.1`, prepared in the source checkout, keeps its public API
+unchanged and stays on the `0.8` line with wire `0.21`. Negotiation behavior
+changes in one place: `validate_open` limits
+`NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol
+intersection, as it already does for Add-Path, Extended Next Hop, and Graceful
+Restart. ORF entries arrive in ROUTE-REFRESH (RFC 5291), which is ignored for
+a family that was not negotiated (RFC 2918), so a peer advertising ORF Send for
+such a family no longer produces an entry. An embedder that holds back
+advertisement for each listed family until the peer's ROUTE-REFRESH no longer
+waits on a family where that message could never apply.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
@@ -121,7 +132,10 @@ the "0.21.0 compatibility note" in the wire README.
 - **`Action`** — `SendOpen`, `SendKeepalive`, `SendNotification`, `StartTimer`, `StopTimer`, etc.
 - **`NegotiatedSession`** — post-OPEN capabilities: families, Add-Path modes,
   `peer_paths_limits` / `effective_add_path_send_limits`, GR state, extended
-  message support
+  message support, and `negotiated_orf_recv`, the negotiated families where
+  the peer may send Address-Prefix ORF entries (RFC 5291/5292)
+- **`PeerConfig::prefix_orf_receive`** — advertise the Address-Prefix ORF
+  Receive role on each configured unicast family (`bool`, default `false`)
 - **`PeerConfig::paths_limit_receive_max`** — the preferred per-family receive
   limit, defaulting to `0` (disabled); `paths_limit_capabilities()` advertises
   it only when Add-Path receive is enabled

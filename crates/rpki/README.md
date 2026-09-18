@@ -29,6 +29,14 @@ These compatibility changes do not alter runtime behavior.
   a lower value, and when unset leaves the configured interval unchanged while
   cache-advertised values retain the protocol ceiling. The crate exports the
   RFC 8210 two-day ceiling as `RTR_EXPIRE_MAX_SECS` (`172800` seconds).
+  Starting with `0.3.1`, `RtrClient::new` bounds the configured timers to RFC
+  8210 §6 and logs a warning when it changes one: a zero `refresh_interval` or
+  `retry_interval` becomes 1 second, a zero `expire_interval` or
+  `max_expire_interval` becomes 600 seconds, and either expire value above
+  172800 seconds is capped there. A non-zero expire value below 600 seconds is
+  kept, because expiring early is safe. Earlier releases used these values
+  as given: a zero refresh or retry polled or reconnected with no delay, and a
+  zero expire could expire the table at the End of Data that delivered it.
 - **ASPA path verification** — a synchronous `AspaTable` plus role-aware path
   verification.
 - **Multi-cache merge** — a `VrpManager` that merges retained contributions
@@ -63,8 +71,8 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.3.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-rpki = { version = "0.3.1", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.21.1", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust

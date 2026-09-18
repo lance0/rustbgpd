@@ -189,7 +189,7 @@ are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
 | 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
 | 8669 | BGP Prefix-SID attribute (type 40): generic TLV framing validation with attribute-discard on malformed framing; values are retained opaquely |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes; `FlowSpecAction::TrafficAction::terminal` is the §7.3 Terminal Action bit as carried on the wire, so `true` means later FlowSpec rules are still evaluated and `false` means evaluation stops at this rule (the field documentation through `0.21.0` stated the reverse; encoding and decoding never changed) |
 | 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
 | 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
 | 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
@@ -333,7 +333,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.21.1", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 
