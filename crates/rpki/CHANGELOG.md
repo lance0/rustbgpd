@@ -10,6 +10,14 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   and logs a warning. A zero value previously polled the cache or
   reconnected with no delay between attempts. Values of 1 second or more
   are unchanged.
+- `RtrClient::new` now bounds `RtrClientConfig::expire_interval` and a
+  `Some` `max_expire_interval` to the RFC 8210 §6 range with a warning:
+  zero is raised to 600 seconds and a value above 172800 seconds is
+  clamped down to it. A zero previously armed expiry at the End of Data
+  instant whenever the cache omitted its expire (`Some(0)` on every End of
+  Data), flushing the table just fetched and reconnecting once a second,
+  and a value near `u64::MAX` overflowed the expiry deadline. Non-zero
+  values up to two days, including values below 600 seconds, are unchanged.
 
 ## 0.3.0 - 2026-09-13
 
