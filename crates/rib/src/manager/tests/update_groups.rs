@@ -8337,6 +8337,65 @@ fn authoritative_reclamation_keeps_later_preclassified_destinations() {
     );
 }
 
+/// A grouped member that has answered a plain ROUTE-REFRESH, with nothing
+/// left to retry, returned by `direct_clean_transition_manager`.
+fn refreshed_grouped_member_manager() -> (
+    RibManager,
+    Vec<IpAddr>,
+    Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+) {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 2, None);
+    assert!(manager.clean_policy_transition_peer_ready(peers[0]));
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer: peers[0],
+        session_id: 0,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    let replayed: usize = std::iter::from_fn(|| receivers[0].try_recv().ok())
+        .map(|update| update.announce.len())
+        .sum();
+    assert_eq!(replayed, 2, "the refresh response replays the table");
+    assert!(manager.grouped_member_of(peers[0]).is_some());
+    (manager, peers, receivers)
+}
+
+/// Regression: a completed route refresh response must not leave an empty
+/// `pending_refresh` entry. `clean_policy_transition_peer_ready` checks the
+/// key, so the empty entry reported a grouped member as not ready until its
+/// next dirty resync happened to remove it.
+#[test]
+fn completed_route_refresh_leaves_no_pending_refresh_entry() {
+    let (manager, peers, _receivers) = refreshed_grouped_member_manager();
+    assert!(
+        !manager.pending_refresh.contains_key(&peers[0]),
+        "nothing to retry ⇒ no entry: {:?}",
+        manager.pending_refresh.get(&peers[0])
+    );
+    assert!(manager.clean_policy_transition_peer_ready(peers[0]));
+}
+
+/// The operator-visible effect: a cohort containing a route-refreshed member
+/// still commits through the clean export-policy transition.
+#[test]
+fn route_refreshed_member_keeps_cohort_on_clean_policy_transition() {
+    let (mut manager, peers, _receivers) = refreshed_grouped_member_manager();
+    let next_policy = community_chain(0xFDE8_2102);
+    assert!(
+        manager
+            .clean_policy_transition_destination(peers[0], Some(&next_policy))
+            .is_some()
+    );
+    let _response = start_clean_transition(&mut manager, &peers, &next_policy);
+    let outcome = loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        if outcome != "continue" {
+            break (kind, outcome);
+        }
+    };
+    assert_eq!(outcome.1, "committed", "terminal poll was {outcome:?}");
+}
+
 #[test]
 fn parked_classification_preserves_policy_id_until_terminal_discard() {
     let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 2, None);

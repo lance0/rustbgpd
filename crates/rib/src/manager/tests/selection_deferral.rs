@@ -1020,6 +1020,11 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
             .any(|route| route.prefix == rustbgpd_wire::Prefix::V4(prefix))
     );
     assert!(observer_rx.try_recv().is_err());
+    assert!(
+        !manager.pending_refresh.contains_key(&observer),
+        "a successful retry leaves no entry: {:?}",
+        manager.pending_refresh.get(&observer)
+    );
 }
 
 #[test]

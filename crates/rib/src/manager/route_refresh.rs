@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::Instant;
 
@@ -30,6 +30,23 @@ pub(super) enum FamilyReplayOutcome {
     Committed,
     Deferred,
     Failed,
+}
+
+/// Remove one family from a per-peer family set, dropping the peer's entry
+/// when the set empties and never creating one. Readers such as
+/// `clean_policy_transition_peer_ready` check the key, so for these maps a
+/// present key must mean a non-empty set.
+fn remove_family_drop_empty(
+    map: &mut HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    peer: IpAddr,
+    family: (Afi, Safi),
+) {
+    if let Some(families) = map.get_mut(&peer) {
+        families.remove(&family);
+        if families.is_empty() {
+            map.remove(&peer);
+        }
+    }
 }
 
 impl RibManager {
@@ -499,12 +516,7 @@ impl RibManager {
     /// so an empty entry would keep reporting the peer as gated for the
     /// rest of the session.
     pub(super) fn lift_orf_gate(&mut self, peer: IpAddr, family: (Afi, Safi)) {
-        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
-            pending.remove(&family);
-            if pending.is_empty() {
-                self.peer_orf_pending.remove(&peer);
-            }
-        }
+        remove_family_drop_empty(&mut self.peer_orf_pending, peer, family);
     }
 
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -1660,10 +1672,9 @@ impl RibManager {
             &current_policy_filtered_routes,
         );
         if matches!(replay_kind, FamilyReplayKind::PeerRefresh { .. }) {
-            self.pending_refresh
-                .entry(peer)
-                .or_default()
-                .remove(&family);
+            // Same key-checked reader as `lift_orf_gate`: a completed
+            // response must not leave (or create) an empty entry.
+            remove_family_drop_empty(&mut self.pending_refresh, peer, family);
             if deferred_eor {
                 if let Some(families) = self.gr_deferred_eor.get_mut(&peer) {
                     families.remove(&family);
