@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{ErrorData, Implementation, ServerCapabilities, ServerConfig};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use rustbgpd_api::proto;
 use schemars::JsonSchema;
@@ -1247,10 +1247,10 @@ impl RustbgpdMcp {
 )]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RustbgpdMcp {
-    fn get_info(&self) -> ServerInfo {
-        // `ServerInfo` and `Implementation` are `#[non_exhaustive]`, so this
+    fn get_info(&self) -> ServerConfig {
+        // `ServerConfig` and `Implementation` are `#[non_exhaustive]`, so this
         // starts from a default and assigns the fields it owns.
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("rustbgpd-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
