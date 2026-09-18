@@ -12,7 +12,7 @@ use rustbgpd_wire::{
     AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, RpkiValidation,
     Safi, WhenToRefresh,
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 /// Failure returned by the dedicated, type-narrow RIB readiness lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2291,6 +2291,16 @@ pub enum RibUpdate {
     SubscribeRouteEvents {
         /// Response channel carrying the broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<Arc<RouteEvent>>>,
+    },
+    /// Subscribe to the FIB install-candidate change signal: a payload-free
+    /// generation counter the manager bumps whenever unicast distribution
+    /// runs for a prefix set, including changes that keep the Loc-RIB best
+    /// (an equal-cost member added, withdrawn, or re-advertised with a new
+    /// next hop). Route events only cover best-path changes; the FIB
+    /// reconciler re-queries its candidates on either wake.
+    SubscribeFibCandidateChanges {
+        /// Response channel carrying the watch receiver.
+        reply: oneshot::Sender<watch::Receiver<u64>>,
     },
     /// Query recent route change events from the bounded in-memory history.
     QueryRouteEventHistory {

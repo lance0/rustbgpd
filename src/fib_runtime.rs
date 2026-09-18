@@ -310,6 +310,7 @@ async fn run_loop<F>(
     let mut cmd_open = true;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
+    let mut candidate_changes = subscribe_fib_candidate_changes(&rib_tx).await;
     let mut kernel_route_events = fib.take_kernel_route_events();
     reconcile_once_with_events(
         &config,
@@ -465,6 +466,19 @@ async fn run_loop<F>(
                             .reset(tokio::time::Instant::now() + ROUTE_EVENT_DEBOUNCE);
                     }
                     None => route_events = subscribe_route_events(&rib_tx).await,
+                }
+            }
+            // Install-candidate change that kept the Loc-RIB best (equal-cost
+            // member add/remove/re-advertise): no route event, same wake.
+            maybe_change = recv_fib_candidate_change(&mut candidate_changes) => {
+                match maybe_change {
+                    Some(()) => {
+                        route_event_dirty = true;
+                        event_debounce
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + ROUTE_EVENT_DEBOUNCE);
+                    }
+                    None => candidate_changes = subscribe_fib_candidate_changes(&rib_tx).await,
                 }
             }
             maybe_drift = recv_kernel_route_event(&mut kernel_route_events) => {
@@ -646,6 +660,34 @@ async fn recv_route_event(
         }
         Err(broadcast::error::RecvError::Closed) => None,
     }
+}
+
+async fn subscribe_fib_candidate_changes(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+) -> Option<watch::Receiver<u64>> {
+    let (reply, rx) = oneshot::channel();
+    if rib_tx
+        .send(RibUpdate::SubscribeFibCandidateChanges { reply })
+        .await
+        .is_err()
+    {
+        warn!("general FIB task could not subscribe to RIB install-candidate changes");
+        return None;
+    }
+    if let Ok(changes) = rx.await {
+        Some(changes)
+    } else {
+        warn!("general FIB task install-candidate subscription reply dropped");
+        None
+    }
+}
+
+async fn recv_fib_candidate_change(rx: &mut Option<watch::Receiver<u64>>) -> Option<()> {
+    let Some(rx) = rx.as_mut() else {
+        std::future::pending::<()>().await;
+        return None;
+    };
+    rx.changed().await.ok()
 }
 
 #[cfg(test)]
@@ -2996,7 +3038,7 @@ mod tests {
     use super::*;
     use prometheus::Registry;
     use rustbgpd_rib::{FibInstallNextHop, Route, RouteEvent, RouteOrigin};
-    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+    use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Safi};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
     #[cfg(target_os = "linux")]
@@ -4992,6 +5034,225 @@ mod tests {
 
         assert!(query_count.load(Ordering::SeqCst) > initial);
         handle.shutdown().await;
+    }
+
+    // --- Install-candidate wakes driven through a real RIB manager ---
+    //
+    // `route_event_wakes_actor_before_periodic_interval` injects the event
+    // itself, so it cannot catch a change the RIB never publishes. These
+    // tests feed a real `RibManager` and observe the actor's status
+    // snapshot: any change that reaches the kernel only through the 30 s
+    // periodic backstop fails the event-path budget.
+
+    const PEER_A: &str = "198.51.100.1";
+    const PEER_B: &str = "198.51.100.2";
+    const NH_A: &str = "10.0.0.2";
+    const NH_B: &str = "10.0.1.2";
+    const NH_C: &str = "10.0.2.2";
+    /// Budget for an event-path wake: debounce plus real-manager latency,
+    /// far below `RECONCILE_INTERVAL` so a periodic-only pass fails.
+    const EVENT_WAKE_BUDGET: Duration = Duration::from_secs(5);
+
+    struct RealRibHarness {
+        rib_tx: mpsc::Sender<RibUpdate>,
+        status_rx: watch::Receiver<Vec<FibRuntimeStatus>>,
+        handle: FibRuntimeHandle,
+        /// Kept open so distribution to the two peers never fails and
+        /// marks them dirty.
+        _outbound: Vec<mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate>>,
+    }
+
+    /// Real `RibManager` plus the FIB actor at ECMP width 2, with two eBGP
+    /// peers registered. Peer A wins the BGP-identifier and peer-address
+    /// tie-breaks (no older-path step exists in the chain), so peer B's
+    /// equal-cost route is always a non-best install candidate.
+    async fn real_rib_harness() -> RealRibHarness {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let (query_tx, query_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, metrics())
+            .with_eager_dataplane_prefix_index();
+        tokio::spawn(manager.run());
+
+        let mut config = config();
+        config.tables[0].maximum_paths = Some(2);
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let handle = spawn_with_fib(
+            config,
+            rib_tx.clone(),
+            query_tx,
+            FakeFib::default(),
+            metrics(),
+            status_tx,
+            event_tx,
+            CancellationToken::new(),
+        );
+
+        let mut outbound = Vec::new();
+        for (peer, octet) in [(PEER_A, 1u8), (PEER_B, 2u8)] {
+            let (out_tx, out_rx) = mpsc::channel(64);
+            outbound.push(out_rx);
+            rib_tx
+                .send(RibUpdate::PeerUp {
+                    peer: ip(peer),
+                    session_id: 0,
+                    peer_asn: 65000 + u32::from(octet),
+                    peer_router_id: Ipv4Addr::new(192, 0, 2, octet),
+                    outbound_tx: out_tx,
+                    export_policy: None,
+                    sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    add_path_send_families: Vec::new(),
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: Vec::new(),
+                    negotiated_llgr_families: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+        RealRibHarness {
+            rib_tx,
+            status_rx,
+            handle,
+            _outbound: outbound,
+        }
+    }
+
+    impl RealRibHarness {
+        /// Equal-cost route for `v4(32)` from `peer`: empty `AS_PATH`, IGP
+        /// origin, no MED, eBGP — `multipath_equal` under the strict rule.
+        fn member(peer: &str, octet: u8, next_hop: &str) -> Route {
+            let mut route = route_from_peer(v4(32), ip(next_hop), RouteOrigin::Ebgp, 0, ip(peer));
+            route.peer_router_id = Ipv4Addr::new(192, 0, 2, octet);
+            route
+        }
+
+        async fn announce(&self, peer: &str, octet: u8, next_hop: &str) {
+            self.routes_received(peer, vec![Self::member(peer, octet, next_hop)], Vec::new())
+                .await;
+        }
+
+        async fn withdraw(&self, peer: &str) {
+            self.routes_received(peer, Vec::new(), vec![(v4(32), 0)])
+                .await;
+        }
+
+        async fn routes_received(
+            &self,
+            peer: &str,
+            announced: Vec<Route>,
+            withdrawn: Vec<(Prefix, u32)>,
+        ) {
+            self.rib_tx
+                .send(RibUpdate::RoutesReceived {
+                    peer: ip(peer),
+                    session_id: 0,
+                    announced,
+                    withdrawn,
+                    flowspec_announced: Vec::new(),
+                    flowspec_withdrawn: Vec::new(),
+                    evpn_announced: Vec::new(),
+                    evpn_withdrawn: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+
+        /// Wait for the actor's `v4(32)` row to report exactly `next_hops`
+        /// (canonically sorted) within the event-path budget.
+        async fn expect_next_hops(&mut self, next_hops: &[&str]) {
+            let expected: Vec<IpAddr> = next_hops.iter().map(|hop| ip(hop)).collect();
+            let started = tokio::time::Instant::now();
+            let reached = tokio::time::timeout(EVENT_WAKE_BUDGET, async {
+                loop {
+                    let current = self
+                        .status_rx
+                        .borrow_and_update()
+                        .iter()
+                        .find(|status| status.prefix == v4(32))
+                        .map(|status| status.next_hops.clone());
+                    if current.as_deref() == Some(expected.as_slice()) {
+                        return;
+                    }
+                    self.status_rx.changed().await.expect("FIB actor alive");
+                }
+            })
+            .await;
+            assert!(
+                reached.is_ok(),
+                "FIB row did not reach next hops {expected:?} within {:?} (event path); \
+                 last status: {:?}",
+                started.elapsed(),
+                *self.status_rx.borrow()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn multipath_member_add_and_remove_wake_actor_before_periodic_interval() {
+        let mut harness = real_rib_harness().await;
+        harness.announce(PEER_A, 1, NH_A).await;
+        harness.expect_next_hops(&[NH_A]).await;
+
+        // Second equal-cost member: the Loc-RIB best stays on peer A, so no
+        // route event is published; only the candidate signal wakes the actor.
+        harness.announce(PEER_B, 2, NH_B).await;
+        harness.expect_next_hops(&[NH_A, NH_B]).await;
+
+        harness.withdraw(PEER_B).await;
+        harness.expect_next_hops(&[NH_A]).await;
+        harness.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multipath_member_next_hop_change_wakes_actor_before_periodic_interval() {
+        let mut harness = real_rib_harness().await;
+        harness.announce(PEER_A, 1, NH_A).await;
+        harness.announce(PEER_B, 2, NH_B).await;
+        harness.expect_next_hops(&[NH_A, NH_B]).await;
+
+        // Non-best member re-advertised with a new next hop: same best,
+        // different candidate set.
+        harness.announce(PEER_B, 2, NH_C).await;
+        harness.expect_next_hops(&[NH_A, NH_C]).await;
+        harness.handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn multipath_member_peer_down_wakes_actor_before_periodic_interval() {
+        let mut harness = real_rib_harness().await;
+        harness.announce(PEER_A, 1, NH_A).await;
+        harness.announce(PEER_B, 2, NH_B).await;
+        harness.expect_next_hops(&[NH_A, NH_B]).await;
+
+        harness
+            .rib_tx
+            .send(RibUpdate::PeerDown {
+                peer: ip(PEER_B),
+                session_id: 0,
+            })
+            .await
+            .unwrap();
+        harness.expect_next_hops(&[NH_A]).await;
+        harness.handle.shutdown().await;
+    }
+
+    /// Guard for the shape the route-event path already covers: the best
+    /// path re-advertised by the same peer with a new next hop is a Loc-RIB
+    /// payload change and publishes `BestChanged`.
+    #[tokio::test]
+    async fn best_next_hop_change_from_same_peer_wakes_actor_before_periodic_interval() {
+        let mut harness = real_rib_harness().await;
+        harness.announce(PEER_A, 1, NH_A).await;
+        harness.expect_next_hops(&[NH_A]).await;
+
+        harness.announce(PEER_A, 1, NH_C).await;
+        harness.expect_next_hops(&[NH_C]).await;
+        harness.handle.shutdown().await;
     }
 
     // --- Kernel route-drift classifier (`kernel_route_drift_wakes`) ---
