@@ -3431,12 +3431,15 @@ mod tests {
         mpsc::Sender<RibUpdate>,
         Arc<AtomicUsize>,
         broadcast::Sender<Arc<RouteEvent>>,
+        watch::Sender<u64>,
     ) {
         let (tx, mut rx) = mpsc::channel(8);
         let query_count = Arc::new(AtomicUsize::new(0));
         let query_count_task = Arc::clone(&query_count);
         let (events_tx, _) = broadcast::channel(16);
         let events_task = events_tx.clone();
+        let (candidates_tx, _) = watch::channel(0u64);
+        let candidates_task = candidates_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
@@ -3475,11 +3478,14 @@ mod tests {
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events_task.subscribe());
                     }
+                    RibUpdate::SubscribeFibCandidateChanges { reply } => {
+                        let _ = reply.send(candidates_task.subscribe());
+                    }
                     _ => {}
                 }
             }
         });
-        (tx, query_count, events_tx)
+        (tx, query_count, events_tx, candidates_tx)
     }
 
     fn route_event(prefix: Prefix) -> RouteEvent {
@@ -4907,7 +4913,7 @@ mod tests {
         let path = dir.path().join("fib-owned.json");
         let mut config = config();
         config.owned_state_path = Some(path.clone());
-        let (rib_tx, _query_count, _events_tx) = rib_with_events(Vec::new());
+        let (rib_tx, _query_count, _events_tx, _candidates_tx) = rib_with_events(Vec::new());
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
@@ -4956,7 +4962,7 @@ mod tests {
             ..FakeFib::default()
         };
 
-        let (rib_tx, _count, _events) = rib_with_events(vec![route]);
+        let (rib_tx, _count, _events, _candidates) = rib_with_events(vec![route]);
         let (status_tx, mut status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
@@ -5004,7 +5010,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_event_wakes_actor_before_periodic_interval() {
-        let (rib_tx, query_count, events_tx) =
+        let (rib_tx, query_count, events_tx, _candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
@@ -6143,7 +6149,7 @@ mod tests {
 
     #[tokio::test]
     async fn kernel_drift_event_wakes_actor_before_periodic_interval() {
-        let (rib_tx, query_count, _events_tx) =
+        let (rib_tx, query_count, _events_tx, _candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
@@ -6210,7 +6216,7 @@ mod tests {
 
     #[tokio::test]
     async fn route_event_debounce_waits_after_idle() {
-        let (rib_tx, query_count, events_tx) =
+        let (rib_tx, query_count, events_tx, candidates_tx) =
             rib_with_events(vec![route(v4(24), ip("192.0.2.1"))]);
         let (status_tx, _status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
@@ -6234,6 +6240,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(query_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            candidates_tx.receiver_count(),
+            1,
+            "FIB actor subscribed to install-candidate changes"
+        );
 
         tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
         events_tx.send(Arc::new(route_event(v4(24)))).unwrap();
@@ -6414,7 +6425,7 @@ mod tests {
         let registry = Registry::new();
         let metrics = BgpMetrics::with_registry(registry.clone());
         let desired = route(v4(24), ip("192.0.2.1"));
-        let (rib_tx, _count, _events) = rib_with_events(vec![desired]);
+        let (rib_tx, _count, _events, _candidates) = rib_with_events(vec![desired]);
         let (status_tx, mut status_rx) = watch::channel(Vec::new());
         let (event_tx, _) = broadcast::channel(16);
         let shutdown = CancellationToken::new();
