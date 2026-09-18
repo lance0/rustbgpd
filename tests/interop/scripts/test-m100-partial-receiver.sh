@@ -186,7 +186,8 @@ frr_absent() {
 }
 
 rustbgpd_established() {
-    rs_ctl neighbor "$RAW_ADDR" 2>/dev/null | grep -i established >/dev/null
+    # GR-stale renders as "Stale" and does not count as up here.
+    rs_ctl neighbor "$RAW_ADDR" -j | rbgp_neighbor_json_established
 }
 
 bird_established() {

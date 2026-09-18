@@ -43,7 +43,23 @@ vtep_ctl() {
             fi
             printf '[]\n'
             ;;
+        session_connect) neighbor_detail Connect "unavailable (session not Established)" "$@" ;;
+        session_stale) neighbor_detail Stale "unknown (stale state)" "$@" ;;
+        session_up) neighbor_detail Established negotiated "$@" ;;
         *) return 99 ;;
+    esac
+}
+
+# Excerpt of real `rbgp neighbor <peer>` output: JSON when -j is passed, the
+# human detail view otherwise. The human view of a session that is down still
+# contains the word "Established", which is what a text match trips over.
+neighbor_detail() {
+    local state=$1 negotiation=$2
+    shift 2
+    case " $* " in
+        *" -j "*) printf '{"address":"192.0.2.1","state":"%s"}\n' "$state" ;;
+        *) printf 'Negotiation:           %s\nState:                 %s\n' \
+            "$negotiation" "$state" ;;
     esac
 }
 
@@ -100,5 +116,19 @@ rm -f "$out" "$err"
 case_name=transient
 [ "$(wait_vtep_routes_gone 2 192.0.2.1 true 2)" = 0 ]
 [ "$(<"$transient_counter")" -eq 2 ]
+
+for case_name in session_connect session_stale; do
+    if VTEP_ESTABLISHED_ATTEMPTS=2 wait_vtep_established 192.0.2.1 >/dev/null; then
+        echo "$case_name: a session that is not Established was reported up" >&2
+        exit 1
+    fi
+done
+case_name=session_up
+VTEP_ESTABLISHED_ATTEMPTS=1 wait_vtep_established 192.0.2.1 >/dev/null
+case_name=malformed
+if vtep_ctl routes | rbgp_neighbor_json_established; then
+    echo "malformed JSON was reported as an Established session" >&2
+    exit 1
+fi
 
 echo "shared VTEP route oracles: PASS"
