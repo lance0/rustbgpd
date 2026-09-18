@@ -61,7 +61,7 @@ with an explicit stable tag (`vMAJOR.MINOR.PATCH`):
 
 ```sh
 less packaging/install.sh
-sh packaging/install.sh --tag v0.70.1
+sh packaging/install.sh --tag v0.70.2
 ```
 
 Without a source checkout, fetch the published asset:
@@ -77,10 +77,10 @@ systemd units. `--download-only` writes the verified selected artifact and its
 manifest without installing either.
 
 ```sh
-sh packaging/install.sh --tag v0.70.1 --prefix /opt/rustbgpd-0.70.1
-/opt/rustbgpd-0.70.1/rbgp doctor
+sh packaging/install.sh --tag v0.70.2 --prefix /opt/rustbgpd-0.70.2
+/opt/rustbgpd-0.70.2/rbgp doctor
 
-sh packaging/install.sh --tag v0.70.1 --download-only ./rustbgpd-v0.70.1
+sh packaging/install.sh --tag v0.70.2 --download-only ./rustbgpd-v0.70.2
 ```
 
 ### Pre-built binary tarball

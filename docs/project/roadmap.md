@@ -125,7 +125,11 @@ reload-window cadence rule; the original on-host verdict failed only the
 superseded zero-miss rule). v0.70.1 (2026-09-15) is a patch release of
 reload, configuration-path, CLI, and dependency fixes; it shipped on its
 per-change regression tests and main CI without a new 24-hour soak, so the
-flagship receipt still describes v0.70.0. The
+flagship receipt still describes v0.70.0. v0.70.2 (2026-09-18) is a patch
+release of best-path, RIB bookkeeping, event-history, FIB, EVPN, RTR timer,
+and configuration-path fixes, with IXP Manager rendering for multi-router and
+IRR-disabled members; it shipped the same way, and the flagship receipt still
+describes v0.70.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

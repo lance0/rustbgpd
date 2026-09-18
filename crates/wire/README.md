@@ -326,7 +326,7 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.21.0"
+rustbgpd-wire = "0.21.1"
 bytes = "1"
 ```
 
