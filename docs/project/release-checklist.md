@@ -104,9 +104,10 @@ convention in `CONTRIBUTING.md`:
       `docs/explanation/ixp-evaluation.md` — cites a receipt measured within the last three
       releases, or carries an explicit measured-on date in the claim text
       (e.g. "measured 2026-07-03"). Older numbers stay quotable with their
-      date; undated stale numbers do not ship. The public-docs contract checks
-      every receipt link in those curated headline blocks against the manifest,
-      plus commit/tag provenance and this freshness rule. The manifest does not
+      date. The public-docs contract fails on any receipt link in those curated
+      headline blocks that differs from the manifest and on broken commit/tag
+      provenance; a stale claim without its date is reported as an advisory.
+      Dating it is good practice, not a release gate. The manifest does not
       catalog the whole performance corpus; the checker's sorted
       zero-inbound-link inventory covers all top-level receipts as an advisory
       so discoverability is not conflated with measurement validity.

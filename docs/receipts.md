@@ -23,9 +23,10 @@ declared in the structured
 [`perf/receipt-provenance.json`](perf/receipt-provenance.json) manifest. The
 public-docs [`receipt integrity checker`](../scripts/check_perf_receipt_freshness.py)
 requires every receipt link in those curated headline blocks to match the
-manifest, resolves its provenance against Git tags, and enforces dates on stale
-claims. The manifest is not a whole-corpus catalog: the checker separately
-reports top-level receipts with no inbound Markdown link as a sorted advisory.
+manifest, resolves its provenance against Git tags, and reports stale claims
+without a measured date as advisories. The manifest is not a whole-corpus
+catalog: the checker separately reports top-level receipts with no inbound
+Markdown link as a sorted advisory.
 
 Numbering note: M0–M4 and M10 onward are interop labs. M5–M9 were
 development-phase build milestones (wire/RIB/API hardening) and are documented
