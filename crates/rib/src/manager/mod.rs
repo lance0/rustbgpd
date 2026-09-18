@@ -636,6 +636,7 @@ pub struct RibManager {
     /// `EoR` markers that failed to enqueue and must be retried.
     pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Families with an outstanding enhanced route refresh response retry.
+    /// Entries are never left empty: readers check the key.
     pending_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Outbound registrations (initial table dumps) deferred behind queued
     /// actor work, completed one per run-loop iteration between drained

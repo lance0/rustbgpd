@@ -195,6 +195,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recovery ladder treated the newer store like corruption, moved it to
   `events.db.stale`, and started an empty one. No released daemon has bumped
   the schema version yet, so this only affects a future downgrade.
+- A peer that has been sent a ROUTE-REFRESH response no longer keeps its
+  update group out of the clean export-policy transition. Previously an
+  export-policy reload for a group containing such a peer took the slower
+  fallback path until the peer's next outbound resync. Advertised routes were
+  unaffected.
 
 ### Upgrade notes
 

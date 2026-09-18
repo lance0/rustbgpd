@@ -1161,10 +1161,6 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
         "no family gated ⇒ no entry: {:?}",
         manager.peer_orf_pending.get(&peer)
     );
-    // A successful refresh response leaves an empty `pending_refresh` entry
-    // behind, which the same readiness predicate also checks by key. Clear
-    // it so the assertion below isolates the ORF clause.
-    manager.pending_refresh.remove(&peer);
     assert!(
         manager.clean_policy_transition_peer_ready(peer),
         "a fully lifted ORF peer no longer reads as gated"
