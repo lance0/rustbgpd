@@ -2768,6 +2768,84 @@ async fn oracle_rtc_membership_change_while_dirty_converges() {
     );
 }
 
+/// A membership widen whose announce-only delta is lost to a full channel
+/// has no withdraw duty to carry, so it must mark the member dirty without
+/// creating an empty extra-withdraw entry: readers test that map by key.
+#[tokio::test]
+async fn rtc_announce_only_delta_lost_to_full_channel_leaves_no_extra_withdraw_entry() {
+    tokio::time::pause();
+    let mut o = Oracle::spawn(false, Some(Ipv4Addr::new(192, 0, 2, 1)));
+    o.peer_up_families(A, false, true, None, 64, vpn_sendable())
+        .await;
+    o.peer_up_families(B, false, true, None, 64, vpn_rtc_sendable())
+        .await;
+    // C's capacity-2 channel is left holding its initial dump and EoR, so
+    // the next send to it fails.
+    o.peer_up_families(C, false, true, None, 2, vpn_rtc_sendable())
+        .await;
+    // Strict-empty membership: the staged route reaches neither B nor C.
+    o.vpn_routes(
+        A,
+        vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![rt_ec(1)])],
+        vec![],
+    )
+    .await;
+    let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
+    assert_eq!(
+        (dirty, extra_withdraw_peers),
+        (0, 0),
+        "clean before the widen"
+    );
+
+    // C widens to RT1: one announce, no withdraws, and the send fails.
+    o.rtc_routes(C, vec![rtc_interest(C, 1)]).await;
+    let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
+    assert_eq!(dirty, 1, "the lost delta must leave C dirty for the resync");
+    assert_eq!(
+        extra_withdraw_peers, 0,
+        "an announce-only delta must not create an extra-withdraw entry"
+    );
+    o.finish().await;
+}
+
+/// A member that leaves its group dirty with an empty advertised view has
+/// no withdraw duty to carry, so the regroup must not create an empty
+/// extra-withdraw entry: readers test that map by key.
+#[tokio::test]
+async fn dirty_leaver_with_empty_view_leaves_no_extra_withdraw_entry() {
+    tokio::time::pause();
+    let mut o = Oracle::spawn(false, Some(Ipv4Addr::new(192, 0, 2, 1)));
+    o.peer_up(A, false, true, None, 64).await;
+    o.peer_up(B, false, true, None, 64).await;
+    // C's policy denies the only route, so its group table and advertised
+    // view stay empty. Its capacity-1 channel is left holding the initial
+    // EoR, so the refresh response below cannot be sent: C goes dirty with
+    // nothing advertised and no group tombstones.
+    o.peer_up(C, false, true, Some(deny_prefix_chain(pfx(1, 0))), 1)
+        .await;
+    o.routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+        .await;
+    o.route_refresh(C, Afi::Ipv4, Safi::Unicast).await;
+    let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
+    assert_eq!(
+        (dirty, extra_withdraw_peers),
+        (1, 0),
+        "dirty, no residue yet"
+    );
+
+    // Regroup while dirty into B's group: the baseline snapshot is empty,
+    // and the destination's announce is lost to the still-full channel, so
+    // C stays dirty.
+    o.replace_policy(C, None).await;
+    let (dirty, _, _, _, _, extra_withdraw_peers) = o.terminal_health().await;
+    assert_eq!(dirty, 1, "C is still dirty after the regroup");
+    assert_eq!(
+        extra_withdraw_peers, 0,
+        "an empty baseline must not create an extra-withdraw entry"
+    );
+    o.finish().await;
+}
+
 /// Kill criterion (b), design §6.2: a single member's membership flip
 /// at 100k staged VPN routes emits ONLY the minimal RFC 4684 delta —
 /// one message, announce-only on widen / withdraw-only on narrow, with

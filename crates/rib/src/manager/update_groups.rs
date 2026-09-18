@@ -1975,12 +1975,16 @@ impl RibManager {
             // announces the Φ-passing table; the narrow's withdraws
             // ride the extra-withdraw residue.
             self.mark_outbound_dirty(peer);
-            self.pending_extra_withdraws
-                .entry(peer)
-                .or_default()
-                .vpn
-                .extend(withdraw_keys.drain(..).inspect(|_| checkpoint()));
-            self.refresh_group_residue_gauge();
+            // An announce-only delta has no withdraw duty to carry: never
+            // create an empty residue entry (readers check the key).
+            if !withdraw_keys.is_empty() {
+                self.pending_extra_withdraws
+                    .entry(peer)
+                    .or_default()
+                    .vpn
+                    .extend(withdraw_keys.drain(..).inspect(|_| checkpoint()));
+                self.refresh_group_residue_gauge();
+            }
         }
         super::retire_vec(&mut withdraw_keys, &mut || checkpoint());
         super::retire_vec(&mut permit_rows, &mut || checkpoint());

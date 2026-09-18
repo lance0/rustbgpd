@@ -233,6 +233,11 @@ impl RibManager {
                         drop(vpn);
                         crate::manager::replacement_readiness_checkpoint(&readiness, true);
                     }
+                    // Empty baselines carry no withdraw duty: never leave an
+                    // empty residue entry behind (readers check the key).
+                    if extras.unicast.is_empty() && extras.vpn.is_empty() {
+                        self.pending_extra_withdraws.remove(&peer);
+                    }
                 }
                 (Some(mut base), Some(_)) => {
                     // A grouped member keeps no per-family record of its
