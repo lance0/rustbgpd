@@ -1,5 +1,8 @@
 name: CI
 
+# Manual dispatch runs the head of the chosen branch or tag, for example a
+# release commit whose push run a later merge canceled. A dispatch on `main`
+# shares the push runs' concurrency group below.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +22,7 @@ on:
   pull_request:
     paths-ignore:
       - "**/*.md"
+  workflow_dispatch:
 
 jobs:
   v064_validator:
@@ -78,10 +82,11 @@ jobs:
                 - "**/*.md"
             pull_request:
               paths-ignore:
-                - "**/*.md"'
+                - "**/*.md"
+            workflow_dispatch:'
           if [[ "$actual" != "$expected" ]]; then
             diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") || true
-            echo "CI triggers must keep main-only pushes, all PRs, and Markdown ignores" >&2
+            echo "CI triggers must keep main-only pushes, all PRs, Markdown ignores, and manual dispatch" >&2
             exit 1
           fi
       - name: Install exact developer linters
@@ -130,6 +135,10 @@ jobs:
       - name: Prove netns selector receipt finalizer
         run: |
           python3 -m unittest -v scripts/test_check_netns_selector_receipt.py
+      # `just gate-release` is the local home of the release-commit checks;
+      # nothing else executes its checker's failure cases.
+      - name: Prove release preflight checks
+        run: python3 -m unittest -v scripts/test_check_release_preflight.py
       - uses: dtolnay/rust-toolchain@v1 # stable
         with:
           toolchain: stable
@@ -346,7 +355,8 @@ jobs:
                [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
             base="${{ github.event.before }}"
           else
-            # Initial push of a new branch — nothing to diff against.
+            # Initial push of a new branch, or a manual dispatch — nothing to
+            # diff against. `just gate-release` runs this gate locally.
             echo "no diff base; skipping"
             exit 0
           fi

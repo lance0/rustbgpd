@@ -26,6 +26,13 @@ permissions:
   contents: read
 
 on:
+  # A release tag gets its own run at the tagged commit, with no path filter,
+  # so the result exists before the first `cargo publish`. Nothing in the job
+  # reads pull-request context: the crate set comes from `cargo metadata` and
+  # the baseline from crates.io. `release.yml` publishes no crates, so the
+  # two tag runs are independent.
+  push:
+    tags: ["v*"]
   pull_request:
     # GitHub cannot derive this filter from the manifests. The `publishable`
     # step below re-derives the crate set and fails the job if a publishable

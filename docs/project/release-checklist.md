@@ -11,10 +11,11 @@ pushing a version tag.
 
 The core `.github/workflows/ci.yml` and `.github/workflows/interop.yml`
 lanes run on qualifying pull requests and main-branch pushes. Both ignore
-Markdown-only changes, and interop also ignores the rest of `docs/`. The
-specialized lanes below have their own trigger semantics: some are unfiltered,
-while others are path-scoped. Confirm every lane applicable to the release
-diff actually ran before tagging.
+Markdown-only changes, and interop also ignores the rest of `docs/`. Both also
+accept a manual dispatch, which runs the head of the chosen branch or tag with
+no path filter. The specialized lanes below have their own trigger semantics:
+some are unfiltered, while others are path-scoped. Confirm every lane
+applicable to the release diff actually ran before tagging.
 
 - [ ] `cargo fmt --check`
 - [ ] `python3 scripts/check-clippy-reasons.py`
@@ -34,7 +35,10 @@ diff actually ran before tagging.
       builder version)
 - [ ] **Published-crate README freshness gate** — if the independently
       versioned manifest for `wire`, `fsm`, or `rpki` changed in the diff, the
-      matching crate README must also be touched
+      matching crate README must also be touched. Hosted CI diffs the pull
+      request or the pushed range and skips on a manual dispatch;
+      `just gate-release` runs the same comparison locally against the merge
+      base with `origin/main`
 - [ ] **Gate 8b BUM-filter kernel primitive**
       (`evpn_bum_filter_kernel` job) — runs the netns harness under
       `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
@@ -58,9 +62,11 @@ diff actually ran before tagging.
       contract on every pull request and main-branch push.
 - [ ] **Published-crate semver contract** — when `crates/wire/`, `crates/fsm/`,
       or `crates/rpki/` changed, `.github/workflows/semver-checks.yml` is green
-      for the pull request or a manual dispatch at the release commit. It is
-      path-scoped on pull requests to those crate trees, its tested derivation
-      helper, and its own workflow; it has no push trigger. The exact RPKI
+      for the pull request, and its run for the release tag is green before
+      the first `cargo publish`. It is path-scoped on pull requests to those
+      crate trees, its tested derivation helper, and its own workflow; it runs
+      unfiltered on every `v*` tag push, and a manual dispatch gives the same
+      result at the release commit before the tag exists. The exact RPKI
       `0.1.0` first-publish exception applies only while crates.io returns 404
       for the name and becomes an ordinary registry baseline automatically
       once that normal release is visible.
@@ -788,12 +794,36 @@ Before rolling any versions:
    `-D warnings`, release build)
 5. Commit the final release candidate (workspace):
    `chore(release): prepare vX.Y.Z`
-6. Push the final release candidate to `main`: `git push origin main`.
+6. Run `just gate-release --mode release` on the committed release candidate,
+   then push it to `main`: `git push origin main`. The recipe runs the checks
+   that otherwise first fail in hosted CI on the release commit, or only after
+   the tag: the metric release-note contract, the published-crate README
+   freshness gate, a dated `CHANGELOG.md` heading and released README wording
+   for every crate whose manifest is ahead of
+   `docs/reference/published-crate-versions.json`, and the root `## [X.Y.Z]`
+   section that `release.yml` extracts. Run it before the push: the README
+   comparison covers the commits `origin/main` does not have yet, and needs
+   `--base <previous main SHA>` afterwards. Without `--mode release` the
+   recipe detects a release commit by its empty `[Unreleased]` section and
+   otherwise lists the release-only checks it skipped. `--heavy` adds
+   `cargo audit`, the release build, and the multi-package publish dry-run.
 7. Wait for every applicable gate to pass on that exact final `main` SHA,
-   including the stable-surface and metric release-note checks. The
-   tag-triggered publication workflows do not run those Python checks.
-   When an independently published crate changed, manually dispatch
-   `semver-checks.yml` at the release commit because it has no push trigger.
+   including the `ci.yml` and `interop.yml` push runs and the stable-surface
+   and metric release-note checks. The tag-triggered publication workflows do
+   not run those Python checks. Tag only after those main-push lanes are green.
+   - Merge nothing else into `main` until the tag is cut. `ci.yml` and
+     `interop.yml` set `cancel-in-progress: true` per ref, so the next push to
+     `main` cancels the release commit's unfinished runs and that commit loses
+     its heavy-lane coverage. If a lane was canceled while `main` still points
+     at the release commit, rerun it with `gh workflow run ci.yml --ref main`
+     or `gh workflow run interop.yml --ref main`. A dispatch runs the head of
+     the ref and shares the push runs' concurrency group, so dispatch only a
+     lane that is no longer running.
+   - The tag push in step 8 runs `semver-checks.yml` at the tagged commit.
+     When an independently published crate changed and the result is wanted
+     before tagging, dispatch it at the release commit:
+     `gh workflow run semver-checks.yml --ref main`. Either run must be green
+     before the first `cargo publish`.
    - If this cycle touched `.github/workflows/release.yml`, run the
      dispatch dry-run to green in this step, after the workflow change is on
      `main`: `gh workflow run release.yml -f dry_run=true`. Workflow edits
@@ -805,7 +835,8 @@ Before rolling any versions:
 9. Confirm the annotated tag resolves to the exact main commit whose
    applicable CI, interop, documentation, security, and install-contract
    workflows were already green; those main-only workflows do not rerun for a
-   tag. Then verify both tag-triggered publication workflows pass: **Release
+   tag. Confirm the tag's `semver-checks.yml` run is green before publishing
+   any crate. Then verify both tag-triggered publication workflows pass: **Release
    Binaries** (`release.yml`, including the x86_64 + aarch64 build matrix,
    artifacts, and GitHub Release) and **Container Image** (`container.yml`,
    including native amd64 + arm64 runtime verification and the GHCR manifest
@@ -888,12 +919,15 @@ updating the published record, boundary table, and dependency examples. Publish
 wire before dependent crates. If a publish or registry check fails, retain the
 existing record and retry after resolving the failure.
 
-`--refresh` does not reword prose. In the same change, turn "prepared" or
-"source checkout prepares" wording for the released versions into released
-wording in `crates/wire/README.md`, `crates/fsm/README.md`,
-`crates/rpki/README.md`, and `docs/reference/embedding.md` §4; these READMEs
-are the crates.io landing pages. Past `CHANGELOG.md` sections keep their
-wording.
+`--refresh` does not reword prose. A crate README is packaged with the crate
+and becomes its crates.io landing page, so turn "prepared in the source
+checkout" or "source checkout prepares" wording for a version about to publish
+into released wording in `crates/wire/README.md`, `crates/fsm/README.md`, and
+`crates/rpki/README.md` before the release commit;
+`just gate-release --mode release` rejects either wording in a crate whose
+manifest is ahead of the published record. Reword
+`docs/reference/embedding.md` §4 in the same change as `--refresh`. Past
+`CHANGELOG.md` sections keep their wording.
 
 Review the generated changes and run the offline checks before committing:
 
@@ -932,8 +966,11 @@ changed.
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. Keep the
    wire publish ahead of dependent FSM or RPKI releases when moving to a new
    wire line.
-4. Roll `crates/wire/CHANGELOG.md` and add a `rustbgpd-wire` entry in the
-   repository-level `CHANGELOG.md`
+4. Roll `crates/wire/CHANGELOG.md`, review and update the crate README, and
+   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`. Hosted
+   CI rejects a version bump of a published crate whose README has no diff in
+   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
+   release commit.
 5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-wire --dry-run`
@@ -971,8 +1008,11 @@ do not force an FSM release for every daemon tag.
 3. Update `version` in `crates/fsm/Cargo.toml`, its matching root workspace
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. When the
    wire line also moves, publish wire first so the FSM package can resolve it.
-4. Roll `crates/fsm/CHANGELOG.md` and add a `rustbgpd-fsm` entry in the
-   repository-level `CHANGELOG.md`
+4. Roll `crates/fsm/CHANGELOG.md`, review and update the crate README, and
+   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. Hosted
+   CI rejects a version bump of a published crate whose README has no diff in
+   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
+   release commit.
 5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-fsm --dry-run`. When this release moves
@@ -1003,8 +1043,11 @@ client share one public compatibility boundary.
    its latest normal crates.io baseline.
 3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`.
-4. Roll `crates/rpki/CHANGELOG.md`, update the crate README, and add a
-   `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
+4. Roll `crates/rpki/CHANGELOG.md`, review and update the crate README, and
+   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`. Hosted
+   CI rejects a version bump of a published crate whose README has no diff in
+   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
+   release commit.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.

@@ -138,9 +138,9 @@ FRR1070_IMAGE = (
     "a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b"
 )
 TRIGGER_HASHES = {
-    "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
+    "ci.yml": "f228a103e0fb3f2a6794bc352204a0c136540a6d5ded8e19537e2ad4060c277b",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
-    "interop.yml": "5a02c2699d26443c537ba1560fd1b16c595498e9148b2f99be975ae79b3b9492",
+    "interop.yml": "9e0df830852bce65597b12ac831509f6ecd500a1bcb85417394dac2f1e3c72a9",
     "kernel-dataplane.yml": "9e0df830852bce65597b12ac831509f6ecd500a1bcb85417394dac2f1e3c72a9",
 }
 PERMISSION_HASHES = {

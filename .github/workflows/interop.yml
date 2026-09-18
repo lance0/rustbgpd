@@ -138,6 +138,10 @@ name: Interop
 # for L3VNI binding (RFC 9136 Type 5); M32 needs a bond ES; M33 needs
 # wall time. See "CI wiring for M29-M33" in docs/project/roadmap.md.
 
+# Manual dispatch runs the head of the chosen branch or tag, for example a
+# release commit whose push run a later merge canceled. A dispatch on `main`
+# shares the concurrency group of the push runs. Only a pull request may skip
+# the labs, so a dispatch always runs them.
 on:
   push:
     branches: [main]
@@ -148,6 +152,7 @@ on:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
