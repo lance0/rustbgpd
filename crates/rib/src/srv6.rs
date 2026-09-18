@@ -134,10 +134,18 @@ fn service_transposition(
     }
 }
 
+/// End.DT2M and its SID-list-compression flavors (RFC 9800): uDT2M with
+/// NEXT-CSID (68) and End.DT2M with REPLACE-CSID (124). RFC 9819 section 3
+/// applies the same ESI-filtering argument rules to all three.
+fn argument_capable(behavior: u16) -> bool {
+    matches!(behavior, 24 | 68 | 124)
+}
+
 fn sid_eligible(sid: &Srv6SidInformation, transposition: Transposition) -> bool {
-    // RFC 9819 requires Structure for argument-capable End.DT2M (24), even
-    // when no argument is used. An unrecognized behavior alone is not invalid.
-    if sid.endpoint_behavior == 24 && sid.structures.is_empty() {
+    // RFC 9819 requires Structure for the argument-capable End.DT2M family,
+    // even when no argument is used. An unrecognized behavior alone is not
+    // invalid.
+    if argument_capable(sid.endpoint_behavior) && sid.structures.is_empty() {
         return false;
     }
     sid.structures
@@ -150,10 +158,10 @@ fn structure_eligible(
     structure: Srv6SidStructure,
     transposition: Transposition,
 ) -> bool {
-    // End.DT2M is the argument-capable behavior understood here. RFC 9252
-    // section 3.2.1 requires ignoring unknown behaviors with arguments; the
-    // known non-argument behaviors likewise require AL=0.
-    if structure.argument_length != 0 && sid.endpoint_behavior != 24 {
+    // The End.DT2M family is the argument-capable behavior understood here.
+    // RFC 9252 section 3.2.1 requires ignoring unknown behaviors with
+    // arguments; the known non-argument behaviors likewise require AL=0.
+    if structure.argument_length != 0 && !argument_capable(sid.endpoint_behavior) {
         return false;
     }
     let total = u16::from(structure.locator_block_length)
@@ -317,6 +325,11 @@ pub(crate) mod tests {
             (24, None, false),
             (24, Some([40, 24, 16, 0, 0, 0]), true), // RFC 9819 EAD without ARG.
             (24, Some([40, 24, 16, 16, 0, 0]), true),
+            // Compressed End.DT2M flavors follow the same RFC 9819 rules.
+            (68, Some([40, 24, 16, 16, 0, 0]), true),
+            (124, Some([40, 24, 16, 16, 0, 0]), true),
+            (68, None, false),
+            (124, None, false),
         ] {
             assert_eq!(
                 service_eligible(
@@ -503,5 +516,45 @@ pub(crate) mod tests {
             (Afi::L2Vpn, Safi::Evpn),
             Some(&imet)
         ));
+    }
+
+    #[test]
+    fn compressed_dt2m_imet_with_argument_is_selected() {
+        use std::{net::Ipv4Addr, sync::Arc, time::Instant};
+
+        use crate::{loc_rib::LocRib, route::RouteOrigin};
+
+        let sid: Ipv6Addr = "2001:db8:111:1::".parse().unwrap();
+        let peer = Ipv4Addr::new(10, 0, 0, 1);
+        let route = EvpnRibRoute {
+            route: EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0; 8]),
+                ethernet_tag: EthernetTagId(0),
+                originator_ip: sid.into(),
+            }),
+            next_hop: sid.into(),
+            link_local_next_hop: None,
+            peer: peer.into(),
+            attributes: Arc::new(vec![
+                service_attribute(6, sid, 124, Some([40, 24, 16, 16, 0, 0])),
+                PathAttribute::PmsiTunnel(PmsiTunnel {
+                    flags: 0,
+                    tunnel_type: PmsiTunnelType::IngressReplication,
+                    mpls_label: 0,
+                    tunnel_identifier: PmsiTunnelIdentifier::Ipv6(sid),
+                }),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: peer,
+            is_stale: false,
+            is_llgr_stale: false,
+        };
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_evpn(route.key(), std::iter::once(&route)));
+        assert!(
+            loc.get_evpn(&route.key()).is_some(),
+            "REPLACE-CSID End.DT2M IMET with AL=16 must stay selected"
+        );
     }
 }

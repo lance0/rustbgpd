@@ -50,6 +50,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SRv6 service eligibility now treats the compressed End.DT2M flavors,
+  End.DT2M with NEXT-CSID (behavior 68) and End.DT2M with REPLACE-CSID
+  (behavior 124), as argument-capable, as RFC 9819 section 3 specifies.
+  Previously only End.DT2M (24) was accepted with a nonzero Argument Length,
+  so EVPN BUM routes over uSID/CSID SRv6 that carried an ESI-filtering
+  argument were reported as `srv6_sid_invalid`, excluded from selection, and
+  withdrawn from peers. As for End.DT2M, a behavior 68 or 124 SID advertised
+  without a SID Structure is now ineligible (RFC 9819 section 2); such routes
+  were previously selected.
 - The Linux EVPN dataplane now retries a failed delete of an L3 (all-active
   Type 5) FDB nexthop or nexthop group on later reconcile passes, as it
   already did for L2 FDB nexthop groups. Previously the orphaned kernel object
