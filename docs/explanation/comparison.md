@@ -534,10 +534,10 @@ member individually.
 ## Performance Snapshot (bgperf2 — 2026-08-30)
 
 The freshest published [v0.68.0 cross-stack
-receipt](../perf/competitive-bgperf2-v0680-2026-08.md) is an 80-cell,
-counterbalanced same-host campaign against fresh pinned builds of BIRD 2.19.2,
-FRR 10.7.0, and GoBGP 4.8.0. Values are successful-run medians of
-**convergence seconds / total seconds**.
+receipt](../perf/competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
+is an 80-cell, counterbalanced same-host campaign against fresh pinned builds
+of BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. Values are successful-run
+medians of **convergence seconds / total seconds**.
 
 | Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
 |---|---:|---:|---:|---:|
@@ -620,7 +620,8 @@ has 320/320 sessions and zero parse errors, and each overlap quartet passes the
 received-view delta verifier. The older IRR receipts are historical records.
 
 A separate [1,000-peer retained receipt](../perf/route-server-1000-2026-07.md),
-measured 2026-07-20, exercises a uniform all-eBGP route-server fleet against
+measured 2026-07-20 with a source-equivalent v0.68.0 rerun measured 2026-08-30,
+exercises a uniform all-eBGP route-server fleet against
 the real daemon: 400k routes, 399.6 million observer-NLRI cold deliveries, four
 generation-complete export reloads, and continuous readiness/RSS/grouping
 checks. It is capacity acceptance for that disclosed same-host shape, not

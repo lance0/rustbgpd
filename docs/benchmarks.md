@@ -18,8 +18,8 @@ superseded campaigns remain below with their original provenance.
 | Evaluation question | Current evidence | Boundary |
 |---|---|---|
 | How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
-| What is the current IRR reload result? | [v0.68.0 IRR reload receipt](perf/irr-reload-v0680-2026-08.md), with 96 verifier-approved rows | Source-equivalent v0.68.0 campaign at 320 members × 183,040 generated IPv4 prefixes, two repeats, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host. |
-| What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
+| What is the current IRR reload result? | [v0.68.0 IRR reload receipt](perf/irr-reload-v0680-2026-08.md), with 96 verifier-approved rows | Source-equivalent v0.68.0 campaign measured 2026-08-30 at 320 members × 183,040 generated IPv4 prefixes, two repeats, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host. |
+| What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations measured 2026-08-30 at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
 | What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Current rustbgpd source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD remains the v0.64.0 refresh measured 2026-08-08, and OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30. |
 | Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
 | Which adoption capabilities have direct proof? | [IXP evaluation matrix](explanation/ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
@@ -322,10 +322,10 @@ a scale result.
 ### Linux FIB kernel-dump scaling
 
 `bench/run-fib-kernel-dump.py` is the privileged raw-rtnetlink harness for
-global versus strict table-filtered `RTM_GETROUTE` scaling. Its August 2026
-receipt covers 64 managed tables, 0 to 20,000 unrelated IPv4 rows, and 25
-timed passes at each K=1..64 table shape, with exact response-cardinality and
-`NLM_F_DUMP_FILTERED` fences. See the
+global versus strict table-filtered `RTM_GETROUTE` scaling. Its receipt,
+measured 2026-08-30, covers 64 managed tables, 0 to 20,000 unrelated IPv4
+rows, and 25 timed passes at each K=1..64 table shape, with exact
+response-cardinality and `NLM_F_DUMP_FILTERED` fences. See the
 [`Linux FIB kernel-dump receipt`](perf/fib-kernel-dump-2026-08.md) and its
 machine-readable [`results.json`](perf/artifacts/fib-kernel-dump-2026-08/results.json).
 The fixture is raw IPv4 blackhole `/32` traffic, not whole-daemon latency.
