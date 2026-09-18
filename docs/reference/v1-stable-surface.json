@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "contract": "rustbgpd-rs-rr-v1",
-  "baseline_release": "v0.70.1",
+  "baseline_release": "v0.70.2",
   "scope": "Narrow route-server and route-reflector product contract; unlisted surfaces are not stable by implication.",
   "roles": [
     {

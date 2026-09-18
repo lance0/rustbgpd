@@ -22,6 +22,8 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 Consumers exchanging wire types across these crates must move to the matching
 dependency lines together. Existing parse and validation signatures remain
 available; the new `DecodeError` variants extend a `#[non_exhaustive]` enum.
+`rustbgpd-wire` 0.21.1 is a documentation-only patch release on the same line:
+it corrects the `FlowSpecAction::TrafficAction::terminal` field documentation.
 
 - `UpdateMessage::parse_revised_observed_with_error_context` and
   `validate::validate_update_attributes_with_context` retain offending
