@@ -48,7 +48,7 @@ const MAX_PDU_LEN: usize = 65_535;
 // refresh/retry minimums are 1 s, which every non-zero value already
 // satisfies; an End of Data zero is handled as "not provided" (see
 // `apply_eod_timers`), and a configured zero is raised to the minimum
-// (see `configured_interval`).
+// (see `configured_interval` and `configured_expire`).
 const REFRESH_RETRY_MIN_SECS: u64 = 1;
 const REFRESH_MAX_SECS: u64 = 86_400;
 const RETRY_MAX_SECS: u64 = 7_200;
@@ -192,13 +192,25 @@ pub struct RtrClientConfig {
     /// RFC 8210 §6 minimum of 1 second are raised to 1 second with a
     /// warning.
     pub retry_interval: u64,
-    /// Seconds after which cached VRPs are considered stale.
+    /// Seconds after which cached VRPs are considered stale, until the
+    /// cache's End of Data supplies its own expire. Zero is raised to the
+    /// RFC 8210 §6 minimum of 600 seconds and a value above the §6
+    /// two-day maximum (172800 seconds) is clamped down to it, each with
+    /// a warning; a non-zero value below the minimum is kept, since
+    /// expiring early is safe. A value not above `refresh_interval` or
+    /// `retry_interval` is kept as configured: no data is held before the
+    /// first End of Data, and from then on the refresh and retry are
+    /// lowered below the effective expire (§6).
     pub expire_interval: u64,
     /// Operator ceiling on the effective expire interval in seconds.
     /// The cache-advertised End of Data expire (and `expire_interval`)
     /// is clamped down to it, so data older than this is discarded
     /// regardless of what the cache says. `None`: only the §6 two-day
-    /// maximum applies.
+    /// maximum applies. `Some` is bounded like `expire_interval`: zero
+    /// is raised to 600 seconds and a value above 172800 seconds is
+    /// clamped down to it, with a warning; a ceiling not above
+    /// `refresh_interval` or `retry_interval` lowers them below it at
+    /// End of Data.
     pub max_expire_interval: Option<u64>,
 }
 
@@ -254,6 +266,32 @@ fn configured_interval(server: SocketAddr, timer: &'static str, value: u64) -> D
     Duration::from_secs(value.max(REFRESH_RETRY_MIN_SECS))
 }
 
+/// Bound a configured expire interval or ceiling to the §6 range,
+/// warning with both values. Zero is raised to the 600 s minimum: it
+/// would otherwise arm expiry at the End of Data instant whenever the
+/// cache omits its expire, flushing the table just fetched. A value above
+/// the two-day maximum is clamped down to it — the longest retention a
+/// cache can legally indicate, and a deadline the timer can represent. A
+/// non-zero value below the minimum is kept, as at End of Data: expiring
+/// early is safe.
+fn configured_expire(server: SocketAddr, timer: &'static str, value: u64) -> u64 {
+    let bounded = if value == 0 {
+        EXPIRE_MIN_SECS
+    } else {
+        value.min(EXPIRE_MAX_SECS)
+    };
+    if bounded != value {
+        warn!(
+            server = %server,
+            timer,
+            value,
+            bounded,
+            "RTR configured expire outside the §6 range, bounded"
+        );
+    }
+    bounded
+}
+
 /// Boxed connection opener installed by [`RtrClient::with_dialer`].
 type RtrDialer = Box<
     dyn Fn(SocketAddr) -> Pin<Box<dyn Future<Output = std::io::Result<TcpStream>> + Send>>
@@ -264,20 +302,19 @@ type RtrDialer = Box<
 impl RtrClient {
     /// Create a new RTR client.
     #[must_use]
-    pub fn new(config: RtrClientConfig, vrp_tx: mpsc::Sender<VrpUpdate>) -> Self {
+    pub fn new(mut config: RtrClientConfig, vrp_tx: mpsc::Sender<VrpUpdate>) -> Self {
+        let server = config.server_addr;
+        config.max_expire_interval = config
+            .max_expire_interval
+            .map(|max| configured_expire(server, "max_expire", max));
+        let expire = configured_expire(server, "expire", config.expire_interval);
         Self {
-            refresh_interval: configured_interval(
-                config.server_addr,
-                "refresh",
-                config.refresh_interval,
-            ),
-            retry_interval: configured_interval(config.server_addr, "retry", config.retry_interval),
+            refresh_interval: configured_interval(server, "refresh", config.refresh_interval),
+            retry_interval: configured_interval(server, "retry", config.retry_interval),
             expire_interval: Duration::from_secs(
                 config
                     .max_expire_interval
-                    .map_or(config.expire_interval, |max| {
-                        config.expire_interval.min(max)
-                    }),
+                    .map_or(expire, |max| expire.min(max)),
             ),
             last_end_of_data_at: None,
             data_expires_at: None,
@@ -3776,6 +3813,92 @@ mod tests {
             intervals(60, 5),
             (Duration::from_secs(60), Duration::from_secs(5))
         );
+    }
+
+    /// A configured expire of zero is raised to the §6 minimum of 600 s:
+    /// left alone it would arm expiry at the End of Data instant itself
+    /// whenever the cache omits its expire, flushing the table just
+    /// fetched and reconnecting once a second. A value above the §6
+    /// two-day maximum is clamped down to it (the retention the cache
+    /// could legally ask for, and an `Instant` the timer can hold). A
+    /// non-zero value below the minimum is kept, as at End of Data:
+    /// expiring early is safe.
+    #[test]
+    fn configured_expire_is_bounded_to_the_section_6_range() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let expire = |secs| {
+            RtrClient::new(test_config(addr, 60, 5, secs), mpsc::channel(1).0)
+                .expire_interval
+                .as_secs()
+        };
+        assert_eq!(expire(0), 600);
+        assert_eq!(expire(1), 1);
+        assert_eq!(expire(300), 300);
+        assert_eq!(expire(7_200), 7_200);
+        assert_eq!(expire(172_800), 172_800);
+        assert_eq!(expire(172_801), 172_800);
+        assert_eq!(expire(u64::MAX), 172_800);
+    }
+
+    /// `max_expire_interval` is bounded the same way, and the bounded
+    /// ceiling is what End of Data clamps to: `Some(0)` no longer forces
+    /// an immediate expiry after every transaction, and a ceiling above
+    /// two days is the two-day maximum.
+    #[test]
+    fn configured_max_expire_is_bounded_to_the_section_6_range() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let with_max = |max| {
+            let mut config = test_config(addr, 60, 5, 7_200);
+            config.max_expire_interval = Some(max);
+            RtrClient::new(config, mpsc::channel(1).0)
+        };
+
+        let mut client = with_max(0);
+        assert_eq!(client.expire_interval.as_secs(), 600);
+        client.apply_eod_timers(0, 0, 7_200);
+        assert_eq!(client.expire_interval.as_secs(), 600);
+
+        let mut client = with_max(u64::MAX);
+        assert_eq!(client.expire_interval.as_secs(), 7_200);
+        client.apply_eod_timers(0, 0, 200_000);
+        assert_eq!(client.expire_interval.as_secs(), 172_800);
+
+        // A ceiling inside the range is applied verbatim.
+        let mut client = with_max(900);
+        assert_eq!(client.expire_interval.as_secs(), 900);
+        client.apply_eod_timers(0, 0, 7_200);
+        assert_eq!(client.expire_interval.as_secs(), 900);
+    }
+
+    /// A configured expire (or ceiling) not above the refresh or retry is
+    /// left as configured at construction — no data is held, so no
+    /// expiry is armed — and the existing End of Data rule lowers
+    /// refresh/retry below it at the first point data exists. This
+    /// guards that decision; it is not a regression test.
+    #[test]
+    fn configured_expire_ordering_is_enforced_at_end_of_data() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let secs = |client: &RtrClient| {
+            (
+                client.refresh_interval.as_secs(),
+                client.retry_interval.as_secs(),
+                client.expire_interval.as_secs(),
+            )
+        };
+
+        let mut client = RtrClient::new(test_config(addr, 3_600, 600, 60), mpsc::channel(1).0);
+        assert_eq!(secs(&client), (3_600, 600, 60));
+        assert!(client.data_expires_at.is_none());
+        client.apply_eod_timers(0, 0, 0);
+        assert_eq!(secs(&client), (59, 59, 60));
+
+        let mut config = test_config(addr, 3_600, 600, 7_200);
+        config.max_expire_interval = Some(120);
+        let mut client = RtrClient::new(config, mpsc::channel(1).0);
+        assert_eq!(secs(&client), (3_600, 600, 120));
+        assert!(client.data_expires_at.is_none());
+        client.apply_eod_timers(0, 0, 0);
+        assert_eq!(secs(&client), (119, 119, 120));
     }
 
     /// §6 timer acceptance rules, asserted on the effective intervals:
