@@ -372,10 +372,14 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         self.assert_red("has no manifested measured_on date", manifest)
 
     def test_fresh_claim_does_not_require_a_date(self) -> None:
-        original = text("docs/perf/README.md")
-        summary = original.replace("  measured 2026-08-30\n", "", 1)
-        self.assertNotEqual(original, summary)
-        self.assertEqual(self.errors(overrides={"docs/perf/README.md": summary}), [])
+        # The live tree has no receipt that stays fresh across releases, so use
+        # the fixture: v0.4.0 is exactly RELEASE_WINDOW releases after v0.1.0.
+        with TemporaryReceiptRepository() as fixture:
+            releases = [name for _, name in checker.stable_release_tags(fixture.root)]
+            self.assertEqual(releases, ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0"])
+            for source in checker.FRONT_DOORS:
+                self.assertNotIn("measured", (fixture.root / source).read_text(encoding="utf-8"))
+            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), [])
 
     def test_receipt_must_record_manifested_provenance(self) -> None:
         path = "docs/perf/ixp-matrix-2026-07.md"
