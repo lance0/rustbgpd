@@ -2,11 +2,12 @@
 """Validate front-door performance claims and receipt provenance.
 
 The structured manifest names the performance claims that function as project
-front doors.  Git proves when each measured revision first entered a release;
-old evidence remains publishable only when its claim carries an exact
-``measured YYYY-MM-DD`` label.  Receipt files outside the front-door manifest
-are still inventoried for inbound links, but an orphan is advisory rather than
-a release failure.
+front doors.  Git proves when each measured revision first entered a release,
+and any provenance mismatch fails the check.  A claim whose receipt has aged
+past the release window without an exact ``measured YYYY-MM-DD`` label is an
+advisory, not a failure: that age changes when a release is tagged, not when
+the claim does.  Receipt files outside the front-door manifest are still
+inventoried for inbound links; an orphan is likewise advisory.
 """
 
 from __future__ import annotations
@@ -299,13 +300,15 @@ def check_contract(
     root: Path,
     manifest: dict[str, object],
     overrides: dict[str, str] | None = None,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
+    """Return ``(errors, advisories)``; only errors fail the check."""
     errors: list[str] = []
+    advisories: list[str] = []
     check_house_contract(root, errors, overrides)
     try:
         releases = stable_release_tags(root)
     except ContractError as error:
-        return errors + [str(error)]
+        return errors + [str(error)], advisories
     release_names = [name for _, name in releases]
     current_release = release_names[-1]
 
@@ -389,21 +392,21 @@ def check_contract(
             age = release_ages.get(receipt)
             # Age counts stable-release transitions after first containment:
             # the containing release plus three later lines remains current,
-            # and the fourth transition requires an exact measured-on date.
+            # and from the fourth transition an undated claim is an advisory.
             if age is None or age <= RELEASE_WINDOW:
                 continue
             measured_on = receipt_by_path[receipt].get("measured_on")
             if measured_on is None:
-                errors.append(
+                advisories.append(
                     f"{source} stale claim for {receipt} has no manifested measured_on date"
                 )
                 continue
             phrase = f"measured {measured_on}"
             if phrase not in block:
-                errors.append(
-                    f"{source} stale claim for {receipt} must carry exact phrase {phrase!r}"
+                advisories.append(
+                    f"{source} stale claim for {receipt} does not carry exact phrase {phrase!r}"
                 )
-    return errors
+    return errors, advisories
 
 
 def tracked_markdown(root: Path) -> list[Path]:
@@ -444,19 +447,23 @@ def unlinked_receipts(root: Path) -> list[str]:
 def main() -> int:
     try:
         manifest = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
-        errors = check_contract(ROOT, manifest)
+        errors, stale = check_contract(ROOT, manifest)
         orphans = unlinked_receipts(ROOT)
     except (OSError, ContractError) as error:
         errors = [str(error)]
+        stale = []
         orphans = []
     for error in errors:
         print(f"performance receipt integrity check failed: {error}", file=sys.stderr)
+    for advisory in stale:
+        print(f"performance receipt advisory: {advisory}")
     for path in orphans:
         print(f"performance receipt advisory: no inbound Markdown link to {path}")
     if not errors:
         print(
             "performance receipt integrity check passed: "
-            f"{len(orphans)} unlinked receipt(s) reported"
+            f"{len(stale)} undated stale claim(s) and "
+            f"{len(orphans)} unlinked receipt(s) reported as advisories"
         )
     return int(bool(errors))
 

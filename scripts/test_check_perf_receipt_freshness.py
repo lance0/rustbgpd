@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import os
 import subprocess
@@ -11,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -247,6 +250,13 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         manifest: dict[str, object] | None = None,
         overrides: dict[str, str] | None = None,
     ) -> list[str]:
+        return self.result(manifest, overrides)[0]
+
+    def result(
+        self,
+        manifest: dict[str, object] | None = None,
+        overrides: dict[str, str] | None = None,
+    ) -> tuple[list[str], list[str]]:
         return checker.check_contract(ROOT, MANIFEST if manifest is None else manifest, overrides)
 
     def assert_red(
@@ -257,6 +267,16 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
     ) -> None:
         errors = self.errors(manifest, overrides)
         self.assertTrue(any(needle in error for error in errors), errors)
+
+    def assert_advisory(
+        self,
+        needle: str,
+        manifest: dict[str, object] | None = None,
+        overrides: dict[str, str] | None = None,
+    ) -> None:
+        errors, advisories = self.result(manifest, overrides)
+        self.assertEqual(errors, [])
+        self.assertTrue(any(needle in advisory for advisory in advisories), advisories)
 
     def test_live_contract_is_green(self) -> None:
         self.assertEqual(self.errors(), [])
@@ -355,21 +375,35 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             overrides={"docs/perf/README.md": mutated},
         )
 
-    def test_each_stale_claim_requires_its_exact_date(self) -> None:
+    def test_stale_claim_without_its_exact_date_is_advisory(self) -> None:
         comparison = text("docs/explanation/comparison.md")
         for old, expected in (("measured 2026-07-26", "measured 2026-07-26"),):
             with self.subTest(old=old):
-                self.assert_red(
-                    f"must carry exact phrase '{expected}'",
+                self.assert_advisory(
+                    f"does not carry exact phrase '{expected}'",
                     overrides={"docs/explanation/comparison.md": comparison.replace(old, "measured later", 1)},
                 )
 
-    def test_stale_claim_cannot_hide_behind_a_manifest_exception(self) -> None:
+    def test_stale_claim_without_a_manifested_date_is_advisory(self) -> None:
         manifest = copy.deepcopy(MANIFEST)
         receipt_item(manifest, "docs/perf/v0.61.0-final-performance-2026-07.md").pop(
             "measured_on"
         )
-        self.assert_red("has no manifested measured_on date", manifest)
+        self.assert_advisory("has no manifested measured_on date", manifest)
+
+    def test_main_exit_code_ignores_advisories(self) -> None:
+        for result, expected in (
+            (([], ["stale advisory"]), 0),
+            ((["broken provenance"], ["stale advisory"]), 1),
+        ):
+            with (
+                self.subTest(result=result),
+                mock.patch.object(checker, "check_contract", return_value=result),
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(checker.main(), expected)
+            self.assertIn("performance receipt advisory: stale advisory", stdout.getvalue())
 
     def test_fresh_claim_does_not_require_a_date(self) -> None:
         # The live tree has no receipt that stays fresh across releases, so use
@@ -379,7 +413,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             self.assertEqual(releases, ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0"])
             for source in checker.FRONT_DOORS:
                 self.assertNotIn("measured", (fixture.root / source).read_text(encoding="utf-8"))
-            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), [])
+            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), ([], []))
 
     def test_receipt_must_record_manifested_provenance(self) -> None:
         path = "docs/perf/ixp-matrix-2026-07.md"
@@ -395,7 +429,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             item = receipt_item(manifest, fixture.receipt)
             item["measured_commit"] = unknown
             receipt = (fixture.root / fixture.receipt).read_text(encoding="utf-8")
-            errors = checker.check_contract(
+            errors, _ = checker.check_contract(
                 fixture.root,
                 manifest,
                 {fixture.receipt: receipt + f"\nMeasured commit: `{unknown}`\n"},
@@ -414,7 +448,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             item = receipt_item(manifest, fixture.receipt)
             item["release_commit"] = untagged
             receipt = (fixture.root / fixture.receipt).read_text(encoding="utf-8")
-            errors = checker.check_contract(
+            errors, _ = checker.check_contract(
                 fixture.root,
                 manifest,
                 {fixture.receipt: receipt + f"\nRelease commit: `{untagged}`\n"},
@@ -425,7 +459,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
     def test_temporary_git_untagged_measurement_requires_source_equivalent(self) -> None:
         with TemporaryReceiptRepository() as fixture:
             fixture.run("tag", "-d", fixture.receipt_tag)
-            errors = checker.check_contract(fixture.root, fixture.manifest)
+            errors, _ = checker.check_contract(fixture.root, fixture.manifest)
             expected = (
                 f"measured commit {fixture.measured_commit} is contained by no git tag"
             )
@@ -437,7 +471,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             manifest = copy.deepcopy(fixture.manifest)
             item = receipt_item(manifest, fixture.receipt)
             item["source_equivalent"] = True
-            errors = checker.check_contract(fixture.root, manifest)
+            errors, _ = checker.check_contract(fixture.root, manifest)
             expected = (
                 f"source-equivalent release commit {fixture.release_commit} "
                 f"is not an ancestor of measured commit {fixture.measured_commit}"
@@ -458,7 +492,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                     manifest,
                     {fixture.receipt: receipt + f"\nMeasured commit: `{measured_commit}`\n"},
                 ),
-                [],
+                ([], []),
             )
 
     def test_temporary_git_off_main_measurement_and_landed_sibling_are_green(self) -> None:
@@ -494,17 +528,18 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                 checker.commit_tags(fixture.root, fixture.measured_commit),
             )
             self.assertIn("v0.1.0", checker.commit_tags(fixture.root, fixture.release_commit))
-            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), [])
+            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), ([], []))
 
-    def test_temporary_git_next_release_requires_exact_measured_date(self) -> None:
+    def test_temporary_git_next_release_reports_undated_claims_as_advisories(self) -> None:
         with TemporaryReceiptRepository() as fixture:
-            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), [])
+            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), ([], []))
             fixture.add_next_stable_release()
-            errors = checker.check_contract(fixture.root, fixture.manifest)
-            expected = f"must carry exact phrase 'measured {fixture.measured_on}'"
-            self.assertEqual(sum(expected in error for error in errors), 4, errors)
+            errors, advisories = checker.check_contract(fixture.root, fixture.manifest)
+            self.assertEqual(errors, [])
+            expected = f"does not carry exact phrase 'measured {fixture.measured_on}'"
+            self.assertEqual(sum(expected in advisory for advisory in advisories), 4, advisories)
             fixture.add_measured_date_to_claims()
-            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), [])
+            self.assertEqual(checker.check_contract(fixture.root, fixture.manifest), ([], []))
 
     def test_workflow_checklist_and_index_wiring_fail_closed(self) -> None:
         cases = (
