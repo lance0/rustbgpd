@@ -443,6 +443,8 @@ def check(root: Path) -> list[str]:
         "--coverage-label",
         'readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"',
         "https://bird.nic.cz/download/${BIRD3_ASSET}",
+        "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${BIRD3_ASSET}",
+        'prepare_archive "$BIRD3_SHA256" "$2" "$BIRD3_URL" "$BIRD3_FALLBACK_URL"',
         "readonly BIRD3_ATTEMPTS=3",
         "curl -fsSL",
         "--connect-timeout 10",
