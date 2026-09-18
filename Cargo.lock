@@ -3106,6 +3106,7 @@ dependencies = [
  "prost",
  "rs-config-render",
  "rtnetlink",
+ "rusqlite",
  "rustbgpctl",
  "rustbgpd-api",
  "rustbgpd-bfd",

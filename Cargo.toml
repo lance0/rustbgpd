@@ -209,6 +209,9 @@ prost.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+# Seeds an events DB with a newer schema version for the downgrade-fence
+# proof in tests/grpc_failure_exit_code.rs.
+rusqlite.workspace = true
 criterion.workspace = true
 tikv-jemalloc-ctl.workspace = true
 # Drives the gRPC services directly (Request/Status/Code) in the tests that
