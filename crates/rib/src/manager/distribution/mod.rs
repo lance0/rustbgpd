@@ -5010,9 +5010,15 @@ impl RibManager {
             }
         }
         // An emptied filter (REMOVE-ALL or a reset) means permit-all again —
-        // drop the entry so the absent-filter fast path applies.
+        // drop the entry so the absent-filter fast path applies, and the
+        // peer's entry with its last family: readers such as
+        // `clean_policy_transition_peer_ready` check the peer key, so a
+        // present key must mean an installed filter.
         if now_empty && let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {
             by_family.remove(&family);
+            if by_family.is_empty() {
+                self.peer_orf_filters.remove(&peer);
+            }
         }
         if reset || when == WhenToRefresh::Immediate {
             // If this peer's EoR for the family was withheld at `PeerUp`

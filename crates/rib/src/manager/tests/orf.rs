@@ -1176,6 +1176,22 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
     );
 }
 
+/// The `orf_installed` classifier input the live update-group snapshot
+/// reports for `peer`.
+fn orf_installed_classifier_input(manager: &RibManager, peer: IpAddr) -> bool {
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_update_group_snapshot(reply);
+    response
+        .try_recv()
+        .expect("synchronous snapshot reply")
+        .peers
+        .into_iter()
+        .find(|snapshot| snapshot.peer == peer)
+        .expect("peer is a registered update-group member")
+        .input
+        .orf_installed
+}
+
 /// Same invariant through the ORF-message path: an Address-Prefix ORF push
 /// is itself a ROUTE-REFRESH (RFC 5291 §6) and lifts the family's gate.
 #[test]
@@ -1203,9 +1219,30 @@ fn orf_pending_entry_drops_after_last_orf_message_lift() {
         "no family gated ⇒ no entry: {:?}",
         manager.peer_orf_pending.get(&peer)
     );
-    // The installed filter keeps this peer off the clean transition path.
-    assert!(manager.peer_orf_filters.contains_key(&peer));
-    assert!(!manager.clean_policy_transition_peer_ready(peer));
+    // An empty push installs nothing, so no filter entry may remain either:
+    // the readiness predicate and the classifier test this map by key.
+    assert!(
+        !manager.peer_orf_filters.contains_key(&peer),
+        "no filter installed ⇒ no entry: {:?}",
+        manager.peer_orf_filters.get(&peer)
+    );
+    // With both gates lifted and nothing installed, no clause of the
+    // readiness predicate holds the peer back — the same end state as the
+    // plain ROUTE-REFRESH path above.
+    assert!(
+        manager.clean_policy_transition_peer_ready(peer),
+        "a fully lifted ORF peer with no installed filter no longer reads as gated"
+    );
+    // What keeps the peer off the clean transition is the session's ORF
+    // negotiation, not this map: it stays classified `orf_installed`, is
+    // never a grouped member, and so has no transition destination.
+    assert!(orf_installed_classifier_input(&manager, peer));
+    assert!(manager.grouped_member_of(peer).is_none());
+    assert!(
+        manager
+            .clean_policy_transition_destination(peer, None)
+            .is_none()
+    );
 
     // Peer down after the entry is already gone must not disturb teardown.
     manager.handle_update(RibUpdate::PeerDown {
@@ -1215,4 +1252,89 @@ fn orf_pending_entry_drops_after_last_orf_message_lift() {
     assert!(!manager.peer_orf_pending.contains_key(&peer));
     assert!(!manager.peer_orf_filters.contains_key(&peer));
     assert!(!manager.outbound_peers.contains_key(&peer));
+}
+
+/// A genuinely installed filter keeps the peer's entry, and that entry keeps
+/// the peer off the clean transition path; removing the last entry of the
+/// last family drops it again. Only the emptied family goes while another
+/// family still holds a filter.
+#[test]
+fn orf_filter_entry_tracks_installed_filters() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    let v4 = (Afi::Ipv4, Safi::Unicast);
+    let v6 = (Afi::Ipv6, Safi::Unicast);
+    let v6_permit = AddressPrefixOrf {
+        action: OrfAction::Add,
+        match_: OrfMatch::Permit,
+        sequence: 10,
+        min_len: 32,
+        max_len: 48,
+        prefix: Some(Prefix::V6(Ipv6Prefix::new(
+            "2001:db8::".parse().unwrap(),
+            32,
+        ))),
+    };
+    let remove_all = AddressPrefixOrf {
+        action: OrfAction::RemoveAll,
+        match_: OrfMatch::Permit,
+        sequence: 0,
+        min_len: 0,
+        max_len: 0,
+        prefix: None,
+    };
+    let push = |manager: &mut RibManager, afi, entries| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::PeerOrfUpdate {
+            peer,
+            session_id: 7,
+            afi,
+            safi: Safi::Unicast,
+            when: WhenToRefresh::Defer,
+            entries,
+            reply,
+        });
+        response
+            .try_recv()
+            .expect("synchronous ORF reply")
+            .expect("ORF update accepted");
+    };
+
+    push(
+        &mut manager,
+        Afi::Ipv4,
+        vec![orf_permit(
+            10,
+            8,
+            24,
+            Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+        )],
+    );
+    push(&mut manager, Afi::Ipv6, vec![v6_permit]);
+    assert!(!manager.peer_orf_pending.contains_key(&peer));
+    let installed = |manager: &RibManager| -> Vec<(Afi, Safi)> {
+        let mut families: Vec<_> = manager
+            .peer_orf_filters
+            .get(&peer)
+            .into_iter()
+            .flat_map(|by_family| by_family.keys().copied())
+            .collect();
+        families.sort_unstable_by_key(|&(afi, safi)| (afi as u16, safi as u8));
+        families
+    };
+    assert_eq!(installed(&manager), vec![v4, v6]);
+    // The installed filter keeps this peer off the clean transition path.
+    assert!(!manager.clean_policy_transition_peer_ready(peer));
+    assert!(orf_installed_classifier_input(&manager, peer));
+
+    // Emptying one family leaves the other family's filter installed.
+    push(&mut manager, Afi::Ipv4, vec![remove_all]);
+    assert_eq!(installed(&manager), vec![v6]);
+    assert!(!manager.clean_policy_transition_peer_ready(peer));
+
+    // Emptying the last family drops the peer's entry.
+    push(&mut manager, Afi::Ipv6, vec![remove_all]);
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    assert!(manager.clean_policy_transition_peer_ready(peer));
+    assert!(orf_installed_classifier_input(&manager, peer));
 }
