@@ -493,6 +493,20 @@ impl RibManager {
         self.prune_exact_export_rejections();
     }
 
+    /// Lift the RFC 5291 §6 initial-advertisement gate for one family and
+    /// drop the peer's entry once no family remains gated. Some readers
+    /// check the key rather than the set (`clean_policy_transition_peer_ready`),
+    /// so an empty entry would keep reporting the peer as gated for the
+    /// rest of the session.
+    pub(super) fn lift_orf_gate(&mut self, peer: IpAddr, family: (Afi, Safi)) {
+        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
+            pending.remove(&family);
+            if pending.is_empty() {
+                self.peer_orf_pending.remove(&peer);
+            }
+        }
+    }
+
     pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "handling route refresh request");
         self.send_route_refresh_response(peer, afi, safi);
@@ -720,9 +734,7 @@ impl RibManager {
                 }
                 // RFC 5291 §6: a peer ROUTE-REFRESH lifts the initial-
                 // advertisement gate. Internal recovery may only observe it.
-                if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
-                    pending.remove(&family);
-                }
+                self.lift_orf_gate(peer, family);
                 // A GR restarter's EoR may have been withheld at PeerUp while
                 // the ORF gate was active. Only the peer refresh that lifts
                 // that gate may consume and flush this protocol deferral.

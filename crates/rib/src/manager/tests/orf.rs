@@ -1093,3 +1093,130 @@ async fn peer_down_clears_gr_deferred_eor() {
         "peer down must clear the outstanding EoR deferral"
     );
 }
+
+/// Register `peer` on a synchronous manager with ORF receive negotiated for
+/// both unicast families, so both RFC 5291 §6 gates start armed.
+fn dual_stack_orf_manager(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (out_tx, out_rx) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 7,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: dual_stack_sendable(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    assert_eq!(
+        manager.peer_orf_pending.get(&peer).map(HashSet::len),
+        Some(2),
+        "both families start gated"
+    );
+    (manager, out_rx)
+}
+
+/// Regression: once every negotiated family's gate has lifted through the
+/// plain ROUTE-REFRESH path, the peer's `peer_orf_pending` entry must go
+/// too. `clean_policy_transition_peer_ready` checks the key, not the set,
+/// so a stranded empty entry kept reporting the peer as gated for the rest
+/// of the session.
+#[test]
+fn orf_pending_entry_drops_after_last_route_refresh_lift() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    assert!(!manager.clean_policy_transition_peer_ready(peer));
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_eq!(
+        manager.peer_orf_pending.get(&peer).map(HashSet::len),
+        Some(1),
+        "one family still gated keeps the entry"
+    );
+    assert!(!manager.clean_policy_transition_peer_ready(peer));
+
+    manager.handle_update(RibUpdate::RouteRefreshRequest {
+        peer,
+        session_id: 7,
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+    });
+    assert!(
+        !manager.peer_orf_pending.contains_key(&peer),
+        "no family gated ⇒ no entry: {:?}",
+        manager.peer_orf_pending.get(&peer)
+    );
+    // A successful refresh response leaves an empty `pending_refresh` entry
+    // behind, which the same readiness predicate also checks by key. Clear
+    // it so the assertion below isolates the ORF clause.
+    manager.pending_refresh.remove(&peer);
+    assert!(
+        manager.clean_policy_transition_peer_ready(peer),
+        "a fully lifted ORF peer no longer reads as gated"
+    );
+    // The readiness change is not observable through the transition itself:
+    // an ORF-receive peer is never a grouped member, so the cohort falls
+    // back at the destination check either way.
+    assert!(manager.grouped_member_of(peer).is_none());
+    assert!(
+        manager
+            .clean_policy_transition_destination(peer, None)
+            .is_none()
+    );
+}
+
+/// Same invariant through the ORF-message path: an Address-Prefix ORF push
+/// is itself a ROUTE-REFRESH (RFC 5291 §6) and lifts the family's gate.
+#[test]
+fn orf_pending_entry_drops_after_last_orf_message_lift() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (mut manager, _out_rx) = dual_stack_orf_manager(peer);
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::PeerOrfUpdate {
+            peer,
+            session_id: 7,
+            afi,
+            safi: Safi::Unicast,
+            when: WhenToRefresh::Defer,
+            entries: vec![],
+            reply,
+        });
+        response
+            .try_recv()
+            .expect("synchronous ORF reply")
+            .expect("ORF update accepted");
+    }
+    assert!(
+        !manager.peer_orf_pending.contains_key(&peer),
+        "no family gated ⇒ no entry: {:?}",
+        manager.peer_orf_pending.get(&peer)
+    );
+    // The installed filter keeps this peer off the clean transition path.
+    assert!(manager.peer_orf_filters.contains_key(&peer));
+    assert!(!manager.clean_policy_transition_peer_ready(peer));
+
+    // Peer down after the entry is already gone must not disturb teardown.
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 7,
+    });
+    assert!(!manager.peer_orf_pending.contains_key(&peer));
+    assert!(!manager.peer_orf_filters.contains_key(&peer));
+    assert!(!manager.outbound_peers.contains_key(&peer));
+}

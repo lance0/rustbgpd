@@ -741,6 +741,8 @@ pub struct RibManager {
     /// Families whose initial advertisement is gated pending the peer's first
     /// ROUTE-REFRESH (RFC 5291 §6). While a `(peer, AFI, SAFI)` is here, the
     /// initial table dump skips it; the gate is lifted on the first refresh.
+    /// A peer's entry is dropped once no family remains gated
+    /// (`lift_orf_gate`), so key presence means "at least one family gated".
     peer_orf_pending: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Families whose initial-table `EoR` is withheld because the peer came
     /// back as a graceful-restart RESTARTER (RFC 4724) while the family was

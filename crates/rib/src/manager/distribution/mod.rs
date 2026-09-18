@@ -1490,7 +1490,7 @@ impl RibManager {
     /// RS ASN (`extend_clean_policy_transition_inventory`) — a tagged
     /// inventory rejects the whole optimized plan there, before any
     /// member is moved or an envelope emitted.
-    fn clean_policy_transition_peer_ready(&self, peer: IpAddr) -> bool {
+    pub(super) fn clean_policy_transition_peer_ready(&self, peer: IpAddr) -> bool {
         let sendable = self.peer_sendable_families.get(&peer);
         let only_unicast = sendable.is_some_and(|families| {
             !families.is_empty() && families.iter().all(|(_, safi)| *safi == Safi::Unicast)
@@ -4949,9 +4949,7 @@ impl RibManager {
         );
         let family = (afi, safi);
         // The ORF message is itself a ROUTE-REFRESH (RFC 5291 §6) — lift the gate.
-        if let Some(pending) = self.peer_orf_pending.get_mut(&peer) {
-            pending.remove(&family);
-        }
+        self.lift_orf_gate(peer, family);
         let filter = self
             .peer_orf_filters
             .entry(peer)
