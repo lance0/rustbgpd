@@ -134,6 +134,16 @@ The recipes intentionally expose their direct commands:
   `just gate-ci-steps`, and `just gate-msrv` in sequence. It takes tens of
   minutes and includes the Criterion smoke, so do not run another gate
   beside it.
+- `just gate-release [--mode release] [--base <commit>] [--heavy]` runs the
+  checks that otherwise first fail on a release commit: the metric
+  release-note contract, the published-crate README freshness check against
+  the merge base with `origin/main`, and the `CHANGELOG.md` heading of every
+  crate whose manifest is ahead of
+  `docs/reference/published-crate-versions.json`. On a release commit, or
+  with `--mode release`, it also requires dated crate headings, released
+  crate README wording, and the root `CHANGELOG.md` section that the release
+  workflow extracts; otherwise it lists those checks as skipped. `--heavy`
+  adds `cargo audit`, the release build, and the publish dry-run.
 - `just fuzz-list` prints every cargo-fuzz `<crate> <target>` pair from the
   fail-closed inventory in `scripts/check_fuzz_target_inventory.py`.
   `just fuzz <crate> <target> [args]` runs one listed target from its owning
@@ -144,7 +154,8 @@ Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
 checks that need no privileges or pull-request context; these stay CI-only:
 
 - the published-crate README freshness check, which diffs against the pull
-  request base;
+  request base (`just gate-release` runs the same comparison against the
+  merge base with `origin/main`);
 - the exact v0.64 migration test, which runs only when
   `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI
   prepares;

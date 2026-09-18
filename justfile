@@ -34,8 +34,9 @@ _gate:
 # rustdoc commands; `test-feature-gated` the feature-gated Cargo commands;
 # `gate-ci-steps` every other named script step of the core and scale/receipt
 # jobs, read from the workflow; and `gate-msrv` the msrv job. What stays
-# CI-only: the published-crate README check (it diffs against the pull request
-# base), the exact v0.64 migration test (it needs the validator binary CI
+# outside it: the published-crate README check (it diffs against the pull
+# request base; `gate-release` runs it against the merge base with
+# origin/main), the exact v0.64 migration test (it needs the validator binary CI
 # prepares), the privileged kernel job (`just netns` runs it in Docker), and
 # every other workflow, including the interop and kernel labs. The recipes run
 # one after another because `test-feature-gated` includes the Criterion smoke;
@@ -87,6 +88,7 @@ check-contracts:
     python3 scripts/check_markdown_test_pins.py
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
+    python3 -m unittest -v scripts/test_check_release_preflight.py
 
 # Lint every workspace target with warnings denied.
 check-clippy:
@@ -194,6 +196,17 @@ gate-msrv:
     exec bash scripts/build-lock.sh \
         env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/msrv-${msrv}" \
         cargo "+${msrv}" check --locked --workspace --all-targets
+
+# The release-only checks are skipped, and listed, while the root CHANGELOG
+# `[Unreleased]` section still has entries; `--mode release` forces them.
+# `--base <commit>` replaces the origin/main merge base of the README check,
+# and `--heavy` adds `cargo audit`, the release build, and the multi-package
+# publish dry-run.
+
+# Run the checks that otherwise first fail on a release commit: metric release notes, published-crate README freshness, crate changelogs, and the root changelog section.
+gate-release *args:
+    python3 -m unittest -v scripts/test_check_release_preflight.py
+    python3 scripts/check_release_preflight.py {{args}}
 
 # Excluded ignored tests: the TCP-AO kernel receipts (transport listener and
 # socket_opts) need CONFIG_TCP_AO and privileges; the four config persistence

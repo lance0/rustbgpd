@@ -40,6 +40,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from the workflow, and the new `just gate-msrv`, which checks the workspace
   on the `rust-version` toolchain. `CONTRIBUTING.md` lists the checks that
   remain CI-only.
+- `just gate-release` runs locally the checks that otherwise first fail on a
+  release commit in hosted CI: the metric release-note contract, the
+  published-crate README freshness check, and the changelog heading of every
+  crate whose manifest is ahead of the published record. On a release commit
+  it also requires dated crate changelog headings, released crate README
+  wording, and the root changelog section the release workflow extracts;
+  `--heavy` adds `cargo audit`, the release build, and the publish dry-run.
+  The `semver-checks` workflow now also runs on every `v*` tag push, and the
+  CI and Interop workflows accept a manual dispatch.
 
 ### Changed
 

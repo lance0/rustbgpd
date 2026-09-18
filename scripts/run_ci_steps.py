@@ -30,7 +30,7 @@ LOCAL_SKIPS = {
         "Smoke selection-deferral release receipt": "`just test-feature-gated`",
         "Smoke MRT snapshot allocation benchmark modes": "`just test-feature-gated`",
         "Gate eager policy-set sharing allocation shape": "`just test-feature-gated`",
-        "Published crate README freshness gate": "needs the pull request base",
+        "Published crate README freshness gate": "needs the pull request base; `just gate-release`",
     },
     "scale_receipts": {
         "Install receipt-tool dependencies": INSTALLS_TOOLS,
