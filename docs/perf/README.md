@@ -69,12 +69,13 @@ The mixed-date boundary and earlier bands are preserved in the receipt.
 one staging pass: ~27x faster 100k-route convergence at 256 uniform RR
 clients (15.1 s to 0.56 s), measured 2026-07-03; v2 extends sharing to
 VPNv4/v6 with per-member RT filtering at emit
-([receipt](scale-receipt-2026-07.md)).
+([receipt](scale-receipt-2026-07.md), whose current 1,000-client rows were
+measured 2026-08-30).
 
 At route-reflector shapes, the
-[1000-peer scale receipt](scale-receipt-2026-07.md), measured 2026-07-03,
-records 1,000 uniform RR clients × 100k routes converging on the
-wire in 1.82 s at 419 MiB
+[1000-peer scale receipt](scale-receipt-2026-07.md), measured 2026-07-03
+(its current rows, listed above, were measured 2026-08-30), records 1,000
+uniform RR clients × 100k routes converging on the wire in 1.82 s at 419 MiB
 whole-process RSS, and 1,000 clients × 100k VPNv4 in 12.60 s / 625 MiB uniform
 and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
 and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
