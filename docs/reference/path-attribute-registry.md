@@ -265,9 +265,11 @@ PMSI label; IP Prefix routes use L3 Function bits. EVPN Type 4 and families
 outside these encodings keep their existing selection behavior.
 
 An unknown endpoint behavior with no arguments remains eligible. Nonzero
-Argument Length requires the understood argument-capable End.DT2M behavior;
-End.DT2M requires SID Structure, including the zero-SID EAD encoding specified
-by [RFC 9819 §3](https://www.rfc-editor.org/rfc/rfc9819.html#section-3).
+Argument Length requires an understood argument-capable behavior: End.DT2M
+(24) or one of its SID-list-compression flavors, End.DT2M with NEXT-CSID (68)
+and End.DT2M with REPLACE-CSID (124). Each of the three requires SID Structure,
+including the zero-SID EAD encoding specified by
+[RFC 9819 §3](https://www.rfc-editor.org/rfc/rfc9819.html#section-3).
 Reserved bits, unknown extensions, unused SID tail bits, and later duplicate
 Service TLVs remain preserved. These checks do not implement PE import,
 service origination, SID reconstruction, next-hop rewriting, or SRv6 forwarding.
