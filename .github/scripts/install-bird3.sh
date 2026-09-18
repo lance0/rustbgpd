@@ -32,6 +32,10 @@ fi
 readonly BIRD3_VERSION BIRD3_SHA256 BIRD3_COVERAGE_LABEL
 readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"
 readonly BIRD3_URL="https://bird.nic.cz/download/${BIRD3_ASSET}"
+# The primary host intermittently refuses hosted runners. The mirror serves the
+# same upstream tarball under the same name and is trusted only through the same
+# pinned checksum, so it adds availability without adding trust.
+readonly BIRD3_FALLBACK_URL="https://ftp.openbsd.org/pub/OpenBSD/distfiles/${BIRD3_ASSET}"
 readonly BIRD3_ATTEMPTS=3
 # prepare_archive separates a third-party outage from a supply-chain signal so
 # callers can act on the difference. 3 = the archive bytes never arrived (every
@@ -97,15 +101,15 @@ stage_archive() (
 # The upstream archive is a third party. When it will not serve the pinned
 # tarball at all, say so where a human reading the run will see it: an
 # annotation in the run UI plus a line in the job summary naming the scenario
-# that loses coverage, the reason, and the URL that refused. This is the only
-# site that holds the URL, so the loud text cannot drift from the real target.
+# that loses coverage, the reason, and the URLs that refused. It prints the
+# URLs prepare_archive actually tried, so the loud text cannot drift from them.
 announce_unavailable() {
-    local url=${1:?url}
+    local urls=${*:?url}
     local message
 
     message="${BIRD3_COVERAGE_LABEL}: the pinned"
     message+=" bird ${BIRD3_VERSION} source archive is unavailable upstream"
-    message+=" after ${BIRD3_ATTEMPTS} attempts (${url})."
+    message+=" after ${BIRD3_ATTEMPTS} attempts per source (${urls})."
     message+=" This is third-party unavailability, not a rustbgpd failure;"
     message+=" re-run once upstream recovers."
     echo "::warning::${message}" >&2
@@ -125,11 +129,14 @@ download_archive_once() {
         "$url"
 }
 
+# Tries each source URL in order with the same bounded download+verify loop;
+# a mirror is never checked any differently from the primary.
 prepare_archive() {
     local sha256=${1:?sha256}
-    local url=${2:?url}
-    local archive=${3:?archive}
-    local attempt staged_archive
+    local archive=${2:?archive}
+    shift 2
+    : "${1:?url}"
+    local url attempt staged_archive
     local fetched=0
 
     if verify_archive_contents "$sha256" "$archive" 2>/dev/null; then
@@ -142,31 +149,34 @@ prepare_archive() {
     fi
 
     mkdir -p "$(dirname "$archive")"
-    for ((attempt = 1; attempt <= BIRD3_ATTEMPTS; attempt++)); do
-        staged_archive=$(mktemp "${archive}.download.XXXXXX")
-        if download_archive_once "$url" "$staged_archive"; then
-            fetched=1
-            if verify_archive_contents "$sha256" "$staged_archive"; then
-                mv -f -- "$staged_archive" "$archive"
-                echo "downloaded and verified bird3 archive"
-                return 0
+    for url in "$@"; do
+        for ((attempt = 1; attempt <= BIRD3_ATTEMPTS; attempt++)); do
+            staged_archive=$(mktemp "${archive}.download.XXXXXX")
+            if download_archive_once "$url" "$staged_archive"; then
+                fetched=1
+                if verify_archive_contents "$sha256" "$staged_archive"; then
+                    mv -f -- "$staged_archive" "$archive"
+                    echo "downloaded and verified bird3 archive from ${url}"
+                    return 0
+                fi
             fi
-        fi
-        rm -f -- "$staged_archive"
-        if ((attempt < BIRD3_ATTEMPTS)); then
-            echo "::warning::bird3 download/verify attempt ${attempt}/${BIRD3_ATTEMPTS} failed; retrying" >&2
-            sleep $((attempt * 5))
-        fi
+            rm -f -- "$staged_archive"
+            if ((attempt < BIRD3_ATTEMPTS)); then
+                echo "::warning::bird3 download/verify attempt ${attempt}/${BIRD3_ATTEMPTS} failed (${url}); retrying" >&2
+                sleep $((attempt * 5))
+            fi
+        done
+        echo "::warning::bird3 source exhausted after ${BIRD3_ATTEMPTS} attempts: ${url}" >&2
     done
 
     if ((fetched)); then
-        # Bytes arrived and did not match the pinned checksum or the pinned
-        # source version. That is a supply-chain signal, not an outage, and it
-        # stays hard-red no matter how many times it repeats.
-        echo "::error::bird3 archive failed verification after ${BIRD3_ATTEMPTS} attempts: ${url}" >&2
+        # Bytes arrived from some source and did not match the pinned checksum
+        # or the pinned source version. That is a supply-chain signal, not an
+        # outage, and it stays hard-red no matter how many times it repeats.
+        echo "::error::bird3 archive failed verification after ${BIRD3_ATTEMPTS} attempts per source: $*" >&2
         return "$BIRD3_RC_CORRUPT"
     fi
-    announce_unavailable "$url"
+    announce_unavailable "$@"
     return "$BIRD3_RC_UNAVAILABLE"
 }
 
@@ -178,7 +188,7 @@ fail_self_test() {
 self_test() (
     local fixture_dir source_dir valid_archive valid_checksum wrong_dir wrong_archive
     local wrong_checksum partial_archive expected_url staged_hash attempts
-    local summary_file rc
+    local summary_file rc tampered_archive primary_attempts
 
     fixture_dir=$(mktemp -d)
     trap 'rm -rf -- "$fixture_dir"' EXIT
@@ -192,6 +202,8 @@ self_test() (
         '/download/bird-3.3.2.tar.gz'
     [[ "$BIRD3_URL" == "$expected_url" ]] \
         || fail_self_test "release URL drifted"
+    [[ "$BIRD3_FALLBACK_URL" == "https://ftp.openbsd.org/pub/OpenBSD/distfiles/bird-3.3.2.tar.gz" ]] \
+        || fail_self_test "fallback URL drifted"
     [[ "$BIRD3_ATTEMPTS" -eq 3 ]] || fail_self_test "retry bound drifted"
 
     source_dir="$fixture_dir/source/bird-3.3.2"
@@ -261,43 +273,100 @@ self_test() (
         fi
     }
     sleep() { :; }
-    prepare_archive "$valid_checksum" "https://example.invalid/retry" \
-        "$fixture_dir/cache.tar.gz" >/dev/null 2>&1
+    prepare_archive "$valid_checksum" "$fixture_dir/cache.tar.gz" \
+        "https://example.invalid/retry" >/dev/null 2>&1
     [[ "$attempts" -eq 2 ]] || fail_self_test "bounded retry count drifted"
     cmp -s "$valid_archive" "$fixture_dir/cache.tar.gz" \
         || fail_self_test "invalid cache was not atomically replaced"
 
     download_archive_once() { fail_self_test "warm cache reached upstream"; }
-    prepare_archive "$valid_checksum" "https://example.invalid/unreachable" \
-        "$fixture_dir/cache.tar.gz" \
+    prepare_archive "$valid_checksum" "$fixture_dir/cache.tar.gz" \
+        "https://example.invalid/unreachable" \
         | grep -Fxq "using verified cached bird3 archive" \
         || fail_self_test "warm cache attempted an upstream fetch"
 
-    # Upstream refused to serve the bytes at all (a 403/5xx makes curl -f
-    # exit non-zero). That is third-party unavailability: distinct exit code,
-    # loud annotation, and a job-summary line naming scenario/reason/URL.
+    # The primary refuses (a 403/5xx makes curl -f exit non-zero) and the
+    # mirror serves the pinned bytes: the mirror's archive passes the same
+    # verification and lands, and the log names the source that served it.
+    attempts=0
+    primary_attempts=0
+    download_archive_once() {
+        ((attempts += 1))
+        if [[ "$1" == "https://example.invalid/primary" ]]; then
+            ((primary_attempts += 1))
+            return 22
+        fi
+        cp "$valid_archive" "$2"
+    }
+    prepare_archive "$valid_checksum" "$fixture_dir/fallback-cache.tar.gz" \
+        "https://example.invalid/primary" "https://example.invalid/fallback" \
+        >"$fixture_dir/fallback.out" 2>/dev/null \
+        || fail_self_test "verified fallback archive was rejected"
+    [[ "$primary_attempts" -eq "$BIRD3_ATTEMPTS" && "$attempts" -eq $((BIRD3_ATTEMPTS + 1)) ]] \
+        || fail_self_test "fallback was not tried once after the primary's retry bound"
+    cmp -s "$valid_archive" "$fixture_dir/fallback-cache.tar.gz" \
+        || fail_self_test "fallback archive bytes drifted"
+    grep -Fxq "downloaded and verified bird3 archive from https://example.invalid/fallback" \
+        "$fixture_dir/fallback.out" \
+        || fail_self_test "fallback success did not name its source"
+
+    # A mirror is trusted only through the pin. A well-formed archive with the
+    # right version but different bytes must fail closed exactly as it would
+    # from the primary: supply-chain exit code, no artifact, no skip excuse.
+    printf 'extra\n' >"$source_dir/EXTRA"
+    tampered_archive="$fixture_dir/tampered.tar.gz"
+    tar -czf "$tampered_archive" -C "$fixture_dir/source" bird-3.3.2
+    rm -f -- "$source_dir/EXTRA"
     attempts=0
     download_archive_once() {
         ((attempts += 1))
-        return 22
+        [[ "$1" == "https://example.invalid/fallback" ]] || return 22
+        cp "$tampered_archive" "$2"
     }
     summary_file="$fixture_dir/step-summary.md"
     : >"$summary_file"
     rc=0
     GITHUB_STEP_SUMMARY="$summary_file" \
-        prepare_archive "$valid_checksum" "https://example.invalid/unavailable" \
-        "$fixture_dir/cold-cache.tar.gz" >/dev/null 2>"$fixture_dir/unavailable.err" \
+        prepare_archive "$valid_checksum" "$fixture_dir/tampered-cache.tar.gz" \
+        "https://example.invalid/primary" "https://example.invalid/fallback" \
+        >/dev/null 2>"$fixture_dir/tampered.err" \
+        || rc=$?
+    [[ "$rc" -eq "$BIRD3_RC_CORRUPT" ]] \
+        || fail_self_test "wrong-checksum fallback did not report BIRD3_RC_CORRUPT"
+    [[ "$attempts" -eq $((2 * BIRD3_ATTEMPTS)) ]] \
+        || fail_self_test "wrong-checksum fallback retry bound drifted"
+    grep -Fq "bird3 archive checksum mismatch" "$fixture_dir/tampered.err" \
+        || fail_self_test "fallback bytes skipped the checksum verification"
+    [[ ! -e "$fixture_dir/tampered-cache.tar.gz" ]] \
+        || fail_self_test "wrong-checksum fallback left an artifact"
+    [[ ! -s "$summary_file" ]] \
+        || fail_self_test "wrong-checksum fallback wrote a skip excuse to the job summary"
+
+    # Every source refused to serve the bytes at all. That is third-party
+    # unavailability: distinct exit code, loud annotation, and a job-summary
+    # line naming scenario/reason/URLs.
+    attempts=0
+    download_archive_once() {
+        ((attempts += 1))
+        return 22
+    }
+    : >"$summary_file"
+    rc=0
+    GITHUB_STEP_SUMMARY="$summary_file" \
+        prepare_archive "$valid_checksum" "$fixture_dir/cold-cache.tar.gz" \
+        "https://example.invalid/unavailable" "https://example.invalid/mirror" \
+        >/dev/null 2>"$fixture_dir/unavailable.err" \
         || rc=$?
     [[ "$rc" -eq "$BIRD3_RC_UNAVAILABLE" ]] \
         || fail_self_test "unreachable upstream did not report BIRD3_RC_UNAVAILABLE"
-    [[ "$attempts" -eq "$BIRD3_ATTEMPTS" ]] \
+    [[ "$attempts" -eq $((2 * BIRD3_ATTEMPTS)) ]] \
         || fail_self_test "cold-cache retry bound was not enforced"
     [[ ! -e "$fixture_dir/cold-cache.tar.gz" ]] \
         || fail_self_test "failed cold-cache fetch left an artifact"
     grep -Fq '::warning::M43' "$fixture_dir/unavailable.err" \
         || fail_self_test "unavailable upstream did not emit a warning annotation"
-    grep -Fq 'https://example.invalid/unavailable' "$summary_file" \
-        || fail_self_test "job summary did not name the upstream URL"
+    grep -Fq 'https://example.invalid/unavailable https://example.invalid/mirror' "$summary_file" \
+        || fail_self_test "job summary did not name both source URLs"
     grep -Fq 'M43' "$summary_file" \
         || fail_self_test "job summary did not name the skipped scenario"
 
@@ -312,8 +381,8 @@ self_test() (
     : >"$summary_file"
     rc=0
     GITHUB_STEP_SUMMARY="$summary_file" \
-        prepare_archive "$valid_checksum" "https://example.invalid/corrupt" \
-        "$fixture_dir/corrupt-cache.tar.gz" >/dev/null 2>"$fixture_dir/corrupt.err" \
+        prepare_archive "$valid_checksum" "$fixture_dir/corrupt-cache.tar.gz" \
+        "https://example.invalid/corrupt" >/dev/null 2>"$fixture_dir/corrupt.err" \
         || rc=$?
     [[ "$rc" -eq "$BIRD3_RC_CORRUPT" ]] \
         || fail_self_test "unverifiable download did not report BIRD3_RC_CORRUPT"
@@ -344,7 +413,7 @@ usage() {
 case "${1:-}" in
     --prepare-archive)
         [[ $# -eq 2 ]] || usage
-        prepare_archive "$BIRD3_SHA256" "$BIRD3_URL" "$2"
+        prepare_archive "$BIRD3_SHA256" "$2" "$BIRD3_URL" "$BIRD3_FALLBACK_URL"
         ;;
     --stage-archive)
         [[ $# -eq 3 ]] || usage

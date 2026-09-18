@@ -1112,6 +1112,8 @@ class PrimerContractTests(unittest.TestCase):
             (checksum, "0" * 64),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
+            ("ftp.openbsd.org/pub/OpenBSD/distfiles/", "example.invalid/"),
+            ('"$BIRD3_URL" "$BIRD3_FALLBACK_URL"', '"$BIRD3_URL"'),
         ):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
