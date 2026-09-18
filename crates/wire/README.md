@@ -333,7 +333,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.21.1", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

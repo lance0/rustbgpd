@@ -3,7 +3,14 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.21.1 - Unreleased
+
+- Corrected the `FlowSpecAction::TrafficAction::terminal` field documentation
+  to the RFC 8955 section 7.3 meaning of the Terminal Action bit: when set,
+  subsequent `FlowSpec` rules are evaluated; when unset, evaluation stops after
+  this rule. The documentation previously stated the opposite. Encoding,
+  decoding, and the field's type are unchanged; the traffic-action round-trip
+  test now covers all four sample/terminal combinations.
 
 ## 0.21.0 - 2026-09-13
 

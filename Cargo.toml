@@ -36,15 +36,15 @@ categories = ["network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-rustbgpd-wire = { path = "crates/wire", version = "0.21.0" }
+rustbgpd-wire = { path = "crates/wire", version = "0.21.1" }
 rustbgpd-bfd = { path = "crates/bfd", version = "0.70.1" }
-rustbgpd-fsm = { path = "crates/fsm", version = "0.8.0" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.8.1" }
 rustbgpd-transport = { path = "crates/transport", version = "0.70.1" }
 rustbgpd-rib = { path = "crates/rib", version = "0.70.1" }
 rustbgpd-policy = { path = "crates/policy", version = "0.70.1" }
 rustbgpd-api = { path = "crates/api", version = "0.70.1" }
 rustbgpd-telemetry = { path = "crates/telemetry", version = "0.70.1" }
-rustbgpd-rpki = { path = "crates/rpki", version = "0.3.0" }
+rustbgpd-rpki = { path = "crates/rpki", version = "0.3.1" }
 rustbgpd-bmp = { path = "crates/bmp", version = "0.70.1" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.70.1" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.70.1" }
