@@ -65,9 +65,10 @@ candidate when another change selects the generation route.
 
 ## Session-establishment caveat
 
-Several **live** fields bind at session establishment (OPEN negotiation
-or socket creation), not mid-session. Examples: `md5_password`,
-`families`, `add_path`, `graceful_restart`, `hold_time`, `min_hold_time`. These are not
+Several **live** fields bind at session establishment (OPEN negotiation,
+socket creation, or registration with the RIB manager), not mid-session.
+Examples: `md5_password`, `families`, `add_path`, `graceful_restart`,
+`hold_time`, `min_hold_time`, `route_reflector_client`. These are not
 restart-required, but applying them takes a session reset — and on
 SIGHUP reload of a static neighbor the reconciler performs that reset
 **immediately**: any changed session-reset-class field routes the
@@ -175,11 +176,11 @@ reload).
 | `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Hot-applied in place; the new value governs the next GR peer-down event. |
 | `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
-| `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Toggling re-evaluates the existing Adj-RIB-Out on the next distribution pass. |
-| `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node), or `"peer_address"` for the peer's own peering address. Resolved to a concrete address during neighbor resolution and registered with the RIB manager at session establishment, so a change takes effect on the next session. Drives the vantage registry, cached SPF state, per-vantage best-path selection, and `rbgp orr` status. |
-| `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. |
+| `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Registered with the RIB manager at session establishment; the running session's Adj-RIB-Out is not re-evaluated in place. On SIGHUP the reconciler rebuilds the session: the running session is closed with a Cease/Administrative Shutdown NOTIFICATION (not an RFC 8538 Hard Reset), the routes learned from the peer are withdrawn and then re-learned, and the peer is re-advertised under the new flag once the replacement session establishes. The one exception to the withdrawal: when `graceful_restart` is enabled for the neighbor and the peer advertised the Graceful Restart capability with the RFC 8538 Notification bit, routes in the peer's Graceful Restart families are held stale until the replacement session's End-of-RIB or the Graceful Restart (and, where negotiated, Long-Lived Graceful Restart) timers expire; its other families are still withdrawn. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
+| `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node), or `"peer_address"` for the peer's own peering address. Resolved to a concrete address during neighbor resolution and registered with the RIB manager at session establishment; on SIGHUP the reconciler rebuilds the session so the new vantage applies right away. Drives the vantage registry, cached SPF state, per-vantage best-path selection, and `rbgp orr` status. |
+| `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. |
 | `send_non_transitive_extended_communities` | live (effective next session) | Plain-eBGP opt-in for exporting non-transitive Extended Communities. SIGHUP rebuilds the session and the replacement export profile applies the value to the next advertisement; iBGP and route-server-client sessions remain preserving. |
-| `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`), so a change takes effect on the next session. |
+| `per_client_best` | live (effective next session) | RFC 7947 §2.3.2 per-client best-path selection mode. Registered with the RIB manager at session establishment (like `orr_vantage`); on SIGHUP the reconciler rebuilds the session so the new mode applies right away. |
 | `next_hop_ownership` | live (effective next session) | ADR-0107 pre-policy `NEXT_HOP` ownership enforcement for route-server clients (RFC 7948 §4.8). Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
 | `interpret_rfc1997` | live (effective next session) | RFC 1997 `NO_EXPORT` egress enforcement (derived default: `true` unless `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
 | `rs_control_communities` | live (effective next session) | RFC 7947 §2.3.2 / RFC 8195 route-server control-community enforcement (derived default: `true` when `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
@@ -235,7 +236,7 @@ configure their keyring directly.
 | `gr_stale_routes_time` | live | |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |
-| `route_reflector_client` | live (effective next session) | |
+| `route_reflector_client` | live (effective next session) | Same as neighbor; a toggle session-resets the inheriting static members. |
 | `orr_vantage` | live (effective next session) | Inherited RFC 9107 vantage; same semantics as the neighbor field. `"peer_address"` on a group backing a `[[dynamic_neighbors]]` range gives every accepted peer its own vantage. |
 | `route_server_client` | live (effective next session) | |
 | `send_non_transitive_extended_communities` | live (effective next session) | Inherited plain-eBGP export opt-in; same session-rebuild semantics as the neighbor field. |
