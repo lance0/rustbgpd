@@ -538,6 +538,16 @@ wait_pe_grpc() {
     return 1
 }
 
+# Read `rbgp neighbor <peer> -j` on stdin; succeed only when `.state` is exactly
+# "Established". The human detail view is not usable for this: its
+# `Negotiation: unavailable (session not Established)` line carries the word
+# in every other state too. A graceful-restart-stale session renders as
+# "Stale" and deliberately does not count as up. jq reads stdin to EOF, so the
+# writer is never SIGPIPEd under pipefail.
+rbgp_neighbor_json_established() {
+    jq -e '.state == "Established"' >/dev/null 2>&1
+}
+
 # Wait for the VTEP's session to a peer to reach Established.
 wait_vtep_established() {
     local peer=${1:?}
@@ -546,9 +556,7 @@ wait_vtep_established() {
     local timeout=$((attempts * 2))
     log "Waiting for $label session to reach Established..."
     for i in $(seq 1 "$attempts"); do
-        # grep reads to EOF (no -q): -q's early exit can SIGPIPE the
-        # vtep_ctl writer, a false failure under pipefail (LAN-1039).
-        if vtep_ctl neighbor "$peer" 2>/dev/null | grep -i "establ" >/dev/null; then
+        if vtep_ctl neighbor "$peer" -j 2>/dev/null | rbgp_neighbor_json_established; then
             ok "$label session established (attempt $i)"
             return 0
         fi
