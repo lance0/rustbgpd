@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.8.1 - Unreleased
+## 0.8.1 - 2026-09-18
 
 - `validate_open` now limits `NegotiatedSession::negotiated_orf_recv` to the
   address families in the negotiated MultiProtocol intersection, matching the

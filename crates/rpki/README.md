@@ -7,11 +7,13 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-`rustbgpd-rpki` 0.3.0 is released on the `0.3` compatibility line with wire `0.21.0`.
-Upgrade dependencies that exchange public wire types together. This release also
+`rustbgpd-rpki` 0.3.1 is released on the `0.3` compatibility line with wire `0.21.1`.
+Upgrade dependencies that exchange public wire types together. The `0.3` line
 makes four RTR enums non-exhaustive; downstream exhaustive matches need a
 fallback, as described under [Enum exhaustiveness](#enum-exhaustiveness).
-These compatibility changes do not alter runtime behavior.
+Those compatibility changes do not alter runtime behavior. `0.3.1` adds no
+public item; it bounds the configured RTR client timers, as the RTR client
+entry below describes.
 
 ## What this crate provides
 

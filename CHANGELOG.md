@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.70.2] — 2026-09-18
+
 ### Added
 
 - `rs-config-render` in IXP Manager mode now renders members with multiple
@@ -60,15 +62,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `expire_interval` to 600 s and bounds a `Some` `max_expire_interval` the
   same way; daemon configuration validation already rejects a zero
   `expire_interval` and a `max_expire_interval` above two days.
-- Stage patch releases of the independently versioned crates:
-  `rustbgpd-wire` 0.21.1 (a `FlowSpecAction::TrafficAction` documentation
-  correction), `rustbgpd-fsm` 0.8.1 (ORF receive families limited to the
-  negotiated MultiProtocol families), and `rustbgpd-rpki` 0.3.1 (RTR client
-  refresh, retry, and expire interval bounds). No public item was added,
-  removed, or changed, so each stays on its current compatibility line;
-  FSM 0.8.1 and RPKI 0.3.1 require wire 0.21.1 or later on the 0.21 line.
-  Registry examples remain on the last verified published versions until
-  those releases are published.
+- This release publishes patch releases of the independently versioned
+  crates: `rustbgpd-wire` 0.21.1 (a `FlowSpecAction::TrafficAction`
+  documentation correction), `rustbgpd-fsm` 0.8.1 (ORF receive families
+  limited to the negotiated MultiProtocol families), and `rustbgpd-rpki`
+  0.3.1 (RTR client refresh, retry, and expire interval bounds). No public
+  item was added, removed, or changed, so each stays on its current
+  compatibility line; FSM 0.8.1 and RPKI 0.3.1 require wire 0.21.1 or later
+  on the 0.21 line.
 
 ### Fixed
 

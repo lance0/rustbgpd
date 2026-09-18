@@ -10,9 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.8.0 is released on the `0.8` compatibility line with wire `0.21.0`.
-Upgrade dependencies that exchange public wire types together. This dependency
-move introduces no direct FSM API or runtime behavior changes.
+`rustbgpd-fsm` 0.8.1 is released on the `0.8` compatibility line with wire `0.21.1`.
+Upgrade dependencies that exchange public wire types together. The public API
+is unchanged from `0.8.0`; [Compatibility](#compatibility) describes the one
+ORF negotiation change.
 
 ## Usage
 
@@ -113,7 +114,7 @@ negotiated MultiProtocol intersection.
 `rustbgpd-wire 0.21.0` with no direct FSM API or runtime behavior change; see
 the "0.21.0 compatibility note" in the wire README.
 
-`rustbgpd-fsm 0.8.1`, prepared in the source checkout, keeps its public API
+`rustbgpd-fsm 0.8.1` keeps its public API
 unchanged and stays on the `0.8` line with wire `0.21`. Negotiation behavior
 changes in one place: `validate_open` limits
 `NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol

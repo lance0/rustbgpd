@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.21.1 - Unreleased
+## 0.21.1 - 2026-09-18
 
 - Corrected the `FlowSpecAction::TrafficAction::terminal` field documentation
   to the RFC 8955 section 7.3 meaning of the Terminal Action bit: when set,
