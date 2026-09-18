@@ -41,6 +41,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the `rust-version` toolchain. `CONTRIBUTING.md` lists the checks that
   remain CI-only.
 
+### Changed
+
+- The RTR client now bounds a configured `expire_interval` to the RFC 8210 §6
+  range of 600–172800 s with a warning. A value above two days only mattered
+  when the cache omitted its own expire, and is now capped there;
+  `max_expire_interval` is bounded the same way.
+
 ### Fixed
 
 - The Linux EVPN dataplane now retries a failed delete of an L3 (all-active
