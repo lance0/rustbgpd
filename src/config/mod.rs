@@ -1665,8 +1665,9 @@ pub struct NeighborDiff {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigFieldImpact {
-    /// Reload-matrix class `live`: the value applies to the running peer
-    /// without renegotiating the session.
+    /// Reload-matrix class `live`: applying the value does not require
+    /// replacing the session task. Enforcement of the new value can still
+    /// stop BGP, for example when a lowered prefix limit is exceeded.
     HotApplied,
     /// Reload-matrix class `live (effective next session)`: the value is
     /// OPEN-negotiated, socket-scoped, or registered at session
