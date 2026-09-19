@@ -804,3 +804,166 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
         "tearing down the last referencing peer must empty the table"
     );
 }
+
+fn diverse_unicast_fixture(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>, IpAddr) {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    manager.ribs.insert(peer, AdjRibIn::new(peer));
+    let routes = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
+        .map(|index| diverse_unicast_route(index, u32::try_from(index).unwrap()))
+        .collect::<Vec<_>>();
+    for chunk in routes.chunks(ROUTES_RECEIVED_CHUNK_SIZE) {
+        manager.process_announce_chunk(peer, chunk.to_vec());
+    }
+    (manager, tx, peer)
+}
+
+fn diverse_unicast_route(index: usize, med: u32) -> Route {
+    let prefix = Ipv4Prefix::new(
+        Ipv4Addr::from(0x0a00_0000 + u32::try_from(index).unwrap()),
+        32,
+    );
+    let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+    route.attributes = Arc::new(vec![PathAttribute::Med(med)]);
+    route
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_attr_gc_bounds_displaced_sets_and_preserves_current_routes() {
+    let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());
+    let live_sets = ATTR_INTERN_GC_DISPLACED_LIMIT + 1;
+    for index in 1..=ATTR_INTERN_GC_DISPLACED_LIMIT {
+        let route = diverse_unicast_route(0, 100_000 + u32::try_from(index).unwrap());
+        let expected = Arc::clone(&route.attributes);
+        let prefix = route.prefix;
+        manager.process_announce_chunk(peer, vec![route]);
+        assert_eq!(
+            manager.ribs[&peer].get(&prefix, 0).unwrap().attributes,
+            expected
+        );
+        assert_eq!(manager.loc_rib.get(&prefix).unwrap().attributes, expected);
+        if index < ATTR_INTERN_GC_DISPLACED_LIMIT {
+            assert_eq!(manager.attr_intern.len(), live_sets + index);
+            assert_eq!(manager.attr_intern_gc_displaced, index);
+        }
+    }
+    assert_eq!(manager.attr_intern.len(), live_sets);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert!(manager.attr_intern_gc_deadline.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_attr_gc_reclaims_when_actor_is_idle() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, tx, peer) = diverse_unicast_fixture(metrics.clone());
+    let live_sets = ATTR_INTERN_GC_DISPLACED_LIMIT + 1;
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    assert_eq!(manager.attr_intern.len(), live_sets + 1);
+    let actor = tokio::spawn(manager.run());
+    tokio::task::yield_now().await;
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    let observed = gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]);
+    assert!((observed - f64::from(u32::try_from(live_sets).unwrap())).abs() < f64::EPSILON);
+    assert_eq!(
+        histogram_sample_counts_by_label(
+            &metrics,
+            "bgp_rib_actor_work_duration_seconds",
+            "work_unit"
+        )["attribute_gc"],
+        1,
+        "idle collection is visible outside the route-chunk timing",
+    );
+    drop(tx);
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_attr_gc_withdraw_all_reaches_floor_without_waiting() {
+    let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());
+    let withdrawals = (0..=ATTR_INTERN_GC_DISPLACED_LIMIT)
+        .map(|index| (diverse_unicast_route(index, 0).prefix, 0))
+        .collect::<Vec<_>>();
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: withdrawals,
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    assert!(manager.ribs[&peer].is_empty());
+    assert!(manager.loc_rib.is_empty());
+    assert!(manager.attr_intern.is_empty());
+    assert!(manager.attr_intern_gc_deadline.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_attr_gc_keeps_held_attributes_canonical() {
+    let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());
+    let original = diverse_unicast_route(0, 0);
+    let held = Arc::clone(
+        &manager.ribs[&peer]
+            .get(&original.prefix, 0)
+            .unwrap()
+            .attributes,
+    );
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    // Expiry on an active UPDATE takes the same full sweep as the idle timer.
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)]);
+    let mut equal = Arc::new(held.as_ref().clone());
+    manager.attr_intern.intern(&mut equal);
+    assert!(
+        Arc::ptr_eq(&equal, &held),
+        "a live external reference stays canonical"
+    );
+    drop(equal);
+    drop(held);
+    manager.gc_attr_intern();
+    assert_eq!(
+        manager.attr_intern.len(),
+        ATTR_INTERN_GC_DISPLACED_LIMIT + 1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn unicast_attr_gc_amortizes_sparse_large_capacity_tables() {
+    let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());
+    for index in ATTR_INTERN_GC_DISPLACED_LIMIT + 1..=2 * ATTR_INTERN_GC_DISPLACED_LIMIT {
+        manager.process_announce_chunk(
+            peer,
+            vec![diverse_unicast_route(index, u32::try_from(index).unwrap())],
+        );
+    }
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: (1..=2 * ATTR_INTERN_GC_DISPLACED_LIMIT)
+            .map(|index| (diverse_unicast_route(index, 0).prefix, 0))
+            .collect(),
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    assert_eq!(manager.attr_intern.len(), 1);
+    assert!(manager.attr_intern.capacity() > ATTR_INTERN_GC_DISPLACED_LIMIT);
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_000)]);
+    assert_eq!(
+        manager.attr_intern.len(),
+        2,
+        "sparse capacity still defers collection"
+    );
+    assert_eq!(manager.attr_intern_gc_displaced, 1);
+    assert!(manager.attr_intern_gc_deadline.is_some());
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    manager.process_announce_chunk(peer, vec![diverse_unicast_route(0, 100_001)]);
+    assert_eq!(manager.attr_intern.len(), 1);
+}
