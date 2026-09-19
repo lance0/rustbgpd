@@ -9,7 +9,7 @@
       "default": true
     },
     "bfd_profiles": {
-      "description": "Named BFD timing profiles (RFC 5880/5881/5883, ADR-0067) referenced by\n`[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.",
+      "description": "Named BFD timing profiles (RFC 5880/5881/5883, ADR-0067) referenced by\n`[neighbors.bfd]` / `[peer_groups.<name>.bfd]`. Profile edits require\na daemon restart; member attachments can change on SIGHUP.",
       "type": "array",
       "default": [],
       "items": {
@@ -267,11 +267,11 @@
       ]
     },
     "BfdConfig": {
-      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).\n\nThe presence of this block enables asynchronous BFD for the neighbor —\nsingle-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;\nit references a `[[bfd_profiles]]` entry for the timers. Static neighbors\nonly — dynamic-neighbor BFD is deferred (see ADR-0067).",
+      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).\n\nThe presence of this block enables asynchronous BFD for the neighbor —\nsingle-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;\nit references a `[[bfd_profiles]]` entry for the timers. Static neighbors\nonly — dynamic-neighbor BFD is deferred (see ADR-0067). Attachments apply\non SIGHUP; profile definitions remain restart-required.",
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Whether BFD is enabled. Defaults to `true`; the field exists so a\nneighbor can override an inherited peer-group `bfd` block to *disable*\nBFD (`bfd = { profile = \"...\", enabled = false }`). A disabled block runs\nno session — the actor skips it — so the effective session set is fully\nexpressible inline, which the restart-required reload pin relies on.",
+          "description": "Whether BFD is enabled. Defaults to `true`; the field exists so a\nneighbor can override an inherited peer-group `bfd` block to *disable*\nBFD (`bfd = { profile = \"...\", enabled = false }`). A disabled block runs\nno session. Enable and disable edits apply on SIGHUP, including the first\nattachment to a profile defined at startup.",
           "type": "boolean",
           "default": true
         },
@@ -285,7 +285,7 @@
           "type": "string"
         },
         "strict": {
-          "description": "RFC 5882 strict mode: when true, the BGP session is not allowed to reach\nEstablished until the BFD session is Up. Default false — BGP may\nestablish first, and a later BFD-down tears it down faster than the hold\ntimer.",
+          "description": "RFC 5882 strict mode: when true, the BGP session is not allowed to reach\nEstablished until the BFD session is Up. Default false — BGP may\nestablish first, and a later BFD-down tears it down faster than the hold\ntimer. Enabling strict mode on reload can stop BGP until BFD is Up.",
           "type": "boolean",
           "default": false
         }
@@ -1898,7 +1898,7 @@
           "type": "string"
         },
         "bfd": {
-          "description": "BFD (RFC 5880/5881/5883) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.",
+          "description": "BFD (RFC 5880/5881/5883) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.\nAttachment edits apply on SIGHUP; profile definitions require restart.",
           "anyOf": [
             {
               "$ref": "#/$defs/BfdConfig"
@@ -2429,7 +2429,7 @@
           ]
         },
         "bfd": {
-          "description": "BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.",
+          "description": "BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.\nAttachment edits apply on SIGHUP; profile definitions require restart.",
           "anyOf": [
             {
               "$ref": "#/$defs/BfdConfig"

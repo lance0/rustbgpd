@@ -1478,6 +1478,7 @@ impl PeerManager {
         }
 
         loop {
+            let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
@@ -2396,6 +2397,13 @@ impl PeerManager {
                         self.publish_notification_event(event);
                     }
                 }
+                () = async {
+                    if let Some(deadline) = bfd_retry_at {
+                        tokio::time::sleep_until(deadline).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => self.retry_bfd_commands(bfd_state_change_rx.as_ref()),
                 change = async {
                     match bfd_state_change_rx.as_mut() {
                         Some(rx) => rx.recv().await,

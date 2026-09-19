@@ -563,7 +563,7 @@ What happens:
    reports dataset bindings; SIGHUP also checks staged dataset contents and
    loader errors when choosing the actual route.
 2. **Generation route** — a candidate whose reload-applied changes are
-   static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
+   static `[[neighbors]]`, `[peer_groups]`, BFD member attachments, inline policy definitions,
    neighbor sets, global chains, changed `.rpol` content (imports included),
    dataset contents, dataset bindings (added, removed, or re-mapped
    `[policy.datasets]` entries), or outbound
@@ -595,8 +595,9 @@ What happens:
    `[gnmi_dialout]`) runs the existing
    per-subsystem steps. A generation-class change combined with a TCP-AO
    rotation or an in-place listener MD5/GTSM edit also stays on this path
-   when dataset contents are unchanged. An in-place edit changes the
-   password or GTSM setting of a neighbor that stays configured, or of a
+   when dataset contents, dataset bindings, and BFD attachments are unchanged.
+   An in-place edit changes the password or GTSM setting of a neighbor that
+   stays configured, or of a
    dynamic range. The daemon logs that the change runs without generation
    compensation, because the rotation is its own ordered protocol and the
    session reshape primitive refuses authentication changes. A static
@@ -604,8 +605,8 @@ What happens:
    `ttl_security` takes the generation route. Its listener entry is
    installed before the session is added, withdrawn after the session is
    removed, and restored with the prior generation if the reload fails.
-4. **Rejected changes** — dataset content or binding changes combined with
-   TCP-AO rotation or an in-place listener MD5/GTSM edit reject before
+4. **Rejected changes** — dataset content/binding or BFD attachment changes
+   combined with TCP-AO rotation or an in-place listener MD5/GTSM edit reject before
    any effect. A generation-class or dataset change combined with
    `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
    `honor_graceful_shutdown` / `honor_blackhole` also rejects: those families
@@ -2146,6 +2147,10 @@ use `rbgp neighbor <address>` to correlate the live per-family waiter state.
 |--------|-------------------|
 | `bfd_session_up{peer}` | Per-peer BFD session state (1 = Up, 0 = not Up) |
 | `bfd_session_flaps_total{peer}` | BFD session flaps (transitions out of Up) per peer |
+
+Removing a BFD attachment on SIGHUP removes its BFD metric series while keeping
+the neighbor's BGP history. An administrative neighbor disable retains the BFD
+series at Down; a session flap retains its counters.
 
 ### Config transactions
 

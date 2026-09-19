@@ -964,7 +964,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefix_restart_seconds` | non-zero u32 | no | unset | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the indefinite fail-closed latch until explicit enable; failure to deliver the timed session `Start` command consumes the attempt and stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only; 1..=80 bytes, the kernel `TCP_MD5SIG` key limit). Also accepted on a peer group with the same bound |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
-| `bfd`                  | table    | no       | --      | BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; `multihop = true` selects RFC 5883; static neighbors only; restart-required edits) |
+| `bfd`                  | table    | no       | --      | BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; `multihop = true` selects RFC 5883; static neighbors only; attachment changes apply on SIGHUP, profile definitions require restart) |
 | `tcp_mss`              | u16      | no       | --      | TCP maximum segment size clamp in bytes (`TCP_MAXSEG`, 88..=32767; Linux). Set on the active-open socket before connect; each bound passive listener socket takes the smallest effective value across resolved static neighbors of the same address family before listen, so an IPv4 tunnel constraint does not down-clamp IPv6 sessions. Dynamic-range peer groups cannot set it. Restart-required |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Outbound packets use TTL/Hop-Limit 255. Without `ttl_security_hops`, inbound packets must arrive with exactly 255, preserving the historical one-hop policy |
 | `ttl_security_hops`    | non-zero u8 | no    | 1 when GTSM is enabled | Maximum expected peer distance for GTSM (1--255). Requires effective `ttl_security = true`; inbound packets below `256 - ttl_security_hops` are dropped by `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Inherits from peer groups and may be overridden per neighbor |
@@ -1399,9 +1399,33 @@ BFD transmit scope and rejects an unresolvable name before preparing sockets.
 Receive-side `IPV6_PKTINFO` must report the same interface for every link-local
 control packet, including zero-discriminator bootstrap packets. The public BFD
 status and metric key remains the bare peer address under the existing unique
-link-local-address rule. Like TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
-`[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
-reports them as restart-required in `--diff`. Inspect sessions with
+link-local-address rule.
+
+Neighbor and peer-group `bfd` attachments apply on **SIGHUP**, including BFD
+on a newly added neighbor or the first BFD session in the process. Removing a
+neighbor or disabling its BFD attachment removes the BFD session. Unchanged
+members keep their sessions; enabling non-strict BFD does not reset BGP.
+Strict mode can withhold BGP until BFD is Up or the remote reports AdminDown.
+Socket preparation and configuration validation precede peer mutation, and the
+BFD actor acknowledges the new session set before the runtime snapshot advances.
+Config transactions do not apply BFD attachment changes.
+Peer-group RPC edits preserve the group's file-defined BFD attachment. RPCs
+that would change a neighbor's effective BFD membership reject before effects;
+edit the configuration file and use SIGHUP instead.
+
+Apply BFD attachment edits separately from TCP-AO keyring rotation or changes
+to existing listener MD5/GTSM settings. A combined candidate is rejected before
+runtime changes because those authentication edits use a separate reload path.
+Adding or removing a static neighbor with its own authentication remains
+supported by the generation executor.
+
+`[[bfd_profiles]]` definitions remain **restart-required** and are pinned to
+their running values on reload. Attachments must reference a profile already
+present in that running set; adding a new profile and attaching a member to it
+requires a restart. An invalid candidate leaves the running BFD sessions
+untouched. See the [reload matrix](reload-matrix.md#bfd_profiles).
+
+Inspect sessions with
 `rbgp bfd` / `BfdService.GetBfdSessions` (see [API.md](api.md)); an older daemon
 that omits the optional cause field is shown explicitly as unknown rather than
 silently treated as a genuine failure.

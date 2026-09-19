@@ -1592,6 +1592,83 @@ async fn hot_update_refresh_ack_loss_after_knob_ack_never_claims_restoration() {
 }
 
 #[tokio::test]
+async fn failed_bfd_generation_inner_reshape_restores_prior_nonstrict_start() {
+    let fixture = RsFixture::new();
+    let mut prior = fixture.load();
+    prior.bfd_profiles.push(crate::config::BfdProfileConfig {
+        name: "fast".into(),
+        min_tx_interval: 300,
+        min_rx_interval: 300,
+        multiplier: 3,
+    });
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    prior
+        .neighbors
+        .iter_mut()
+        .find(|n| n.address == peer.to_string())
+        .unwrap()
+        .bfd = Some(crate::config::BfdConfig {
+        profile: "fast".into(),
+        enabled: true,
+        strict: false,
+        multihop: false,
+    });
+    let mut harness = GenerationHarness::new(&prior);
+    let desired = crate::bfd_runtime::BfdRuntimeConfig::from_config(&prior).unwrap();
+    let configured = desired
+        .sessions
+        .iter()
+        .cloned()
+        .map(|params| (params.peer, params))
+        .collect();
+    let (desired_tx, desired_rx) = tokio::sync::watch::channel(desired.clone());
+    let (_states, states_rx) = crate::bfd_runtime::state_change_channel();
+    harness.mgr = harness
+        .mgr
+        .with_bfd_coupling(desired_tx, states_rx, configured);
+    let mut candidate = fixture.compound_candidate();
+    candidate.bfd_profiles.clone_from(&prior.bfd_profiles);
+    candidate
+        .neighbors
+        .iter_mut()
+        .find(|n| n.address == peer.to_string())
+        .unwrap()
+        .bfd = Some(crate::config::BfdConfig {
+        profile: "fast".into(),
+        enabled: true,
+        strict: true,
+        multihop: false,
+    });
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    assert!(!harness.mgr.bfd_withholding(&peer));
+    assert_eq!(
+        *desired_rx.borrow(),
+        desired,
+        "candidate BFD must not publish"
+    );
+    let state = harness.mgr.peers[&key(peer)]
+        .handle
+        .query_state_timeout(PEER_QUERY_TIMEOUT)
+        .await
+        .unwrap();
+    assert_ne!(
+        state.fsm_state,
+        SessionState::Idle,
+        "inner compensation must Start the restored non-strict BGP session"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn failed_generation_rebuilds_with_prior_diagnostic_settings() {
     // With the bystander removed, outer compensation re-adds it. In both
     // cases the reshape helper first restores the already-replaced member.

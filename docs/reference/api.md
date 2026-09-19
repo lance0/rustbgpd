@@ -3037,8 +3037,9 @@ fail-stop on a later primitive convergence failure as described above.
 Read-only inspection of single-hop and multihop BFD sessions (ADR-0067,
 RFC 5880/5881/5883).
 Sessions themselves are configured via `[[bfd_profiles]]` + `[neighbors.bfd]`
-(see [CONFIGURATION.md](configuration.md)) — BFD config is restart-required, so
-there is no mutating RPC here.
+(see [CONFIGURATION.md](configuration.md)). Member attachments apply on SIGHUP;
+profile definitions require a restart. There is no mutating BFD RPC, and config
+transactions do not apply BFD attachment changes.
 
 | RPC | Description |
 |-----|-------------|

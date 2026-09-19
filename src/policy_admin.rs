@@ -798,6 +798,10 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         } => {
             let mut group = api_peer_group_to_config(definition.clone());
             group.tcp_mss = config.peer_groups.get(name).and_then(|group| group.tcp_mss);
+            group.bfd = config
+                .peer_groups
+                .get(name)
+                .and_then(|group| group.bfd.clone());
             config.peer_groups.insert(name.clone(), group);
         }
         ConfigEvent::DeletePeerGroup { name, .. } => {
@@ -1332,13 +1336,26 @@ peer_group = "fabric"
     }
 
     #[test]
-    fn peer_group_event_preserves_file_only_tcp_mss() {
+    fn peer_group_event_preserves_file_only_tcp_mss_and_bfd() {
         let mut config = minimal_config();
+        config.bfd_profiles.push(crate::config::BfdProfileConfig {
+            name: "fast".into(),
+            min_tx_interval: 300,
+            min_rx_interval: 300,
+            multiplier: 3,
+        });
+        let bfd = crate::config::BfdConfig {
+            profile: "fast".into(),
+            enabled: true,
+            strict: true,
+            multihop: false,
+        };
         config.peer_groups.insert(
             "tunnel".to_string(),
             PeerGroupConfig {
                 hold_time: Some(90),
                 tcp_mss: Some(1360),
+                bfd: Some(bfd.clone()),
                 ..Default::default()
             },
         );
@@ -1358,5 +1375,6 @@ peer_group = "fabric"
         let group = &config.peer_groups["tunnel"];
         assert_eq!(group.hold_time, Some(45));
         assert_eq!(group.tcp_mss, Some(1360));
+        assert_eq!(group.bfd, Some(bfd));
     }
 }

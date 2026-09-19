@@ -804,8 +804,7 @@ impl PeerManager {
             // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically
             // covers the delete→add reconfigure cycle — a re-added BFD peer
             // must clear its disabled mark so the actor restarts the session.
-            // A brand-new peer not in the startup-pinned BFD set is unaffected
-            // (BFD is restart-required).
+            // During reload, publication waits for the generation's BFD commit.
             self.set_bfd_peer_disabled(address, false);
             // For a strict peer, mark it pre-held so the first BFD Up releases
             // the withhold via the normal up→start path.
@@ -1389,6 +1388,7 @@ impl PeerManager {
     ) -> Result<(), PeerLifecycleError> {
         // Internal cohort compensation must build from the accepted generation,
         // even while the enclosing reload still owns the candidate snapshot.
+        let prior_bfd_lookup = self.set_bfd_rollback_lookup(true);
         let candidate = rollback_config
             .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
         // Replays the captured prior configs in reverse of the apply order.
@@ -1412,6 +1412,7 @@ impl PeerManager {
         if let Some(candidate) = candidate {
             self.current_config = *candidate;
         }
+        self.set_bfd_rollback_lookup(prior_bfd_lookup);
         if failures.is_empty() {
             return Ok(());
         }
@@ -1578,6 +1579,7 @@ impl PeerManager {
         graceful_shutdown: bool,
         rollback_config: Option<&crate::config::Config>,
     ) -> Result<(), PeerLifecycleError> {
+        let prior_bfd_lookup = self.set_bfd_rollback_lookup(true);
         let candidate = rollback_config
             .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
         let restored = async {
@@ -1600,6 +1602,7 @@ impl PeerManager {
         if let Some(candidate) = candidate {
             self.current_config = *candidate;
         }
+        self.set_bfd_rollback_lookup(prior_bfd_lookup);
         restored
     }
 

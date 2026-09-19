@@ -12,6 +12,9 @@
 #     tears the BGP session down within the BFD detection window — far faster
 #     than the 90 s hold timer — proving the RFC 5882 coupling.
 #   * Recovery: watchfrr restarts bfdd and the session re-establishes.
+#   * Reload: per-member enable/disable, removal/re-add with inherited BFD,
+#     rejected invalid configuration, and first enable after startup without
+#     BFD. Unaffected BGP session counters must not change.
 #   * Strict remote-AdminDown: after restarting rustbgpd with strict BFD, FRR
 #     administratively shuts down its BFD peer.  The remote AdminDown releases
 #     the withheld BGP session while rustbgpd truthfully reports local BFD Down;

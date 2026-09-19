@@ -161,7 +161,8 @@ pub struct Config {
     #[serde(default)]
     pub managed_netdevs: ManagedNetdevsConfig,
     /// Named BFD timing profiles (RFC 5880/5881/5883, ADR-0067) referenced by
-    /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.
+    /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`. Profile edits require
+    /// a daemon restart; member attachments can change on SIGHUP.
     #[serde(default)]
     pub bfd_profiles: Vec<BfdProfileConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
@@ -1481,10 +1482,12 @@ define_neighbor_and_peer_group_configs! {
         neighbor {
             /// BFD (RFC 5880/5881/5883) attachment, referencing a
             /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
+            /// Attachment edits apply on SIGHUP; profile definitions require restart.
         }
         peer_group {
             /// BFD attachment inherited by neighbors in this group (unless
             /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
+            /// Attachment edits apply on SIGHUP; profile definitions require restart.
         }
     }
     ttl_security: Option<bool> {
@@ -2231,7 +2234,8 @@ pub struct AddPathConfig {
 /// The presence of this block enables asynchronous BFD for the neighbor —
 /// single-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;
 /// it references a `[[bfd_profiles]]` entry for the timers. Static neighbors
-/// only — dynamic-neighbor BFD is deferred (see ADR-0067).
+/// only — dynamic-neighbor BFD is deferred (see ADR-0067). Attachments apply
+/// on SIGHUP; profile definitions remain restart-required.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BfdConfig {
@@ -2240,14 +2244,14 @@ pub struct BfdConfig {
     /// Whether BFD is enabled. Defaults to `true`; the field exists so a
     /// neighbor can override an inherited peer-group `bfd` block to *disable*
     /// BFD (`bfd = { profile = "...", enabled = false }`). A disabled block runs
-    /// no session — the actor skips it — so the effective session set is fully
-    /// expressible inline, which the restart-required reload pin relies on.
+    /// no session. Enable and disable edits apply on SIGHUP, including the first
+    /// attachment to a profile defined at startup.
     #[serde(default = "default_bfd_enabled")]
     pub enabled: bool,
     /// RFC 5882 strict mode: when true, the BGP session is not allowed to reach
     /// Established until the BFD session is Up. Default false — BGP may
     /// establish first, and a later BFD-down tears it down faster than the hold
-    /// timer.
+    /// timer. Enabling strict mode on reload can stop BGP until BFD is Up.
     #[serde(default)]
     pub strict: bool,
     /// RFC 5883 multihop mode. The session runs over UDP/4784 instead of

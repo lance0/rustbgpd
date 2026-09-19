@@ -276,8 +276,9 @@ of taking its default process action. The ordering is a contract, asserted by
 4. It wires and starts the optional BMP manager and collector clients, then
    RibManager, the optional RPKI VRP/ASPA manager and RTR clients, the optional
    MRT manager, and PeerManager.
-5. It starts the remaining pre-gRPC optional runtime actors, including BFD
-   from its already prepared sockets, and then starts the gRPC API server.
+5. It starts the remaining pre-gRPC runtime actors, then the gRPC API server.
+   BFD uses its prepared sockets, or waits without sockets until SIGHUP enables
+   the first member.
 6. For each configured neighbor, it sends `AddPeer` to PeerManager and waits
    for the result, so the complete configured-peer roster is installed before
    inbound BGP can be admitted.

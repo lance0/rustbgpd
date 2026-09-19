@@ -152,7 +152,7 @@ fn diff_neighbors_ignores_tcp_ao_only_changes_because_reload_pins_them() {
 fn diff_neighbors_detects_prefix_orf_receive_only_change() {
     // ORF is negotiated in OPEN like add_path / families / role, so it is live
     // config (effective on the next session via the ReconcilePeers delete/re-add
-    // path), NOT a startup-pinned resource like tcp_ao / bfd. A bare
+    // path), NOT a startup-pinned resource like tcp_ao / tcp_mss. A bare
     // prefix_orf_receive toggle must therefore surface as a changed neighbor,
     // not a silent no-op (the inverse of the tcp_ao case above).
     let old = vec![test_neighbor("10.0.0.1", 65001)];
@@ -1319,9 +1319,9 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     assert_eq!(class("gr_peer_restart_time_max"), Some(HotApplied));
     assert_eq!(class("log_level"), Some(HotApplied));
     assert_eq!(class("max_prefixes"), Some(HotApplied));
+    assert_eq!(class("bfd"), Some(HotApplied));
     // Restart-required, matching the reload matrix pins.
     assert_eq!(class("tcp_ao"), Some(RestartRequired));
-    assert_eq!(class("bfd"), Some(RestartRequired));
     // LAN-341 adjudication: both flow through the reconcile rebuild path
     // (remote_asn is not part of the diff key; a peer_group reassignment
     // changes the peer's effective inherited config), so both are honest
@@ -1937,6 +1937,62 @@ fn diff_peer_group_changes_detects_field_diffs() {
     assert!(changes[0].render().contains("45"));
 }
 
+#[test]
+fn diff_peer_group_bfd_is_summarized_and_hot_applied() {
+    let old = PeerGroupConfig::default();
+    let new = PeerGroupConfig {
+        bfd: Some(BfdConfig {
+            profile: "fast".into(),
+            enabled: true,
+            strict: true,
+            multihop: false,
+        }),
+        ..Default::default()
+    };
+    for (before, after) in [(&old, &new), (&new, &old)] {
+        let changes = super::describe_peer_group_changes(before, after);
+        assert_eq!(
+            serde_json::to_value(&changes).unwrap(),
+            serde_json::json!([{
+                "field": "bfd", "old": null, "new": null, "impact": "hot_applied"
+            }])
+        );
+        assert!(changes[0].render().contains("bfd: <changed>"));
+        assert!(
+            changes[0]
+                .render()
+                .contains("strict BFD may stop BGP until Up")
+        );
+        assert!(super::peer_group_change_hot_applicable(before, after));
+    }
+}
+
+#[test]
+fn diff_strict_bfd_warns_about_admission_without_forcing_session_replacement() {
+    let old = parse(valid_toml()).unwrap().neighbors.remove(0);
+    let mut new = old.clone();
+    new.bfd = Some(BfdConfig {
+        profile: "fast".into(),
+        enabled: true,
+        strict: true,
+        multihop: false,
+    });
+    for (before, after) in [(&old, &new), (&new, &old)] {
+        let changes = super::describe_neighbor_changes(before, after);
+        assert_eq!(changes.len(), 1);
+        assert!(
+            changes[0]
+                .render()
+                .contains("strict BFD may stop BGP until Up")
+        );
+        assert!(super::neighbor_change_hot_applicable(before, after));
+        assert_eq!(
+            changes[0].impact,
+            Some(super::ConfigFieldImpact::HotApplied)
+        );
+    }
+}
+
 /// Policy-only edits are reload-applied (per-named definitions
 /// flow through `apply_policy_change` on SIGHUP).
 #[test]
@@ -2022,10 +2078,9 @@ fn reload_matrix_documents_every_peer_group_field() {
 /// (or vice versa) this fails. `tcp_ao` pins its deliberately narrow SIGHUP
 /// exception: add-only install, observation-gated selection, and deletion of
 /// deprecated unselected keys are live, while key edits and selected or
-/// nondeprecated-key deletion remain restart-required. `bfd` pins the
-/// unconditional restart-required side so a blanket "mark everything live"
-/// edit also fails. `ebgp_requires_policy` pins the ADR-0112 RFC 8212
-/// enforcement mode: re-marking it live would tell operators a SIGHUP can flip
+/// nondeprecated-key deletion remain restart-required. `bfd` pins member
+/// reconciliation as reload-applied. `ebgp_requires_policy` pins the ADR-0112
+/// RFC 8212 enforcement mode: re-marking it live would tell operators a SIGHUP can flip
 /// import and export on every EBGP session, which the reload path refuses.
 #[test]
 fn reload_matrix_pins_load_bearing_field_classes() {
@@ -2036,7 +2091,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
             "tcp_ao",
             "| live (ordered rotation generations) / otherwise restart-required |",
         ),
-        ("bfd", "| restart-required |"),
+        ("bfd", "| reload-applied |"),
         ("ebgp_requires_policy", "| restart-required |"),
     ] {
         let rows = reload_matrix_rows_for(&matrix, field);

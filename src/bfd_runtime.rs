@@ -36,6 +36,8 @@ use crate::config::{BfdConfig, Config};
 /// timers and never derives lifecycle from BGP itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BfdSessionParams {
+    /// Identifies the configured session across reloads.
+    pub revision: u64,
     /// Peer IP address (the BGP neighbor).
     pub peer: IpAddr,
     /// Linux interface index for an IPv6 link-local peer. Global IPv4/IPv6
@@ -43,7 +45,7 @@ pub struct BfdSessionParams {
     /// daemon runtime and is not part of the public BFD status identity.
     pub(crate) scope_id: Option<u32>,
     /// Concrete control-packet destination derived together with `scope_id`.
-    /// Keeping this in the startup-pinned runtime value makes a missing scope
+    /// Keeping this in the preflighted runtime value makes a missing scope
     /// impossible to discover as a best-effort transmit failure later.
     pub(crate) destination: SocketAddr,
     /// Desired minimum transmit interval (microseconds).
@@ -92,6 +94,8 @@ impl std::error::Error for BfdRuntimeConfigError {}
 /// stream, because a missed Down would leave BGP up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BfdStateChange {
+    /// Configured session identity; stale notifications cannot affect replacements.
+    pub revision: u64,
     /// Peer IP address.
     pub peer: IpAddr,
     /// New session state.
@@ -110,9 +114,7 @@ pub struct BfdStateChange {
     /// `PeerManager` across a coalesced disable→re-enable (where the session may
     /// stay Up with no new transition), so the strict withhold can be released
     /// without ever trusting a possibly-stale cached state — and without a
-    /// deadlock when no fresh edge is coming. (A single-task actor + a
-    /// per-peer coalescing channel that always delivers the latest state make
-    /// a monotonic generation unnecessary.)
+    /// deadlock when no fresh edge is coming.
     pub resync: bool,
 }
 
@@ -154,6 +156,15 @@ pub struct BfdStateChangeSender {
 }
 
 impl BfdStateChangeSender {
+    /// Preserve a pending real transition in an owned reload acknowledgement.
+    fn pending_state(&self, peer: IpAddr) -> Option<BfdStateChange> {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&peer)
+            .cloned()
+    }
+
     /// Enqueue a state change, coalescing with any pending change for the same
     /// peer (latest state/diagnostic/`remote_admin_down`; `resync` stays
     /// `false` if either side was a real transition).
@@ -164,7 +175,8 @@ impl BfdStateChangeSender {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match pending.entry(change.peer) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                let resync = slot.get().resync && change.resync;
+                let resync =
+                    change.resync && (slot.get().revision != change.revision || slot.get().resync);
                 let mut merged = change;
                 merged.resync = resync;
                 slot.insert(merged);
@@ -188,6 +200,14 @@ pub struct BfdStateChangeReceiver {
 }
 
 impl BfdStateChangeReceiver {
+    /// A queued newer outcome must be handled before retrying a BGP command.
+    pub(crate) fn has_pending(&self, peer: IpAddr) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&peer)
+    }
+
     /// Receive the next (coalesced) state change, or `None` once every sender
     /// is dropped and the queue is drained — the same close semantics as
     /// `mpsc::UnboundedReceiver::recv`.
@@ -212,6 +232,7 @@ impl BfdStateChangeReceiver {
 impl BfdRuntimeConfig {
     /// Whether the actor should run at all.
     #[must_use]
+    #[cfg(test)]
     pub fn enabled(&self) -> bool {
         !self.sessions.is_empty()
     }
@@ -275,6 +296,27 @@ impl BfdRuntimeConfig {
     /// neighbor whose own `bfd` (or inherited peer-group `bfd`) names a defined
     /// profile. Config validation has already checked the profile references.
     pub fn from_config(config: &Config) -> Result<BfdRuntimeConfig, BfdRuntimeConfigError> {
+        Self::from_reload(config, config, &std::collections::HashMap::new())
+    }
+
+    /// Retain accepted interface scopes for unchanged sessions. An unrelated
+    /// reload must not depend on a transient interface lookup or replace a
+    /// session merely because its interface was recreated with another index.
+    pub(crate) fn from_reload(
+        config: &Config,
+        accepted_config: &Config,
+        accepted: &std::collections::HashMap<IpAddr, BfdSessionParams>,
+    ) -> Result<BfdRuntimeConfig, BfdRuntimeConfigError> {
+        let accepted_interfaces: std::collections::HashMap<_, _> = accepted_config
+            .neighbors
+            .iter()
+            .filter_map(|neighbor| {
+                let peer = neighbor.address.parse::<IpAddr>().ok()?;
+                accepted
+                    .contains_key(&peer)
+                    .then_some((peer, neighbor.interface.as_deref()))
+            })
+            .collect();
         let mut sessions = Vec::new();
         for neighbor in &config.neighbors {
             let Some(bfd) = resolve_bfd(
@@ -305,6 +347,10 @@ impl BfdRuntimeConfig {
                         neighbor.address, bfd.profile
                     ))
                 })?;
+            let source = bfd
+                .multihop
+                .then(|| config.active_source_for(peer))
+                .flatten();
             let scope_id = if is_ipv6_link_local(peer) {
                 let interface = neighbor.interface.as_deref().ok_or_else(|| {
                     BfdRuntimeConfigError(format!(
@@ -312,17 +358,33 @@ impl BfdRuntimeConfig {
                         neighbor.address
                     ))
                 })?;
-                Some(nix::net::if_::if_nametoindex(interface).map_err(|error| {
-                    BfdRuntimeConfigError(format!(
-                        "neighbor {:?} interface {:?}: failed to resolve IPv6 link-local BFD scope: {error}",
-                        neighbor.address, interface
-                    ))
-                })?)
+                let retained = accepted
+                    .get(&peer)
+                    .filter(|prior| {
+                        accepted_interfaces.get(&peer) == Some(&Some(interface))
+                        && prior.desired_min_tx_us == profile.min_tx_interval.saturating_mul(1000)
+                        && prior.required_min_rx_us == profile.min_rx_interval.saturating_mul(1000)
+                        && u32::from(prior.detect_mult) == profile.multiplier
+                        && prior.multihop == bfd.multihop
+                        // Strict is BGP admission metadata, not BFD session identity.
+                        && prior.source == source
+                    })
+                    .and_then(|prior| prior.scope_id);
+                Some(match retained {
+                    Some(scope) => scope,
+                    None => nix::net::if_::if_nametoindex(interface).map_err(|error| {
+                        BfdRuntimeConfigError(format!(
+                            "neighbor {:?} interface {:?}: failed to resolve IPv6 link-local BFD scope: {error}",
+                            neighbor.address, interface
+                        ))
+                    })?,
+                })
             } else {
                 None
             };
             let destination = bfd_destination(peer, scope_id, bfd.multihop)?;
             sessions.push(BfdSessionParams {
+                revision: 0,
                 peer,
                 scope_id,
                 destination,
@@ -334,10 +396,7 @@ impl BfdRuntimeConfig {
                 strict: bfd.strict,
                 enabled: true,
                 multihop: bfd.multihop,
-                source: bfd
-                    .multihop
-                    .then(|| config.active_source_for(peer))
-                    .flatten(),
+                source,
             });
         }
         Ok(BfdRuntimeConfig { sessions })
@@ -433,11 +492,16 @@ pub struct BfdRuntimeEvent {
     pub diagnostic: rustbgpd_bfd::Diagnostic,
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub use linux::spawn_prepared;
 #[cfg(target_os = "linux")]
 // These are crate-internal daemon wiring types; their names are not all
 // referenced directly in this binary crate, hence the allow.
 #[allow(unused_imports)]
-pub use linux::{BfdRuntimeHandle, PreparedRuntime, prepare_runtime, spawn_prepared};
+pub use linux::{
+    BfdReloadCommand, BfdRuntimeHandle, PreparedRuntime, prepare_reload, prepare_runtime,
+    spawn_prepared_with_reload,
+};
 
 /// RFC 5880 §6.8.6 demultiplexing decision (pure, testable): pick the session a
 /// received packet belongs to. A non-zero Your Discriminator selects the session
@@ -482,7 +546,7 @@ fn operator_status_changed(
 #[cfg(target_os = "linux")]
 mod linux {
     use std::cmp::Reverse;
-    use std::collections::{BTreeMap, BinaryHeap, HashMap};
+    use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
     use std::io::IoSliceMut;
     use std::net::{IpAddr, SocketAddr};
     use std::os::fd::AsRawFd;
@@ -497,7 +561,7 @@ mod linux {
     use socket2::{Domain, Protocol, Socket, Type};
     use tokio::io::unix::AsyncFd;
     use tokio::net::UdpSocket;
-    use tokio::sync::{broadcast, watch};
+    use tokio::sync::{broadcast, mpsc, oneshot, watch};
     use tokio::time::Instant;
     use tokio_util::sync::CancellationToken;
     use tracing::{debug, info, warn};
@@ -578,6 +642,7 @@ mod linux {
     /// until the daemon reaches the existing BFD activation point. Each
     /// encapsulation mode has its own per-family set; a mode with no
     /// configured session opens nothing.
+    #[derive(Default)]
     pub struct PreparedRuntime {
         single_hop: Option<RuntimeSockets>,
         multihop: Option<RuntimeSockets>,
@@ -637,8 +702,37 @@ mod linux {
         }))
     }
 
+    /// Reserved socket additions and desired membership, applied in one actor turn.
+    pub struct BfdReloadCommand {
+        pub prepared: Option<PreparedRuntime>,
+        pub desired: BfdRuntimeConfig,
+        pub reply: oneshot::Sender<Vec<BfdStateChange>>,
+    }
+
+    /// Reserve only socket families not already owned by the running actor.
+    pub fn prepare_reload(
+        desired: &BfdRuntimeConfig,
+        opened: &BfdRuntimeConfig,
+    ) -> std::io::Result<Option<PreparedRuntime>> {
+        let missing = BfdRuntimeConfig {
+            sessions: desired
+                .sessions
+                .iter()
+                .filter(|session| {
+                    !opened.sessions.iter().any(|old| {
+                        old.peer.is_ipv6() == session.peer.is_ipv6()
+                            && old.multihop == session.multihop
+                    })
+                })
+                .cloned()
+                .collect(),
+        };
+        prepare_runtime(&missing)
+    }
+
     /// Activate an already prepared BFD runtime. Socket acquisition cannot
     /// fail here; `None` means no BFD family was configured at startup.
+    #[cfg(test)]
     pub fn spawn_prepared(
         prepared: Option<PreparedRuntime>,
         desired_rx: watch::Receiver<BfdRuntimeConfig>,
@@ -649,11 +743,41 @@ mod linux {
         shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
         let prepared = prepared?;
+        let (_reload_tx, reload_rx) = mpsc::channel(1);
+        Some(spawn_prepared_with_reload(
+            Some(prepared),
+            desired_rx,
+            metrics,
+            status_tx,
+            event_tx,
+            state_change_tx,
+            shutdown,
+            reload_rx,
+        ))
+    }
+
+    /// Start even without sockets so the first BFD member can be enabled by reload.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "startup channels are owned by the single BFD actor"
+    )]
+    pub fn spawn_prepared_with_reload(
+        prepared: Option<PreparedRuntime>,
+        desired_rx: watch::Receiver<BfdRuntimeConfig>,
+        metrics: BgpMetrics,
+        status_tx: watch::Sender<Vec<BfdStatus>>,
+        event_tx: broadcast::Sender<BfdRuntimeEvent>,
+        state_change_tx: BfdStateChangeSender,
+        shutdown: CancellationToken,
+        reload_rx: mpsc::Receiver<BfdReloadCommand>,
+    ) -> BfdRuntimeHandle {
+        let prepared = prepared.unwrap_or_default();
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
             run(
                 prepared,
                 desired_rx,
+                reload_rx,
                 &metrics,
                 &status_tx,
                 &event_tx,
@@ -662,11 +786,12 @@ mod linux {
             )
             .await;
         });
-        Some(BfdRuntimeHandle { shutdown, task })
+        BfdRuntimeHandle { shutdown, task }
     }
 
     /// One running session plus its provenance.
     struct Entry {
+        revision: u64,
         session: Session,
         peer: IpAddr,
         /// Required receive/transmit interface for an IPv6 link-local peer.
@@ -729,6 +854,7 @@ mod linux {
     }
 
     struct Actor {
+        configured_peers: HashSet<IpAddr>,
         sessions: BTreeMap<IpAddr, Entry>,
         /// Allocates unique non-zero local discriminators (RFC 5880 §6.8.1).
         /// Replaces an address hash, which could collide across peers.
@@ -738,9 +864,8 @@ mod linux {
         /// session, not the source address).
         by_discriminator: HashMap<u32, IpAddr>,
         timers: BinaryHeap<Reverse<Deadline>>,
-        /// Transmit socket per family; `None` when the family had no
-        /// configured session at startup (the session set is restart-required,
-        /// so a session can never appear in an unopened family).
+        /// Transmit socket per family, opened at startup or installed from a
+        /// successful reload preflight before its first session starts.
         tx_v4: Option<UdpSocket>,
         tx_v6: Option<UdpSocket>,
         /// Multihop transmit socket per family, same opening rule.
@@ -796,9 +921,14 @@ mod linux {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "actor owns its runtime and independent input/output channels"
+    )]
     async fn run(
         prepared: PreparedRuntime,
         mut desired_rx: watch::Receiver<BfdRuntimeConfig>,
+        mut reload_rx: mpsc::Receiver<BfdReloadCommand>,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
         event_tx: &broadcast::Sender<BfdRuntimeEvent>,
@@ -809,9 +939,10 @@ mod linux {
             single_hop,
             multihop,
         } = prepared;
-        let ((rx_v4, tx_v4), (rx_v6, tx_v6)) = split_sockets(single_hop);
-        let ((rx_mh_v4, tx_mh_v4), (rx_mh_v6, tx_mh_v6)) = split_sockets(multihop);
+        let ((mut rx_v4, tx_v4), (mut rx_v6, tx_v6)) = split_sockets(single_hop);
+        let ((mut rx_mh_v4, tx_mh_v4), (mut rx_mh_v6, tx_mh_v6)) = split_sockets(multihop);
         let mut actor = Actor {
+            configured_peers: HashSet::new(),
             sessions: BTreeMap::new(),
             discriminators: DiscriminatorAllocator::new(),
             by_discriminator: HashMap::new(),
@@ -848,6 +979,28 @@ mod linux {
                 () = shutdown.cancelled() => {
                     actor.drain(metrics, status_tx).await;
                     return;
+                }
+                Some(command) = reload_rx.recv() => {
+                    if let Some(prepared) = command.prepared {
+                        let ((v4, tx4), (v6, tx6)) = split_sockets(prepared.single_hop);
+                        let ((mh4, mtx4), (mh6, mtx6)) = split_sockets(prepared.multihop);
+                        if v4.is_some() { rx_v4 = v4; actor.tx_v4 = tx4; }
+                        if v6.is_some() { rx_v6 = v6; actor.tx_v6 = tx6; }
+                        if mh4.is_some() { rx_mh_v4 = mh4; actor.multihop_tx_v4 = mtx4; }
+                        if mh6.is_some() { rx_mh_v6 = mh6; actor.multihop_tx_v6 = mtx6; }
+                    }
+                    // Consume the matching watch update before acknowledging so an
+                    // older admin-state publication cannot undo this generation.
+                    desired_rx.borrow_and_update();
+                    actor.reconcile(&command.desired, metrics, status_tx).await;
+                    let states = actor.sessions.values().map(|entry| {
+                        state_change_tx.pending_state(entry.peer).unwrap_or(BfdStateChange {
+                            revision: entry.revision, peer: entry.peer,
+                            state: entry.session.state(), diagnostic: entry.last_diagnostic,
+                            remote_admin_down: entry.session.remote_admin_down(), resync: true,
+                        })
+                    }).collect();
+                    let _ = command.reply.send(states);
                 }
                 changed = desired_rx.changed() => {
                     if changed.is_err() {
@@ -919,6 +1072,7 @@ mod linux {
                 }
             };
             let entry = Entry {
+                revision: params.revision,
                 session,
                 peer: params.peer,
                 scope_id: params.scope_id,
@@ -942,8 +1096,7 @@ mod linux {
         /// Reconcile running sessions toward the desired set (level-triggered):
         /// start missing enabled sessions, drain (`AdminDown` + remove) sessions
         /// no longer desired or now disabled, and refresh mutable metadata
-        /// (`strict`) on the rest. Interval/multiplier changes are
-        /// restart-required and intentionally ignored here.
+        /// (`strict`) on the rest. A new configured revision replaces only that session.
         async fn reconcile(
             &mut self,
             desired: &BfdRuntimeConfig,
@@ -962,11 +1115,28 @@ mod linux {
                 .sessions
                 .keys()
                 .copied()
-                .filter(|peer| !wanted.contains_key(peer))
+                .filter(|peer| {
+                    wanted
+                        .get(peer)
+                        .is_none_or(|params| self.sessions[peer].revision != params.revision)
+                })
                 .collect();
-            for peer in stale {
-                self.admin_down_and_remove(peer, metrics).await;
+            if !stale.is_empty() {
+                for peer in stale {
+                    self.admin_down_and_remove(peer, metrics).await;
+                }
+                // Purge once before same-address replacements start: their timer
+                // epochs begin at zero and must never match a retired deadline.
+                self.timers
+                    .retain(|deadline| self.sessions.contains_key(&deadline.0.peer));
             }
+
+            let configured: HashSet<_> =
+                desired.sessions.iter().map(|params| params.peer).collect();
+            for peer in self.configured_peers.difference(&configured) {
+                metrics.reap_bfd_series(&peer.to_string());
+            }
+            self.configured_peers = configured;
 
             // Start missing sessions; refresh metadata on existing ones.
             for (peer, params) in wanted {
@@ -990,6 +1160,7 @@ mod linux {
                 .sessions
                 .values()
                 .map(|e| BfdStateChange {
+                    revision: e.revision,
                     peer: e.peer,
                     state: e.session.state(),
                     diagnostic: e.last_diagnostic,
@@ -1193,6 +1364,7 @@ mod linux {
                         // (resync=false): the consumer may tear BGP down on a
                         // genuine Down, not just release.
                         self.state_change_tx.send(BfdStateChange {
+                            revision: self.sessions[&peer].revision,
                             peer,
                             state: new,
                             diagnostic,
@@ -1237,10 +1409,8 @@ mod linux {
                     self.multihop_tx_v6.as_mut()
                 };
                 let Some(sock) = sock else {
-                    // Unreachable while the restart-required session set holds
-                    // (a session's mode and family always had their sockets
-                    // opened at startup); degrade to a logged non-send rather
-                    // than a panic.
+                    // Startup and reload preflight reserve each required family
+                    // before activation; retain a diagnostic if that invariant fails.
                     warn!(peer = %peer, "BFD transmit skipped: no multihop socket for the peer's address family");
                     return;
                 };
@@ -1645,6 +1815,201 @@ mod linux {
             }
         }
 
+        fn reload_params(peer: &str, revision: u64) -> super::BfdSessionParams {
+            let peer: IpAddr = peer.parse().unwrap();
+            super::BfdSessionParams {
+                revision,
+                peer,
+                scope_id: None,
+                destination: SocketAddr::new(peer, 9),
+                desired_min_tx_us: 300_000,
+                required_min_rx_us: 300_000,
+                detect_mult: 3,
+                strict: false,
+                enabled: true,
+                multihop: false,
+                source: None,
+            }
+        }
+
+        #[tokio::test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "exercise replacement, disable, detach, and re-add against the same actor and metric history"
+        )]
+        async fn bfd_reload_replaces_one_session_and_retires_its_timers() {
+            use super::*;
+            let metrics = BgpMetrics::new();
+            let (status_tx, _) = watch::channel(Vec::new());
+            let (event_tx, _) = broadcast::channel(8);
+            let (state_change_tx, mut state_rx) = super::super::state_change_channel();
+            let mut actor = Actor {
+                configured_peers: HashSet::new(),
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 1,
+            };
+            let first = reload_params("127.0.0.2", 1);
+            let unaffected = reload_params("127.0.0.3", 1);
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![first.clone(), unaffected.clone()],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            let discriminator = actor.sessions[&unaffected.peer].local_discriminator;
+            let stale_at = Instant::now();
+            actor.timers.push(Reverse(Deadline {
+                at: stale_at,
+                peer: first.peer,
+                kind: TimerKind::Detect,
+                epoch: 1,
+            }));
+            let mut replacement = first;
+            replacement.revision = 2;
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![replacement.clone(), unaffected.clone()],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            assert_eq!(
+                actor.sessions[&unaffected.peer].local_discriminator,
+                discriminator
+            );
+            assert_eq!(actor.sessions[&replacement.peer].revision, 2);
+            assert!(
+                actor
+                    .timers
+                    .iter()
+                    .all(|timer| timer.0.peer != replacement.peer || timer.0.at > stale_at)
+            );
+            let change = state_rx.recv().await.unwrap();
+            assert_eq!(change.peer, replacement.peer);
+            assert_eq!(change.revision, 2);
+            assert!(
+                change.resync,
+                "retired AdminDown must not taint replacement bootstrap"
+            );
+            let has_series = || {
+                use prometheus::Encoder;
+                let mut bytes = Vec::new();
+                prometheus::TextEncoder::new()
+                    .encode(&metrics.registry().gather(), &mut bytes)
+                    .unwrap();
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("bfd_session_up{peer=\"127.0.0.2\"}")
+            };
+            replacement.enabled = false;
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![replacement.clone(), unaffected.clone()],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            assert!(
+                has_series(),
+                "admin-disabled membership retains its zero gauge"
+            );
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![unaffected],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            assert!(
+                !has_series(),
+                "detaching an already disabled member reaps BFD metrics"
+            );
+            replacement.enabled = true;
+            actor
+                .reconcile(
+                    &BfdRuntimeConfig {
+                        sessions: vec![replacement],
+                    },
+                    &metrics,
+                    &status_tx,
+                )
+                .await;
+            assert!(has_series(), "re-added member seeds a new gauge");
+        }
+
+        #[tokio::test]
+        async fn bfd_reload_starts_first_member_on_socketless_actor_and_acknowledges_removal() {
+            use super::*;
+            let (desired_tx, desired_rx) = watch::channel(BfdRuntimeConfig::default());
+            let (reload_tx, reload_rx) = mpsc::channel(1);
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, _) = broadcast::channel(8);
+            let (state_tx, _) = super::super::state_change_channel();
+            let handle = spawn_prepared_with_reload(
+                None,
+                desired_rx,
+                BgpMetrics::new(),
+                status_tx,
+                event_tx,
+                state_tx,
+                CancellationToken::new(),
+                reload_rx,
+            );
+            let prepared = PreparedRuntime {
+                single_hop: Some(RuntimeSockets {
+                    v4: Some(loopback_family_sockets(false).unwrap()),
+                    v6: None,
+                }),
+                multihop: None,
+            };
+            let desired = BfdRuntimeConfig {
+                sessions: vec![reload_params("127.0.0.2", 1)],
+            };
+            let (reply, applied) = oneshot::channel();
+            reload_tx
+                .send(BfdReloadCommand {
+                    prepared: Some(prepared),
+                    desired: desired.clone(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            let states = applied.await.unwrap();
+            assert_eq!(states.len(), 1);
+            assert_eq!(status_rx.borrow().len(), 1);
+            desired_tx.send_replace(desired);
+            let (reply, applied) = oneshot::channel();
+            reload_tx
+                .send(BfdReloadCommand {
+                    prepared: None,
+                    desired: BfdRuntimeConfig::default(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert!(applied.await.unwrap().is_empty());
+            assert!(status_rx.borrow().is_empty());
+            handle.shutdown().await;
+        }
+
         #[test]
         fn deadline_ord_is_consistent_with_eq() {
             let now = Instant::now();
@@ -1879,6 +2244,7 @@ mod linux {
 
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
+                    revision: 0,
                     peer: "fe80::2".parse().unwrap(),
                     scope_id: None,
                     destination: "[fe80::2]:3784".parse().unwrap(),
@@ -2126,6 +2492,7 @@ mod linux {
         async fn shutdown_is_serviced_under_packet_flood() {
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
+                    revision: 0,
                     peer: "127.0.0.9".parse().expect("ip"),
                     scope_id: None,
                     destination: "127.0.0.9:3784".parse().expect("socket address"),
@@ -2477,6 +2844,81 @@ bfd = { profile = "p" }
     }
 
     #[test]
+    fn reload_retains_accepted_link_local_scope_until_session_configuration_changes() {
+        let mut config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65005
+bfd = { profile = "p" }
+"#,
+        );
+        let mut session = BfdRuntimeConfig::from_config(&config)
+            .expect("initial scope")
+            .sessions
+            .remove(0);
+        // Synthetic accepted index deliberately differs from the current loopback
+        // index, covering an interface recreated since its session was accepted.
+        session.scope_id = Some(4242);
+        session.destination = super::bfd_destination(session.peer, session.scope_id, false)
+            .expect("scoped destination");
+        let accepted = std::collections::HashMap::from([(session.peer, session.clone())]);
+        let retained = BfdRuntimeConfig::from_reload(&config, &config, &accepted)
+            .expect("interface index change does not replace accepted session");
+        assert_eq!(retained.sessions, [session.clone()]);
+
+        config.neighbors[0].interface = Some("rustbgpd-no-such-interface".into());
+        let mut candidate = config.clone();
+        candidate.neighbors[0].description = Some("unrelated edit".into());
+        let retained = BfdRuntimeConfig::from_reload(&candidate, &config, &accepted)
+            .expect("unchanged session needs no fresh interface lookup");
+        assert_eq!(retained.sessions, [session.clone()]);
+
+        candidate.neighbors[0]
+            .bfd
+            .as_mut()
+            .expect("attachment")
+            .strict = true;
+        let retained = BfdRuntimeConfig::from_reload(&candidate, &config, &accepted)
+            .expect("strict admission metadata needs no fresh interface lookup");
+        session.strict = true;
+        assert_eq!(retained.sessions, [session]);
+
+        assert!(
+            BfdRuntimeConfig::from_reload(
+                &candidate,
+                &config,
+                &std::collections::HashMap::default()
+            )
+            .is_err(),
+            "a new attachment must resolve its interface before mutation"
+        );
+        let mut changed = candidate.clone();
+        changed.neighbors[0].interface = Some("rustbgpd-other-missing-interface".into());
+        assert!(
+            BfdRuntimeConfig::from_reload(&changed, &config, &accepted).is_err(),
+            "a changed interface must resolve before mutation"
+        );
+        let mut changed = candidate.clone();
+        changed.bfd_profiles[0].min_tx_interval += 100;
+        assert!(
+            BfdRuntimeConfig::from_reload(&changed, &config, &accepted).is_err(),
+            "changed session timers must resolve before mutation"
+        );
+        let mut added = candidate.neighbors[0].clone();
+        added.address = "fe80::6".into();
+        candidate.neighbors.push(added);
+        assert!(
+            BfdRuntimeConfig::from_reload(&candidate, &config, &accepted).is_err(),
+            "a new peer cannot borrow an existing peer's scope"
+        );
+    }
+
+    #[test]
     fn from_config_inherits_peer_group_bfd() {
         let config = config_with(
             r#"
@@ -2579,14 +3021,8 @@ remote_asn = 65002
     }
 
     #[test]
-    fn reload_cannot_introduce_a_session_in_an_unopened_family() {
-        // The actor opens sockets only for address families that have
-        // configured sessions at startup. That is sound because BFD config is
-        // restart-required: `pin_bfd_startup_only_runtime` (applied on every
-        // reload) pins the effective session set to the live snapshot, so the
-        // `desired_rx` watch can never introduce a session whose family had no
-        // socket opened. This test pins that seam: a reload adding the first
-        // IPv6 session to an IPv4-only runtime must not widen the family set.
+    fn reload_preserves_new_member_for_socket_preflight() {
+        // Member changes survive profile pinning and reach staged socket acquisition.
         let profiles = r#"
 [[bfd_profiles]]
 name = "p"
@@ -2612,14 +3048,14 @@ bfd = {{ profile = "p" }}
             "candidate must genuinely ask for a new family"
         );
         assert!(
-            crate::config::pin_bfd_startup_only_runtime(&mut candidate, &live),
-            "a BFD-attachment change must be classified restart-required"
+            !crate::config::pin_bfd_startup_only_runtime(&mut candidate, &live),
+            "unchanged profiles must not pin member changes"
         );
         let rc = BfdRuntimeConfig::from_config(&candidate).expect("derive pinned BFD runtime");
         assert!(rc.needs_ipv4());
         assert!(
-            !rc.needs_ipv6(),
-            "pinned reload must not add a session in a family with no socket"
+            rc.needs_ipv6(),
+            "reload must preserve the new family for socket preflight"
         );
     }
 
@@ -2630,6 +3066,7 @@ bfd = {{ profile = "p" }}
 
         fn change(state: SessionState, resync: bool) -> BfdStateChange {
             BfdStateChange {
+                revision: 0,
                 peer: ip("10.0.0.2"),
                 state,
                 diagnostic: Diagnostic::None,
@@ -2667,6 +3104,16 @@ bfd = {{ profile = "p" }}
             let got = rx.recv().await.expect("merged change");
             assert_eq!(got.state, SessionState::Down);
             assert!(!got.resync, "ack must not mask a pending real transition");
+        }
+
+        #[tokio::test]
+        async fn replacement_ack_does_not_inherit_retired_transition() {
+            let (tx, mut rx) = state_change_channel();
+            tx.send(change(SessionState::AdminDown, false));
+            let mut replacement = change(SessionState::Down, true);
+            replacement.revision = 1;
+            tx.send(replacement.clone());
+            assert_eq!(rx.recv().await, Some(replacement));
         }
 
         #[tokio::test]
@@ -3227,6 +3674,7 @@ bfd = {{ profile = "p" }}
             let peer_ip: IpAddr = PEER_ADDR.parse().unwrap();
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
+                    revision: 0,
                     peer: peer_ip,
                     scope_id: None,
                     destination: "127.0.0.2:3784".parse().unwrap(),
@@ -3389,6 +3837,7 @@ bfd = {{ profile = "p" }}
             let config = BfdRuntimeConfig {
                 sessions: vec![
                     BfdSessionParams {
+                        revision: 0,
                         peer: peer_ip,
                         scope_id: None,
                         destination: format!("{PEER_ADDR}:{MULTIHOP_PORT}").parse().unwrap(),
@@ -3401,6 +3850,7 @@ bfd = {{ profile = "p" }}
                         source: Some(ACTOR_ADDR.parse().unwrap()),
                     },
                     BfdSessionParams {
+                        revision: 0,
                         peer: bystander_ip,
                         scope_id: None,
                         destination: format!("{SINGLE_HOP_BYSTANDER_ADDR}:{PORT}")
@@ -3558,6 +4008,7 @@ bfd = {{ profile = "p" }}
             let wrong_tx = link_local_peer_tx(wrong_peer_scope);
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
+                    revision: 0,
                     peer: peer_ip,
                     scope_id: Some(actor_scope),
                     destination: SocketAddr::V6(SocketAddrV6::new(

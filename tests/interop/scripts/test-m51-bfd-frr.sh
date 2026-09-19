@@ -15,6 +15,9 @@
 #      Down and BGP is withheld; a fresh FRR AdminDown packet releases BGP while
 #      GetBfdSessions remains truthfully Down.  `no shutdown` restores BFD Up
 #      without BGP churn.
+#   5. Reload changes BFD attachments and membership, rejects an invalid
+#      candidate, and enables BFD from an empty startup set, preserving BGP
+#      sessions on unaffected members.
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
@@ -36,9 +39,12 @@ FRR_LL_BFD_PEER="fe80::51"
 LL_INTERFACE="eth1"
 STRICT_CONFIG="/etc/rustbgpd/config-strict.toml"
 STRICT_LOG="/tmp/rustbgpd-m51-strict.log"
+RELOAD_CONFIG="/tmp/rustbgpd-m51-reload.toml"
+RELOAD_LOG="/tmp/rustbgpd-m51-reload.log"
 
 resolve_grpc_addr
-start_rustbgpd
+docker exec "$RUSTBGPD" cp /etc/rustbgpd/config.toml "$RELOAD_CONFIG"
+start_rustbgpd "exec /usr/local/bin/rustbgpd $RELOAD_CONFIG >$RELOAD_LOG 2>&1"
 
 # --- 1. BGP Established + BFD Up (both sides) --------------------------------
 
@@ -238,12 +244,12 @@ dump_state_on_failure() {
 }
 
 wait_grpc_bfd() {
-    local want=$1 label=$2 attempts=${3:-30}
+    local want=$1 label=$2 attempts=${3:-30} state
     for _ in $(seq 1 "$attempts"); do
-        [ "$(grpc_bfd_state)" = "$want" ] && {
+        if state=$(grpc_bfd_state) && [ "$state" = "$want" ]; then
             ok "rustbgpd BFD session $label"
             return 0
-        }
+        fi
         sleep 1
     done
     fail "rustbgpd BFD session did not reach $label"
@@ -252,12 +258,12 @@ wait_grpc_bfd() {
 }
 
 wait_grpc_ll_bfd() {
-    local want=$1 label=$2 attempts=${3:-30}
+    local want=$1 label=$2 attempts=${3:-30} state
     for _ in $(seq 1 "$attempts"); do
-        [ "$(grpc_ll_bfd_state)" = "$want" ] && {
+        if state=$(grpc_ll_bfd_state) && [ "$state" = "$want" ]; then
             ok "rustbgpd link-local BFD session $label"
             return 0
-        }
+        fi
         sleep 1
     done
     fail "rustbgpd link-local BFD session did not reach $label"
@@ -401,7 +407,109 @@ wait_frr_established "$FRR1" "$FRR_LL_BFD_PEER" \
     "rustbgpd ↔ frr1 link-local (recovered)"
 wait_grpc_ll_bgp_established "link-local recovery" 60
 
-# --- 4. Strict: remote AdminDown permits BGP while local BFD stays Down ------
+# --- 4. Reload: member BFD lifecycle without unrelated BGP churn -----------
+
+reload_member_bfd() {
+    local mode=$1 expected=${2:-"runtime config settlement settled"} first_line
+    # Rewrite from the original fixture each time, preserving the profile set.
+    # Stream the candidate into the container: the mounted fixture stays read-only.
+    python3 - "$mode" <<'PY' | docker exec -i "$RUSTBGPD" sh -c 'cat > "$1"' sh "$RELOAD_CONFIG"
+import pathlib
+import sys
+
+text = pathlib.Path("tests/interop/configs/rustbgpd-m51-bfd.toml").read_text()
+mode = sys.argv[1]
+if mode == "disable":
+    text = text.replace('bfd = { profile = "fast" }',
+                        'bfd = { profile = "fast", enabled = false }', 1)
+elif mode == "remove":
+    start = text.index('[[neighbors]]\naddress = "fe80::52"')
+    end = text.index('[security.grpc]', start)
+    text = text[:start] + text[end:]
+elif mode == "inherit":
+    text = text.replace('address = "fe80::52"',
+                        'address = "fe80::52"\npeer_group = "bfd-members"')
+    start = text.index('address = "fe80::52"')
+    text = text[:start] + text[start:].replace('bfd = { profile = "fast" }\n', '', 1)
+    text += '\n[peer_groups.bfd-members]\nbfd = { profile = "fast" }\n'
+elif mode == "invalid":
+    text = text.replace('bfd = { profile = "fast" }',
+                        'bfd = { profile = "missing-profile" }', 1)
+elif mode != "enable":
+    raise SystemExit(f"unknown reload mode: {mode}")
+sys.stdout.write(text)
+PY
+    first_line=$(docker exec "$RUSTBGPD" sh -c 'wc -l < "$1"' sh "$RELOAD_LOG")
+    first_line=$((first_line + 1))
+    docker exec "$RUSTBGPD" sh -c 'kill -HUP "$(pidof rustbgpd)"'
+    for _ in $(seq 1 30); do
+        if docker exec "$RUSTBGPD" sh -c \
+            'tail -n +"$1" "$2" | grep -F "$3" >/dev/null' \
+            sh "$first_line" "$RELOAD_LOG" "$expected"; then
+            ok "BFD reload $mode settled ($expected)"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "BFD reload $mode did not settle"
+    docker exec "$RUSTBGPD" cat "$RELOAD_LOG" >&2
+    return 1
+}
+
+member_continuity() {
+    local peer=$1 remote=$2 interface=${3:-} snapshot count
+    snapshot=$(grpcurl_call -d "{\"address\":\"$peer\",\"interface\":\"$interface\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState)
+    # Default-valued proto3 flap counts may be absent. State and freshness must
+    # be affirmative; a stale placeholder cannot establish continuity.
+    snapshot=$(printf '%s\n' "$snapshot" | jq -er '
+        select(.state == "SESSION_STATE_ESTABLISHED" and (.stale // false) == false)
+        | (.flapCount // "0") | tostring') || return 1
+    count=$(docker exec "$FRR1" vtysh -c "show bgp neighbors $remote json" 2>/dev/null \
+        | jq -er --arg peer "$remote" '.[$peer].connectionsEstablished | select(. != null)') || return 1
+    printf '%s:%s\n' "$snapshot" "$count"
+}
+
+check_member_continuity() {
+    local expected=$1 peer=$2 remote=$3 interface=${4:-} actual
+    if actual=$(member_continuity "$peer" "$remote" "$interface") && [ "$actual" = "$expected" ]; then
+        ok "reload preserved $peer BGP (local flaps:FRR establishments=$actual)"
+    else
+        fail "reload changed $peer BGP continuity (expected=$expected, actual=${actual:-unknown})"
+        dump_state_on_failure
+        return 1
+    fi
+}
+
+numbered_before=$(member_continuity "$PEER" "$FRR_BFD_PEER")
+ll_before=$(member_continuity "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE")
+reload_member_bfd disable
+wait_grpc_bfd "" "absent after disable"
+sleep 2 # Exceeds BFD detection time: FRR must accept the administrative removal.
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+check_member_continuity "$ll_before" "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE"
+reload_member_bfd enable
+wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up after enable"
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+check_member_continuity "$ll_before" "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE"
+
+reload_member_bfd remove
+wait_grpc_ll_bfd "" "absent after neighbor removal"
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+reload_member_bfd inherit
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up on added member inheriting BFD"
+wait_grpc_ll_bgp_established "re-added link-local member"
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+
+ll_before=$(member_continuity "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE")
+reload_member_bfd invalid "SIGHUP reload rejected without runtime effect"
+wait_grpc_bfd "BFD_SESSION_STATE_UP" "unchanged after invalid reload"
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "unchanged after invalid reload"
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+check_member_continuity "$ll_before" "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE"
+reload_member_bfd enable
+
+# --- 5. Strict: remote AdminDown permits BGP while local BFD stays Down ------
 
 log "Restarting rustbgpd in strict BFD mode for the remote-AdminDown receipt..."
 stop_rustbgpd
@@ -523,5 +631,24 @@ else
     fail "BGP churned while BFD recovered (state=$state_after, rustbgpd flaps $flaps_before→$flaps_after, uptime $uptime_before→$uptime_after, FRR establishments $frr_established_before→$frr_established_after)"
     dump_state_on_failure
 fi
+
+# --- 6. First BFD enable after a startup with no active BFD sessions --------
+
+stop_rustbgpd
+docker exec "$RUSTBGPD" sh -c \
+    'sed '\''s/bfd = { profile = "fast" }/bfd = { profile = "fast", enabled = false }/g'\'' /etc/rustbgpd/config.toml > "$1"' \
+    sh "$RELOAD_CONFIG"
+start_rustbgpd "exec /usr/local/bin/rustbgpd $RELOAD_CONFIG >$RELOAD_LOG 2>&1"
+wait_grpc_bgp_established "startup without BFD"
+wait_grpc_ll_bgp_established "link-local startup without BFD"
+wait_grpc_bfd "" "absent at startup"
+wait_grpc_ll_bfd "" "absent at startup"
+numbered_before=$(member_continuity "$PEER" "$FRR_BFD_PEER")
+ll_before=$(member_continuity "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE")
+reload_member_bfd enable
+wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up after first enable from zero"
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up after first enable from zero"
+check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
+check_member_continuity "$ll_before" "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE"
 
 print_summary
