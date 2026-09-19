@@ -148,6 +148,40 @@ Two deprecation floors apply, each to a different set of surfaces:
 
 The [stability guide](stability.md) lists which surfaces are alpha.
 
+## Operator-read observation semantics
+
+These meanings are part of the inventoried RPC contract:
+
+- `ListNeighbors` / `GetNeighborState`: `stale=true` is an unavailable session
+  observation. The peer remains listed and its placeholder `Idle` is not an
+  observed Idle/down state. Consumers must check `stale` before interpreting
+  the state.
+- `GetHealth`: `healthy=true` means the core snapshot was obtained, not that
+  every session or the dataplane is healthy. `active_peers` counts only
+  non-stale `Established` observations, so an unavailable peer is excluded
+  without asserting it is down. Core snapshot failure returns an RPC error.
+- `GetPolicyStats`: success means the installed counters were available,
+  not that the session command loop is responsive. Numeric samples are not
+  an atomic fleet snapshot. Peer validation and export, import and dataset
+  waits share one absolute deadline, including admission; errors return no
+  partial response and late backend replies do not become successful reads.
+
+The [API deadline table](api.md#operator-read-deadlines) distinguishes bounded
+operator, summary and statistics waits from general RIB listing/explain reads
+that rely on caller deadlines and cancellation and can wait behind consistency
+fences. This contract does not give reads priority over route work or add a
+blanket server timeout.
+
+Existing regressions distinguish unavailable from fresh down observations in
+[`snapshots.rs`](../../src/peer_manager/tests/snapshots.rs), pin neighbor
+inventory and staged summary reads in
+[`neighbor_service.rs`](../../crates/api/src/neighbor_service.rs), core health
+counting in [`control_service.rs`](../../crates/api/src/control_service.rs), and
+absolute statistics deadlines and all-or-error responses in
+[`policy_service.rs`](../../crates/api/src/policy_service.rs). The
+[installed-counter session regression](../../src/peer_manager/tests/policy_stats.rs)
+also exercises a successful statistics RPC while the real session is held.
+
 ## Mutation and reload model
 
 The canonical live-mutation path is:

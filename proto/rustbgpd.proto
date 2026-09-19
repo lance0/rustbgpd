@@ -582,11 +582,10 @@ message NeighborState {
   string last_error = 11;
   // True for peers auto-created from a dynamic_neighbors prefix range.
   bool is_dynamic = 12;
-  // True when the per-peer session-state query did not complete in time
-  // (e.g. session task parked on TCP write back-pressure). The `state`
-  // field is a placeholder Idle in that case — clients that distinguish
-  // "session is genuinely Idle" from "we couldn't read state right now"
-  // should check this flag before treating `state` as authoritative.
+  // True when the per-peer session-state observation is unavailable
+  // (e.g. its query timed out). The `state` field is a placeholder Idle,
+  // not an observed Idle/down state. Clients must check this flag before
+  // treating `state` as authoritative; a stale row remains in the inventory.
   bool stale = 13;
   // Locally configured BGP Role. Empty when disabled.
   string local_role = 14;
@@ -1152,7 +1151,11 @@ service PolicyService {
   // unavailable counter state returns UNAVAILABLE. An address that does not resolve
   // to one unique managed static or accepted dynamic peer returns NOT_FOUND.
   // Import counter values are sampled during collection; the response is not
-  // an atomic fleet snapshot and does not establish session readiness.
+  // an atomic fleet snapshot. Success proves installed-counter availability,
+  // not that the session command loop is responsive. Peer validation, export,
+  // import and dataset backend waits share one absolute 2 s deadline, including
+  // admission; the budget is not reset between stages. A backend reply observed
+  // at or after that deadline fails, and errors return no partial rows.
   //
   // Side-effect free read; does not reset any counter. Explain queries
   // and TestPolicy dry runs never move these counters either — only
@@ -3869,8 +3872,14 @@ message CheckLivenessResponse {}
 message HealthRequest {}
 
 message HealthResponse {
+  // True when the peer-manager and RIB core snapshot was obtained. This does
+  // not assert that every BGP session or the dataplane is healthy. Failure to
+  // obtain that snapshot is an RPC error, not a successful healthy=false reply.
   bool healthy = 1;
   uint64 uptime_seconds = 2;
+  // Number of non-stale peers observed Established in that snapshot. Peers
+  // whose session state could not be read are excluded even if their last
+  // known state was Established; exclusion does not prove they are down.
   uint32 active_peers = 3;
   uint32 total_routes = 4;
   // Daemon package version (e.g. "0.50.0"). Empty when answered by a

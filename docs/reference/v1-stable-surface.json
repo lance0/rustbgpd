@@ -284,7 +284,7 @@
     ]
   },
   "compatibility": {
-    "protobuf": "Existing stable RPC names, streaming modes, request/response types, field numbers, field types, and enum numeric values do not change in v1. Additive fields and RPCs are allowed; removed numbers and names remain reserved.",
+    "protobuf": "Existing stable RPC names, streaming modes, request/response types, field numbers, field types, and enum numeric values do not change in v1. Additive fields and RPCs are allowed; removed numbers and names remain reserved. ListNeighbors/GetNeighborState stale means unavailable observation, not observed Idle/down. GetHealth healthy means a core snapshot was obtained, not all-session or dataplane health; active_peers excludes stale observations. GetPolicyStats success means installed-counter availability, not session command-loop responsiveness; backend waits share one absolute deadline and errors return no partial response. General RIB listing/explain reads retain caller deadlines/cancellation and consistency fences without a blanket server timeout or priority over route work.",
     "config": "Stable fields may gain optional siblings with documented defaults. Removal, rename, type change, or default change requires deprecation and migration under the support window.",
     "rpol": "Grammar additions must preserve parsing and decisions for the pinned corpus. Changing an existing program's accept/reject result or modification set is breaking.",
     "metrics": "Stable metric names, types, and existing label meanings do not change. New metrics and bounded labels are additive; label removal or reinterpretation is breaking.",

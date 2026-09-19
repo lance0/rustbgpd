@@ -273,6 +273,30 @@ candidate is discarded, so the runtime and TOML remain at their prior state.
 The marker is a retry warning: repeating the request can repeat those transient
 runtime changes even though the reported attempt left no final-state change.
 
+### Operator-read deadlines
+
+Read budgets depend on the operation; there is no server-wide read timeout.
+
+| Read path | Existing backend wait budget |
+|-----------|------------------------------|
+| Peer-manager operator reads | 2 s per request to the peer manager, including channel admission and reply |
+| `ListNeighbors` / `GetNeighborState` RIB summaries | A separate 2 s for the RIB summary admission and reply, after the peer-manager read; this is not one 2 s end-to-end RPC budget |
+| `GetPolicyStats` | One absolute 2 s deadline shared by peer validation, export, import and dataset backend waits; admission consumes that budget and no stage resets it |
+| `GetHealth` | One 200 ms internal core-probe budget shared by peer-manager and RIB snapshot queries; failures return `INTERNAL` |
+| General RIB listing and RIB explain reads | No fixed server-side timeout in the shared RIB read helper; callers set their own deadlines and cancel abandoned reads |
+
+General RIB reads can wait behind policy-transition consistency fences. A raw
+gRPC caller with no deadline can remain waiting for that fence to clear. The
+CLI bounds ordinary unary reads, including these RIB reads, at 30 s; methods
+with separate documented budgets retain those allowances. Custom clients
+should supply their own deadline.
+Cancellation releases the waiting reply and is checked by actor work; it does
+not preempt a synchronous work unit already executing. Route work retains
+priority. These backend budgets do not promise end-to-end response latency,
+including synchronous response construction, transport and client scheduling.
+The separate measured end-to-end [soak acceptance gates](../soaks/soak-acceptance-gates.md)
+remain unchanged.
+
 ---
 
 ## gnmi.gNMI
@@ -936,6 +960,12 @@ added at runtime.
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
 | `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
+`ListNeighbors` and `GetNeighborState` expose `stale=true` when a peer's
+session-state observation is unavailable. The row remains in the inventory;
+its placeholder `Idle` state is not evidence that the session is down.
+Check `stale` before interpreting `state`. An observed `Idle` with
+`stale=false` is a different result.
+
 `ListNeighbors` and `GetNeighborState` set `is_dynamic` and, for a dynamic
 peer, include `accepted_dynamic_range` with the canonical prefix and peer group
 captured when the connection was accepted. This is session provenance, not a
@@ -1221,7 +1251,9 @@ instantaneous fractions. Import error count and error detail are acquired
 together. A session that has not initialized its observation remains pending
 within the deadline; a closed session or invalid counter state returns
 `UNAVAILABLE`, without partial rows. Counter availability does not establish
-session progress or replace the live readiness checks. See
+that the session command loop is responsive or replace the live readiness checks.
+A backend result observed at or after the shared absolute deadline returns
+`DEADLINE_EXCEEDED`, including an otherwise successful final dataset reply. See
 [ADR-0133](../adr/0133-installed-import-counter-reads.md).
 
 Sessions continue to service direct transport import-counter queries and
@@ -2630,6 +2662,15 @@ Daemon lifecycle, health checks, and metrics.
 | `TriggerMrtDump` | Triggers an on-demand MRT TABLE_DUMP_V2 dump |
 
 ### Health check
+
+`GetHealth.healthy=true` means the core peer-manager and RIB snapshot was
+obtained. It does not assert that every BGP session or the dataplane is healthy.
+Failure to obtain the snapshot returns an RPC error, rather than a successful
+`healthy=false` response. `active_peers` counts only non-stale peers observed
+`Established`; unavailable observations are excluded even if their last known
+state was `Established`. The count can therefore omit live sessions. Use
+`ListNeighbors` and its `stale` flag to distinguish unavailable state from an
+observed session state.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
