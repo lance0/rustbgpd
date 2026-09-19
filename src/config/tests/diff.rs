@@ -1958,7 +1958,38 @@ fn diff_peer_group_bfd_is_summarized_and_hot_applied() {
             }])
         );
         assert!(changes[0].render().contains("bfd: <changed>"));
+        assert!(
+            changes[0]
+                .render()
+                .contains("strict BFD may stop BGP until Up")
+        );
         assert!(super::peer_group_change_hot_applicable(before, after));
+    }
+}
+
+#[test]
+fn diff_strict_bfd_warns_about_admission_without_forcing_session_replacement() {
+    let old = parse(valid_toml()).unwrap().neighbors.remove(0);
+    let mut new = old.clone();
+    new.bfd = Some(BfdConfig {
+        profile: "fast".into(),
+        enabled: true,
+        strict: true,
+        multihop: false,
+    });
+    for (before, after) in [(&old, &new), (&new, &old)] {
+        let changes = super::describe_neighbor_changes(before, after);
+        assert_eq!(changes.len(), 1);
+        assert!(
+            changes[0]
+                .render()
+                .contains("strict BFD may stop BGP until Up")
+        );
+        assert!(super::neighbor_change_hot_applicable(before, after));
+        assert_eq!(
+            changes[0].impact,
+            Some(super::ConfigFieldImpact::HotApplied)
+        );
     }
 }
 

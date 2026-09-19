@@ -19,6 +19,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coupling continues to withhold BGP until BFD permits it. The first BFD
   session can be enabled after startup. Profile definitions remain
   restart-required, and BFD changes remain unsupported in config transactions.
+  Apply attachment edits separately from TCP-AO rotation or edits to existing
+  listener MD5/GTSM settings; mixed candidates are rejected before any effect.
+  In `--diff --json`, `restart_required.bfd_changed` now describes profile
+  definitions only; attachment changes appear in the neighbor/peer-group diff.
+  Peer-group RPC edits preserve file-defined BFD settings and reject effective
+  BFD membership changes with instructions to use SIGHUP.
   Upgrade note: a BFD attachment previously ignored by SIGHUP now takes effect;
   review pending neighbor and peer-group BFD edits before reloading. New
   profile definitions still require a restart before members can use them.

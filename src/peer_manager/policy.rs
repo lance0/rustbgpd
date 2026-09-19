@@ -77,6 +77,20 @@ fn reject_peer_group_tcp_mss_change(
     Ok(())
 }
 
+fn reject_peer_group_bfd_change(
+    current: &crate::config::Config,
+    next: &crate::config::Config,
+) -> Result<(), CatalogMutationError> {
+    if crate::config::bfd_member_attachments_changed(current, next) {
+        return Err(CatalogMutationError::RestartRequired(
+            "peer-group changes affecting BFD membership require the config file and SIGHUP; \
+             runtime group mutations cannot settle BFD coupling"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InstalledPolicyRoutesScope {
     reachable: BTreeSet<(String, String)>,
@@ -778,7 +792,8 @@ impl PeerManager {
         let Some(existing) = self.current_config.peer_groups.get(name) else {
             return false;
         };
-        let next = api_peer_group_to_config(definition.clone());
+        let mut next = api_peer_group_to_config(definition.clone());
+        next.bfd.clone_from(&existing.bfd);
         let policy_changed = existing.import_policy != next.import_policy
             || existing.export_policy != next.export_policy
             || existing.import_policy_chain != next.import_policy_chain
@@ -4608,6 +4623,7 @@ impl PeerManager {
             return Ok(());
         }
         reject_peer_group_tcp_mss_change(&self.current_config, &next_config)?;
+        reject_peer_group_bfd_change(&self.current_config, &next_config)?;
         let purge_dynamic_group = match &event {
             ConfigEvent::SetPeerGroup { name, .. } => {
                 let old = self.current_config.peer_groups.get(name).and_then(|group| {
@@ -4769,6 +4785,9 @@ impl PeerManager {
             return OwnedCatalogMutationOutcome::Success;
         }
         if let Err(error) = reject_peer_group_tcp_mss_change(&self.current_config, &next_config) {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(error);
+        }
+        if let Err(error) = reject_peer_group_bfd_change(&self.current_config, &next_config) {
             return OwnedCatalogMutationOutcome::RejectedNoEffect(error);
         }
         let purge_dynamic_group = match &event {

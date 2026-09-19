@@ -830,7 +830,7 @@ async fn bfd_reload_commit_preserves_nonstrict_and_releases_removed_hold() {
 }
 
 #[tokio::test]
-async fn bfd_reload_strict_down_requires_successful_bgp_stop() {
+async fn bfd_reload_strict_down_retains_gate_after_failed_bgp_stop() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let (commands, commands_rx) = mpsc::channel(1);
     drop(commands_rx);
@@ -845,7 +845,7 @@ async fn bfd_reload_strict_down_requires_successful_bgp_stop() {
     let coupling = mgr.bfd_coupling.as_mut().unwrap();
     coupling.pending = Some(HashMap::from([(peer, bfd_params(peer, true))]));
     coupling.reloading = true;
-    assert!(mgr.commit_bfd_reload(None).await.is_err());
+    mgr.commit_bfd_reload(None).await.unwrap();
     assert!(
         mgr.bfd_withholding(&peer),
         "failure must retain strict inbound gate"
@@ -953,7 +953,7 @@ async fn bfd_reload_abort_preserves_prior_failure_hold_reason() {
 }
 
 #[tokio::test]
-async fn bfd_reload_up_ack_requires_successful_held_peer_start() {
+async fn bfd_reload_up_ack_retains_hold_after_failed_peer_start() {
     let peer: IpAddr = "10.0.0.2".parse().unwrap();
     let (commands, commands_rx) = mpsc::channel(1);
     drop(commands_rx);
@@ -973,12 +973,7 @@ async fn bfd_reload_up_ack_requires_successful_held_peer_start() {
     let coupling = mgr.bfd_coupling.as_mut().unwrap();
     coupling.pending = Some(HashMap::from([(peer, replacement)]));
     coupling.reloading = true;
-    assert!(
-        mgr.commit_bfd_reload(None)
-            .await
-            .unwrap_err()
-            .contains("release BFD hold")
-    );
+    mgr.commit_bfd_reload(None).await.unwrap();
     assert!(mgr.bfd_withholding(&peer));
     actor.await.unwrap();
 }
@@ -1080,4 +1075,505 @@ async fn bfd_reload_strict_relaxation_preserves_failure_pending_during_commit() 
     assert!(mgr.bfd_withholding(&peer));
     assert_eq!(counters.start.load(Ordering::SeqCst), 0);
     actor.await.unwrap();
+}
+
+#[tokio::test]
+async fn bfd_reload_unchanged_strict_replacement_waits_for_actor_ack() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    // Replacing only the BGP transport withholds the new peer even though its
+    // BFD session parameters and incarnation have not changed.
+    mgr.mark_bfd_withheld(peer);
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    mgr = mgr.with_bfd_reload(reload_tx);
+    let coupling = mgr.bfd_coupling.as_mut().unwrap();
+    coupling.pending = Some(coupling.configured.clone());
+    coupling.reloading = true;
+    let commit = tokio::spawn(async move {
+        let result = mgr.commit_bfd_reload(None).await;
+        (mgr, result)
+    });
+    let command = tokio::time::timeout(Duration::from_millis(250), reload_rx.recv())
+        .await
+        .expect("unchanged BFD members still require actor acknowledgement")
+        .expect("reload command");
+    assert!(!commit.is_finished());
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+    command.reply.send(vec![up_ack(peer)]).unwrap();
+    let (mgr, result) = commit.await.unwrap();
+    result.unwrap();
+    wait_counter(&counters.start, 1).await;
+    assert!(!mgr.bfd_withholding(&peer));
+}
+
+#[tokio::test]
+async fn bfd_reload_unchanged_members_reject_dead_actor() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    for strict in [false, true] {
+        let counters = Arc::new(BfdCouplingCounters::default());
+        let (mut mgr, _) = coupled_mgr(peer, strict, fake_bfd_peer_handle(counters.clone()));
+        if strict {
+            mgr.mark_bfd_withheld(peer);
+        }
+        let (reload_tx, reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        drop(reload_rx);
+        mgr = mgr.with_bfd_reload(reload_tx);
+        let coupling = mgr.bfd_coupling.as_mut().unwrap();
+        coupling.pending = Some(coupling.configured.clone());
+        coupling.reloading = true;
+        assert!(
+            mgr.commit_bfd_reload(None)
+                .await
+                .unwrap_err()
+                .contains("BFD actor stopped before reload")
+        );
+        assert_eq!(mgr.bfd_withholding(&peer), strict);
+        assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_reload_ack_budget_excludes_admitted_operator_read_time() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let (commands, mut commands_rx) = mpsc::channel(4);
+    let (state_queries, mut state_queries_rx) = mpsc::channel(1);
+    let session = tokio::spawn(async move {
+        while let Some(command) = commands_rx.recv().await {
+            if let PeerCommand::QueryState { reply } = command {
+                state_queries.send(reply).await.unwrap();
+            }
+        }
+        Ok(())
+    });
+    let (mut mgr, _) = coupled_mgr(peer, false, PeerHandle::from_parts(commands, session));
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let (operator_tx, operator_rx) = mpsc::channel(1);
+    mgr = mgr
+        .with_bfd_reload(reload_tx)
+        .with_operator_queries(operator_rx);
+    let coupling = mgr.bfd_coupling.as_mut().unwrap();
+    coupling.pending = Some(coupling.configured.clone());
+    coupling.reloading = true;
+    let commit = tokio::spawn(async move { mgr.commit_bfd_reload(None).await });
+    let command = reload_rx.recv().await.unwrap();
+    tokio::time::advance(Duration::from_millis(4_950)).await;
+    let (reply, read) = oneshot::channel();
+    operator_tx
+        .send(
+            PeerManagerOperatorQuery::GetPeerState {
+                peer: key(peer),
+                reply,
+            }
+            .into(),
+        )
+        .await
+        .unwrap();
+    let state_reply = state_queries_rx.recv().await.unwrap();
+    // Cross the wall-clock 5 s limit while the admitted read still has
+    // 25 ms remaining in its independent 100 ms session-query budget.
+    tokio::time::advance(Duration::from_millis(75)).await;
+    state_reply
+        .send(policy_test_peer_state(peer, SessionState::Established))
+        .unwrap();
+    read.await.unwrap().unwrap();
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !commit.is_finished(),
+        "operator servicing must not consume the actor acknowledgement budget"
+    );
+    command.reply.send(vec![down_ack(peer)]).unwrap();
+    commit.await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_reload_busy_peer_does_not_prevent_other_peers_coupling() {
+    let busy: IpAddr = "10.0.0.2".parse().unwrap();
+    let healthy: IpAddr = "10.0.0.3".parse().unwrap();
+    for permits_bgp in [false, true] {
+        let (commands, mut commands_rx) = mpsc::channel(1);
+        commands.try_send(PeerCommand::Start).unwrap();
+        let task = tokio::spawn(std::future::pending());
+        let (mut mgr, _) = coupled_mgr(busy, permits_bgp, PeerHandle::from_parts(commands, task));
+        let counters = Arc::new(BfdCouplingCounters::default());
+        insert_test_managed_peer(
+            &mut mgr,
+            healthy,
+            fake_bfd_peer_handle(counters.clone()),
+            false,
+        );
+        let coupling = mgr.bfd_coupling.as_mut().unwrap();
+        coupling
+            .configured
+            .insert(healthy, bfd_params(healthy, permits_bgp));
+        coupling.pending = Some(HashMap::from([
+            (busy, bfd_params(busy, true)),
+            (healthy, bfd_params(healthy, true)),
+        ]));
+        coupling.reloading = true;
+        if permits_bgp {
+            mgr.mark_bfd_withheld(busy);
+            mgr.mark_bfd_withheld(healthy);
+        }
+        let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        mgr = mgr.with_bfd_reload(reload_tx);
+        let actor = tokio::spawn(async move {
+            let command = reload_rx.recv().await.unwrap();
+            // Busy first proves a full queue does not prevent the remaining
+            // peer from receiving its lifecycle command.
+            command
+                .reply
+                .send(if permits_bgp {
+                    vec![up_ack(busy), up_ack(healthy)]
+                } else {
+                    vec![down_ack(busy), down_ack(healthy)]
+                })
+                .unwrap();
+        });
+        mgr.commit_bfd_reload(None)
+            .await
+            .expect("settled actor set remains accepted");
+        assert!(mgr.bfd_withholding(&busy));
+        assert!(!mgr.bfd_coupling.as_ref().unwrap().reloading);
+        if permits_bgp {
+            wait_counter(&counters.start, 1).await;
+            assert!(!mgr.bfd_withholding(&healthy));
+        } else {
+            wait_counter(&counters.bfd_down, 1).await;
+            assert!(mgr.bfd_withholding(&healthy));
+        }
+        actor.await.unwrap();
+        assert!(matches!(commands_rx.recv().await, Some(PeerCommand::Start)));
+        let (manager_tx, manager_rx) = mpsc::channel(4);
+        mgr.rx = manager_rx;
+        let manager = tokio::spawn(mgr.run());
+        let retried = tokio::time::timeout(Duration::from_secs(1), commands_rx.recv())
+            .await
+            .expect("automatic retry deadline")
+            .expect("automatic retry after queue drains");
+        assert!(matches!(
+            (&retried, permits_bgp),
+            (PeerCommand::Start, true) | (PeerCommand::BfdDown, false)
+        ));
+        let (reply, ping) = oneshot::channel();
+        manager_tx
+            .send(PeerManagerCommand::Ping { reply })
+            .await
+            .unwrap();
+        ping.await.unwrap();
+        manager_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        manager.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bfd_reload_ack_applies_queued_genuine_down_before_returning() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _) = coupled_mgr(peer, false, fake_bfd_peer_handle(counters.clone()));
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    mgr = mgr.with_bfd_reload(reload_tx);
+    let coupling = mgr.bfd_coupling.as_mut().unwrap();
+    coupling.pending = Some(coupling.configured.clone());
+    coupling.reloading = true;
+    let actor = tokio::spawn(async move {
+        reload_rx
+            .recv()
+            .await
+            .unwrap()
+            .reply
+            .send(vec![down(peer)])
+            .unwrap();
+    });
+    mgr.commit_bfd_reload(None).await.unwrap();
+    wait_counter(&counters.bfd_down, 1).await;
+    assert!(mgr.bfd_withholding(&peer));
+    // The normal notification remains queued too; consuming it later must
+    // not enqueue a second stop after the acknowledgement handled the edge.
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert_eq!(counters.bfd_down.load(Ordering::SeqCst), 1);
+    actor.await.unwrap();
+}
+
+#[tokio::test]
+async fn bfd_retry_cancels_on_opposite_state_admin_and_replacement() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    for cancellation in ["down", "disable", "replacement", "bfd replacement"] {
+        let counters = Arc::new(BfdCouplingCounters::default());
+        let (mut mgr, _) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+        mgr.mark_bfd_withheld(peer);
+        mgr.schedule_bfd_retry(peer, true);
+        match cancellation {
+            "down" => mgr.handle_bfd_state_change(down(peer)).await,
+            "disable" => mgr.set_bfd_peer_disabled(peer, true),
+            "replacement" => mgr.peers.get_mut(&key(peer)).unwrap().session_id += 1,
+            _ => {
+                mgr.bfd_coupling
+                    .as_mut()
+                    .unwrap()
+                    .configured
+                    .get_mut(&peer)
+                    .unwrap()
+                    .revision += 1;
+            }
+        }
+        mgr.retry_bfd_commands(None);
+        tokio::task::yield_now().await;
+        assert_eq!(counters.start.load(Ordering::SeqCst), 0, "{cancellation}");
+        assert!(mgr.bfd_retry_deadline().is_none(), "{cancellation}");
+        if cancellation != "disable" {
+            assert!(
+                mgr.bfd_withholding(&peer),
+                "stale retry must not clear replacement/failure hold"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn bfd_retry_round_robin_reaches_peer_after_full_first_batch() {
+    let first: IpAddr = "10.0.0.1".parse().unwrap();
+    let (first_tx, first_rx) = mpsc::channel(1);
+    first_tx.try_send(PeerCommand::Start).unwrap();
+    let (mut mgr, _) = coupled_mgr(
+        first,
+        true,
+        PeerHandle::from_parts(first_tx, tokio::spawn(std::future::pending())),
+    );
+    let mut full_queues = vec![first_rx];
+    for suffix in 1..=32 {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, suffix));
+        if suffix != 1 {
+            let (commands, receiver) = mpsc::channel(1);
+            commands.try_send(PeerCommand::Start).unwrap();
+            full_queues.push(receiver);
+            insert_test_managed_peer(
+                &mut mgr,
+                peer,
+                PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+                false,
+            );
+            mgr.bfd_coupling
+                .as_mut()
+                .unwrap()
+                .configured
+                .insert(peer, bfd_params(peer, true));
+        }
+        mgr.mark_bfd_withheld(peer);
+        mgr.schedule_bfd_retry(peer, true);
+    }
+    let healthy = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 33));
+    let counters = Arc::new(BfdCouplingCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        healthy,
+        fake_bfd_peer_handle(counters.clone()),
+        false,
+    );
+    // A detached member still needs its previously failed Start retried.
+    mgr.mark_bfd_withheld(healthy);
+    mgr.schedule_bfd_retry(healthy, true);
+    mgr.retry_bfd_commands(None);
+    assert!(
+        mgr.bfd_withholding(&healthy),
+        "one turn is limited to 32 attempts"
+    );
+    mgr.retry_bfd_commands(None);
+    wait_counter(&counters.start, 1).await;
+    assert!(
+        !mgr.bfd_withholding(&healthy),
+        "permanently full first batch cannot starve later peers"
+    );
+    assert_eq!(full_queues.len(), 32);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_busy_lifecycle_enqueue_defers_without_delaying_readiness() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let (commands, _receiver) = mpsc::channel(1);
+    commands.try_send(PeerCommand::Start).unwrap();
+    let (mut mgr, _) = coupled_mgr(
+        peer,
+        false,
+        PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+    );
+    let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    mgr = mgr
+        .with_bfd_reload(reload_tx)
+        .with_readiness_queries(readiness_rx);
+    let coupling = mgr.bfd_coupling.as_mut().unwrap();
+    coupling.pending = Some(HashMap::from([(peer, bfd_params(peer, true))]));
+    coupling.reloading = true;
+    let began = tokio::time::Instant::now();
+    let commit = tokio::spawn(async move {
+        mgr.commit_bfd_reload(None).await.unwrap();
+        mgr
+    });
+    reload_rx
+        .recv()
+        .await
+        .unwrap()
+        .reply
+        .send(vec![down_ack(peer)])
+        .unwrap();
+    let mut mgr = commit.await.unwrap();
+    assert_eq!(
+        began.elapsed(),
+        Duration::ZERO,
+        "full lifecycle queue must not delay the settled reload"
+    );
+    assert!(mgr.bfd_retry_deadline().is_some());
+    let (manager_tx, manager_rx) = mpsc::channel(1);
+    mgr.rx = manager_rx;
+    let manager = tokio::spawn(mgr.run());
+    let (reply, ping) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_millis(100), ping)
+        .await
+        .unwrap()
+        .unwrap();
+    manager_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager.await.unwrap();
+}
+
+#[tokio::test]
+async fn bfd_retry_defers_to_queued_opposite_state() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    mgr.mark_bfd_withheld(peer);
+    mgr.schedule_bfd_retry(peer, true);
+    let (changes, mut events) = crate::bfd_runtime::state_change_channel();
+    changes.send(down(peer));
+    mgr.retry_bfd_commands(Some(&events));
+    tokio::task::yield_now().await;
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+    assert!(mgr.bfd_withholding(&peer));
+    mgr.handle_bfd_state_change(events.recv().await.unwrap())
+        .await;
+    mgr.retry_bfd_commands(Some(&events));
+    assert!(mgr.bfd_retry_deadline().is_none());
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_busy_strict_relaxation_retries_initial_start_unless_real_failure() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    for real_failure in [false, true] {
+        let (commands, mut receiver) = mpsc::channel(1);
+        commands.try_send(PeerCommand::Start).unwrap();
+        let (mut mgr, _) = coupled_mgr(
+            peer,
+            true,
+            PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+        );
+        mgr.mark_bfd_withheld(peer);
+        let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        mgr = mgr.with_bfd_reload(reload_tx);
+        let coupling = mgr.bfd_coupling.as_mut().unwrap();
+        coupling.pending = Some(HashMap::from([(peer, bfd_params(peer, false))]));
+        coupling.reloading = true;
+        let actor = tokio::spawn(async move {
+            reload_rx
+                .recv()
+                .await
+                .unwrap()
+                .reply
+                .send(vec![down_ack(peer)])
+                .unwrap();
+        });
+        mgr.commit_bfd_reload(None).await.unwrap();
+        actor.await.unwrap();
+        // The commit ack and a later unchanged level ack both leave the
+        // initial non-strict Start eligible after the busy queue drains.
+        mgr.handle_bfd_state_change(down_ack(peer)).await;
+        assert!(mgr.bfd_retry_deadline().is_some());
+        if real_failure {
+            mgr.handle_bfd_state_change(down(peer)).await;
+        }
+        assert!(matches!(receiver.recv().await, Some(PeerCommand::Start)));
+        mgr.retry_bfd_commands(None);
+        if real_failure {
+            assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
+            assert!(mgr.bfd_withholding(&peer));
+        } else {
+            assert!(matches!(receiver.try_recv(), Ok(PeerCommand::Start)));
+            assert!(!mgr.bfd_withholding(&peer));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_pending_stop_survives_bfd_revision_change_until_permitted() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    for permits_bgp in [false, true] {
+        let (commands, mut receiver) = mpsc::channel(1);
+        commands.try_send(PeerCommand::Start).unwrap();
+        let (mut mgr, _) = coupled_mgr(
+            peer,
+            false,
+            PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+        );
+        mgr.handle_bfd_state_change(down(peer)).await;
+        assert!(mgr.bfd_retry_deadline().is_some());
+        let mut replacement = bfd_params(peer, false);
+        replacement.revision = 1;
+        replacement.desired_min_tx_us = 500_000;
+        let coupling = mgr.bfd_coupling.as_mut().unwrap();
+        coupling.pending = Some(HashMap::from([(peer, replacement)]));
+        coupling.reloading = true;
+        let (reload_tx, mut reload_rx) = mpsc::channel::<crate::bfd_runtime::BfdReloadCommand>(1);
+        mgr = mgr.with_bfd_reload(reload_tx);
+        let actor = tokio::spawn(async move {
+            let mut ack = if permits_bgp {
+                up_ack(peer)
+            } else {
+                down_ack(peer)
+            };
+            ack.revision = 1;
+            reload_rx
+                .recv()
+                .await
+                .unwrap()
+                .reply
+                .send(vec![ack])
+                .unwrap();
+        });
+        mgr.commit_bfd_reload(None).await.unwrap();
+        actor.await.unwrap();
+        assert!(matches!(receiver.recv().await, Some(PeerCommand::Start)));
+        mgr.retry_bfd_commands(None);
+        if permits_bgp {
+            assert!(matches!(receiver.try_recv(), Ok(PeerCommand::Start)));
+            assert!(!mgr.bfd_withholding(&peer));
+        } else {
+            assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
+            assert!(mgr.bfd_withholding(&peer));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bfd_busy_down_up_down_retries_final_stop() {
+    let peer: IpAddr = "10.0.0.2".parse().unwrap();
+    let (commands, mut receiver) = mpsc::channel(1);
+    commands.try_send(PeerCommand::Start).unwrap();
+    let (mut mgr, _) = coupled_mgr(
+        peer,
+        false,
+        PeerHandle::from_parts(commands, tokio::spawn(std::future::pending())),
+    );
+    mgr.handle_bfd_state_change(down(peer)).await;
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
+    mgr.handle_bfd_state_change(down(peer)).await;
+    assert!(matches!(receiver.recv().await, Some(PeerCommand::Start)));
+    mgr.retry_bfd_commands(None);
+    assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
+    assert!(mgr.bfd_withholding(&peer));
 }

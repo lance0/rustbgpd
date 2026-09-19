@@ -2264,6 +2264,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // credential, listener, session, or catalog effect.
     let route = config::classify_sighup_reload(config::SighupReloadFamilies {
         generation: !neighbors_unchanged || !peer_groups_unchanged || policy_generation_changed,
+        bfd_members: config::bfd_member_attachments_changed(current, &new_config),
         datasets: dataset_commit_pending || dataset_events_pending,
         dataset_bindings: policy_diff.datasets_changed
             || current.policy.dataset_bindings != new_config.policy.dataset_bindings,
@@ -9242,6 +9243,49 @@ hold_time = 90
             tags,
             vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)"]
         );
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_bfd_with_existing_neighbor_auth_before_any_command() {
+        let initial = format!("{}\n[[bfd_profiles]]\nname = \"fast\"\n", baseline_toml());
+        for auth in ["md5_password = \"secret\"", "ttl_security = true"] {
+            let desired = initial.replace(
+                "hold_time = 90",
+                &format!("hold_time = 90\nbfd = {{ profile = \"fast\" }}\n{auth}"),
+            );
+            let (outcome, tags, calls) =
+                drive_generation(&initial, &desired, GenerationReply::Applied).await;
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
+            else {
+                panic!("BFD and existing-neighbor authentication must be rejected");
+            };
+            assert!(
+                failure
+                    .error
+                    .to_string()
+                    .contains("BFD member changes with listener MD5/GTSM changes")
+            );
+            assert!(tags.is_empty(), "no sequential mutation: {tags:?}");
+            assert!(calls.is_empty(), "no generation mutation");
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_adds_authenticated_bfd_member_through_owned_generation() {
+        let initial = format!("{}\n[[bfd_profiles]]\nname = \"fast\"\n", baseline_toml());
+        let desired = format!(
+            "{initial}\n[[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\nmd5_password = \"secret\"\nttl_security = true\nbfd = {{ profile = \"fast\" }}\n"
+        );
+        let (outcome, tags, calls) =
+            drive_generation(&initial, &desired, GenerationReply::Applied).await;
+        outcome.expect("new authenticated BFD neighbor remains supported");
+        assert_eq!(
+            tags,
+            ["ApplyReloadGeneration(hot=0,replace=0,add=1,remove=0)"]
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].actions.len(), 1);
+        assert_eq!(calls[0].actions[0].kind, config::ReloadPeerActionKind::Add);
     }
 
     #[tokio::test]

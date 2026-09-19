@@ -17,20 +17,28 @@
 //! held state (`bfd_withholding`) so an established strict peer still accepts
 //! inbound.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use rustbgpd_bfd::SessionState;
+use rustbgpd_transport::PeerCommand;
 
 use crate::bfd_runtime::{
     BfdReloadCommand, BfdRuntimeConfig, BfdSessionParams, BfdStateChange, BfdStateChangeReceiver,
     PreparedRuntime, prepare_reload,
 };
 
-use super::{OperatorReadAdmission, PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager};
+use super::{OperatorReadAdmission, PeerManager};
+
+#[derive(Clone, Copy)]
+struct BfdCommandRetry {
+    session_id: u64,
+    revision: Option<u64>,
+    start: bool,
+}
 
 /// State for RFC 5882 coupling, owned by `PeerManager`.
 pub(super) struct BfdCoupling {
@@ -40,6 +48,12 @@ pub(super) struct BfdCoupling {
     next_revision: u64,
     /// During a generation, lifecycle mutations must not publish partial BFD membership.
     pub(super) reloading: bool,
+    /// Inner compensation must read accepted strict settings without losing
+    /// the candidate needed to fence an uncertain rollback.
+    rollback_lookup: bool,
+    retries: BTreeMap<IpAddr, BfdCommandRetry>,
+    retry_at: Option<tokio::time::Instant>,
+    retry_cursor: Option<IpAddr>,
     pub(super) prior_held: HashSet<IpAddr>,
     initially_withheld: HashSet<IpAddr>,
     prior_initially_withheld: HashSet<IpAddr>,
@@ -93,6 +107,10 @@ impl PeerManager {
             opened,
             next_revision: 1,
             reloading: false,
+            rollback_lookup: false,
+            retries: BTreeMap::new(),
+            retry_at: None,
+            retry_cursor: None,
             prior_held: HashSet::new(),
             initially_withheld: HashSet::new(),
             prior_initially_withheld: HashSet::new(),
@@ -123,7 +141,8 @@ impl PeerManager {
             return Ok(None);
         };
         let mut desired =
-            BfdRuntimeConfig::from_config(candidate).map_err(|error| error.to_string())?;
+            BfdRuntimeConfig::from_reload(candidate, &self.current_config, &coupling.configured)
+                .map_err(|error| error.to_string())?;
         for params in &mut desired.sessions {
             if let Some(old) = coupling.configured.get(&params.peer) {
                 params.revision = old.revision;
@@ -154,14 +173,21 @@ impl PeerManager {
                 .collect(),
         );
         coupling.reloading = true;
+        coupling.rollback_lookup = false;
         Ok(prepared)
     }
 
     /// Restore strict lookup before rollback re-adds peers, but keep publication suspended.
     pub(super) fn restore_bfd_reload_lookup(&mut self) {
-        if let Some(coupling) = self.bfd_coupling.as_mut() {
-            coupling.pending = None;
-        }
+        self.set_bfd_rollback_lookup(true);
+    }
+
+    /// Select accepted strict settings during compensation and return the
+    /// previous lookup mode so an inner rollback can restore its caller's mode.
+    pub(super) fn set_bfd_rollback_lookup(&mut self, enabled: bool) -> bool {
+        self.bfd_coupling
+            .as_mut()
+            .is_some_and(|coupling| std::mem::replace(&mut coupling.rollback_lookup, enabled))
     }
 
     /// An uncertain generation must not let an old notification release a new strict hold.
@@ -192,8 +218,146 @@ impl PeerManager {
         }
     }
 
+    fn cancel_bfd_retry(&mut self, peer: IpAddr, start: Option<bool>) -> bool {
+        let Some(coupling) = self.bfd_coupling.as_mut() else {
+            return false;
+        };
+        let matches = coupling
+            .retries
+            .get(&peer)
+            .is_some_and(|retry| start.is_none_or(|start| retry.start == start));
+        if matches {
+            coupling.retries.remove(&peer);
+        }
+        if coupling.retries.is_empty() {
+            coupling.retry_at = None;
+        }
+        matches
+    }
+
+    pub(super) fn schedule_bfd_retry(&mut self, peer: IpAddr, start: bool) {
+        let Some(managed) = self
+            .unique_peer_key_for_address(peer)
+            .and_then(|key| self.peers.get(&key))
+            .filter(|managed| managed.enabled)
+        else {
+            return;
+        };
+        if let Some(coupling) = self.bfd_coupling.as_mut() {
+            coupling.retries.insert(
+                peer,
+                BfdCommandRetry {
+                    session_id: managed.session_id,
+                    revision: coupling.configured.get(&peer).map(|params| params.revision),
+                    start,
+                },
+            );
+            coupling.retry_at.get_or_insert_with(|| {
+                tokio::time::Instant::now() + std::time::Duration::from_millis(100)
+            });
+        }
+    }
+
+    pub(super) fn bfd_retry_deadline(&self) -> Option<tokio::time::Instant> {
+        self.bfd_coupling
+            .as_ref()
+            .filter(|coupling| !coupling.reloading)
+            .and_then(|coupling| coupling.retry_at)
+    }
+
+    /// Retry only failed enqueues, never a full BFD reconcile. Each turn visits
+    /// at most 32 peers in address order, resuming after the previous batch.
+    pub(super) fn retry_bfd_commands(&mut self, events: Option<&BfdStateChangeReceiver>) {
+        let Some(coupling) = self.bfd_coupling.as_ref() else {
+            return;
+        };
+        let cursor = coupling
+            .retry_cursor
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let attempts: Vec<_> = coupling
+            .retries
+            .range((
+                std::ops::Bound::Excluded(cursor),
+                std::ops::Bound::Unbounded,
+            ))
+            .chain(coupling.retries.range(..=cursor))
+            .take(32)
+            .map(|(peer, retry)| (*peer, *retry))
+            .collect();
+        for (peer, retry) in attempts {
+            let commands = self
+                .unique_peer_key_for_address(peer)
+                .and_then(|key| self.peers.get(&key))
+                .filter(|managed| managed.enabled && managed.session_id == retry.session_id)
+                .map(|managed| managed.handle.commands_sender());
+            let coupling = self.bfd_coupling.as_mut().expect("BFD retry owns coupling");
+            coupling.retry_cursor = Some(peer);
+            if events.is_some_and(|events| events.has_pending(peer)) {
+                continue;
+            }
+            if retry.revision != coupling.configured.get(&peer).map(|params| params.revision) {
+                coupling.retries.remove(&peer);
+                continue;
+            }
+            let Some(commands) = commands else {
+                coupling.retries.remove(&peer);
+                continue;
+            };
+            let command = if retry.start {
+                PeerCommand::Start
+            } else {
+                PeerCommand::BfdDown
+            };
+            match commands.try_send(command) {
+                Ok(()) => {
+                    coupling.retries.remove(&peer);
+                    if retry.start {
+                        coupling.held_down.remove(&peer);
+                        coupling.initially_withheld.remove(&peer);
+                    }
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    coupling.retries.remove(&peer);
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+            }
+        }
+        let coupling = self.bfd_coupling.as_mut().expect("BFD retry owns coupling");
+        coupling.retry_at = (!coupling.retries.is_empty())
+            .then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+    }
+
+    fn enqueue_bfd_command(&mut self, peer: IpAddr, start: bool) -> Result<(), String> {
+        let Some(commands) = self
+            .unique_peer_key_for_address(peer)
+            .and_then(|key| self.peers.get(&key))
+            .filter(|managed| managed.enabled)
+            .map(|managed| managed.handle.commands_sender())
+        else {
+            return Ok(());
+        };
+        let command = if start {
+            PeerCommand::Start
+        } else {
+            PeerCommand::BfdDown
+        };
+        match commands.try_send(command) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(format!("BFD command for {peer}: session channel closed"))
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.schedule_bfd_retry(peer, start);
+                Err(format!(
+                    "BFD command for {peer}: session queue full; retry scheduled"
+                ))
+            }
+        }
+    }
+
     /// Gate inbound admission and stop both primary and collision sessions.
     async fn hold_bgp_for_bfd(&mut self, peer: IpAddr) -> Result<(), String> {
+        self.cancel_bfd_retry(peer, None);
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.held_down.insert(peer);
             coupling.initially_withheld.remove(&peer);
@@ -218,34 +382,22 @@ impl PeerManager {
                 .await;
             if outcome == super::PeerShutdownOutcome::TimedOut {
                 failure = Some(format!("BFD pending inbound stop for {peer} timed out"));
+            } else {
+                info!(%peer, "BFD down — shut down pending inbound collision candidate");
             }
         }
-        if let Some(managed) = self.peers.get(&key)
-            && managed.enabled
-            && let Err(error) = managed
-                .handle
-                .bfd_down_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await
-        {
-            failure = Some(format!("BFD stop for {peer}: {error}"));
+        if let Err(error) = self.enqueue_bfd_command(peer, false) {
+            failure = Some(error);
         }
         failure.map_or(Ok(()), Err)
     }
 
-    async fn release_bgp_bfd_hold(&mut self, peer: IpAddr) -> Result<(), String> {
+    fn release_bgp_bfd_hold(&mut self, peer: IpAddr) -> Result<(), String> {
+        self.cancel_bfd_retry(peer, None);
         if !self.bfd_withholding(&peer) {
             return Ok(());
         }
-        if let Some(key) = self.unique_peer_key_for_address(peer)
-            && let Some(managed) = self.peers.get(&key)
-            && managed.enabled
-        {
-            managed
-                .handle
-                .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await
-                .map_err(|error| format!("release BFD hold for {peer}: {error}"))?;
-        }
+        self.enqueue_bfd_command(peer, true)?;
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.held_down.remove(&peer);
             coupling.initially_withheld.remove(&peer);
@@ -257,6 +409,7 @@ impl PeerManager {
         if let Some(coupling) = self.bfd_coupling.as_mut() {
             coupling.pending = None;
             coupling.reloading = false;
+            coupling.rollback_lookup = false;
             coupling.held_down.retain(|peer| {
                 coupling.prior_held.contains(peer)
                     || coupling
@@ -326,6 +479,7 @@ impl PeerManager {
             .map(|(key, _)| key.address)
             .collect();
         coupling.reloading = false;
+        coupling.rollback_lookup = false;
         let desired = BfdRuntimeConfig {
             sessions: coupling
                 .configured
@@ -336,7 +490,7 @@ impl PeerManager {
                 })
                 .collect(),
         };
-        if !changed {
+        if !changed && coupling.configured.is_empty() && coupling.held_down.is_empty() {
             coupling.prior_held.clear();
             coupling.prior_initially_withheld.clear();
             coupling.desired_tx.send_replace(desired);
@@ -362,12 +516,13 @@ impl PeerManager {
             applied.await.map_err(|_| "BFD actor stopped during reload")
         };
         let states = self
-            .await_with_readiness(
-                tokio::time::timeout(std::time::Duration::from_secs(5), apply),
+            .await_with_readiness_budget(
+                apply,
+                std::time::Duration::from_secs(5),
                 OperatorReadAdmission::Served,
             )
             .await
-            .map_err(|_| "BFD reload acknowledgement timed out")??;
+            .ok_or("BFD reload acknowledgement timed out")??;
         let coupling = self
             .bfd_coupling
             .as_mut()
@@ -410,25 +565,57 @@ impl PeerManager {
         coupling.desired_tx.send_replace(desired);
         coupling.prior_held.clear();
         coupling.prior_initially_withheld.clear();
+        // The exact actor acknowledgement settles BFD membership. BGP lifecycle
+        // commands only acknowledge enqueue, not application; as in ordinary
+        // BFD events, a busy peer warns and retains its gate without preventing
+        // coupling for the remaining peers or recovery-fencing the daemon.
         for peer in released {
-            self.release_bgp_bfd_hold(peer).await?;
+            if let Err(error) = self.release_bgp_bfd_hold(peer) {
+                warn!(%peer, %error, "BFD permits BGP: failed to (re)start session");
+            }
         }
         for state in states {
+            if state.state != SessionState::Up && !state.remote_admin_down {
+                let session_id = self
+                    .unique_peer_key_for_address(state.peer)
+                    .and_then(|key| self.peers.get(&key))
+                    .map(|managed| managed.session_id);
+                let coupling = self
+                    .bfd_coupling
+                    .as_mut()
+                    .expect("BFD acknowledgement owns coupling");
+                if coupling.held_down.contains(&state.peer)
+                    && let Some(retry) = coupling.retries.get_mut(&state.peer)
+                    && !retry.start
+                    && Some(retry.session_id) == session_id
+                {
+                    // Replacing only BFD must not discard an undelivered Stop
+                    // still required by this same BGP session's retained hold.
+                    retry.revision = Some(state.revision);
+                }
+            }
             if newly_strict.contains(&state.peer)
                 && state.state != SessionState::Up
                 && !state.remote_admin_down
             {
-                if !self.bfd_withholding(&state.peer) {
-                    self.hold_bgp_for_bfd(state.peer).await?;
-                    if state.resync {
+                let superseded_start = self.cancel_bfd_retry(state.peer, Some(true));
+                let held = self.bfd_withholding(&state.peer);
+                let initially_held = self
+                    .bfd_coupling
+                    .as_ref()
+                    .is_some_and(|coupling| coupling.initially_withheld.contains(&state.peer));
+                if !held || superseded_start {
+                    if let Err(error) = self.hold_bgp_for_bfd(state.peer).await {
+                        let peer = state.peer;
+                        warn!(%peer, %error, "BFD down: failed to stop BGP session");
+                    }
+                    if state.resync && (!held || initially_held) {
                         self.mark_bfd_withheld(state.peer);
                     }
                 }
                 continue;
             }
-            if state.state == SessionState::Up || state.remote_admin_down {
-                self.release_bgp_bfd_hold(state.peer).await?;
-            }
+            self.handle_bfd_state_change(state).await;
         }
         Ok(())
     }
@@ -438,6 +625,9 @@ impl PeerManager {
     /// and republish the desired set. No-op when coupling is off or the peer is
     /// not BFD-configured.
     pub(super) fn set_bfd_peer_disabled(&mut self, peer: IpAddr, disabled: bool) {
+        if disabled {
+            self.cancel_bfd_retry(peer, None);
+        }
         let relevant = self.bfd_coupling.as_mut().is_some_and(|c| {
             if c.reloading || !c.configured.contains_key(&peer) {
                 return false;
@@ -459,7 +649,14 @@ impl PeerManager {
     pub(super) fn is_strict_bfd_peer(&self, peer: &IpAddr) -> bool {
         self.bfd_coupling
             .as_ref()
-            .and_then(|c| c.pending.as_ref().unwrap_or(&c.configured).get(peer))
+            .and_then(|c| {
+                if c.rollback_lookup {
+                    &c.configured
+                } else {
+                    c.pending.as_ref().unwrap_or(&c.configured)
+                }
+                .get(peer)
+            })
             .is_some_and(|params| params.strict)
     }
 
@@ -488,6 +685,7 @@ impl PeerManager {
     /// the first BFD Up releases it through the normal `handle_bfd_state_change`
     /// up→start path. No-op when coupling is off.
     pub(super) fn mark_bfd_withheld(&mut self, peer: IpAddr) {
+        self.cancel_bfd_retry(peer, Some(true));
         if let Some(c) = self.bfd_coupling.as_mut() {
             c.held_down.insert(peer);
             c.initially_withheld.insert(peer);
@@ -596,8 +794,14 @@ impl PeerManager {
         // strict withhold.
         let permits_bgp = change.state == SessionState::Up || change.remote_admin_down;
         if permits_bgp {
-            if let Err(error) = self.release_bgp_bfd_hold(peer).await {
-                warn!(%peer, %error, "BFD up: failed to start BGP session");
+            if let Err(error) = self.release_bgp_bfd_hold(peer) {
+                warn!(%peer, %error, "BFD permits BGP: failed to (re)start session");
+            } else if already_held {
+                if change.remote_admin_down {
+                    info!(%peer, "BFD remote AdminDown — allowing BGP (RFC 5882 §4.1)");
+                } else {
+                    info!(%peer, "BFD up — allowing BGP session to (re)establish");
+                }
             }
             return;
         }
@@ -607,6 +811,18 @@ impl PeerManager {
         // is Down, and an established non-strict peer's BGP must only fall to a
         // real Up→Down *transition*, never a level report. So only a genuine
         // transition (resync=false) to Down tears BGP down and holds it.
+        // Relaxing strict admission permits the initial Start even while BFD
+        // remains initially Down. Its failed enqueue must survive level acks;
+        // a genuine failure still revokes that permission and cancels retry.
+        let relaxing_initial_hold = change.resync
+            && self.bfd_coupling.as_ref().is_some_and(|coupling| {
+                coupling.initially_withheld.contains(&peer)
+                    && coupling
+                        .configured
+                        .get(&peer)
+                        .is_some_and(|params| !params.strict)
+            });
+        let superseded_start = !relaxing_initial_hold && self.cancel_bfd_retry(peer, Some(true));
         if change.resync {
             return;
         }
@@ -615,7 +831,7 @@ impl PeerManager {
                 if let Some(coupling) = self.bfd_coupling.as_mut() {
                     coupling.initially_withheld.remove(&peer);
                 }
-                if already_held {
+                if already_held && !superseded_start {
                     return;
                 }
                 if let Err(error) = self.hold_bgp_for_bfd(peer).await {

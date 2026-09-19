@@ -123,6 +123,67 @@ async fn owned_peer_group_validation_rejection_is_typed_no_effect() {
     assert_eq!(mgr.current_config, prior);
 }
 
+#[tokio::test]
+async fn peer_group_bfd_membership_edits_reject_before_effects() {
+    use rustbgpd_api::peer_types::{ConfigEvent, OwnedCatalogMutationOutcome};
+    let source = format!(
+        "{EDGE_GROUP_TOML}\n[[bfd_profiles]]\nname = \"fast\"\n[peer_groups.protected]\nbfd = {{ profile = \"fast\", strict = true }}\n"
+    );
+    let address: IpAddr = "10.0.0.2".parse().unwrap();
+    for owned in [false, true] {
+        for attach in [false, true] {
+            let mut prior = load_test_config(&source);
+            if !attach {
+                prior.neighbors[0].peer_group = Some("protected".into());
+            }
+            let mut mgr = peer_group_reshape_manager(prior.clone());
+            let counters = Arc::new(FakePeerCounters::default());
+            insert_test_managed_peer(
+                &mut mgr,
+                address,
+                fake_peer_handle(address, SessionState::Established, None, counters.clone()),
+                false,
+            );
+            let before = mgr.peers[&key(address)].session_id;
+            let event = if attach {
+                ConfigEvent::SetNeighborPeerGroup {
+                    address,
+                    peer_group: "protected".into(),
+                    ack: None,
+                }
+            } else {
+                ConfigEvent::ClearNeighborPeerGroup { address, ack: None }
+            };
+            let error = if owned {
+                let outcome = mgr
+                    .apply_peer_group_change_owned(event, vec![address])
+                    .await;
+                let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = outcome else {
+                    panic!("expected rejection before effects: {outcome:?}");
+                };
+                error
+            } else {
+                mgr.apply_peer_group_change(event, vec![address])
+                    .await
+                    .unwrap_err()
+            };
+            assert!(error.to_string().contains("BFD membership"), "{error}");
+            assert!(error.to_string().contains("SIGHUP"), "{error}");
+            assert_eq!(mgr.current_config, prior);
+            assert_eq!(mgr.peers[&key(address)].session_id, before);
+            assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+            mgr.peers
+                .remove(&key(address))
+                .unwrap()
+                .handle
+                .shutdown()
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+}
+
 const EDGE_GROUP_TOML: &str = r#"
 [global]
 asn = 65001

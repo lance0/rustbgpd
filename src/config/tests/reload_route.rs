@@ -451,3 +451,64 @@ fn diff_config_reports_the_sighup_route_and_listener_inventory() {
     let unchanged = diff_config(&prior, &prior);
     assert!(!format_config_diff(&unchanged).contains("SIGHUP reload route"));
 }
+
+#[test]
+fn bfd_member_reload_rejects_in_place_authentication_but_keeps_owned_generation() {
+    for (tcp_ao, listener_auth) in [(true, false), (false, true), (true, true)] {
+        let route = classify_sighup_reload(SighupReloadFamilies {
+            generation: true,
+            bfd_members: true,
+            tcp_ao,
+            listener_auth,
+            ..SighupReloadFamilies::default()
+        });
+        let SighupReloadRoute::Rejected { reasons } = &route else {
+            panic!("BFD must not bypass generation acknowledgement: {route:?}");
+        };
+        assert!(
+            reasons
+                .iter()
+                .all(|reason| reason.contains("BFD member changes"))
+        );
+        assert!(
+            route
+                .describe()
+                .contains("reload these families on their own")
+        );
+    }
+    assert_eq!(
+        classify_sighup_reload(SighupReloadFamilies {
+            bfd_members: true,
+            ..SighupReloadFamilies::default()
+        }),
+        SighupReloadRoute::Generation
+    );
+}
+
+#[test]
+fn bfd_auth_compound_diff_reports_rejection_in_json_and_human_output() {
+    let prior = rs(&format!("{RS_TOML}\n[[bfd_profiles]]\nname = \"fast\"\n"));
+    let mut candidate = prior.clone();
+    candidate.neighbors[0].md5_password = Some("secret".to_string());
+    candidate.neighbors[0].bfd = Some(BfdConfig {
+        profile: "fast".to_string(),
+        enabled: true,
+        strict: false,
+        multihop: false,
+    });
+    let diff = diff_config(&prior, &candidate);
+    assert!(diff.bfd_members_changed);
+    assert_eq!(
+        config_diff_json_value(&diff)["sighup_reload"]["route"],
+        "rejected"
+    );
+    let text = format_config_diff(&diff);
+    assert!(
+        text.contains("reload these families on their own"),
+        "{text}"
+    );
+    assert!(
+        text.contains("BFD member changes with listener MD5/GTSM changes"),
+        "{text}"
+    );
+}

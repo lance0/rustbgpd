@@ -1409,6 +1409,15 @@ Strict mode can withhold BGP until BFD is Up or the remote reports AdminDown.
 Socket preparation and configuration validation precede peer mutation, and the
 BFD actor acknowledges the new session set before the runtime snapshot advances.
 Config transactions do not apply BFD attachment changes.
+Peer-group RPC edits preserve the group's file-defined BFD attachment. RPCs
+that would change a neighbor's effective BFD membership reject before effects;
+edit the configuration file and use SIGHUP instead.
+
+Apply BFD attachment edits separately from TCP-AO keyring rotation or changes
+to existing listener MD5/GTSM settings. A combined candidate is rejected before
+runtime changes because those authentication edits use a separate reload path.
+Adding or removing a static neighbor with its own authentication remains
+supported by the generation executor.
 
 `[[bfd_profiles]]` definitions remain **restart-required** and are pinned to
 their running values on reload. Attachments must reference a profile already

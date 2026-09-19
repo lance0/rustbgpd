@@ -5002,8 +5002,13 @@ async fn run<T>(
     // (held in ServeConfig) is the long-lived sink, so the WatchEvents BFD
     // stream stays open even when no sessions are configured.
     //
-    // Membership can be enabled later by SIGHUP, including from an empty startup.
-    let bfd_ring_capacity = 1024;
+    // Membership can be enabled later using startup-defined profiles. With no
+    // profiles, BFD cannot start before a restart, so retain the minimal rings.
+    let bfd_ring_capacity = if config.bfd_profiles.is_empty() {
+        1
+    } else {
+        1024
+    };
     let (bfd_event_tx, bfd_event_rx) =
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(bfd_ring_capacity);
     let (bfd_bgp_event_tx, _) =

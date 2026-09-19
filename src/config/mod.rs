@@ -1684,7 +1684,8 @@ pub enum ConfigFieldImpact {
 /// are the shipped reload behavior, not aspiration:
 /// - Hot-applied fields are applied in place by the reload partition
 ///   (`neighbor_change_hot_applicable` → `HotUpdatePeer`) without
-///   touching the session task.
+///   replacing the session task. BFD attachment reconciliation is separate:
+///   strict admission may stop BGP until BFD is Up without rebuilding it.
 /// - `remote_asn`: `diff_neighbors` keys on `(address, interface)`, so
 ///   an ASN edit flows through reconcile as an immediate session rebuild
 ///   under the new ASN — identity delete+add semantics without a daemon
@@ -1765,7 +1766,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         ),
         "bfd" => (
             ConfigFieldImpact::HotApplied,
-            "reload-applied: BFD session reconciliation",
+            "reload-applied: BFD reconciliation; strict BFD may stop BGP until Up",
         ),
         "tcp_ao" | "tcp_mss" => (ConfigFieldImpact::RestartRequired, "restart required"),
         _ => return None,
@@ -3348,6 +3349,8 @@ pub struct SighupReloadFamilies {
     /// Static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
     /// neighbor sets, global chains, or compiled `.rpol` content.
     pub generation: bool,
+    /// BFD member attachments require the acknowledged generation executor.
+    pub bfd_members: bool,
     /// Staged dataset content/error state, through unchanged live handles.
     pub datasets: bool,
     /// Dataset names, kinds, file mappings, or handle identities changed.
@@ -3391,6 +3394,7 @@ impl SighupReloadFamilies {
             || diff.policy.rpol_changed;
         Self {
             generation,
+            bfd_members: diff.bfd_members_changed,
             datasets: false,
             dataset_bindings: diff.policy.datasets_changed,
             dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
@@ -3463,18 +3467,26 @@ impl SighupReloadRoute {
 /// edit, and the generation stages its listener inventory around the
 /// session change. Without dataset changes,
 /// those authentication edits keep a generation-class candidate on the
-/// sequential path: they have separate ordered protocols and cannot be
+/// sequential path unless BFD member attachments also change; BFD requires
+/// its generation acknowledgement and cannot share that sequential executor.
+/// Authentication changes have separate ordered protocols and cannot be
 /// folded into the session reshape primitive. Candidates with no
 /// generation-class or dataset change keep the sequential path.
 #[must_use]
 pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
     let datasets = families.datasets || families.dataset_bindings;
-    if !families.generation && !datasets {
+    if !families.generation && !families.bfd_members && !datasets {
         return SighupReloadRoute::Sequential {
             reasons: Vec::new(),
         };
     }
     let mut rejected = Vec::new();
+    if families.bfd_members && families.tcp_ao {
+        rejected.push("BFD member changes with TCP-AO keyring rotation".to_string());
+    }
+    if families.bfd_members && families.listener_auth {
+        rejected.push("BFD member changes with listener MD5/GTSM changes".to_string());
+    }
     if datasets && families.tcp_ao {
         rejected.push("dataset changes with TCP-AO keyring rotation".to_string());
     }
@@ -4579,7 +4591,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let dynamic_neighbors_reload_applied_changed =
         old.dynamic_neighbors != dynamic_reload_new.dynamic_neighbors;
     let tcp_mss_changed = tcp_mss_restart_required_changed(old, new);
-    let bfd_changed = old.bfd_profiles != new.bfd_profiles;
+    let bfd_changed = !bfd_profiles_equal(&old.bfd_profiles, &new.bfd_profiles);
     let bfd_members_changed = bfd_member_attachments_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
@@ -4785,7 +4797,7 @@ fn neighbor_effective_bfd<'a>(neighbor: &'a Neighbor, config: &'a Config) -> Opt
 /// Compare attachment intent, including unused groups and disabled overrides.
 /// Add/remove and group reassignment must also be rejected by transactions,
 /// whose field summaries alone cannot expose inherited BFD changes.
-fn bfd_member_attachments_changed(old: &Config, new: &Config) -> bool {
+pub(crate) fn bfd_member_attachments_changed(old: &Config, new: &Config) -> bool {
     let groups = |config: &Config| -> BTreeMap<_, _> {
         config
             .peer_groups
@@ -4928,11 +4940,22 @@ pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current:
     true
 }
 
+/// Profiles are named definitions; their declaration order has no runtime effect.
+fn bfd_profiles_equal(old: &[BfdProfileConfig], new: &[BfdProfileConfig]) -> bool {
+    fn by_name(profiles: &[BfdProfileConfig]) -> BTreeMap<&str, &BfdProfileConfig> {
+        profiles
+            .iter()
+            .map(|profile| (profile.name.as_str(), profile))
+            .collect()
+    }
+    by_name(old) == by_name(new)
+}
+
 /// Pin startup-owned profile definitions while preserving reloadable member
 /// attachments. The resulting candidate must be validated before mutation:
 /// a reference to a newly added profile cannot resolve until restart.
 pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
-    if new_config.bfd_profiles == current.bfd_profiles {
+    if bfd_profiles_equal(&new_config.bfd_profiles, &current.bfd_profiles) {
         return false;
     }
     new_config.bfd_profiles.clone_from(&current.bfd_profiles);

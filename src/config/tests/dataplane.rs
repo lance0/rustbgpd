@@ -721,6 +721,26 @@ fn bfd_member_edits_are_reload_applied_and_transaction_unsupported() {
 }
 
 #[test]
+fn bfd_profile_reordering_is_not_a_restart_required_change() {
+    let mut live = bfd_reload_config();
+    let mut second = live.bfd_profiles[0].clone();
+    second.name = "slow".into();
+    second.min_tx_interval = 1000;
+    live.bfd_profiles.push(second);
+    let mut candidate = live.clone();
+    candidate.bfd_profiles.reverse();
+    candidate.validate().unwrap();
+    assert!(!diff_config(&live, &candidate).has_any_changes());
+    assert!(!super::pin_bfd_startup_only_runtime(&mut candidate, &live));
+    assert_eq!(candidate.bfd_profiles[0].name, "slow");
+
+    candidate.bfd_profiles[0].multiplier += 1;
+    assert!(diff_config(&live, &candidate).bfd_changed);
+    assert!(super::pin_bfd_startup_only_runtime(&mut candidate, &live));
+    assert_eq!(candidate.bfd_profiles, live.bfd_profiles);
+}
+
+#[test]
 fn bfd_profile_edits_are_pinned_even_without_members() {
     let mut live = bfd_reload_config();
     live.neighbors.pop();

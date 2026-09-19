@@ -200,6 +200,14 @@ pub struct BfdStateChangeReceiver {
 }
 
 impl BfdStateChangeReceiver {
+    /// A queued newer outcome must be handled before retrying a BGP command.
+    pub(crate) fn has_pending(&self, peer: IpAddr) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&peer)
+    }
+
     /// Receive the next (coalesced) state change, or `None` once every sender
     /// is dropped and the queue is drained — the same close semantics as
     /// `mpsc::UnboundedReceiver::recv`.
@@ -288,6 +296,27 @@ impl BfdRuntimeConfig {
     /// neighbor whose own `bfd` (or inherited peer-group `bfd`) names a defined
     /// profile. Config validation has already checked the profile references.
     pub fn from_config(config: &Config) -> Result<BfdRuntimeConfig, BfdRuntimeConfigError> {
+        Self::from_reload(config, config, &std::collections::HashMap::new())
+    }
+
+    /// Retain accepted interface scopes for unchanged sessions. An unrelated
+    /// reload must not depend on a transient interface lookup or replace a
+    /// session merely because its interface was recreated with another index.
+    pub(crate) fn from_reload(
+        config: &Config,
+        accepted_config: &Config,
+        accepted: &std::collections::HashMap<IpAddr, BfdSessionParams>,
+    ) -> Result<BfdRuntimeConfig, BfdRuntimeConfigError> {
+        let accepted_interfaces: std::collections::HashMap<_, _> = accepted_config
+            .neighbors
+            .iter()
+            .filter_map(|neighbor| {
+                let peer = neighbor.address.parse::<IpAddr>().ok()?;
+                accepted
+                    .contains_key(&peer)
+                    .then_some((peer, neighbor.interface.as_deref()))
+            })
+            .collect();
         let mut sessions = Vec::new();
         for neighbor in &config.neighbors {
             let Some(bfd) = resolve_bfd(
@@ -318,6 +347,10 @@ impl BfdRuntimeConfig {
                         neighbor.address, bfd.profile
                     ))
                 })?;
+            let source = bfd
+                .multihop
+                .then(|| config.active_source_for(peer))
+                .flatten();
             let scope_id = if is_ipv6_link_local(peer) {
                 let interface = neighbor.interface.as_deref().ok_or_else(|| {
                     BfdRuntimeConfigError(format!(
@@ -325,12 +358,27 @@ impl BfdRuntimeConfig {
                         neighbor.address
                     ))
                 })?;
-                Some(nix::net::if_::if_nametoindex(interface).map_err(|error| {
-                    BfdRuntimeConfigError(format!(
-                        "neighbor {:?} interface {:?}: failed to resolve IPv6 link-local BFD scope: {error}",
-                        neighbor.address, interface
-                    ))
-                })?)
+                let retained = accepted
+                    .get(&peer)
+                    .filter(|prior| {
+                        accepted_interfaces.get(&peer) == Some(&Some(interface))
+                        && prior.desired_min_tx_us == profile.min_tx_interval.saturating_mul(1000)
+                        && prior.required_min_rx_us == profile.min_rx_interval.saturating_mul(1000)
+                        && u32::from(prior.detect_mult) == profile.multiplier
+                        && prior.multihop == bfd.multihop
+                        // Strict is BGP admission metadata, not BFD session identity.
+                        && prior.source == source
+                    })
+                    .and_then(|prior| prior.scope_id);
+                Some(match retained {
+                    Some(scope) => scope,
+                    None => nix::net::if_::if_nametoindex(interface).map_err(|error| {
+                        BfdRuntimeConfigError(format!(
+                            "neighbor {:?} interface {:?}: failed to resolve IPv6 link-local BFD scope: {error}",
+                            neighbor.address, interface
+                        ))
+                    })?,
+                })
             } else {
                 None
             };
@@ -348,10 +396,7 @@ impl BfdRuntimeConfig {
                 strict: bfd.strict,
                 enabled: true,
                 multihop: bfd.multihop,
-                source: bfd
-                    .multihop
-                    .then(|| config.active_source_for(peer))
-                    .flatten(),
+                source,
             });
         }
         Ok(BfdRuntimeConfig { sessions })
@@ -2796,6 +2841,81 @@ bfd = { profile = "p" }
             "interface context: {message}"
         );
         assert!(message.contains("failed to resolve"), "reason: {message}");
+    }
+
+    #[test]
+    fn reload_retains_accepted_link_local_scope_until_session_configuration_changes() {
+        let mut config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65005
+bfd = { profile = "p" }
+"#,
+        );
+        let mut session = BfdRuntimeConfig::from_config(&config)
+            .expect("initial scope")
+            .sessions
+            .remove(0);
+        // Synthetic accepted index deliberately differs from the current loopback
+        // index, covering an interface recreated since its session was accepted.
+        session.scope_id = Some(4242);
+        session.destination = super::bfd_destination(session.peer, session.scope_id, false)
+            .expect("scoped destination");
+        let accepted = std::collections::HashMap::from([(session.peer, session.clone())]);
+        let retained = BfdRuntimeConfig::from_reload(&config, &config, &accepted)
+            .expect("interface index change does not replace accepted session");
+        assert_eq!(retained.sessions, [session.clone()]);
+
+        config.neighbors[0].interface = Some("rustbgpd-no-such-interface".into());
+        let mut candidate = config.clone();
+        candidate.neighbors[0].description = Some("unrelated edit".into());
+        let retained = BfdRuntimeConfig::from_reload(&candidate, &config, &accepted)
+            .expect("unchanged session needs no fresh interface lookup");
+        assert_eq!(retained.sessions, [session.clone()]);
+
+        candidate.neighbors[0]
+            .bfd
+            .as_mut()
+            .expect("attachment")
+            .strict = true;
+        let retained = BfdRuntimeConfig::from_reload(&candidate, &config, &accepted)
+            .expect("strict admission metadata needs no fresh interface lookup");
+        session.strict = true;
+        assert_eq!(retained.sessions, [session]);
+
+        assert!(
+            BfdRuntimeConfig::from_reload(
+                &candidate,
+                &config,
+                &std::collections::HashMap::default()
+            )
+            .is_err(),
+            "a new attachment must resolve its interface before mutation"
+        );
+        let mut changed = candidate.clone();
+        changed.neighbors[0].interface = Some("rustbgpd-other-missing-interface".into());
+        assert!(
+            BfdRuntimeConfig::from_reload(&changed, &config, &accepted).is_err(),
+            "a changed interface must resolve before mutation"
+        );
+        let mut changed = candidate.clone();
+        changed.bfd_profiles[0].min_tx_interval += 100;
+        assert!(
+            BfdRuntimeConfig::from_reload(&changed, &config, &accepted).is_err(),
+            "changed session timers must resolve before mutation"
+        );
+        let mut added = candidate.neighbors[0].clone();
+        added.address = "fe80::6".into();
+        candidate.neighbors.push(added);
+        assert!(
+            BfdRuntimeConfig::from_reload(&candidate, &config, &accepted).is_err(),
+            "a new peer cannot borrow an existing peer's scope"
+        );
     }
 
     #[test]
