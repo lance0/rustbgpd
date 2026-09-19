@@ -3512,8 +3512,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.peer_info, peer);
         Self::reap_peer_series_from_vec(&self.0.session_down, peer);
         Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
-        Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
-        Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
+        self.reap_bfd_series(peer);
         Self::reap_peer_series_from_vec(&self.0.notifications_sent, peer);
         Self::reap_peer_series_from_vec(&self.0.notifications_received, peer);
         Self::reap_peer_series_from_vec(&self.0.messages_sent, peer);
@@ -3922,6 +3921,13 @@ impl BgpMetrics {
             .0
             .gnmi_dialout_last_publish_timestamp
             .remove_label_values(&[target]);
+    }
+
+    /// Remove BFD series when an attachment is removed, preserving the peer's
+    /// BGP history. Do not call for a session flap or neighbor admin disable.
+    pub fn reap_bfd_series(&self, peer: &str) {
+        Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
+        Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
     }
 
     /// Record a BFD session state change: set the per-peer up gauge and count a
@@ -9027,6 +9033,29 @@ mod tests {
         assert!(text.contains(
             r#"bgp_outbound_prefix_blocked_total{family="ipv4_unicast",peer="10.0.0.1"} 3"#
         ));
+    }
+
+    #[test]
+    fn reap_bfd_series_preserves_bgp_history_and_other_peers() {
+        let m = BgpMetrics::new();
+        populate_all_peer_families(&m, "10.0.0.1");
+        m.record_bfd_state("10.0.0.2", true, false);
+        let without_bfd = |text: String| {
+            text.lines()
+                .filter(|line| line.contains("peer=") && !line.contains("bfd_session_"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let before = without_bfd(gather_text(&m));
+        m.reap_bfd_series("10.0.0.1");
+        m.reap_bfd_series("10.0.0.1"); // Idempotent after removal.
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"bfd_session_up{peer="10.0.0.1"}"#));
+        assert!(!text.contains(r#"bfd_session_flaps_total{peer="10.0.0.1"}"#));
+        assert!(text.contains(r#"bfd_session_up{peer="10.0.0.2"} 1"#));
+        assert_eq!(without_bfd(text), before);
+        m.record_bfd_state("10.0.0.1", true, false);
+        assert!(gather_text(&m).contains(r#"bfd_session_up{peer="10.0.0.1"} 1"#));
     }
 
     #[test]

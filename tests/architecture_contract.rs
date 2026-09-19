@@ -226,7 +226,7 @@ fn documented_startup_phases_match_unique_main_anchors_in_order() {
         "// Spawn RPKI subsystem (VRP manager + per-cache RTR clients)",
         "// Spawn MRT manager (periodic TABLE_DUMP_V2 snapshots)",
         "let mut peer_mgr_handle = tokio::spawn(async move {",
-        "let bfd_runtime_handle = bfd_runtime::spawn_prepared(",
+        "let bfd_runtime_handle = bfd_runtime::spawn_prepared_with_reload(",
         "let mut grpc_handle = tokio::spawn(async move {",
         "for neighbor in peer_configs {",
         "let mut bgp_listener_handle = tokio::spawn(async move {",

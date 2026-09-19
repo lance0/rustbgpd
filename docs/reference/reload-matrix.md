@@ -164,7 +164,7 @@ reload).
 | `max_prefix_restart_seconds` | live | Manager-owned hold-down policy. A successful value change hot-applies without touching the session and reschedules any armed countdown to now + the new duration (the superseded deadline never fires); removing the value cancels the countdown; a rejected change preserves it untouched. The field does not retroactively arm an indefinitely latched peer. |
 | `md5_password` | live (effective next session) | **TCP-MD5 keys are per-socket.** On SIGHUP the reconciler rebuilds the session immediately, so the new key is installed on the rebuilt socket right away. |
 | `tcp_ao` | live (ordered rotation generations) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs, then on a later SIGHUP select an already-installed successor as local RNext. Selection is one-shot observed across the affected protected-session cohort; predecessor deprecation metadata commits in that same immutable generation only after verified successor traffic increases beyond each affected socket's baseline. A later SIGHUP may delete only deprecated, unselected MKTs while preserving the exact owner set, survivor order, key definitions, and selected key. Adding and selecting together, setting Current, key edits/reordering, non-deprecated/selected-key deletion, or owner changes are rejected/pinned. Runtime config transactions remain conservatively restart-required because they do not run the SIGHUP coordinator. |
-| `bfd` | restart-required | Pinned by `pin_bfd_startup_only_runtime`. The ADR-0067 BFD actor resolves `[[bfd_profiles]]` plus per-neighbor/peer-group `bfd` once at startup. Logged at `ERROR` during reload. |
+| `bfd` | reload-applied | SIGHUP adds, removes, enables, or disables the member's BFD session, including the first BFD session after startup. New sockets are prepared before peer changes; the actor acknowledges the new session set before the runtime snapshot advances. Strict mode can withhold BGP until BFD permits it. Profile definitions remain restart-required; config transactions do not apply BFD changes. |
 | `tcp_mss` | restart-required | `TCP_MAXSEG` is installed when sockets are created. Active opens use the neighbor's effective value; each bound passive listener socket carries the smallest effective value across resolved static neighbors of its own address family, and every accepted child inherits its family's clamp. A family whose resolved static neighbors set no clamp is left unclamped, so an IPv4 tunnel constraint no longer down-clamps IPv6 sessions. SIGHUP keeps the startup values. |
 | `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
 | `ttl_security_hops` | live (effective next session) | Inherited GTSM distance; a static session is rebuilt and the listener's inbound minimum is replaced by the SIGHUP coordinator. Runtime transactions remain restart-required because they cannot update the listener inventory. |
@@ -224,7 +224,7 @@ configure their keyring directly.
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Inherited by group members. An all-`live` group edit applies in place to static and dynamic members without bouncing them; a mixed change set reshapes static members and manager-syncs dynamic ones. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |
 | `md5_password` | live (effective next session) | Same as neighbor — pinned by group, applied to the inheriting peer's next socket. |
-| `bfd` | restart-required | Pinned. |
+| `bfd` | reload-applied | SIGHUP reconciles inherited BFD for static members. A neighbor's own `bfd` block still overrides its group. Profile definitions remain restart-required; config transactions do not apply BFD changes. |
 | `tcp_mss` | restart-required | Inherited by static group members and included in the passive-listener minimum for the member's own address family only after resolution. Groups referenced by dynamic-neighbor ranges cannot set it. |
 | `ttl_security` | live (effective next session) | |
 | `ttl_security_hops` | live (effective next session) | Same as neighbor; changes to a dynamic range's listener selector require SIGHUP. |
@@ -436,7 +436,7 @@ SIGHUP outcomes.
 
 | Section | Class | Notes |
 |---|---|---|
-| `[[bfd_profiles]]` | restart-required | Pinned alongside per-neighbor/peer-group `bfd`. The ADR-0067 BFD actor resolves the profile set once. |
+| `[[bfd_profiles]]` | restart-required | `pin_bfd_startup_only_runtime` preserves the running profile definitions. A member can attach to an existing profile on SIGHUP; adding or editing a profile requires a restart. A candidate that cannot resolve its BFD references against the running profiles is rejected before runtime mutation. |
 
 ## `[security.grpc.*]`
 
@@ -543,6 +543,6 @@ before sending the configuration to the daemon.
 - [`docs/reference/configuration.md`](configuration.md) — field-by-field config reference.
 - [`docs/reference/operations.md`](operations.md) — operator runbook (startup, SIGHUP, upgrade).
 - [`docs/adr/0061-opt-in-unicast-linux-fib-integration.md`](../adr/0061-opt-in-unicast-linux-fib-integration.md) — FIB-discard reconciler scope.
-- [`docs/adr/0067-bfd-single-hop.md`](../adr/0067-bfd-single-hop.md) — BFD startup-only runtime.
+- [`docs/adr/0067-bfd-single-hop.md`](../adr/0067-bfd-single-hop.md) — original BFD actor and coupling design; current reload behavior is specified above.
 - [`docs/adr/0071-bgp-roles-otc.md`](../adr/0071-bgp-roles-otc.md) — RFC 9234 roles + OTC reload semantics.
 - [`docs/adr/0134-reload-monitoring-and-validation-endpoints.md`](../adr/0134-reload-monitoring-and-validation-endpoints.md) — Proposed reload-applied reconciliation for BMP collectors, RPKI RTR caches, and MRT dumps (not shipped).

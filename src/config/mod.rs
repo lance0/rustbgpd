@@ -1763,7 +1763,11 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
         ),
-        "tcp_ao" | "bfd" | "tcp_mss" => (ConfigFieldImpact::RestartRequired, "restart required"),
+        "bfd" => (
+            ConfigFieldImpact::HotApplied,
+            "reload-applied: BFD session reconciliation",
+        ),
+        "tcp_ao" | "tcp_mss" => (ConfigFieldImpact::RestartRequired, "restart required"),
         _ => return None,
     })
 }
@@ -2036,6 +2040,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes_out_ipv6 == new.max_prefixes_out_ipv6
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
+        && old.bfd == new.bfd
         && old.tcp_mss == new.tcp_mss
         && old.ttl_security == new.ttl_security
         && old.ttl_security_hops == new.ttl_security_hops
@@ -2289,12 +2294,13 @@ pub struct ConfigDiff {
     /// they are created, so edits remain pinned to the startup snapshot until
     /// the daemon restarts.
     pub tcp_mss_changed: bool,
-    /// Effective BFD session set changed — `[[bfd_profiles]]` referenced by a
-    /// live session, or a neighbor/peer-group `bfd` block. The ADR-0067 BFD
-    /// actor resolves its session set once at startup, so edits are
-    /// restart-required until actor reconfiguration is implemented and must
-    /// remain visible in `--diff`.
+    /// BFD profile definitions changed. Profiles remain startup-owned even
+    /// when no running member currently references the changed profile.
     pub bfd_changed: bool,
+    /// Member attachments need the SIGHUP BFD coordinator; v1 transactions
+    /// cannot atomically settle the BFD actor with their peer mutations.
+    #[serde(skip)]
+    pub(crate) bfd_members_changed: bool,
     /// `[policy.explain]` (`enabled` / `cache_size`, ADR-0073) changed.
     /// These are read by `build_transport_config` / `resolve_neighbor`
     /// when a session is constructed, so they do not hot-apply to live
@@ -3872,10 +3878,15 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[neighbors]] / [peer_groups.*].tcp_mss".to_string());
     }
+    if diff.bfd_members_changed {
+        class
+            .unsupported_sections
+            .push("neighbor / peer-group BFD (apply via SIGHUP reload)".to_string());
+    }
     if diff.bfd_changed {
         class
             .restart_required_sections
-            .push("[[bfd_profiles]] / neighbor BFD".to_string());
+            .push("[[bfd_profiles]]".to_string());
     }
     if diff.policy_explain_changed {
         class
@@ -4401,7 +4412,7 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         restart_sections.push("[[neighbors]] / [peer_groups.*].tcp_mss");
     }
     if diff.bfd_changed {
-        restart_sections.push("[[bfd_profiles]] / [neighbors.bfd] / [peer_groups.*.bfd]");
+        restart_sections.push("[[bfd_profiles]]");
     }
     if diff.policy_explain_changed {
         restart_sections.push("[policy.explain] (per-peer; applies on next session)");
@@ -4568,13 +4579,12 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let dynamic_neighbors_reload_applied_changed =
         old.dynamic_neighbors != dynamic_reload_new.dynamic_neighbors;
     let tcp_mss_changed = tcp_mss_restart_required_changed(old, new);
-    let bfd_changed = bfd_restart_required_changed(old, new);
+    let bfd_changed = old.bfd_profiles != new.bfd_profiles;
+    let bfd_members_changed = bfd_member_attachments_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
     pin_tcp_mss_startup_only_runtime(&mut reload_new, old);
-    // Pin BFD too so the hot-reload neighbor/peer-group diff does not report
-    // startup-only BFD edits as if they apply live; the restart-required
-    // surface is carried by `bfd_changed` above.
+    // Profiles stay startup-owned; member attachments remain reload-applied.
     pin_bfd_startup_only_runtime(&mut reload_new, old);
     let neighbor_diff = diff_neighbors(&old.neighbors, &reload_new.neighbors);
 
@@ -4689,6 +4699,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         neighbor_tcp_ao_changed,
         tcp_mss_changed,
         bfd_changed,
+        bfd_members_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
         policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
         evpn_runtime_change_class,
@@ -4771,35 +4782,37 @@ fn neighbor_effective_bfd<'a>(neighbor: &'a Neighbor, config: &'a Config) -> Opt
     resolved.filter(|bfd| bfd.enabled)
 }
 
-/// The effective BFD session set: one tuple per neighbor whose own or inherited
-/// `bfd` references a defined profile, resolved to the timers the actor would
-/// run. Sorted so it is order-insensitive. This is exactly the actor's startup
-/// input, so comparing it across configs detects restart-required BFD drift.
-fn effective_bfd_sessions(config: &Config) -> Vec<(String, u32, u32, u32, bool, bool)> {
-    let mut out: Vec<(String, u32, u32, u32, bool, bool)> = config
-        .neighbors
-        .iter()
-        .filter_map(|n| {
-            let bfd = neighbor_effective_bfd(n, config)?;
-            let profile = config.bfd_profiles.iter().find(|p| p.name == bfd.profile)?;
-            Some((
-                n.address.clone(),
-                profile.min_tx_interval,
-                profile.min_rx_interval,
-                profile.multiplier,
-                bfd.strict,
-                bfd.multihop,
-            ))
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// Whether the effective BFD session set differs — restart-required because the
-/// ADR-0067 actor resolves its sessions once at startup.
-fn bfd_restart_required_changed(old: &Config, new: &Config) -> bool {
-    effective_bfd_sessions(old) != effective_bfd_sessions(new)
+/// Compare attachment intent, including unused groups and disabled overrides.
+/// Add/remove and group reassignment must also be rejected by transactions,
+/// whose field summaries alone cannot expose inherited BFD changes.
+fn bfd_member_attachments_changed(old: &Config, new: &Config) -> bool {
+    let groups = |config: &Config| -> BTreeMap<_, _> {
+        config
+            .peer_groups
+            .iter()
+            .filter_map(|(name, group)| group.bfd.clone().map(|bfd| (name.clone(), bfd)))
+            .collect()
+    };
+    let members = |config: &Config| -> BTreeMap<_, _> {
+        config
+            .neighbors
+            .iter()
+            .filter_map(|neighbor| {
+                let bfd = neighbor.bfd.as_ref().or_else(|| {
+                    config
+                        .peer_groups
+                        .get(neighbor.peer_group.as_deref()?)?
+                        .bfd
+                        .as_ref()
+                })?;
+                Some((
+                    (neighbor.address.clone(), neighbor.interface.clone()),
+                    (neighbor.bfd.clone(), bfd.clone()),
+                ))
+            })
+            .collect()
+    };
+    groups(old) != groups(new) || members(old) != members(new)
 }
 
 type StaticNeighborKey = (String, Option<String>);
@@ -4915,88 +4928,14 @@ pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current:
     true
 }
 
-/// Resolved (effective) BFD per neighbor address — its own `bfd`, else its
-/// peer-group's. Used to pin/compare the *effective* session set, which
-/// peer-group inheritance makes irreducible to raw field comparison.
-fn effective_bfd_by_addr(config: &Config) -> HashMap<String, Option<BfdConfig>> {
-    config
-        .neighbors
-        .iter()
-        .map(|n| {
-            (
-                n.address.clone(),
-                neighbor_effective_bfd(n, config).cloned(),
-            )
-        })
-        .collect()
-}
-
-/// Pin BFD startup-only runtime state to the live snapshot. When the effective
-/// session set differs, restore `bfd_profiles` and every peer-group `bfd`
-/// field, and — for each neighbor whose *effective* BFD attachment changed —
-/// pin its `bfd` and `peer_group` membership back to the live values, so a
-/// SIGHUP reload cannot advance the persisted snapshot past what the running
-/// actor is using. Pinning membership (not just the raw `bfd` field) is
-/// required because BFD can be inherited from a peer group: a reload that moves
-/// a neighbor between peer groups, or in/out of a BFD-bearing one, changes the
-/// effective session without touching `neighbor.bfd`. This mirrors the
-/// whole-neighbor `tcp_ao` pin — a neighbor with a changed startup-only
-/// attachment is restart-required this reload. Returns whether anything was
-/// pinned.
-///
-/// Residual: a neighbor *added* in the same reload that *inherits* BFD has no
-/// live session to preserve; its inline `bfd` is dropped, but inherited BFD
-/// will only start on the next restart (surfaced by `bfd_changed`). A neighbor
-/// *removed* while it had BFD likewise leaves a session running until restart.
+/// Pin startup-owned profile definitions while preserving reloadable member
+/// attachments. The resulting candidate must be validated before mutation:
+/// a reference to a newly added profile cannot resolve until restart.
 pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
-    if !bfd_restart_required_changed(current, new_config) {
+    if new_config.bfd_profiles == current.bfd_profiles {
         return false;
     }
-    // Snapshot effective BFD per address for both configs before mutating.
-    let live_effective = effective_bfd_by_addr(current);
-    let new_effective = effective_bfd_by_addr(new_config);
-
     new_config.bfd_profiles.clone_from(&current.bfd_profiles);
-    for (name, group) in &mut new_config.peer_groups {
-        group.bfd = current.peer_groups.get(name).and_then(|g| g.bfd.clone());
-    }
-
-    let current_by_addr: HashMap<&str, &Neighbor> = current
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
-    for neighbor in &mut new_config.neighbors {
-        let addr = neighbor.address.as_str();
-        if live_effective.get(addr) == new_effective.get(addr) {
-            continue;
-        }
-        if let Some(live) = current_by_addr.get(addr) {
-            neighbor.bfd.clone_from(&live.bfd);
-            neighbor.peer_group.clone_from(&live.peer_group);
-        } else {
-            // Newly added neighbor — no live session exists. If it carries its
-            // own inline bfd, dropping it removes the effective session. If it
-            // has no inline bfd but would *inherit* an enabled block, materialize
-            // a disabled inline override so the pinned runtime's effective set
-            // matches the actor (no session) — the `BfdConfig.enabled` tri-state
-            // makes this expressible without editing peer-group membership.
-            let pinned_bfd = if neighbor.bfd.is_some() {
-                None
-            } else {
-                match new_effective.get(addr) {
-                    Some(Some(inherited)) => Some(BfdConfig {
-                        profile: inherited.profile.clone(),
-                        enabled: false,
-                        strict: inherited.strict,
-                        multihop: inherited.multihop,
-                    }),
-                    _ => None,
-                }
-            };
-            neighbor.bfd = pinned_bfd;
-        }
-    }
     true
 }
 
@@ -5990,6 +5929,9 @@ pub fn describe_peer_group_changes(
 
     if old.md5_password != new.md5_password {
         changes.push(FieldChange::summarized("md5_password"));
+    }
+    if old.bfd != new.bfd {
+        changes.push(FieldChange::summarized("bfd"));
     }
     if old.import_policy != new.import_policy {
         changes.push(FieldChange::summarized("import_policy"));

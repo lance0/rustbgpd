@@ -621,229 +621,147 @@ name = "fast"
     }
 }
 
-#[test]
-fn bfd_multihop_edits_are_restart_required() {
-    let base = |bfd: &str| {
-        parse(&format!(
-            r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[[neighbors]]
-address = "10.0.2.2"
-remote_asn = 65003
-bfd = {bfd}
-"#,
-            valid_toml()
-        ))
-        .unwrap()
-    };
-    let single_hop = base(r#"{ profile = "fast" }"#);
-    let multihop = base(r#"{ profile = "fast", multihop = true }"#);
-    assert!(diff_config(&single_hop, &multihop).bfd_changed);
-    assert!(!diff_config(&multihop, &multihop.clone()).bfd_changed);
-}
-
-#[test]
-fn bfd_diff_marks_restart_required_and_pins() {
-    let old = parse(valid_toml()).unwrap();
-    let toml = format!(
+fn bfd_reload_config() -> Config {
+    parse(&format!(
         r#"
 {}
 
 [[bfd_profiles]]
 name = "fast"
-min_tx_interval = 200
-min_rx_interval = 200
-multiplier = 3
+
+[peer_groups.rrc]
+bfd = {{ profile = "fast" }}
+
+[peer_groups.plain]
+hold_time = 30
 
 [[neighbors]]
 address = "10.0.0.3"
 remote_asn = 65003
-bfd = {{ profile = "fast" }}
+peer_group = "rrc"
 "#,
         valid_toml()
-    );
-    let new = parse(&toml).unwrap();
+    ))
+    .unwrap()
+}
 
-    // The effective BFD session set changed → restart-required + surfaced.
-    let diff = diff_config(&old, &new);
+#[test]
+fn bfd_member_edits_are_reload_applied_and_transaction_unsupported() {
+    let live = bfd_reload_config();
+    let mut metadata_only = live.clone();
+    metadata_only.neighbors.last_mut().unwrap().description = Some("updated".into());
+    let diff = diff_config(&live, &metadata_only);
+    assert!(!diff.bfd_members_changed);
+    assert!(classify_config_transaction_v1(&diff).is_committable());
+    let bfd = live.peer_groups["rrc"].bfd.clone().unwrap();
+    let mut candidates = Vec::new();
+    let mut explicit = live.clone();
+    explicit.neighbors.last_mut().unwrap().bfd = Some(bfd.clone());
+    candidates.push(explicit);
+    let mut detached = live.clone();
+    detached.neighbors.last_mut().unwrap().peer_group = Some("plain".into());
+    candidates.push(detached);
+    let mut disabled = live.clone();
+    disabled
+        .peer_groups
+        .get_mut("rrc")
+        .unwrap()
+        .bfd
+        .as_mut()
+        .unwrap()
+        .enabled = false;
+    candidates.push(disabled);
+    let mut strict = live.clone();
+    strict
+        .peer_groups
+        .get_mut("rrc")
+        .unwrap()
+        .bfd
+        .as_mut()
+        .unwrap()
+        .strict = true;
+    candidates.push(strict);
+    let mut multihop = live.clone();
+    multihop.neighbors.last_mut().unwrap().bfd = Some(BfdConfig {
+        multihop: true,
+        ..bfd
+    });
+    candidates.push(multihop);
+    let mut removed = live.clone();
+    removed.neighbors.pop();
+    candidates.push(removed);
+    let mut added = live.clone();
+    let mut member = added.neighbors.last().unwrap().clone();
+    member.address = "10.0.0.9".into();
+    added.neighbors.push(member);
+    candidates.push(added);
+    for candidate in candidates {
+        candidate.validate().unwrap();
+        for (prior, next) in [(&live, &candidate), (&candidate, &live)] {
+            let diff = diff_config(prior, next);
+            assert!(!diff.bfd_changed);
+            assert!(diff.bfd_members_changed);
+            assert!(diff.has_reload_applied_changes());
+            assert!(!diff.has_restart_required_changes());
+            let class = classify_config_transaction_v1(&diff);
+            assert!(!class.is_committable());
+            assert!(class.restart_required_sections.is_empty());
+            assert!(
+                class
+                    .unsupported_sections
+                    .iter()
+                    .any(|section| section.contains("BFD"))
+            );
+            let mut runtime = next.clone();
+            assert!(!super::pin_bfd_startup_only_runtime(&mut runtime, prior));
+            assert_eq!(runtime.neighbors, next.neighbors);
+            assert_eq!(runtime.peer_groups, next.peer_groups);
+        }
+    }
+}
+
+#[test]
+fn bfd_profile_edits_are_pinned_even_without_members() {
+    let mut live = bfd_reload_config();
+    live.neighbors.pop();
+    let mut candidate = live.clone();
+    candidate.bfd_profiles[0].min_tx_interval += 100;
+    let diff = diff_config(&live, &candidate);
     assert!(diff.bfd_changed);
     assert!(diff.has_restart_required_changes());
-
-    // A SIGHUP reload pins the BFD config back to the live snapshot so the
-    // persisted config does not silently advance past the running actor.
-    let mut runtime = new.clone();
-    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &old));
-    assert!(runtime.bfd_profiles.is_empty(), "profiles pinned to live");
-    let pinned_neighbor = runtime
-        .neighbors
-        .iter()
-        .find(|n| n.address == "10.0.0.3")
-        .unwrap();
-    assert!(
-        pinned_neighbor.bfd.is_none(),
-        "hot-added neighbor's bfd pinned off until restart"
-    );
-    // After pinning, a re-diff against the live snapshot shows no BFD drift.
-    assert!(!diff_config(&old, &runtime).bfd_changed);
+    assert!(!diff.has_reload_applied_changes());
+    let class = classify_config_transaction_v1(&diff);
+    assert!(!class.is_committable());
+    assert_eq!(class.restart_required_sections, vec!["[[bfd_profiles]]"]);
+    assert!(super::pin_bfd_startup_only_runtime(&mut candidate, &live));
+    assert_eq!(candidate.bfd_profiles, live.bfd_profiles);
+    candidate.validate().unwrap();
 }
 
-/// The effective BFD session set must survive peer-group *membership* changes,
-/// not just raw `neighbor.bfd` edits — BFD can be inherited, so moving a
-/// neighbor between groups (or in/out of a BFD-bearing one) changes its
-/// effective session without touching `neighbor.bfd`. The pin must restore the
-/// live effective attachment for an existing neighbor in all three shapes.
 #[test]
-fn bfd_pin_restores_effective_set_across_peer_group_membership_changes() {
-    // Live config: neighbor 10.0.0.3 inherits BFD from peer-group `rrc`.
-    let live = parse(&format!(
-        r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[peer_groups.rrc]
-bfd = {{ profile = "fast" }}
-
-[peer_groups.plain]
-hold_time = 30
-
-[[neighbors]]
-address = "10.0.0.3"
-remote_asn = 65003
-peer_group = "rrc"
-"#,
-        valid_toml()
-    ))
-    .unwrap();
-
-    // Detach: move the neighbor to a non-BFD group. Effective BFD would drop to
-    // None, but the actor still runs the session → pin must keep it.
-    let detached = parse(&format!(
-        r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[peer_groups.rrc]
-bfd = {{ profile = "fast" }}
-
-[peer_groups.plain]
-hold_time = 30
-
-[[neighbors]]
-address = "10.0.0.3"
-remote_asn = 65003
-peer_group = "plain"
-"#,
-        valid_toml()
-    ))
-    .unwrap();
-    assert!(diff_config(&live, &detached).bfd_changed);
-    let mut runtime = detached.clone();
-    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
-    assert!(
-        !diff_config(&live, &runtime).bfd_changed,
-        "detach via peer-group membership must be pinned back to the live session"
-    );
-
-    // Attach: a neighbor with no BFD moves into the BFD group. The actor has no
-    // session → pin must keep effective BFD off.
-    let plain_live = parse(&format!(
-        r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[peer_groups.rrc]
-bfd = {{ profile = "fast" }}
-
-[peer_groups.plain]
-hold_time = 30
-
-[[neighbors]]
-address = "10.0.0.3"
-remote_asn = 65003
-peer_group = "plain"
-"#,
-        valid_toml()
-    ))
-    .unwrap();
-    let attached = live.clone(); // same file: neighbor in `rrc` (BFD) group
-    assert!(diff_config(&plain_live, &attached).bfd_changed);
-    let mut runtime = attached.clone();
-    assert!(super::pin_bfd_startup_only_runtime(
-        &mut runtime,
-        &plain_live
-    ));
-    assert!(
-        !diff_config(&plain_live, &runtime).bfd_changed,
-        "attach via peer-group membership must be pinned off until restart"
-    );
-}
-
-/// A neighbor *added* in the same reload that *inherits* BFD from a pre-existing
-/// BFD peer-group has no live actor session; the pin must materialize a disabled
-/// inline block so the runtime's effective set still matches the live actor
-/// (the `BfdConfig.enabled` tri-state makes "inherit-but-off" expressible).
-#[test]
-fn bfd_pin_disables_inherited_bfd_on_newly_added_neighbor() {
-    let live = parse(&format!(
-        r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[peer_groups.rrc]
-bfd = {{ profile = "fast" }}
-"#,
-        valid_toml()
-    ))
-    .unwrap();
-    // Candidate adds a brand-new neighbor into the BFD-bearing peer-group.
-    let added = parse(&format!(
-        r#"
-{}
-
-[[bfd_profiles]]
-name = "fast"
-
-[peer_groups.rrc]
-bfd = {{ profile = "fast" }}
-
-[[neighbors]]
-address = "10.0.0.9"
-remote_asn = 65009
-peer_group = "rrc"
-"#,
-        valid_toml()
-    ))
-    .unwrap();
-    assert!(diff_config(&live, &added).bfd_changed);
-
-    let mut runtime = added.clone();
-    assert!(super::pin_bfd_startup_only_runtime(&mut runtime, &live));
-    let pinned = runtime
-        .neighbors
-        .iter()
-        .find(|n| n.address == "10.0.0.9")
-        .unwrap();
+fn bfd_profile_pin_preserves_member_edits_and_rejects_new_profile_reference() {
+    let live = bfd_reload_config();
+    let mut candidate = live.clone();
+    candidate.bfd_profiles[0].name = "new-profile".into();
+    candidate
+        .peer_groups
+        .get_mut("rrc")
+        .unwrap()
+        .bfd
+        .as_mut()
+        .unwrap()
+        .profile = "new-profile".into();
+    candidate.validate().unwrap();
+    assert!(super::pin_bfd_startup_only_runtime(&mut candidate, &live));
+    assert_eq!(candidate.bfd_profiles, live.bfd_profiles);
     assert_eq!(
-        pinned.bfd.as_ref().map(|b| b.enabled),
-        Some(false),
-        "added neighbor's inherited BFD must be pinned to a disabled inline block"
+        candidate.peer_groups["rrc"].bfd.as_ref().unwrap().profile,
+        "new-profile"
     );
-    assert!(
-        !diff_config(&live, &runtime).bfd_changed,
-        "after pinning, the added neighbor must contribute no effective session"
-    );
+    assert!(matches!(
+        candidate.validate(),
+        Err(ConfigError::InvalidBfd { .. })
+    ));
 }
 
 #[test]

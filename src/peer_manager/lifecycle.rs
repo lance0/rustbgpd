@@ -804,8 +804,7 @@ impl PeerManager {
             // ADR-0067 step 4: (re-)arm this peer's BFD session. Critically
             // covers the delete→add reconfigure cycle — a re-added BFD peer
             // must clear its disabled mark so the actor restarts the session.
-            // A brand-new peer not in the startup-pinned BFD set is unaffected
-            // (BFD is restart-required).
+            // During reload, publication waits for the generation's BFD commit.
             self.set_bfd_peer_disabled(address, false);
             // For a strict peer, mark it pre-held so the first BFD Up releases
             // the withhold via the normal up→start path.

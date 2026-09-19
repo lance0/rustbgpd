@@ -1580,6 +1580,7 @@ fn live_policy_test_manager() -> PeerManager {
 
 fn down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
     crate::bfd_runtime::BfdStateChange {
+        revision: 0,
         peer,
         state: rustbgpd_bfd::SessionState::Down,
         diagnostic: rustbgpd_bfd::Diagnostic::ControlDetectionTimeExpired,
@@ -1591,6 +1592,7 @@ fn down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
 /// A Down caused by the remote signaling `AdminDown` (RFC 5882 §4.1).
 fn remote_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
     crate::bfd_runtime::BfdStateChange {
+        revision: 0,
         peer,
         state: rustbgpd_bfd::SessionState::Down,
         diagnostic: rustbgpd_bfd::Diagnostic::NeighborSignaledDown,
@@ -1601,6 +1603,7 @@ fn remote_admin_down(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
 
 fn up(peer: IpAddr) -> crate::bfd_runtime::BfdStateChange {
     crate::bfd_runtime::BfdStateChange {
+        revision: 0,
         peer,
         state: rustbgpd_bfd::SessionState::Up,
         diagnostic: rustbgpd_bfd::Diagnostic::None,

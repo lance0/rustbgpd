@@ -2147,6 +2147,10 @@ use `rbgp neighbor <address>` to correlate the live per-family waiter state.
 | `bfd_session_up{peer}` | Per-peer BFD session state (1 = Up, 0 = not Up) |
 | `bfd_session_flaps_total{peer}` | BFD session flaps (transitions out of Up) per peer |
 
+Removing a BFD attachment on SIGHUP removes its BFD metric series while keeping
+the neighbor's BGP history. An administrative neighbor disable retains the BFD
+series at Down; a session flap retains its counters.
+
 ### Config transactions
 
 | Metric | What it tells you |

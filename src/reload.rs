@@ -2069,10 +2069,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
         );
     }
 
+    if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
+        error!(
+            "[[bfd_profiles]] changed: profile definitions require restart and remain \
+             at their running values for this reload. Member attachments may change \
+             only when their profiles resolve against the running definitions."
+        );
+    }
+
     if let Err(error) = new_config.validate() {
         error!(
             error = %error,
-            "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change startup-owned TCP authentication or MSS boundaries"
+            "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change startup-owned TCP authentication, MSS, or BFD profile boundaries"
         );
         return clean_reload_failure("reload.validate", error.to_string());
     }
@@ -2193,15 +2201,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
              the ADR-0112/0119 RFC 8212 posture is read once at startup. Restart rustbgpd \
              to change it. The complete running epoch/policy tuple is kept at its startup \
              value for this reload."
-        );
-    }
-    if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
-        error!(
-            "BFD config differs from the live session set: the ADR-0067 BFD actor \
-             resolves [[bfd_profiles]] and neighbor/peer-group bfd once at startup. \
-             Restart rustbgpd to add, remove, or retune BFD sessions. The profiles \
-             and per-neighbor/peer-group bfd fields are kept at their live startup \
-             values for this reload."
         );
     }
 
@@ -9230,12 +9229,23 @@ hold_time = 90
     }
 
     #[tokio::test]
-    async fn reload_pins_bfd_edits_to_startup_snapshot() {
-        // Adding a profile + a neighbor bfd block is restart-required (the
-        // ADR-0067 actor resolves its sessions once at startup), so a SIGHUP
-        // must pin the BFD config back to the live snapshot — but preserve the
-        // operator's edit in the desired TOML for the next restart.
-        let initial = baseline_toml();
+    async fn reload_bfd_attachment_uses_generation_without_bgp_replacement() {
+        let initial = format!("{}\n[[bfd_profiles]]\nname = \"fast\"\n", baseline_toml());
+        let desired = initial.replace(
+            "hold_time = 90",
+            "hold_time = 90\nbfd = { profile = \"fast\", strict = true }",
+        );
+        let (returned, tags) = drive_reload(&initial, &desired).await;
+        let returned = returned.expect("existing-profile BFD attachment must reload");
+        assert!(returned.neighbors[0].bfd.as_ref().unwrap().strict);
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_bfd_reference_to_new_profile_before_runtime_mutation() {
         let new_toml = format!(
             "{}\n[[bfd_profiles]]\nname = \"fast\"\n",
             baseline_toml().replace(
@@ -9243,26 +9253,15 @@ hold_time = 90
                 "hold_time = 90\nbfd = { profile = \"fast\", strict = true }",
             )
         );
-
-        let (returned, tags) = drive_reload(initial, &new_toml).await;
-        let returned = returned.expect("reload should return pinned runtime config");
-
+        let (returned, tags) = drive_reloads(baseline_toml(), &new_toml, 2).await;
+        assert!(
+            returned
+                .iter()
+                .all(|outcome| matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)))
+        );
         assert!(
             tags.is_empty(),
-            "bfd-only edits are restart-required and must not reconcile peers: {tags:?}"
-        );
-        assert!(
-            returned.neighbors[0].bfd.is_none(),
-            "runtime snapshot must keep the (empty) startup BFD config"
-        );
-        assert!(
-            returned.bfd_profiles.is_empty(),
-            "runtime snapshot must keep the startup profile set"
-        );
-        assert_eq!(
-            returned.desired.neighbors[0].bfd.as_ref().unwrap().profile,
-            "fast",
-            "desired TOML must preserve the operator's BFD edit for restart"
+            "invalid post-pin BFD must not mutate actors: {tags:?}"
         );
     }
 

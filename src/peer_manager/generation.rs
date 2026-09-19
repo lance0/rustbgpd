@@ -238,13 +238,39 @@ fn retains_set_name<T>(
 }
 
 impl PeerManager {
+    /// Stage BFD resources before any generation effect and publish only after settlement.
+    pub(super) async fn apply_reload_generation(
+        &mut self,
+        candidate: Config,
+        actions: Vec<ReloadPeerAction>,
+        datasets: PreparedDatasetGeneration,
+    ) -> ReloadGenerationOutcome {
+        let prepared = match self.prepare_bfd_reload(&candidate) {
+            Ok(prepared) => prepared,
+            Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
+        };
+        let outcome =
+            Box::pin(self.apply_reload_generation_inner(candidate, actions, datasets)).await;
+        if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
+            if let Err(error) = self.commit_bfd_reload(prepared).await {
+                self.fence_bfd_reload().await;
+                return ReloadGenerationOutcome::CompensationAmbiguous(error);
+            }
+        } else if matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_)) {
+            self.fence_bfd_reload().await;
+        } else {
+            self.abort_bfd_reload();
+        }
+        outcome
+    }
+
     /// Apply `candidate` as one owned generation. `actions` is the session
     /// plan the coordinator derived from the prior and candidate configs.
     #[expect(
         clippy::too_many_lines,
         reason = "the generation keeps its six ordered phases and their failure classification in one auditable flow"
     )]
-    pub(super) async fn apply_reload_generation(
+    pub(super) async fn apply_reload_generation_inner(
         &mut self,
         candidate: Config,
         actions: Vec<ReloadPeerAction>,
@@ -658,6 +684,7 @@ impl PeerManager {
     /// Restore retained priors in reverse application order. Every step is
     /// attempted; the aggregated error names each one that failed.
     async fn unwind_reload_generation(&mut self, applied: AppliedEffects) -> Result<(), String> {
+        self.restore_bfd_reload_lookup();
         // Restore every content pin and error before any session or policy
         // restoration can evaluate a chain against the prior generation.
         if let Some(prior) = applied.dataset_prior {

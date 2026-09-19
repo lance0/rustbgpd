@@ -4388,6 +4388,7 @@ async fn run<T>(
     // BFD actor takes the matching receiver + sender when it spawns below.
     let (bfd_desired_tx, bfd_desired_rx) = tokio::sync::watch::channel(bfd_initial.clone());
     let (bfd_state_change_tx, bfd_state_change_rx) = bfd_runtime::state_change_channel();
+    let (bfd_reload_tx, bfd_reload_rx) = tokio::sync::mpsc::channel(1);
 
     // Accepted-config authority watch (ADR-0121), created before the peer
     // manager so the config-transaction planner can verify a candidate's
@@ -4424,22 +4425,15 @@ async fn run<T>(
     } else {
         peer_mgr
     };
-    // Wire BFD coupling only when BFD is configured; otherwise the unused ends
-    // are dropped (the actor won't spawn either). PeerManager holds the desired
-    // sender for life and never recreates it (the actor treats sender drop as
-    // shutdown).
-    let peer_mgr = if bfd_initial.enabled() {
-        let configured: std::collections::HashMap<_, _> = bfd_initial
-            .sessions
-            .iter()
-            .map(|s| (s.peer, s.clone()))
-            .collect();
-        peer_mgr.with_bfd_coupling(bfd_desired_tx, bfd_state_change_rx, configured)
-    } else {
-        drop(bfd_desired_tx);
-        drop(bfd_state_change_rx);
-        peer_mgr
-    };
+    // Keep the coupling alive with no startup members so SIGHUP can enable BFD.
+    let configured = bfd_initial
+        .sessions
+        .iter()
+        .map(|params| (params.peer, params.clone()))
+        .collect();
+    let peer_mgr = peer_mgr
+        .with_bfd_coupling(bfd_desired_tx, bfd_state_change_rx, configured)
+        .with_bfd_reload(bfd_reload_tx);
     // Retained: supervised by the shutdown `select!` below and joined by the
     // coordinated teardown after it.
     let mut peer_mgr_handle = tokio::spawn(async move {
@@ -4999,23 +4993,17 @@ async fn run<T>(
     // Spawn the BFD actor (single-hop and multihop async, ADR-0067). Runs the sessions in the
     // PeerManager-owned desired set, publishes their state, and emits state
     // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
-    // No-op when no neighbor has BFD configured; the actor owns the Linux sockets.
+    // It waits without sockets until a member is configured.
     let (bfd_status_tx, bfd_status_rx) =
         tokio::sync::watch::channel(Vec::<bfd_runtime::BfdStatus>::new());
     // Actor state-change events (ADR-0067 step 3b): the actor broadcasts
     // BfdRuntimeEvent; a bridge converts each to a proto BgpEvent that
     // EventService surfaces over WatchEvents. The proto `bfd_bgp_event_tx`
     // (held in ServeConfig) is the long-lived sink, so the WatchEvents BFD
-    // stream stays open even when no sessions are configured. The actor event
-    // channel (`bfd_event_tx`) is dropped if the actor doesn't start (no
-    // sessions), which simply ends the bridge task.
+    // stream stays open even when no sessions are configured.
     //
-    // LAN-1014: like the FIB rings above, the BFD actor's existence is fixed
-    // at startup (BFD config is restart-required; reload pins BFD edits to
-    // the startup snapshot and there is no BFD CRUD), so without configured
-    // sessions these rings can never carry an event — shrink them to 1-slot
-    // placeholders while keeping the long-lived sink open.
-    let bfd_ring_capacity = if bfd_initial.enabled() { 1024 } else { 1 };
+    // Membership can be enabled later by SIGHUP, including from an empty startup.
+    let bfd_ring_capacity = 1024;
     let (bfd_event_tx, bfd_event_rx) =
         tokio::sync::broadcast::channel::<bfd_runtime::BfdRuntimeEvent>(bfd_ring_capacity);
     let (bfd_bgp_event_tx, _) =
@@ -5029,7 +5017,7 @@ async fn run<T>(
     // The desired-set receiver + state-change sender are the actor's ends of the
     // coupling channels created above (PeerManager owns the other ends).
     let bfd_runtime_shutdown = tokio_util::sync::CancellationToken::new();
-    let bfd_runtime_handle = bfd_runtime::spawn_prepared(
+    let bfd_runtime_handle = bfd_runtime::spawn_prepared_with_reload(
         bfd_prepared,
         bfd_desired_rx,
         metrics.clone(),
@@ -5037,6 +5025,7 @@ async fn run<T>(
         bfd_event_tx,
         bfd_state_change_tx,
         bfd_runtime_shutdown.clone(),
+        bfd_reload_rx,
     );
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
@@ -6346,10 +6335,8 @@ async fn run<T>(
     }
 
     // Drain BFD sessions (emits AdminDown so peers go Down promptly).
-    if let Some(handle) = bfd_runtime_handle {
-        info!("draining BFD sessions");
-        handle.shutdown().await;
-    }
+    info!("draining BFD sessions");
+    bfd_runtime_handle.shutdown().await;
 
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
     // withdraws every owned remote-MAC FDB entry under a bounded
@@ -6570,7 +6557,7 @@ mod tests {
             find("peer_mgr_tx.send(PeerManagerCommand::Shutdown).await"),
             find("if let Some(handle) = blackhole_handle"),
             find("if let Some(handle) = fib_runtime_handle"),
-            find("if let Some(handle) = bfd_runtime_handle"),
+            find("bfd_runtime_handle.shutdown().await"),
             find("if let Some(handle) = evpn_dataplane_handle {"),
         ];
         assert!(
@@ -6617,7 +6604,7 @@ mod tests {
         assert!(ehm < boundary);
 
         for activation in [
-            "bfd_runtime::spawn_prepared(",
+            "bfd_runtime::spawn_prepared_with_reload(",
             "let mut bgp_forwarder_handle = tokio::spawn(async move {",
             "let mut bgp_listener_handle = tokio::spawn(async move {",
             "metrics_server::serve_metrics(",
@@ -6630,7 +6617,9 @@ mod tests {
                 "{activation} moved before ownership boundary"
             );
         }
-        let bfd_activation = production.find("bfd_runtime::spawn_prepared(").unwrap();
+        let bfd_activation = production
+            .find("bfd_runtime::spawn_prepared_with_reload(")
+            .unwrap();
         assert!(
             production
                 .find("let fib_runtime_handle = fib_runtime::spawn(")
