@@ -476,6 +476,12 @@ checkpoint; use the event-bridge pattern when the consumer must store its own
 confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
 streams remain one-shot.
 
+The unicast, EVPN and FlowSpec route JSON projections have exhaustive API
+fixtures and exact-output regression checks. Adding a field to those generated
+route types requires an explicit projection decision; the tests also cover
+EVPN Prefix-SID details and FlowSpec components and typed actions. This does not
+version every CLI JSON document or change existing arrays, envelopes or streams.
+
 Most data-oriented commands support `--json` for machine-parseable output.
 Commands with fixed formats, such as `metrics`, `completions`, and `top`, keep
 their command-specific output. `--no-color` (or `NO_COLOR=1`) disables colored

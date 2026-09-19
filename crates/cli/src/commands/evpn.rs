@@ -1626,26 +1626,67 @@ mod tests {
     use crate::test_support::spawn_mock_server;
 
     #[test]
-    fn route_json_preserves_communities_and_empty_arrays() {
+    fn route_json_covers_proto_fields() {
+        use prost::Message;
+        let prefix_sid = crate::proto::PrefixSidView::decode(
+            crate::test_support::mock_prefix_sid()
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .unwrap();
+        // Enumerate every generated field so API additions require an explicit
+        // projection decision. The shared Prefix-SID fixture is exhaustive too.
         let routes = [
             crate::proto::EvpnRouteEntry {
+                route_type: 2,
+                rd: "65000:100".into(),
+                esi: "00:01:02:03:04:05:06:07:08:09".into(),
+                ethernet_tag: "7".into(),
+                mac: "02:00:00:00:00:01".into(),
+                ip: "192.0.2.10".into(),
+                prefix: "192.0.2.0/24".into(),
+                gateway: "192.0.2.1".into(),
+                label: 100,
+                label2: 200,
+                next_hop: "198.51.100.1".into(),
+                peer_address: "198.51.100.2".into(),
+                as_path: vec![65001, 65002],
                 communities: vec![(65000 << 16) | 100, rustbgpd_wire::COMMUNITY_NO_EXPORT],
                 extended_communities: vec![0x0002_fde8_0000_0064, u64::MAX],
-                ..Default::default()
+                tunnel_type: 8,
+                prefix_sid: Some(Box::new(prefix_sid.clone())),
             },
             crate::proto::EvpnRouteEntry::default(),
         ];
         let rows = super::routes_to_json(&routes);
         assert_eq!(
-            rows[0]["communities"],
-            serde_json::json!(["65000:100", "NO_EXPORT"])
-        );
-        assert_eq!(
-            rows[0]["extended_communities"],
-            serde_json::json!([0x0002_fde8_0000_0064_u64, u64::MAX])
+            rows[0],
+            serde_json::json!({
+                "route_type": 2,
+                "route_type_name": "mac-ip",
+                "rd": "65000:100",
+                "esi": "00:01:02:03:04:05:06:07:08:09",
+                "ethernet_tag": "7",
+                "mac": "02:00:00:00:00:01",
+                "ip": "192.0.2.10",
+                "prefix": "192.0.2.0/24",
+                "gateway": "192.0.2.1",
+                "label": 100,
+                "label2": 200,
+                "next_hop": "198.51.100.1",
+                // The CLI intentionally calls the API's peer_address field peer.
+                "peer": "198.51.100.2",
+                "as_path": [65001, 65002],
+                "communities": ["65000:100", "NO_EXPORT"],
+                "extended_communities": [0x0002_fde8_0000_0064_u64, u64::MAX],
+                "tunnel_type": 8,
+                // Nested fields are pinned by the shared output projection test.
+                "prefix_sid": crate::output::prefix_sid_json(&prefix_sid),
+            })
         );
         assert_eq!(rows[1]["communities"], serde_json::json!([]));
         assert_eq!(rows[1]["extended_communities"], serde_json::json!([]));
+        assert!(rows[1].get("prefix_sid").is_none());
         for (route, row) in routes.iter().zip(rows) {
             assert_eq!(super::explain_route_to_json(route), row);
         }
