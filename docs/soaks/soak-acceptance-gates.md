@@ -78,6 +78,19 @@ to < 0.2 MB/h at terminal); a short run's red slope gate is a
 small-window artifact, not leak evidence — exactly as a short run's
 green slope would not be clean evidence.
 
+All three analyzers require `run.json` with positive integer `soak_seconds`
+and scenario interval, plus nonnegative integer `warmup_sec`. Cycle floors
+round up to whole cycles and use the configured window, not the last observed
+sample. GR-restart and hot-reload warm up before that window; inject-churn
+subtracts its in-window warmup, which must be shorter than the window.
+Missing or malformed metadata is an input error.
+
+All three also require a nonempty, valid `rustbgpd.log`. Any daemon `ERROR`
+record or malformed log fails the verdict. `WARN` records are counted by
+message and retained for review, using the same parser as the flagship soaks.
+Older archived verdicts retain their original analyzer revision and result;
+any new analysis must be labelled as reanalysis.
+
 ### 1. GR-restart intern-gc — `run-soak-gr-restart-intern-gc.sh`
 
 Injection: repeated peer daemon restart (`killall -9 bgpd` in the FRR
@@ -92,7 +105,7 @@ intern GC. Analyzer: `analyze-soak-gr-restart.py`.
 | Intern-table slope | < 1.0 entries/h | `bgp_rib_attr_intern_global_size` gauge → CSV `intern_size` | Re-announce after every peer restart re-interns attributes; `gc_intern_table` reclaims after stale-clear. The sampler also fires inside the restart routine at the GR-active and post-clear points, so the column moves every cycle. |
 | RSS slope (post-warmup) | < 1.0 MB/h | `/proc/<pid>/status` VmRSS → CSV `rss_mb` | Allocation churn on every restart/re-announce cycle. |
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
-| Restart cycles completed | ≥ 0.8 × (duration ÷ `RESTART_INTERVAL_SEC`) | CSV `restart_cycles` max | Incremented by the harness on every completed cycle. Analyzer floor is ≥ 1; the window floor (chosen here) rejects a run that silently stalled mid-window. 0.8× rather than 1.0× because per-cycle work (GR polling + re-establish, ~15–45 s) rides on top of the interval — a 72 h run at the 300 s default must show ≥ 692 cycles. |
+| Restart cycles completed | ≥ 0.8 × (duration ÷ `RESTART_INTERVAL_SEC`) | CSV `restart_cycles` max | Incremented by the harness on every completed cycle. Analyzer-enforced window floor (at least one) rejects a run that silently stalled mid-window. 0.8× rather than 1.0× because per-cycle work (GR polling + re-establish, ~15–45 s) rides on top of the interval — a 72 h run at the 300 s default must show ≥ 692 cycles. |
 | GR evidence ordered | positive `gr_active`+`stale` observed, then both clear, every cycle | `bgp_gr_active_peers`, `bgp_gr_stale_routes` → CSV columns | Set by GR entry on peer death; cleared by EoR + stale-clear. Harness fails closed mid-run if either phase is not observed within 30 s. |
 | Session recovered at end | Final CSV `bgp_established` == 1 | FRR `show bgp neighbors` → CSV `bgp_established` | Every restart flips it 1→0→1. |
 | Re-establish latency | ≤ 60 s after peer returns | harness `wait_established 60` (fail-closed), `cycles.log` | Checked every cycle. |
@@ -110,7 +123,7 @@ Analyzer: `analyze-soak-hot-reload.py`.
 | RSS slope (post-warmup) | < 1.0 MB/h | VmRSS → CSV `rss_mb` | Every plan/apply allocates a candidate world. |
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
 | Apply accounting exact | cycles == ok + fail, fail == 0, ok ≥ 1 | CSV `apply_cycles`, `apply_ok`, `apply_fail` | Incremented per apply attempt; a swallowed failure breaks the equality (fail-closed). |
-| Apply cycles completed | ≥ 0.9 × (duration ÷ `APPLY_INTERVAL_SEC`) | CSV `apply_cycles` | Window floor, same stall rationale as scenario 1; 0.9× (tighter than scenario 1) because an apply cycle is seconds of work against a 120 s interval. |
+| Apply cycles completed | ≥ 0.9 × (duration ÷ `APPLY_INTERVAL_SEC`) | CSV `apply_cycles` | Analyzer-enforced window floor (at least one), same stall rationale as scenario 1; 0.9× (tighter than scenario 1) because an apply cycle is seconds of work against a 120 s interval. |
 | Session-flap budget | flap delta == 0 across the whole run | `rbgp neighbor -j` `flap_count` → CSV `flap_count` (backed by `bgp_session_flaps_total`) | Sampled every interval; a live-apply that bounces the session moves it immediately. |
 | Session uptime | nondecreasing | CSV `uptime_seconds` | Resets on any reconnect — catches a flap that lands between flap-count samples. |
 | Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Scraped from FRR every sample. |
@@ -126,7 +139,7 @@ Injection: sustained `InjectionService` AddPath/DeletePath churn
 | Intern-table slope | < 1.0 entries/h | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every injected path interns an attribute set; deletes release. |
 | RSS slope (post-warmup) | < 1.0 MB/h | VmRSS → CSV `rss_mb` | Continuous add/delete allocation churn. |
 | Peak RSS | < 512 MB | CSV `rss_mb` max | Same. |
-| Churn cycles completed | ≥ 0.5 × ((duration − warmup) ÷ `CHURN_INTERVAL_SEC`) | CSV `churn_cycles` | Window floor. 0.5× of nominal because each batch is 2 × `CHURN_BATCH` sequential `docker exec` RPCs whose wall time rides on top of the 5 s interval; the receipt must state the achieved cadence. At defaults a 72 h run must show ≥ 25 908 cycles. |
+| Churn cycles completed | ≥ 0.5 × ((duration − warmup) ÷ `CHURN_INTERVAL_SEC`) | CSV `churn_cycles` | Analyzer-enforced window floor (at least one). 0.5× of nominal because each batch is 2 × `CHURN_BATCH` sequential `docker exec` RPCs whose wall time rides on top of the 5 s interval; the receipt must state the achieved cadence. At defaults a 72 h run must show ≥ 25 908 cycles. |
 | Final consumer convergence | FRR route count == live target, exactly, within 30 s of churn end | FRR `show bgp ipv4 unicast` → CSV `frr_route_count` vs `live_target` | The consumer count tracks every add/delete batch; an off-by-anything at terminal means a lost announce or withdraw. |
 | Session-flap budget | flap delta == 0 | CSV `flap_count` / `uptime_seconds` (as scenario 2) | Sampled every interval. |
 | Session established at end | Final CSV `bgp_established` == 1 | CSV `bgp_established` | Every sample. |

@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Post-hoc analyzer for the gRPC inject-churn soak.
 
-Reads the CSV emitted by run-soak-inject-churn.sh and emits a JSON
-verdict against the soak-specific gates:
+Reads samples.csv, run.json and rustbgpd.log from the matching runner
+and emits a JSON verdict against the soak-specific gates:
 
   - RSS slope (steady state, MB/hour) < 1.0
   - intern table size (bgp_rib_attr_intern_global_size) slope per hour < 1.0
   - peak RSS < 512 MB
   - session established in the final CSV sample (no flap)
-  - at least one churn cycle recorded
+  - churn cycles meet 50% of the configured post-warmup cadence (at least one)
   - final consumer route count exactly matches the live target
   - unchanged flap count and nondecreasing session uptime
+  - valid daemon log with no ERROR records
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.
@@ -24,6 +25,8 @@ import json
 import math
 import sys
 from typing import Optional
+
+from flagship_daemon_log import analyze_daemon_log, unique_members
 
 REQUIRED = {
     "elapsed_sec", "rss_mb", "intern_size", "live_target", "frr_route_count",
@@ -55,7 +58,7 @@ def linreg(xs: list[float], ys: list[float]) -> float:
     return num / den
 
 
-def analyze(rows: list[dict[str, str]]) -> dict:
+def analyze(rows: list[dict[str, str]], minimum_cycles: int) -> dict:
     rss_pts: list[tuple[float, float]] = []
     intern_pts: list[tuple[float, float]] = []
     established_final: list[str] = []
@@ -115,8 +118,8 @@ def analyze(rows: list[dict[str, str]]) -> dict:
         },
         "churn_cycles": {
             "value": max_cycles,
-            "limit": 1,
-            "pass": max_cycles >= 1,
+            "limit": minimum_cycles,
+            "pass": max_cycles >= minimum_cycles,
         },
         "final_session_established": {
             "value": final_established,
@@ -147,7 +150,8 @@ def analyze(rows: list[dict[str, str]]) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze inject-churn soak")
-    parser.add_argument("run_dir", help="Soak run directory containing samples.csv")
+    parser.add_argument("run_dir",
+                        help="Soak run directory containing samples.csv, run.json and rustbgpd.log")
     parser.add_argument("--output", help="Write verdict JSON to this path")
     args = parser.parse_args()
 
@@ -180,7 +184,29 @@ def main() -> int:
             print(f"error: row {line}: invalid bgp_established", file=sys.stderr)
             return 2
 
-    result = analyze(rows)
+    try:
+        with open(f"{args.run_dir}/run.json", encoding="utf-8") as stream:
+            meta = json.load(stream, object_pairs_hook=unique_members)
+        if not isinstance(meta, dict):
+            raise ValueError("run.json must be an object")
+        for key in ("soak_seconds", "churn_interval_sec", "warmup_sec"):
+            value = meta.get(key)
+            minimum = 0 if key == "warmup_sec" else 1
+            if type(value) is not int or value < minimum:
+                raise ValueError(f"run.json has invalid {key}")
+        if meta["warmup_sec"] >= meta["soak_seconds"]:
+            raise ValueError("warmup_sec must be less than soak_seconds")
+        active_seconds = meta["soak_seconds"] - meta["warmup_sec"]
+    except (OSError, ValueError) as exc:
+        print(f"error reading run metadata: {exc}", file=sys.stderr)
+        return 2
+    # Integer ceiling preserves the documented fractional window floor.
+    denominator = 2 * meta["churn_interval_sec"]
+    minimum_cycles = max(1, (active_seconds + denominator - 1) // denominator)
+
+    result = analyze(rows, minimum_cycles)
+    result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
+    result["verdict"] = "pass" if all(g["pass"] for g in result["gates"].values()) else "fail"
     out = json.dumps(result, indent=2)
     print(out)
     if args.output:

@@ -11,8 +11,23 @@ import unittest
 HERE = Path(__file__).parent
 
 
-def run_analyzer(name, fields, rows):
+RUN_META = {
+    "soak_seconds": 7200, "warmup_sec": 0,
+    "restart_interval_sec": 7200, "apply_interval_sec": 7200, "churn_interval_sec": 7200,
+}
+DAEMON_RECORD = {
+    "timestamp": "2026-01-01T00:00:00Z", "level": "INFO",
+    "target": "rustbgpd", "fields": {"message": "daemon started"},
+}
+CLEAN_LOG = json.dumps(DAEMON_RECORD) + "\n"
+
+
+def run_analyzer(name, fields, rows, metadata=RUN_META, daemon_log=CLEAN_LOG):
     with tempfile.TemporaryDirectory() as tmp:
+        if metadata is not None:
+            (Path(tmp) / "run.json").write_text(json.dumps(metadata))
+        if daemon_log is not None:
+            (Path(tmp) / "rustbgpd.log").write_text(daemon_log)
         path = Path(tmp) / "samples.csv"
         with path.open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields)
@@ -31,6 +46,80 @@ BASE = {
 
 
 class AnalyzerContracts(unittest.TestCase):
+    def window_cases(self):
+        # 101 seconds gives fractional floors, proving that rounding down
+        # cannot accept a cycle short of the precommitted inequality.
+        metadata = {"soak_seconds": 101, "warmup_sec": 20}
+        for name, interval, cycle, floor, extra in (
+            ("gr-restart", "restart_interval_sec", "restart_cycles", 9,
+             {"gr_active_peers": "0", "gr_stale_routes": "0"}),
+            ("hot-reload", "apply_interval_sec", "apply_cycles", 10,
+             {"apply_ok": "10", "apply_fail": "0", "flap_count": "0",
+              "uptime_seconds": "101"}),
+            ("inject-churn", "churn_interval_sec", "churn_cycles", 5,
+             {"live_target": "1", "frr_route_count": "1", "add_total": "5",
+              "del_total": "4", "flap_count": "0", "uptime_seconds": "101"}),
+        ):
+            final = {**BASE, **extra, "elapsed_sec": "101", cycle: str(floor)}
+            first = {**final, "elapsed_sec": "0", cycle: "0"}
+            if name == "gr-restart":
+                first.update(gr_active_peers="1", gr_stale_routes="1")
+            elif name == "hot-reload":
+                first["apply_ok"] = "0"
+            yield f"analyze-soak-{name}.py", [first, final], {**metadata, interval: 10}, cycle, floor
+
+    def test_window_cycle_floors_are_enforced(self):
+        for analyzer, rows, metadata, cycle, floor in self.window_cases():
+            with self.subTest(analyzer=analyzer):
+                result = run_analyzer(analyzer, rows[0], rows, metadata)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertEqual(json.loads(result.stdout)["gates"][cycle]["limit"], floor)
+                rows[-1][cycle] = str(floor - 1)
+                if cycle == "apply_cycles":
+                    rows[-1]["apply_ok"] = str(floor - 1)
+                result = run_analyzer(analyzer, rows[0], rows, metadata)
+                self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+                gates = json.loads(result.stdout)["gates"]
+                self.assertFalse(gates[cycle]["pass"])
+                self.assertTrue(all(g["pass"] for key, g in gates.items() if key != cycle))
+
+    def test_daemon_errors_and_missing_evidence_fail_each_analyzer(self):
+        warning = json.dumps({**DAEMON_RECORD, "level": "WARN"}) + "\n"
+        error = json.dumps({**DAEMON_RECORD, "level": "ERROR"}) + "\n"
+        for analyzer, rows, metadata, _, _ in self.window_cases():
+            for log, accepted in ((CLEAN_LOG + warning, True),
+                                  (CLEAN_LOG + error, False),
+                                  (CLEAN_LOG + "malformed\n", False),
+                                  (None, False), ("", False)):
+                with self.subTest(analyzer=analyzer, log=log):
+                    result = run_analyzer(analyzer, rows[0], rows, metadata, log)
+                    self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+                    gates = json.loads(result.stdout)["gates"]
+                    self.assertEqual(gates["daemon_log"]["pass"], accepted)
+                    self.assertTrue(all(g["pass"] for key, g in gates.items()
+                                        if key != "daemon_log"))
+                    if log == CLEAN_LOG + error:
+                        self.assertEqual(gates["daemon_log"]["value"]["errors"], 1)
+
+    def test_invalid_window_metadata_is_input_error(self):
+        for analyzer, rows, metadata, _, _ in self.window_cases():
+            for invalid in (None, [], {}, {**metadata, "soak_seconds": 0},
+                            {**metadata, "soak_seconds": True},
+                            {**metadata, "soak_seconds": "101"},
+                            {**metadata, "warmup_sec": -1},
+                            {**metadata, "warmup_sec": 1.5}):
+                with self.subTest(analyzer=analyzer, metadata=invalid):
+                    result = run_analyzer(analyzer, rows[0], rows, invalid)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            interval = next(key for key in metadata if key.endswith("interval_sec"))
+            for invalid in (0, -1, True, 1.5):
+                with self.subTest(analyzer=analyzer, interval=invalid):
+                    result = run_analyzer(analyzer, rows[0], rows, {**metadata, interval: invalid})
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            if "inject-churn" in analyzer:
+                result = run_analyzer(analyzer, rows[0], rows, {**metadata, "warmup_sec": 101})
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+
     def test_gr_requires_ordered_positive_phase_and_clear(self):
         fields = [*BASE, "elapsed_sec", "gr_active_peers", "gr_stale_routes",
                   "restart_cycles"]
