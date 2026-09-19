@@ -1362,16 +1362,24 @@ mod tests {
         )
         .unwrap();
         let json = prefix_sid_json(&view);
-        assert_eq!(json["raw_value"], "deadbeef");
-        assert_eq!(json["flags"], 224);
-        assert_eq!(json["services"][0]["sids"][0]["endpoint_behavior"], 65535);
-        assert_eq!(json["services"][0]["sids"][0]["flags"], 128);
         assert_eq!(
-            json["services"][0]["sids"][0]["structures"][0],
+            json,
             serde_json::json!({
-                "locator_block_length": 40, "locator_node_length": 24,
-                "function_length": 16, "argument_length": 0,
-                "transposition_length": 16, "transposition_offset": 64,
+                "raw_value": "deadbeef",
+                "flags": 224,
+                "services": [{
+                    "tlv_type": 5,
+                    "sids": [{
+                        "sid_value": "fc00:0:1::",
+                        "endpoint_behavior": 65535,
+                        "flags": 128,
+                        "structures": [{
+                            "locator_block_length": 40, "locator_node_length": 24,
+                            "function_length": 16, "argument_length": 0,
+                            "transposition_length": 16, "transposition_offset": 64,
+                        }],
+                    }],
+                }],
             })
         );
         assert!(json.get("decode_error").is_none());
