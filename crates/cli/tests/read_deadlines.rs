@@ -304,17 +304,21 @@ async fn later_page_abort_preserves_legacy_atomicity_and_leaves_stream_unfinishe
         vec!["rib", "received", "192.0.2.1"],
         vec!["rib", "advertised", "192.0.2.1"],
     ] {
-        for mode in ["--json", "--json-lines"] {
+        for mode in [
+            &["--json"][..],
+            &["--json", "--json-version", "1"],
+            &["--json-lines"],
+        ] {
             let server = test_support::spawn_mock_server(None).await;
             seed_first_route_page(&server).await;
             *server.state.list_route_continuation_error.lock().await =
                 Some((tonic::Code::Aborted, "RIB changed".into()));
-            let mut args = vec![mode];
+            let mut args = mode.to_vec();
             args.extend(view.iter().copied());
             let output = finish(start(&server.addr, &args)).await;
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stderr).contains("RIB changed"));
-            if mode == "--json" {
+            if mode[0] == "--json" {
                 assert!(output.stdout.is_empty());
             } else {
                 let records: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)
@@ -331,6 +335,84 @@ async fn later_page_abort_preserves_legacy_atomicity_and_leaves_stream_unfinishe
                 "no restart or retry"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn versioned_json_wraps_existing_documents() {
+    let server = test_support::spawn_mock_server(None).await;
+    for command in [
+        &["global"][..],
+        &["neighbor"],
+        &["health"],
+        &["flowspec"],
+        &["policy", "stats"],
+        &["config", "status"],
+        &["rib", "--limit", "1"],
+        &["neighbor", "192.0.2.1", "enable"],
+    ] {
+        let mut args = vec!["--json"];
+        args.extend_from_slice(command);
+        let legacy = finish(start(&server.addr, &args)).await;
+        assert!(legacy.status.success(), "{args:?}: {legacy:?}");
+        args.extend(["--json-version", "1"]);
+        let versioned = finish(start(&server.addr, &args)).await;
+        assert_eq!(
+            versioned.status.code(),
+            legacy.status.code(),
+            "{versioned:?}"
+        );
+        let payload: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&versioned.stdout).unwrap();
+        assert_eq!(
+            document,
+            serde_json::json!({
+                "format": "rbgp-json", "format_version": "1.0", "data": payload
+            }),
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn versioned_json_rejects_other_formats_before_dispatch() {
+    for command in [
+        &["watch"][..],
+        &["events"],
+        &["metrics"],
+        &["top"],
+        &["doctor"],
+        &["mrt-dump"],
+        &["man"],
+        &["completions", "bash"],
+        &["policy", "check", "absent.rpol"],
+        &["policy", "fmt", "absent.rpol"],
+        &["config", "diff", "absent.toml"],
+        &["config", "import", "absent.conf"],
+        &["diff", "advertised", "--against", "absent.ndjson"],
+    ] {
+        let mut args = vec!["--json", "--json-version", "1"];
+        args.extend_from_slice(command);
+        let output = finish(start("unix:///nonexistent/rbgp.sock", &args)).await;
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("--json-version is not supported for this command"),
+            "{args:?}: {output:?}"
+        );
+    }
+    for (args, code) in [
+        (&["--json-version", "1", "health"][..], 1),
+        (&["--json", "--json-version", "2", "health"][..], 2),
+        (
+            &["--json", "--json-version", "1", "--json-lines", "rib"][..],
+            2,
+        ),
+    ] {
+        let output = finish(start("unix:///nonexistent/rbgp.sock", args)).await;
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(output.stdout.is_empty());
     }
 }
 

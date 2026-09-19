@@ -194,6 +194,10 @@ struct Cli {
     #[arg(long, short = 'j', global = true, conflicts_with = "json_lines")]
     json: bool,
 
+    /// Wrap supported JSON documents in a versioned envelope (requires --json)
+    #[arg(long, global = true, value_parser = ["1"], value_name = "MAJOR")]
+    json_version: Option<String>,
+
     /// Stream accepted unicast RIB routes as versioned JSON lines
     #[arg(long, global = true, conflicts_with = "json")]
     json_lines: bool,
@@ -3074,13 +3078,85 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
+    if cli.json_version.is_none() {
+        return Ok(());
+    }
+    // Validate after global values propagate across subcommands: Clap's
+    // `requires` rejects flags placed on opposite sides of a subcommand.
+    if !cli.json {
+        return Err(CliError::Argument("--json-version requires --json".into()));
+    }
+    let supported = match &cli.command {
+        Command::Global
+        | Command::Neighbor { .. }
+        | Command::Bfd { .. }
+        | Command::Rpki { .. }
+        | Command::Rib { .. }
+        | Command::Topology { .. }
+        | Command::Orr
+        | Command::Flowspec { .. }
+        | Command::Evpn { .. }
+        | Command::Health { .. }
+        | Command::Shutdown { .. }
+        | Command::Gshut { .. }
+        | Command::NeighborSet { .. }
+        | Command::PeerGroup { .. }
+        | Command::DynamicNeighbor { .. }
+        | Command::FibTable { .. } => true,
+        Command::Config { action } => match action {
+            ConfigAction::Diff { .. } | ConfigAction::Import { .. } => false,
+            ConfigAction::Plan { .. }
+            | ConfigAction::Apply { .. }
+            | ConfigAction::Confirm { .. }
+            | ConfigAction::Abort { .. }
+            | ConfigAction::Status
+            | ConfigAction::History
+            | ConfigAction::Rollback { .. }
+            | ConfigAction::Effective => true,
+        },
+        Command::Policy { action } => match action {
+            PolicyAction::Check { .. } | PolicyAction::Fmt { .. } => false,
+            PolicyAction::List
+            | PolicyAction::Test { .. }
+            | PolicyAction::Get { .. }
+            | PolicyAction::Set { .. }
+            | PolicyAction::Delete { .. }
+            | PolicyAction::Chain { .. }
+            | PolicyAction::Stats { .. }
+            | PolicyAction::Explain { .. } => true,
+        },
+        Command::Diff { .. }
+        | Command::Watch { .. }
+        | Command::Events { .. }
+        | Command::Doctor { .. }
+        | Command::MrtDump
+        | Command::Metrics
+        | Command::Top { .. }
+        | Command::Completions { .. }
+        | Command::Man => false,
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(CliError::Argument(
+            "--json-version is not supported for this command; use its existing output format"
+                .into(),
+        ))
+    }
+}
+
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
+    validate_json_version(&cli)?;
     validate_json_lines(&cli)?;
     pager::validate_request(
         cli.pager,
         cli.json || cli.json_lines,
         pager_supported(&cli.command),
     )?;
+    if cli.json_version.is_some() {
+        output::enable_versioned_json();
+    }
 
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {

@@ -69,6 +69,15 @@ async fn plan_exits_zero_noop_two_committable_three_rejected() {
         let server = server(status, Status::Committable).await;
         let output = run(&server.addr, &["--json", "config", "plan", &path]).await;
         assert_json_status(&output, code, label);
+        let mut versioned = run(
+            &server.addr,
+            &["--json", "--json-version", "1", "config", "plan", &path],
+        )
+        .await;
+        let document: serde_json::Value = serde_json::from_slice(&versioned.stdout).unwrap();
+        assert_eq!(document["format_version"], "1.0");
+        versioned.stdout = serde_json::to_vec(&document["data"]).unwrap();
+        assert_json_status(&versioned, code, label);
     }
 }
 
