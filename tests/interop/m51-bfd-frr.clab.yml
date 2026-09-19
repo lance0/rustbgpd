@@ -41,6 +41,7 @@ topology:
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
+        - ip -6 addr flush dev eth1 scope link
         - ip -6 addr replace fe80::51/64 dev eth1 nodad
         - ip link set eth1 up
       env:
@@ -54,6 +55,7 @@ topology:
         - ./configs/frr-bgpd-m51-bfd.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
+        - ip -6 addr flush dev eth1 scope link
         - ip -6 addr replace fe80::52/64 dev eth1 nodad
         - ip link set eth1 up
 
