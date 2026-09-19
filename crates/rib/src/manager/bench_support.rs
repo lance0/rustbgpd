@@ -964,7 +964,10 @@ impl RibManager {
     #[must_use]
     pub fn bench_attr_intern_inventory(&self) -> [usize; 4] {
         [
-            self.ribs.values().map(|rib| rib.len()).sum(),
+            self.ribs
+                .values()
+                .map(crate::adj_rib_in::AdjRibIn::len)
+                .sum(),
             self.loc_rib.len(),
             self.attr_intern.len(),
             self.attr_intern.capacity(),

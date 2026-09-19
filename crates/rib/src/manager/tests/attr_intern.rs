@@ -864,10 +864,8 @@ async fn unicast_attr_gc_reclaims_when_actor_is_idle() {
     tokio::task::yield_now().await;
     tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
     tokio::task::yield_now().await;
-    assert_eq!(
-        gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]),
-        f64::from(u32::try_from(live_sets).unwrap()),
-    );
+    let observed = gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]);
+    assert!((observed - f64::from(u32::try_from(live_sets).unwrap())).abs() < f64::EPSILON);
     assert_eq!(
         histogram_sample_counts_by_label(
             &metrics,
