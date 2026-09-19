@@ -479,8 +479,10 @@ streams remain one-shot.
 The unicast, EVPN and FlowSpec route JSON projections have exhaustive API
 fixtures and exact-output regression checks. Adding a field to those generated
 route types requires an explicit projection decision; the tests also cover
-EVPN Prefix-SID details and FlowSpec components and typed actions. This does not
-cover every CLI JSON projection or change existing arrays, envelopes or streams.
+EVPN Prefix-SID details and FlowSpec components and typed actions. Configuration
+transaction plan, apply and status documents have the same coverage for nested
+diffs, update-group impact and confirmation state. This does not cover every CLI
+JSON projection or change existing arrays, envelopes or streams.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
 supported command). The result is `{"format":"rbgp-json","format_version":"1.0","data":...}`.

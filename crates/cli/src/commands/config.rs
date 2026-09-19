@@ -2363,77 +2363,117 @@ mod tests {
 
     #[test]
     fn plan_json_shape_is_stable() {
-        let value = plan_to_json(
-            &ConfigTransactionPlanResponse {
-                status: ConfigTransactionPlanStatus::Committable as i32,
-                runtime_snapshot_token: "kv1:planned:1".to_string(),
-                diff: Some(DiffRuntimeConfigResponse {
-                    has_actionable_changes: true,
-                    has_reload_applied_changes: true,
-                    has_restart_required_changes: false,
-                    has_informational_changes: false,
-                    has_any_changes: true,
-                    human_text: "Reload-applied changes:\n".to_string(),
-                    diff_json: "{\"reload_applied\":{}}".to_string(),
+        // Keep generated responses and nested messages exhaustive: a new proto
+        // field requires an explicit projection decision. Full JSON assertions
+        // also catch fields disappearing from the existing projection.
+        let mut response = ConfigTransactionPlanResponse {
+            status: ConfigTransactionPlanStatus::Rejected as i32,
+            runtime_snapshot_token: "kv1:planned:1".to_string(),
+            diff: Some(DiffRuntimeConfigResponse {
+                has_actionable_changes: true,
+                has_reload_applied_changes: true,
+                has_restart_required_changes: false,
+                has_informational_changes: false,
+                has_any_changes: true,
+                human_text: "Reload-applied changes:\n".to_string(),
+                diff_json: "{\"reload_applied\":{\"peers\":[\"192.0.2.1\"]}}".to_string(),
+            }),
+            supported_sections: vec!["[[fib_tables]]".to_string()],
+            unsupported_sections: vec!["[policy]".to_string()],
+            restart_required_sections: vec!["[global]".to_string()],
+            human_text: "Config transaction is rejected.\n".to_string(),
+            update_group_impact: Some(UpdateGroupImpactPlan {
+                schema_version: 1,
+                entries: vec![crate::proto::UpdateGroupFamilyImpact {
+                    peer: "192.0.2.1".to_string(),
+                    afi: 1,
+                    safi: 128,
+                    current: "plan-group-001".to_string(),
+                    candidate: "private-view-002".to_string(),
+                    transition: "private_resync".to_string(),
+                    reason: "policy_peer_context".to_string(),
+                    provenance: "runtime_groupability_classifier".to_string(),
+                    local_resync: true,
+                    remote_route_refresh: false,
+                }],
+                rollup: Some(crate::proto::UpdateGroupImpactRollup {
+                    // Distinct counters expose accidental field substitutions.
+                    affected_peers: 2,
+                    affected_families: 3,
+                    no_op: 5,
+                    regroup: 7,
+                    shared_migration: 11,
+                    private_resync: 13,
+                    indeterminate: 17,
+                    projected_shared_groups: 19,
+                    projected_private_views: 23,
+                    local_resyncs: 29,
+                    remote_route_refreshes: u32::MAX,
                 }),
-                supported_sections: vec!["[[fib_tables]]".to_string()],
-                unsupported_sections: vec!["[policy]".to_string()],
-                restart_required_sections: vec!["[global]".to_string()],
-                human_text: "Config transaction is rejected.\n".to_string(),
-                update_group_impact: Some(UpdateGroupImpactPlan {
-                    schema_version: 1,
-                    entries: vec![crate::proto::UpdateGroupFamilyImpact {
-                        peer: "192.0.2.1".to_string(),
-                        afi: 1,
-                        safi: 1,
-                        current: "plan-group-001".to_string(),
-                        candidate: "policy_peer_context".to_string(),
-                        transition: "private_resync".to_string(),
-                        reason: "policy_peer_context".to_string(),
-                        provenance: "runtime_groupability_classifier".to_string(),
-                        local_resync: true,
-                        remote_route_refresh: false,
-                    }],
-                    rollup: Some(crate::proto::UpdateGroupImpactRollup {
-                        affected_peers: 1,
-                        affected_families: 1,
-                        no_op: 0,
-                        regroup: 0,
-                        shared_migration: 0,
-                        private_resync: 1,
-                        indeterminate: 0,
-                        projected_shared_groups: 0,
-                        projected_private_views: 1,
-                        local_resyncs: 1,
-                        remote_route_refreshes: 0,
-                    }),
-                    capacity_class: "within_mixed".to_string(),
-                    capacity_basis: "receipt envelope".to_string(),
-                }),
+                capacity_class: "within_mixed".to_string(),
+                capacity_basis: "receipt envelope".to_string(),
+            }),
+        };
+        let mut expected = serde_json::json!({
+            "status": "rejected",
+            "runtime_snapshot_token": "kv1:planned:1",
+            "diff": {
+                "has_actionable_changes": true,
+                "has_reload_applied_changes": true,
+                "has_restart_required_changes": false,
+                "has_informational_changes": false,
+                "has_any_changes": true,
+                "human_text": "Reload-applied changes:\n",
+                "diff_json": {"reload_applied": {"peers": ["192.0.2.1"]}},
             },
-            None,
-        );
+            "supported_sections": ["[[fib_tables]]"],
+            "unsupported_sections": ["[policy]"],
+            "restart_required_sections": ["[global]"],
+            "human_text": "Config transaction is rejected.\n",
+            "update_group_impact": {
+                "schema_version": 1,
+                "entries": [{
+                    "peer": "192.0.2.1", "afi": 1, "safi": 128,
+                    "current": "plan-group-001", "candidate": "private-view-002",
+                    "transition": "private_resync", "reason": "policy_peer_context",
+                    "provenance": "runtime_groupability_classifier",
+                    "local_resync": true, "remote_route_refresh": false,
+                }],
+                "rollup": {
+                    "affected_peers": 2, "affected_families": 3,
+                    "no_op": 5, "regroup": 7, "shared_migration": 11,
+                    "private_resync": 13, "indeterminate": 17,
+                    "projected_shared_groups": 19, "projected_private_views": 23,
+                    "local_resyncs": 29, "remote_route_refreshes": u32::MAX,
+                },
+                "capacity_class": "within_mixed",
+                "capacity_basis": "receipt envelope",
+            },
+            "plan_token": "plan:stream:2",
+        });
+        assert_eq!(plan_to_json(&response, Some("plan:stream:2")), expected);
 
-        assert_eq!(value["status"], "committable");
-        assert!(value["plan_token"].is_null());
-        assert_eq!(value["runtime_snapshot_token"], "kv1:planned:1");
-        assert_eq!(value["supported_sections"][0], "[[fib_tables]]");
-        assert_eq!(value["unsupported_sections"][0], "[policy]");
-        assert_eq!(value["update_group_impact"]["schema_version"], 1);
-        assert_eq!(
-            value["update_group_impact"]["entries"][0]["transition"],
-            "private_resync"
-        );
-        assert_eq!(value["restart_required_sections"][0], "[global]");
-        assert_eq!(
-            value["diff"]["diff_json"]["reload_applied"],
-            serde_json::json!({})
-        );
+        // The embedded diff is parsed when valid and retained as a string when
+        // malformed. The streaming plan token is separate from the proto token.
+        response.diff.as_mut().unwrap().diff_json = "not JSON".to_string();
+        expected["diff"]["diff_json"] = serde_json::json!("not JSON");
+        expected["plan_token"] = serde_json::Value::Null;
+        assert_eq!(plan_to_json(&response, None), expected);
+
+        response.diff = None;
+        response.update_group_impact = None;
+        expected["diff"] = serde_json::Value::Null;
+        expected["update_group_impact"] = serde_json::Value::Null;
+        assert_eq!(plan_to_json(&response, None), expected);
+
+        response.status = 999;
+        expected["status"] = serde_json::json!("unspecified");
+        assert_eq!(plan_to_json(&response, None), expected);
     }
 
     #[test]
     fn apply_json_shape_is_stable() {
-        let value = apply_to_json(&ConfigTransactionApplyResponse {
+        let mut response = ConfigTransactionApplyResponse {
             status: ConfigTransactionPlanStatus::Committable as i32,
             runtime_snapshot_token: "kv1:committed:2".to_string(),
             committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
@@ -2442,64 +2482,83 @@ mod tests {
                 status: ConfigTransactionConfirmationStatus::Pending as i32,
                 confirm_id: "confirm-123".to_string(),
                 timeout_seconds: 120,
-                deadline_unix_seconds: 1_787_000_000,
+                deadline_unix_seconds: u64::MAX,
                 committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
-                runtime_snapshot_token: "kv1:committed:2".to_string(),
+                runtime_snapshot_token: "kv1:confirmation:3".to_string(),
                 human_text: "Confirmed config transaction is pending confirmation.".to_string(),
             }),
-            update_group_impact: None,
+            update_group_impact: Some(UpdateGroupImpactPlan {
+                schema_version: 1,
+                entries: Vec::new(),
+                rollup: None,
+                capacity_class: "indeterminate".to_string(),
+                capacity_basis: "no negotiated families".to_string(),
+            }),
+        };
+        let mut expected = serde_json::json!({
+            "status": "committable",
+            "runtime_snapshot_token": "kv1:committed:2",
+            "committed_sections": ["[[dynamic_neighbors]]"],
+            "human_text": "Committed [[dynamic_neighbors]] transaction.\n",
+            "confirmation": {
+                "status": "pending",
+                "confirm_id": "confirm-123",
+                "timeout_seconds": 120,
+                "deadline_unix_seconds": u64::MAX,
+                "committed_sections": ["[[dynamic_neighbors]]"],
+                "runtime_snapshot_token": "kv1:confirmation:3",
+                "human_text": "Confirmed config transaction is pending confirmation.",
+            },
+            "update_group_impact": {
+                "schema_version": 1,
+                "entries": [],
+                "rollup": null,
+                "capacity_class": "indeterminate",
+                "capacity_basis": "no negotiated families",
+            },
         });
+        assert_eq!(apply_to_json(&response), expected);
 
-        assert_eq!(value["status"], "committable");
-        assert_eq!(value["runtime_snapshot_token"], "kv1:committed:2");
-        assert_eq!(value["committed_sections"][0], "[[dynamic_neighbors]]");
-        assert_eq!(
-            value["human_text"],
-            "Committed [[dynamic_neighbors]] transaction.\n"
-        );
-        assert_eq!(value["confirmation"]["status"], "pending");
-        assert_eq!(value["confirmation"]["confirm_id"], "confirm-123");
-        assert_eq!(value["confirmation"]["timeout_seconds"], 120);
-        assert_eq!(
-            value["confirmation"]["committed_sections"][0],
-            "[[dynamic_neighbors]]"
-        );
+        response.confirmation = None;
+        response.update_group_impact = None;
+        response.committed_sections.clear();
+        expected["confirmation"] = serde_json::Value::Null;
+        expected["update_group_impact"] = serde_json::Value::Null;
+        expected["committed_sections"] = serde_json::json!([]);
+        assert_eq!(apply_to_json(&response), expected);
     }
 
     #[test]
     fn status_json_shape_is_stable() {
-        let value = status_to_json(&ConfigTransactionStatusResponse {
+        let mut response = ConfigTransactionStatusResponse {
             confirmation: Some(ConfigTransactionConfirmation {
-                status: ConfigTransactionConfirmationStatus::Pending as i32,
-                confirm_id: "confirm-123".to_string(),
-                timeout_seconds: 120,
-                deadline_unix_seconds: 1_787_000_000,
-                committed_sections: vec!["[[dynamic_neighbors]]".to_string()],
-                runtime_snapshot_token: "kv1:committed:2".to_string(),
-                human_text: "Confirmed config transaction is pending confirmation.".to_string(),
+                status: ConfigTransactionConfirmationStatus::AutoRevertFailed as i32,
+                confirm_id: "confirm-456".to_string(),
+                timeout_seconds: 180,
+                deadline_unix_seconds: 1_787_000_001,
+                committed_sections: vec!["[[fib_tables]]".to_string()],
+                runtime_snapshot_token: "kv1:pending:4".to_string(),
+                human_text: "Automatic revert failed.".to_string(),
             }),
-            human_text: "Confirmed config transaction pending.\n".to_string(),
+            human_text: "Confirmed config transaction requires recovery.\n".to_string(),
+        };
+        let mut expected = serde_json::json!({
+            "confirmation": {
+                "status": "auto_revert_failed",
+                "confirm_id": "confirm-456",
+                "timeout_seconds": 180,
+                "deadline_unix_seconds": 1_787_000_001u64,
+                "committed_sections": ["[[fib_tables]]"],
+                "runtime_snapshot_token": "kv1:pending:4",
+                "human_text": "Automatic revert failed.",
+            },
+            "human_text": "Confirmed config transaction requires recovery.\n",
         });
+        assert_eq!(status_to_json(&response), expected);
 
-        assert_eq!(
-            value["human_text"],
-            "Confirmed config transaction pending.\n"
-        );
-        assert_eq!(value["confirmation"]["status"], "pending");
-        assert_eq!(value["confirmation"]["confirm_id"], "confirm-123");
-        assert_eq!(value["confirmation"]["timeout_seconds"], 120);
-        assert_eq!(
-            value["confirmation"]["deadline_unix_seconds"],
-            1_787_000_000u64
-        );
-        assert_eq!(
-            value["confirmation"]["committed_sections"][0],
-            "[[dynamic_neighbors]]"
-        );
-        assert_eq!(
-            value["confirmation"]["runtime_snapshot_token"],
-            "kv1:committed:2"
-        );
+        response.confirmation.as_mut().unwrap().status = 999;
+        expected["confirmation"]["status"] = serde_json::json!("unspecified");
+        assert_eq!(status_to_json(&response), expected);
     }
 
     #[tokio::test]
@@ -2784,8 +2843,13 @@ mod tests {
             confirmation: None,
             human_text: "No confirmed config transaction.\n".to_string(),
         });
-        assert!(value["confirmation"].is_null());
-        assert_eq!(value["human_text"], "No confirmed config transaction.\n");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "confirmation": null,
+                "human_text": "No confirmed config transaction.\n",
+            })
+        );
     }
 
     #[test]
