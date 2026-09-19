@@ -444,20 +444,27 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_daemon_member_join_and_leave_through_activate() {
-    member_churn(&MEMBER_3, false).await;
+    member_churn(&MEMBER_3, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_daemon_md5_member_join_and_leave_through_activate() {
-    member_churn(&MEMBER_3_MD5, false).await;
+    member_churn(&MEMBER_3_MD5, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_daemon_gtsm_fleet_member_join_and_leave_through_activate() {
-    member_churn(&MEMBER_3, true).await;
+    member_churn(&MEMBER_3, true, false).await;
 }
 
-async fn member_churn(member3: &'static MemberSpec, gtsm: bool) {
+// The existing injection is deliberately unavailable in release binaries.
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_daemon_member_join_late_failure_restores_prior_generation() {
+    member_churn(&MEMBER_3, false, true).await;
+}
+
+async fn member_churn(member3: &'static MemberSpec, gtsm: bool, fail_join: bool) {
     let evidence = support::RetainOnPanic::new(
         tempfile::Builder::new()
             .prefix("rs-churn-")
@@ -507,10 +514,15 @@ CONFIG="{state}/current/config.toml"
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     kill -HUP "$(cat "$PID_FILE")"
 else
-    "$DAEMON" "$CONFIG" >> "$LOG_FILE" 2>&1 &
+    {fault_env}"$DAEMON" "$CONFIG" >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 fi
 "#,
+        fault_env = if fail_join {
+            "RUSTBGPD_TEST_SIGHUP_RECONFIGURE_FAILURE_PEER=127.0.0.2 "
+        } else {
+            ""
+        },
         pid = pid_file.display(),
         log = daemon_log.display(),
         daemon = daemon_bin.display(),
@@ -633,6 +645,97 @@ fi
         daemon_bin,
         &render_binding,
     );
+
+    if fail_join {
+        let prior_target = fs::read_link(state.join("current")).expect("prior generation link");
+        let prior_datasets = rbgp_json(
+            &rbgp_addr,
+            &["--json", "policy", "stats", "--direction", "export"],
+        )["datasets"]
+            .clone();
+        assert_eq!(
+            prior_datasets
+                .as_array()
+                .expect("dataset status rows")
+                .len(),
+            4
+        );
+        // Force a replacement of the first member. The existing one-shot hook
+        // rejects it after candidate bindings are adopted, before any session
+        // is removed. The added member must never escape the failed generation.
+        support::edit_rendered_config(&candidate, daemon_bin, |rendered| {
+            let mut config: toml::Value = toml::from_str(rendered).expect("candidate TOML");
+            config["neighbors"][0]
+                .as_table_mut()
+                .unwrap()
+                .insert("hold_time".into(), 60.into());
+            toml::to_string(&config).expect("candidate with replacement")
+        });
+        let rejected = activation::activate(&Options {
+            candidate: &candidate,
+            state_dir: &state,
+            checker: daemon_bin,
+            rbgp: rbgp_bin,
+            rbgp_addr: &rbgp_addr,
+            settle: Duration::from_secs(10),
+            initial: false,
+            activation_command: &activate_sh,
+            activation_args: &[],
+            binding: &binding,
+        });
+        assert!(
+            matches!(rejected, Err(activation::Error::RolledBack)),
+            "{rejected:?}"
+        );
+        let log = fs::read_to_string(&daemon_log).expect("daemon log");
+        assert!(
+            log.contains("injected reconfigure failure for 127.0.0.2"),
+            "{log}"
+        );
+        assert!(log.contains("prior generation restored"), "{log}");
+        assert_eq!(fs::read_link(state.join("current")).unwrap(), prior_target);
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(state.join("activation-receipt.json")).unwrap())
+                .unwrap();
+        assert_eq!(receipt["status"], "rolled_back");
+        assert_eq!(receipt["phases"]["runtime_equal"], true);
+        let diff = rbgp(
+            &rbgp_addr,
+            &[
+                "config",
+                "diff",
+                state.join("current/config.toml").to_str().unwrap(),
+            ],
+        );
+        assert_eq!(diff.status.code(), Some(0), "{diff:?}");
+        assert_eq!(
+            rbgp_json(
+                &rbgp_addr,
+                &["--json", "policy", "stats", "--direction", "export"]
+            )["datasets"]
+                .clone(),
+            prior_datasets
+        );
+        let neighbors = rbgp_json(&rbgp_addr, &["--json", "neighbor"]);
+        let neighbors = neighbors.as_array().unwrap();
+        assert_eq!(neighbors.len(), 2);
+        for (address, peer) in [(MEMBER_1.address, &peer1), (MEMBER_2.address, &peer2)] {
+            let neighbor = neighbors.iter().find(|n| n["address"] == address).unwrap();
+            assert_eq!(neighbor["state"], "Established");
+            assert_eq!(neighbor["flap_count"], 0);
+            assert!(peer.is_established());
+            assert_eq!(peer.notification(), None);
+        }
+        // Continue the normal join/leave proof on this same daemon: rejection
+        // must leave it able to apply subsequent membership changes.
+        write_candidate(
+            &candidate,
+            &[&MEMBER_1, &MEMBER_2, member3],
+            gtsm,
+            daemon_bin,
+            &render_binding,
+        );
+    }
 
     // Before activation, rbgp config diff against the candidate reports changes (exit code 2)
     let pre_diff = rbgp(
