@@ -272,7 +272,12 @@ const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
-const RIB_ACTOR_WORK_UNITS: [&str; 3] = ["route_chunk", "distribute_flush", "exact_export_retire"];
+const RIB_ACTOR_WORK_UNITS: [&str; 4] = [
+    "route_chunk",
+    "distribute_flush",
+    "exact_export_retire",
+    "attribute_gc",
+];
 
 /// Closed labels for the actor seam that served a readiness query.
 const RIB_READINESS_QUERY_SEAMS: [&str; 2] = ["actor_loop", "policy_transition_fence"];
@@ -1538,7 +1543,7 @@ impl BgpMetrics {
         let rib_actor_work_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_actor_work_duration_seconds",
-                "Wall-clock duration of RIB actor ingest components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, and `exact_export_retire` covers the following rejection retirement. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
+                "Wall-clock duration of RIB actor ingest components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, `exact_export_retire` covers the following rejection retirement, and `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["work_unit"],
@@ -5379,9 +5384,10 @@ impl BgpMetrics {
 
     /// Observe one RIB actor ingest component.
     ///
-    /// `work_unit` is one of the bounded `route_chunk`, `distribute_flush`, or
-    /// `exact_export_retire` labels. Components may service readiness internally
-    /// or run consecutively; their durations do not bound readiness latency.
+    /// `work_unit` is one of the bounded `route_chunk`, `distribute_flush`,
+    /// `exact_export_retire`, or `attribute_gc` labels. Components may service
+    /// readiness internally or run consecutively; their durations do not bound
+    /// readiness latency.
     pub fn observe_rib_actor_work(&self, work_unit: &str, duration: std::time::Duration) {
         self.0
             .rib_actor_work_duration_seconds
@@ -7758,7 +7764,12 @@ mod tests {
 
         assert_eq!(
             observed.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["distribute_flush", "exact_export_retire", "route_chunk"]
+            [
+                "attribute_gc",
+                "distribute_flush",
+                "exact_export_retire",
+                "route_chunk"
+            ]
         );
         for (work_unit, (sample_count, buckets)) in &observed {
             assert_eq!(*sample_count, 0, "fresh {work_unit} series is zeroed");

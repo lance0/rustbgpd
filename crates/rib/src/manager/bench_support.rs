@@ -959,6 +959,35 @@ impl RibManager {
         while self.process_next_route_chunk() {}
     }
 
+    /// Inventory for production-path attribute-intern churn measurements:
+    /// Adj-RIB-In routes, Loc-RIB routes, interned sets, and intern capacity.
+    #[must_use]
+    pub fn bench_attr_intern_inventory(&self) -> [usize; 4] {
+        [
+            self.ribs.values().map(|rib| rib.len()).sum(),
+            self.loc_rib.len(),
+            self.attr_intern.len(),
+            self.attr_intern.capacity(),
+        ]
+    }
+
+    /// Verify that a benchmark replacement reached both live unicast stores.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the route is absent or either store retained old attributes.
+    pub fn bench_assert_unicast_attributes(&self, expected: &Route) {
+        let adj = self.ribs[&expected.peer]
+            .get(&expected.prefix, expected.path_id)
+            .expect("benchmark route remains in Adj-RIB-In");
+        let best = self
+            .loc_rib
+            .get(&expected.prefix)
+            .expect("benchmark route remains in Loc-RIB");
+        assert_eq!(adj.attributes, expected.attributes);
+        assert_eq!(best.attributes, expected.attributes);
+    }
+
     /// Seed the Loc-RIB through the production dispatcher/chunk path, grouped
     /// into one envelope per synthetic source peer. A source without an
     /// outbound registration uses the production legacy-unregistered

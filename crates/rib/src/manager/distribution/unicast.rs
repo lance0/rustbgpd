@@ -1563,6 +1563,7 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let mut affected = HashSet::new();
+        let mut removed = 0;
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
 
         let (rib_len, flowspec_len) = {
@@ -1573,6 +1574,7 @@ impl RibManager {
 
             for (prefix, path_id) in withdrawn {
                 if rib.withdraw(&prefix, path_id) {
+                    removed += 1;
                     debug!(%peer, %prefix, path_id, "withdrawn");
                     affected.insert(prefix);
                 }
@@ -1607,7 +1609,11 @@ impl RibManager {
             let changed = self.recompute_best_after_withdraw(&affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            self.gc_attr_intern();
+            if rib_len == 0 {
+                self.gc_attr_intern();
+            } else {
+                self.defer_unicast_attr_gc(removed);
+            }
         }
     }
 
@@ -1624,7 +1630,7 @@ impl RibManager {
         let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
         let mut affected = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
-        let mut any_replaced = false;
+        let mut replaced = 0;
 
         let (rib_len, flowspec_len) = {
             let rib = self
@@ -1644,7 +1650,7 @@ impl RibManager {
                 let prefix = route.prefix;
                 let path_id = route.path_id;
                 self.attr_intern.intern(&mut route.attributes);
-                any_replaced |= rib.insert(route);
+                replaced += usize::from(rib.insert(route));
                 let family = prefix_family(&prefix);
                 if active_refresh.contains(&family)
                     && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
@@ -1682,9 +1688,7 @@ impl RibManager {
             let changed = self.recompute_best_after_announce(peer, &affected);
             self.pending_distribute_changed.extend(changed);
             self.pending_distribute_affected.extend(affected);
-            if any_replaced {
-                self.attr_intern.gc();
-            }
+            self.defer_unicast_attr_gc(replaced);
             self.sync_attr_intern_gauge();
         }
     }

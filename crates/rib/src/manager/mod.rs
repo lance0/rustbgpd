@@ -471,9 +471,12 @@ pub struct RibManager {
     /// Global cross-peer attribute intern table (LAN-336). Owned by this
     /// task like everything else — lock-free by construction. Every route
     /// insertion seam interns `route.attributes` here BEFORE storing the
-    /// route; every removal seam runs [`RibManager::gc_attr_intern`]
-    /// afterwards (see `crate::attr_intern` for the reclaim rules).
+    /// route. Unicast UPDATE chunks amortize collection by displaced count
+    /// and deadline; explicit teardown sweeps remain immediate.
     attr_intern: crate::attr_intern::AttrInternTable,
+    /// Unicast replacements/removals since the last full attribute sweep.
+    attr_intern_gc_displaced: usize,
+    attr_intern_gc_deadline: Option<tokio::time::Instant>,
     /// See [`UnicastPrefixPeers`] for the maintenance contract.
     unicast_prefix_peers: UnicastPrefixPeers,
     loc_rib: LocRib,
@@ -1282,6 +1285,10 @@ const RESYNC_PEERS_PER_TICK: usize = 8;
 /// design: the backlog is work the actor already owes, so the next slice
 /// should run as soon as queued updates and queries have had a turn.
 const DIRTY_RESYNC_BACKLOG_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+// Bound deferred unicast garbage by displaced routes and elapsed time. Small
+// intern tables retain immediate collection; retain scans capacity, not length.
+const ATTR_INTERN_GC_DISPLACED_LIMIT: usize = 4096;
+const ATTR_INTERN_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 const EVPN_ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 /// Loc-RIB size at which a `PeerUp` initial dump is expensive enough to
@@ -1556,13 +1563,43 @@ fn log_orr_input_transition(
 }
 
 impl RibManager {
-    /// Sweep the global attribute intern table (drop entries no route
-    /// references any more) and refresh its gauge. Run after any batch
-    /// that removed or replaced routes — the same seams that swept the
-    /// per-peer tables before LAN-336.
+    /// Immediately reclaim unused attributes at teardown and explicit sweep seams.
     fn gc_attr_intern(&mut self) {
         self.attr_intern.gc();
+        self.attr_intern_gc_displaced = 0;
+        self.attr_intern_gc_deadline = None;
         self.sync_attr_intern_gauge();
+    }
+
+    /// Account deadline-triggered sweeps separately from route-chunk work.
+    fn gc_attr_intern_on_timer(&mut self) {
+        let started = std::time::Instant::now();
+        self.gc_attr_intern();
+        self.metrics
+            .observe_rib_actor_work("attribute_gc", started.elapsed());
+    }
+
+    /// Amortize the measured unicast UPDATE hot path without changing Arc
+    /// ownership or the point at which routes become visible. At most one route
+    /// chunk can take the displaced count over the limit before collection.
+    fn defer_unicast_attr_gc(&mut self, displaced: usize) {
+        if displaced == 0 {
+            return;
+        }
+        self.attr_intern_gc_displaced = self.attr_intern_gc_displaced.saturating_add(displaced);
+        let now = tokio::time::Instant::now();
+        let deadline = *self
+            .attr_intern_gc_deadline
+            .get_or_insert(now + ATTR_INTERN_GC_INTERVAL);
+        if self.attr_intern.capacity() <= ATTR_INTERN_GC_DISPLACED_LIMIT
+            || self.attr_intern_gc_displaced >= ATTR_INTERN_GC_DISPLACED_LIMIT
+            || now >= deadline
+        {
+            // ponytail: each sweep is still O(global table); this bounds its
+            // frequency, not its latency. Revisit incremental collection if a
+            // single large-table sweep exceeds the actor work budget.
+            self.gc_attr_intern();
+        }
     }
 
     /// Refresh the global intern-table gauge without sweeping. Run after
@@ -1637,6 +1674,8 @@ impl RibManager {
         Self {
             ribs: HashMap::new(),
             attr_intern: crate::attr_intern::AttrInternTable::new(),
+            attr_intern_gc_displaced: 0,
+            attr_intern_gc_deadline: None,
             unicast_prefix_peers: UnicastPrefixPeers::default(),
             loc_rib: LocRib::new(),
             evpn_dataplane_generation: 0,
@@ -4203,6 +4242,10 @@ impl RibManager {
         let mut resync_armed = false;
         let mut query_rx_open = true;
 
+        // A deferred attribute sweep must also run when UPDATE traffic stops.
+        let attr_gc_sleep = tokio::time::sleep(ATTR_INTERN_GC_INTERVAL);
+        tokio::pin!(attr_gc_sleep);
+
         // GR stale sweep timer — reset each iteration to the nearest deadline.
         let gr_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(gr_sleep);
@@ -4359,7 +4402,15 @@ impl RibManager {
                     false
                 };
 
-            let needs_timers = resync_armed
+            let has_attr_gc_timer = if let Some(deadline) = self.attr_intern_gc_deadline {
+                attr_gc_sleep.as_mut().reset(deadline);
+                true
+            } else {
+                false
+            };
+
+            let needs_timers = has_attr_gc_timer
+                || resync_armed
                 || has_gr_timers
                 || has_llgr_timers
                 || has_refresh_timers
@@ -4370,6 +4421,10 @@ impl RibManager {
             }
 
             let now = tokio::time::Instant::now();
+            if has_attr_gc_timer && attr_gc_sleep.deadline() <= now {
+                self.gc_attr_intern_on_timer();
+                continue;
+            }
             if resync_armed && resync_sleep.deadline() <= now {
                 debug!(
                     count = self.dirty_peers.len(),
@@ -4500,6 +4555,9 @@ impl RibManager {
                             }
                             None => break,
                         }
+                    }
+                    () = attr_gc_sleep.as_mut(), if has_attr_gc_timer => {
+                        self.gc_attr_intern_on_timer();
                     }
                     () = resync_sleep.as_mut(), if resync_armed => {
                         debug!(

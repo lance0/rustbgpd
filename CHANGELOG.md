@@ -17,6 +17,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supported inspection and management commands, preserving the existing result
   under `data`. Ordinary `-j` output and existing streaming formats are unchanged.
 
+### Fixed
+
+- Unicast UPDATE replacement and withdrawal no longer sweep a large global
+  attribute-intern table on every message. Collection runs after at most 4,096
+  displaced routes (plus the triggering chunk) or a one-second actor deadline;
+  a final source withdrawal still collects immediately. Small tables and
+  explicit teardown paths retain immediate collection. The existing
+  `bgp_rib_actor_work_duration_seconds` histogram adds `work_unit="attribute_gc"`
+  for deadline-triggered sweeps outside ingest chunks.
+
 ## [0.70.2] — 2026-09-18
 
 ### Added

@@ -15,16 +15,15 @@
 //!
 //! Reclaim is the `Arc::strong_count` sweep the per-peer tables already
 //! used: an entry whose only reference is the table itself is dropped by
-//! [`AttrInternTable::gc`], which the manager runs at the same batch
-//! seams that previously swept the per-peer tables (announce-replace,
-//! withdraw, GR/LLGR sweeps, route-refresh, peer teardown). `Arc`'s
-//! reference count *is* the refcount; there is no separate bookkeeping
+//! [`AttrInternTable::gc`]. Large-table unicast UPDATE chunks amortize sweeps
+//! with a displaced-route limit and an actor deadline; explicit teardown,
+//! injection, other-family, GR/LLGR and refresh seams retain immediate sweeps.
+//! `Arc`'s reference count *is* the refcount; there is no separate bookkeeping
 //! to drift out of sync.
 //
-// ponytail: gc is an O(table) sweep per dirty batch — same policy the
-// per-peer tables had, now over one global table. If a fleet with
-// per-peer-unique attribute churn ever makes this visible in profiles,
-// the upgrade path is generation-tagged incremental sweeping.
+// ponytail: gc remains an O(table) sweep. Unicast hot-path frequency is bounded,
+// but each sweep still visits the global table. Revisit incremental sweeping
+// if a single large-table sweep exceeds the actor work budget.
 
 use std::sync::Arc;
 

@@ -664,6 +664,95 @@ fn bench_attr_hashing_route_churn(c: &mut Criterion) {
     group.finish();
 }
 
+// The manager seam includes the real dispatcher, one-route chunk, recompute,
+// and distribution drain. It excludes channel dequeue and actor scheduling.
+// N diverse background routes keep all N attribute sets alive; one extra route
+// alternates between two of those sets. Every timed replacement/withdrawal
+// retains exactly N live interned sets, without fixture-owned Arcs or event-history
+// growth changing table size. A collection scans that table; deferred operations
+// keep the same inventory. This measures sweep cost, not orphan reclamation.
+fn bench_attr_intern_manager_churn(c: &mut Criterion) {
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = c;
+    #[cfg(feature = "bench-internals")]
+    {
+        use std::time::Duration;
+
+        use criterion::SamplingMode;
+        use rustbgpd_rib::RibManager;
+        use rustbgpd_telemetry::BgpMetrics;
+        use tokio::sync::mpsc;
+
+        let mut group = c.benchmark_group("attr_intern_manager_churn");
+        group.sample_size(10);
+        group.warm_up_time(Duration::from_secs(1));
+        group.measurement_time(Duration::from_secs(3));
+        group.sampling_mode(SamplingMode::Linear);
+        for count in [1_000, 200_000, 1_000_000] {
+            for withdraw in [false, true] {
+                let (_tx, rx) = mpsc::channel(8);
+                let (_query_tx, query_rx) = mpsc::channel(8);
+                let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+                let prefixes = generate_prefixes(count + 1);
+                let routes = prefixes[..count]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, prefix)| {
+                        let mut attrs = typical_attributes(1);
+                        attrs.push(PathAttribute::Communities(vec![
+                            u32::try_from(index).expect("fixture community fits u32"),
+                        ]));
+                        make_route_with_attributes(*prefix, 1, Arc::new(attrs))
+                    })
+                    .collect();
+                manager.bench_seed_loc_rib(routes);
+                let make_target = |variant: u32| {
+                    let mut attrs = typical_attributes(1);
+                    attrs.push(PathAttribute::Communities(vec![variant]));
+                    make_route_with_attributes(prefixes[count], 1, Arc::new(attrs))
+                };
+                let peer = make_target(0).peer;
+                manager.bench_seed_loc_rib(vec![make_target(0)]);
+                let inventory = manager.bench_attr_intern_inventory();
+                assert_eq!(&inventory[..3], &[count + 1, count + 1, count]);
+                eprintln!("attr-intern fixture: {inventory:?}");
+                let mut variant = 0;
+                group.bench_function(
+                    BenchmarkId::new(if withdraw { "withdraw" } else { "replace" }, count),
+                    |b| {
+                        b.iter_custom(|iterations| {
+                            let mut elapsed = Duration::ZERO;
+                            for _ in 0..iterations {
+                                if withdraw {
+                                    let withdrawn = vec![(prefixes[count], 0)];
+                                    let start = Instant::now();
+                                    manager.bench_withdraw_loc_rib(peer, withdrawn);
+                                    elapsed += start.elapsed();
+                                    assert_eq!(
+                                        &manager.bench_attr_intern_inventory()[..3],
+                                        &[count, count, count],
+                                    );
+                                    manager.bench_seed_loc_rib(vec![make_target(0)]);
+                                } else {
+                                    variant ^= 1;
+                                    let announced = vec![make_target(variant)];
+                                    let start = Instant::now();
+                                    manager.bench_seed_loc_rib(announced);
+                                    elapsed += start.elapsed();
+                                }
+                                assert_eq!(manager.bench_attr_intern_inventory(), inventory);
+                                manager.bench_assert_unicast_attributes(&make_target(variant));
+                            }
+                            elapsed
+                        });
+                    },
+                );
+            }
+        }
+        group.finish();
+    }
+}
+
 fn bench_best_path_cmp(c: &mut Criterion) {
     let mut group = c.benchmark_group("best_path_cmp");
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
@@ -989,6 +1078,7 @@ fn bench_export_policy_eval(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_attr_intern_hashing,
+    bench_attr_intern_manager_churn,
     bench_attr_hashing_adj_rib_in_insert,
     bench_attr_hashing_bulk_initial_load,
     bench_attr_hashing_route_churn,
