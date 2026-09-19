@@ -576,7 +576,16 @@ impl PeerManager {
                         ReloadPeerActionKind::Remove => resolved.remove.push((*peer).clone()),
                         ReloadPeerActionKind::Replace => resolved.replace.push(resolve(peer)?),
                         ReloadPeerActionKind::HotUpdate => {
-                            let mut next = resolve(peer)?;
+                            let neighbor = record(peer).ok_or_else(|| {
+                                format!("peer {peer} has no neighbor record in the candidate")
+                            })?;
+                            let next = candidate
+                                .resolve_neighbor_for_hot_update(
+                                    neighbor,
+                                    &managed.transport_config,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            let mut next = Self::peer_manager_config_from_resolved(next, false);
                             retain_installed_policy(
                                 managed.import_policy.as_ref(),
                                 &mut next.import_policy,

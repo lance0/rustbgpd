@@ -148,6 +148,11 @@ key: an ASN edit flows through reconcile as an immediate session rebuild
 under the new ASN (the same delete + re-add semantics, applied in one
 reload).
 
+An accepted IPv6 link-local peer retains its interface scope during unrelated
+reloads and hot updates, even if the interface is temporarily missing. Changes
+that add or replace a session, including an interface-name change, still require
+fresh interface resolution before any reload effects.
+
 | Field | Class | Notes |
 |---|---|---|
 | `address` | restart-required (identity) | Part of the diff key. Edit = delete + add. To change the peer address in place, delete the old neighbor (gRPC or remove from config + reload), then add the new one. |

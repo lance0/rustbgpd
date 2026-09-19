@@ -34,6 +34,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Unrelated SIGHUP policy and member changes no longer fail merely because an
+  accepted IPv6 link-local peer's interface is temporarily missing. Hot updates
+  retain that peer's accepted scope. New and replacement sessions still require
+  a resolvable interface before any reload effects.
 - Unicast UPDATE replacement and withdrawal no longer sweep a large global
   attribute-intern table on every message. Collection runs after at most 4,096
   displaced routes (plus the triggering chunk) or a one-second actor deadline;

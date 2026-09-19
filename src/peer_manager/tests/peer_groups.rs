@@ -847,7 +847,7 @@ remote_asn = 65030
 
 // ── peer-group edits partitioned by `ConfigFieldImpact` ───────────────
 
-fn edge_group_max_prefixes_event(
+pub(super) fn edge_group_max_prefixes_event(
     hold_time: u16,
     max_prefixes: u32,
 ) -> rustbgpd_api::peer_types::ConfigEvent {
