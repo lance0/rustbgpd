@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use std::io::{self, Write};
 use std::net::IpAddr;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::CliError;
@@ -1297,7 +1298,40 @@ pub(crate) use outln;
 /// Print a pretty JSON value through locked stdout.
 pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {
     let stdout = io::stdout();
-    write_json_pretty(&mut stdout.lock(), value)
+    write_json_document(&mut stdout.lock(), value, VERSIONED_JSON.get().is_some())
+}
+
+// One command runs per process. Selection is immutable after CLI validation;
+// low-level writers for streams, artifacts and daemon-owned JSON stay separate.
+static VERSIONED_JSON: OnceLock<()> = OnceLock::new();
+
+pub(crate) fn enable_versioned_json() {
+    VERSIONED_JSON.get_or_init(|| ());
+}
+
+fn write_json_document<W: Write + ?Sized, T: Serialize>(
+    writer: &mut W,
+    value: &T,
+    versioned: bool,
+) -> Result<(), CliError> {
+    #[derive(Serialize)]
+    struct Document<'a, T> {
+        format: &'static str,
+        format_version: &'static str,
+        data: &'a T,
+    }
+    if versioned {
+        write_json_pretty(
+            writer,
+            &Document {
+                format: "rbgp-json",
+                format_version: "1.0",
+                data: value,
+            },
+        )
+    } else {
+        write_json_pretty(writer, value)
+    }
 }
 
 /// Print a compact single-line JSON value for streaming commands.
@@ -1351,6 +1385,42 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_json_document_preserves_payload_and_inventory_floor() {
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/reference/v1-stable-surface.json"
+        ))
+        .unwrap();
+        let contract = inventory["cli"]["versioned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["id"] == "rbgp-json/1.0")
+            .unwrap();
+        for payload in [
+            serde_json::json!([]),
+            serde_json::json!([{"counter": u64::MAX, "optional": null}]),
+            serde_json::json!({"complete": false, "routes": []}),
+        ] {
+            let mut legacy = Vec::new();
+            write_json_document(&mut legacy, &payload, false).unwrap();
+            assert_eq!(
+                legacy,
+                format!("{}\n", serde_json::to_string_pretty(&payload).unwrap()).as_bytes()
+            );
+            let mut bytes = Vec::new();
+            write_json_document(&mut bytes, &payload, true).unwrap();
+            let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_json_shape(&document, contract, "rbgp-json/1.0");
+            assert_eq!(
+                document,
+                serde_json::json!({
+                    "format": "rbgp-json", "format_version": "1.0", "data": payload
+                })
+            );
+        }
+    }
 
     #[test]
     fn prefix_sid_json_and_text_retain_numeric_fields_and_decode_errors() {

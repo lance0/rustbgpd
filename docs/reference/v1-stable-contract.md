@@ -74,13 +74,19 @@ The stable CLI set is also explicit. For an inventoried command, the v1 promise
 covers only its command path and command name. Flags, positional arguments,
 defaults, exit behavior, and human-readable output remain outside v1 unless a
 separate inventory entry explicitly pins them. The versioned machine formats
-currently include `rbgp-rib/1.0` (explicit `--json-lines` accepted-unicast
+currently include `rbgp-json/1.0` (explicit `-j --json-version 1` documents),
+`rbgp-rib/1.0` (explicit `--json-lines` accepted-unicast
 listings), `rbgp-ribdiff/1`, and `rbgp-ribsnap/1`. The RIB JSON-lines header
 declares `format: "rbgp-rib"` and `format_version: "1.0"`; additive optional
 fields increment the minor version, while incompatible types, meaning, or
 removal require a major version. Its header, route, and terminal count records
 have executable key/type floors. Ordinary `--json` arrays and bounded
-envelopes retain their existing contracts. See the [CLI guide](../../crates/cli/README.md)
+envelopes retain their existing contracts. The `rbgp-json` document wraps the
+existing command result in `data`, with `format` and `format_version` metadata.
+Its inventory pins the outer envelope on the listed stable command paths;
+the CLI guide defines the supported command set and version evolution rules.
+Versioning a representation does not widen daemon feature support.
+See the [CLI guide](../../crates/cli/README.md)
 for successful limited walks versus streams missing their terminal record.
 The ribdiff report may
 gain additive fields, but removing or reinterpreting existing fields is not

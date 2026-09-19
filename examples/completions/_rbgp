@@ -18,6 +18,7 @@ _rbgp() {
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -41,6 +42,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -55,6 +57,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -77,6 +80,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -93,6 +97,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -114,6 +119,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -129,6 +135,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -144,6 +151,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -159,6 +167,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -173,6 +182,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -192,6 +202,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -207,6 +218,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -223,6 +235,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -303,6 +316,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -341,6 +355,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
 '--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
@@ -364,6 +379,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -378,6 +394,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -393,6 +410,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -408,6 +426,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -424,6 +443,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -438,6 +458,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -452,6 +473,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -523,6 +545,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -561,6 +584,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
 '--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
@@ -584,6 +608,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -598,6 +623,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -613,6 +639,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -628,6 +655,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -644,6 +672,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -658,6 +687,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -672,6 +702,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -742,6 +773,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -764,6 +796,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -807,6 +840,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -829,6 +863,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -843,6 +878,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -904,6 +940,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
@@ -931,6 +968,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -958,6 +996,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--age)--count[Print only the number of matching received routes]' \
 '(--rejected)--age[Append the original route receive age]' \
@@ -990,6 +1029,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--age)--count[Print only the number of matching received routes]' \
 '(--rejected)--age[Append the original route receive age]' \
@@ -1025,6 +1065,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--age)--count[Print only the number of matching advertised routes]' \
 '(--explain)--age[Append the original route receive age]' \
@@ -1061,6 +1102,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--age)--count[Print only the number of matching advertised routes]' \
 '(--explain)--age[Append the original route receive age]' \
@@ -1082,6 +1124,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1104,6 +1147,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1123,6 +1167,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1142,6 +1187,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1160,6 +1206,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1178,6 +1225,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1194,6 +1242,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1217,6 +1266,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1233,6 +1283,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1316,6 +1367,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1338,6 +1390,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1352,6 +1405,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1398,6 +1452,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1412,6 +1467,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1444,6 +1500,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1458,6 +1515,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1485,6 +1543,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1503,6 +1562,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1604,6 +1664,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1630,6 +1691,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1647,6 +1709,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1697,6 +1760,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1723,6 +1787,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1742,6 +1807,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1757,6 +1823,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1785,6 +1852,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1804,6 +1872,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1823,6 +1892,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1842,6 +1912,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1860,6 +1931,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1879,6 +1951,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -1949,6 +2022,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -1969,6 +2043,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -1992,6 +2067,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -2011,6 +2087,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2028,6 +2105,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2045,6 +2123,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2061,6 +2140,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2075,6 +2155,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2089,6 +2170,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2111,6 +2193,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2126,6 +2209,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2141,6 +2225,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2192,6 +2277,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2206,6 +2292,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2220,6 +2307,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2234,6 +2322,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2248,6 +2337,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2263,6 +2353,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2435,6 +2526,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2456,6 +2548,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2486,6 +2579,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2504,6 +2598,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2522,6 +2617,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2542,6 +2638,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2596,6 +2693,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--liveness[Check only authenticated gRPC responsiveness, without actor readiness or topology]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -2614,6 +2712,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2628,6 +2727,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2643,6 +2743,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2657,6 +2758,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2673,6 +2775,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--clear[Clear instead of enabling]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -2690,6 +2793,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2704,6 +2808,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2726,6 +2831,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2744,6 +2850,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--list-deps[Print the resolved import graph — each module'\''s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)]' \
 '--coverage[Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself]' \
@@ -2761,6 +2868,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--check[Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -2785,6 +2893,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2800,6 +2909,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2816,6 +2926,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2831,6 +2942,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2846,6 +2958,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2870,6 +2983,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2886,6 +3000,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2903,6 +3018,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2920,6 +3036,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2936,6 +3053,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -2997,6 +3115,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3014,6 +3133,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3033,6 +3153,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3143,6 +3264,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3165,6 +3287,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3179,6 +3302,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3195,6 +3319,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3210,6 +3335,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3265,6 +3391,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3287,6 +3414,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3301,6 +3429,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3317,6 +3446,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3332,6 +3462,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3348,6 +3479,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3363,6 +3495,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3426,6 +3559,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3448,6 +3582,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3466,6 +3601,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3481,6 +3617,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3532,6 +3669,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3554,6 +3692,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3577,6 +3716,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3592,6 +3732,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3643,6 +3784,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
@@ -3658,6 +3800,7 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \

@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rbgp -j --json-version 1` emits a versioned `rbgp-json` document for
+  supported inspection and management commands, preserving the existing result
+  under `data`. Ordinary `-j` output and existing streaming formats are unchanged.
+
 ## [0.70.2] — 2026-09-18
 
 ### Added

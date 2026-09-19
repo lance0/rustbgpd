@@ -480,7 +480,30 @@ The unicast, EVPN and FlowSpec route JSON projections have exhaustive API
 fixtures and exact-output regression checks. Adding a field to those generated
 route types requires an explicit projection decision; the tests also cover
 EVPN Prefix-SID details and FlowSpec components and typed actions. This does not
-version every CLI JSON document or change existing arrays, envelopes or streams.
+cover every CLI JSON projection or change existing arrays, envelopes or streams.
+
+For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
+supported command). The result is `{"format":"rbgp-json","format_version":"1.0","data":...}`.
+`data` contains the existing command result unchanged, including an empty `[]`,
+optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
+The version describes the CLI JSON representation, not the daemon version.
+
+Consumers should check the format and major version and ignore unknown fields.
+Additive fields increment the minor version; removing or renaming fields, changing
+their types, or reusing their meaning requires a new major version. Existing
+optional fields remain optional, and neither object key order nor whitespace is
+part of the contract. The envelope does not promise that the daemon supports a
+feature, widen an alpha feature's operational support, or add fields absent from
+the existing curated projection. RPC failures produce no document; commands with
+detailed exit codes still print their result when that contract calls for one.
+
+Version 1 supports `global`, `neighbor`, `bfd`, `rpki`, `rib`, `topology`, `orr`,
+`flowspec`, `evpn`, `health`, `shutdown`, `gshut`, `neighbor-set`, `peer-group`,
+`dynamic-neighbor`, and `fib-table`, including their actions. It also supports
+`config` except `diff`/`import`, and `policy` except `check`/`fmt`.
+Other commands reject `--json-version` before connection or side effects.
+`--json-lines`, events/watch streams, diff/snapshot formats, doctor bundles and
+local conversion tools retain their separate contracts.
 
 Most data-oriented commands support `--json` for machine-parseable output.
 Commands with fixed formats, such as `metrics`, `completions`, and `top`, keep
