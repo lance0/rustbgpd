@@ -71,7 +71,9 @@ pub struct PeerConfig {
     pub remote_asn: u32,
     /// Our router ID.
     pub local_router_id: Ipv4Addr,
-    /// Proposed hold time in seconds (0 = no keepalives, or >= 3).
+    /// Proposed hold time in seconds (0 = no keepalives, or >= 3;
+    /// RFC 4271 §4.2). The embedding application must enforce this range:
+    /// the FSM sends the configured value in OPEN without validating it.
     pub hold_time: u16,
     /// Minimum hold time accepted from the peer. When configured, a peer
     /// proposal of zero is also rejected.
@@ -79,10 +81,14 @@ pub struct PeerConfig {
     /// Send hold time in seconds (RFC 9687): tear the session down when
     /// outbound BGP data cannot be handed to the peer's TCP stream for
     /// this long. 0 = disabled. When non-zero it MUST be greater than
-    /// `hold_time` (RFC 9687 §4.4) — config validation enforces this.
+    /// `hold_time` (RFC 9687 §4.4). The embedding application must enforce
+    /// this relationship; the FSM does not validate local timer settings.
     /// Use [`default_send_hold_time`] to derive the RFC 9687 §6 default.
     pub send_hold_time: u32,
-    /// Base connect-retry timer in seconds.
+    /// Base connect-retry timer in seconds. Use a positive value; the default
+    /// is 120 seconds (RFC 4271 §10). Normal exponential backoff is capped
+    /// at 300 seconds. Zero produces zero-second timer actions rather than
+    /// disabling retries. The FSM does not validate this field.
     pub connect_retry_secs: u32,
     /// Address families to advertise in OPEN capabilities.
     pub families: Vec<(Afi, Safi)>,
