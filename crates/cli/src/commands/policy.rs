@@ -960,6 +960,48 @@ struct JsonPolicyStatsDoc {
     datasets: Vec<JsonPolicyDataset>,
 }
 
+fn stats_to_json(
+    resp: &crate::proto::GetPolicyStatsResponse,
+    peer: Option<&str>,
+) -> JsonPolicyStatsDoc {
+    let chains: Vec<JsonPolicyStats> = resp
+        .chains
+        .iter()
+        .map(|chain| JsonPolicyStats {
+            peer_address: operator_peer_address(peer, &chain.peer_address).to_string(),
+            direction: chain.direction.clone(),
+            routes_evaluated: chain.routes_evaluated,
+            eval_errors: chain.eval_errors,
+            last_error: (!chain.last_error.is_empty()).then(|| chain.last_error.clone()),
+            policy_generation: (chain.direction == "import").then_some(chain.policy_generation),
+            terms: chain
+                .terms
+                .iter()
+                .map(|t| JsonPolicyTermStat {
+                    policy_index: t.policy_index,
+                    policy: (!t.policy.is_empty()).then(|| t.policy.clone()),
+                    term_index: t.term_index,
+                    term: (!t.term.is_empty()).then(|| t.term.clone()),
+                    hits: t.hits,
+                })
+                .collect(),
+        })
+        .collect();
+    let datasets: Vec<JsonPolicyDataset> = resp
+        .datasets
+        .iter()
+        .map(|d| JsonPolicyDataset {
+            name: d.name.clone(),
+            kind: d.kind.clone(),
+            generation: d.generation,
+            records: d.records,
+            path: d.path.clone(),
+            last_error: (!d.last_error.is_empty()).then(|| d.last_error.clone()),
+        })
+        .collect();
+    JsonPolicyStatsDoc { chains, datasets }
+}
+
 /// `rbgp policy stats [--peer ADDR] [--direction import|export|both]`
 /// — live per-term hit counters of the installed chains (ADR-0096).
 pub async fn stats(
@@ -984,42 +1026,7 @@ pub async fn stats(
     .into_inner();
 
     if json {
-        let chains: Vec<JsonPolicyStats> = resp
-            .chains
-            .iter()
-            .map(|chain| JsonPolicyStats {
-                peer_address: operator_peer_address(peer, &chain.peer_address).to_string(),
-                direction: chain.direction.clone(),
-                routes_evaluated: chain.routes_evaluated,
-                eval_errors: chain.eval_errors,
-                last_error: (!chain.last_error.is_empty()).then(|| chain.last_error.clone()),
-                policy_generation: (chain.direction == "import").then_some(chain.policy_generation),
-                terms: chain
-                    .terms
-                    .iter()
-                    .map(|t| JsonPolicyTermStat {
-                        policy_index: t.policy_index,
-                        policy: (!t.policy.is_empty()).then(|| t.policy.clone()),
-                        term_index: t.term_index,
-                        term: (!t.term.is_empty()).then(|| t.term.clone()),
-                        hits: t.hits,
-                    })
-                    .collect(),
-            })
-            .collect();
-        let datasets: Vec<JsonPolicyDataset> = resp
-            .datasets
-            .iter()
-            .map(|d| JsonPolicyDataset {
-                name: d.name.clone(),
-                kind: d.kind.clone(),
-                generation: d.generation,
-                records: d.records,
-                path: d.path.clone(),
-                last_error: (!d.last_error.is_empty()).then(|| d.last_error.clone()),
-            })
-            .collect();
-        output::print_json_pretty(&JsonPolicyStatsDoc { chains, datasets })?;
+        output::print_json_pretty(&stats_to_json(&resp, peer))?;
         return Ok(());
     }
 
@@ -2706,6 +2713,109 @@ mod tests {
 
         row.matched_policy.clear();
         assert_eq!(decision_attribution_line(&row), "policy:  inline");
+    }
+
+    #[test]
+    fn stats_json_covers_proto_fields() {
+        // Keep every generated response and nested message exhaustive so a
+        // new API field requires an explicit JSON projection decision.
+        let mut response = proto::GetPolicyStatsResponse {
+            chains: vec![proto::PolicyChainStats {
+                peer_address: "fe80::2".into(),
+                direction: "import".into(),
+                routes_evaluated: u64::MAX,
+                eval_errors: 7,
+                last_error: "fuel exhausted in policy customer-in term validate".into(),
+                policy_generation: 19,
+                terms: vec![proto::PolicyTermStat {
+                    policy_index: 2,
+                    policy: "customer-in".into(),
+                    term_index: 3,
+                    term: "validate".into(),
+                    hits: u64::MAX,
+                }],
+            }],
+            datasets: vec![proto::PolicyDatasetStatus {
+                name: "customers".into(),
+                kind: "prefix-set".into(),
+                generation: 23,
+                records: u64::MAX,
+                path: "/etc/rustbgpd/customers.json".into(),
+                last_error: "refresh failed".into(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(stats_to_json(&response, Some("fe80::2%eth0"))).unwrap(),
+            serde_json::json!({
+                "chains": [{
+                    "peer_address": "fe80::2%eth0", "direction": "import",
+                    "routes_evaluated": u64::MAX, "eval_errors": 7,
+                    "last_error": "fuel exhausted in policy customer-in term validate",
+                    "policy_generation": 19,
+                    "terms": [{
+                        "policy_index": 2, "policy": "customer-in", "term_index": 3,
+                        "term": "validate", "hits": u64::MAX,
+                    }],
+                }],
+                "datasets": [{
+                    "name": "customers", "kind": "prefix-set", "generation": 23,
+                    "records": u64::MAX, "path": "/etc/rustbgpd/customers.json",
+                    "last_error": "refresh failed",
+                }],
+            })
+        );
+
+        let chain = &mut response.chains[0];
+        chain.peer_address = "global".into();
+        chain.direction = "export".into();
+        chain.routes_evaluated = 0;
+        chain.eval_errors = 0;
+        chain.last_error.clear();
+        chain.terms[0] = proto::PolicyTermStat {
+            policy_index: 0,
+            policy: String::new(),
+            term_index: 0,
+            term: String::new(),
+            hits: 0,
+        };
+        response.datasets[0].last_error.clear();
+        let mut expected = serde_json::json!({
+            "chains": [{
+                "peer_address": "global", "direction": "export",
+                "routes_evaluated": 0, "eval_errors": 0, "policy_generation": null,
+                "terms": [{
+                    "policy_index": 0, "policy": null, "term_index": 0,
+                    "term": null, "hits": 0,
+                }],
+            }],
+            "datasets": [{
+                "name": "customers", "kind": "prefix-set", "generation": 23,
+                "records": u64::MAX, "path": "/etc/rustbgpd/customers.json",
+                "last_error": null,
+            }],
+        });
+        assert_eq!(
+            serde_json::to_value(stats_to_json(&response, None)).unwrap(),
+            expected
+        );
+
+        // Import generation zero is present; export generations are intentionally
+        // null even if a backend supplies a nonzero value. Chain errors are omitted
+        // when empty, while dataset errors and anonymous policy/term names are null.
+        response.chains[0].direction = "import".into();
+        response.chains[0].policy_generation = 0;
+        expected["chains"][0]["direction"] = serde_json::json!("import");
+        expected["chains"][0]["policy_generation"] = serde_json::json!(0);
+        assert_eq!(
+            serde_json::to_value(stats_to_json(&response, None)).unwrap(),
+            expected
+        );
+        response.chains.clear();
+        response.datasets.clear();
+        assert_eq!(
+            serde_json::to_value(stats_to_json(&response, None)).unwrap(),
+            serde_json::json!({"chains": []})
+        );
     }
 
     #[tokio::test]
