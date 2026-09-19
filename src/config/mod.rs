@@ -5572,10 +5572,10 @@ fn compute_effective_neighbor_impact(
         let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
             continue;
         };
-        let Ok(old_resolved) = old.resolve_neighbor(old_neighbor) else {
+        let Ok(old_resolved) = old.resolve_neighbor_for_comparison(old_neighbor) else {
             continue;
         };
-        let Ok(new_resolved) = new.resolve_neighbor(new_neighbor) else {
+        let Ok(new_resolved) = new.resolve_neighbor_for_comparison(new_neighbor) else {
             continue;
         };
 

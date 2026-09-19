@@ -421,7 +421,7 @@ impl PeerManager {
         let local_router_id = self.router_id;
         let restart_time_secs = self
             .current_config
-            .resolved_neighbors()
+            .resolved_neighbors_for_comparison()
             .map_err(|error| {
                 format!("failed to resolve current neighbors for warm checkpoint: {error}")
             })?

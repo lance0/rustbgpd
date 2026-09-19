@@ -1168,7 +1168,7 @@ impl Config {
     }
 
     /// Scope-independent projection for configuration inventories only.
-    pub(super) fn resolved_neighbors_for_comparison(
+    pub(crate) fn resolved_neighbors_for_comparison(
         &self,
     ) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
         self.resolved_neighbors_with_scope(Some(0))

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rustbgpd_api::peer_types::{
     FibTableSnapshot, PeerKey, PeerManagerNeighborConfig, PeerReconcileAuthority,
@@ -303,6 +303,44 @@ impl PeerManager {
         live_snapshot_identity: [u8; 8],
         runtime_snapshot_token: String,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
+        let mut committed_diff = crate::config::diff_config(&self.current_config, candidate);
+        committed_diff.policy.external_inputs_identity = external_inputs;
+        let operational_diff = materialization.unwrap_or(&committed_diff);
+        // Transaction executors rebuild raw member edits and static reshape
+        // impacts. Preserve their fresh-interface preflight while comparison
+        // inventories retain accepted peers whose interface is absent.
+        // Validated configs have one member per address, including scoped peers.
+        let fresh_targets: HashSet<&str> = operational_diff
+            .neighbors
+            .added
+            .iter()
+            .map(|neighbor| neighbor.address.as_str())
+            .chain(
+                operational_diff
+                    .neighbors
+                    .changed
+                    .iter()
+                    .map(|neighbor| neighbor.address.as_str()),
+            )
+            .chain(
+                operational_diff
+                    .effective_neighbor_impact
+                    .iter()
+                    .filter_map(|impact| {
+                        (!impact.is_dynamic_range
+                            && impact.kind
+                                == crate::config::EffectiveNeighborImpactKind::SessionReshape)
+                            .then_some(impact.address.as_str())
+                    }),
+            )
+            .collect();
+        for neighbor in &candidate.neighbors {
+            if fresh_targets.contains(neighbor.address.as_str()) {
+                candidate.resolve_neighbor(neighbor).map_err(|error| {
+                    RuntimeConfigTransactionPlanError::InvalidCandidate(error.to_string())
+                })?;
+            }
+        }
         let update_group_impact = self
             .plan_update_group_impact(candidate, live_snapshot)
             .map_err(|error| match error {
@@ -313,9 +351,6 @@ impl PeerManager {
                     RuntimeConfigTransactionPlanError::Internal(message)
                 }
             })?;
-        let mut committed_diff = crate::config::diff_config(&self.current_config, candidate);
-        committed_diff.policy.external_inputs_identity = external_inputs;
-        let operational_diff = materialization.unwrap_or(&committed_diff);
         let classification = crate::config::classify_config_transaction_v1(operational_diff);
         let status = if classification.is_noop() {
             RuntimeConfigTransactionStatus::Noop

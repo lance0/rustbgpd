@@ -151,7 +151,10 @@ reload).
 An accepted IPv6 link-local peer retains its interface scope during unrelated
 reloads and hot updates, even if the interface is temporarily missing. Changes
 that add or replace a session, including an interface-name change, still require
-fresh interface resolution before any reload effects.
+fresh interface resolution before any reload effects. Configuration impact
+planning and policy-only transactions also retain the scoped peer in their
+policy targets without requiring a fresh interface lookup. Transaction edits
+that rebuild sessions still require fresh scope resolution during planning.
 
 | Field | Class | Notes |
 |---|---|---|

@@ -20,7 +20,7 @@ pub(super) enum UpdateGroupImpactPlanError {
 
 fn by_peer(config: &Config) -> Result<BTreeMap<IpAddr, ResolvedNeighbor>, String> {
     config
-        .resolved_neighbors()
+        .resolved_neighbors_for_comparison()
         .map_err(|error| error.to_string())
         .map(|rows| {
             rows.into_iter()
