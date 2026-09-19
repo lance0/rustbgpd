@@ -37,6 +37,9 @@ readonly BIRD3_URL="https://bird.nic.cz/download/${BIRD3_ASSET}"
 # pinned checksum, so it adds availability without adding trust.
 readonly BIRD3_FALLBACK_URL="https://ftp.openbsd.org/pub/OpenBSD/distfiles/${BIRD3_ASSET}"
 readonly BIRD3_ATTEMPTS=3
+# Two sources: 6 * 60 seconds plus 30 seconds of retry sleeps = 390 seconds.
+# Leave 210 seconds of the producer's 10-minute job for setup and artifacts.
+readonly BIRD3_MAX_TIME=60
 # prepare_archive separates a third-party outage from a supply-chain signal so
 # callers can act on the difference. 3 = the archive bytes never arrived (every
 # attempt failed to fetch); 4 = bytes arrived and failed the pinned checksum or
@@ -124,7 +127,7 @@ download_archive_once() {
 
     curl -fsSL \
         --connect-timeout 10 \
-        --max-time 120 \
+        --max-time "$BIRD3_MAX_TIME" \
         --output "$destination" \
         "$url"
 }
@@ -205,6 +208,13 @@ self_test() (
     [[ "$BIRD3_FALLBACK_URL" == "https://ftp.openbsd.org/pub/OpenBSD/distfiles/bird-3.3.2.tar.gz" ]] \
         || fail_self_test "fallback URL drifted"
     [[ "$BIRD3_ATTEMPTS" -eq 3 ]] || fail_self_test "retry bound drifted"
+    curl() { printf '%s\n' "$@" >"$fixture_dir/curl-args"; }
+    download_archive_once "$BIRD3_URL" "$fixture_dir/unused"
+    unset -f curl
+    grep -A1 -x -- '--max-time' "$fixture_dir/curl-args" | grep -Fxq '60' \
+        || fail_self_test "download time bound drifted"
+    [[ $((2 * (BIRD3_ATTEMPTS * BIRD3_MAX_TIME + 15))) -le 420 ]] \
+        || fail_self_test "downloads leave less than three minutes of job headroom"
 
     source_dir="$fixture_dir/source/bird-3.3.2"
     mkdir -p "$source_dir"

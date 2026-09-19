@@ -28,20 +28,30 @@ WORKDIR /tmp/bird
 RUN set -eux; \
     checksum="21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"; \
     archive="bird-${BIRD_VERSION}.tar.gz"; \
-    if [ ! -f "/tmp/bird3-archive/${archive}" ]; then \
-        attempt=1; \
-        while ! curl --fail --location --silent --show-error \
-            --connect-timeout 10 --max-time 120 \
-            "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" \
-            --output "/tmp/bird3-archive/${archive}"; do \
-            rm -f "/tmp/bird3-archive/${archive}"; \
-            if [ "${attempt}" -ge 3 ]; then \
-                echo "BIRD ${BIRD_VERSION} download failed after ${attempt} attempts" >&2; \
-                exit 1; \
-            fi; \
-            sleep $((attempt * 5)); \
-            attempt=$((attempt + 1)); \
+    target="/tmp/bird3-archive/${archive}"; \
+    if [ ! -f "${target}" ]; then \
+        for source in "https://bird.nic.cz/download/${archive}" \
+            "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${archive}"; do \
+            attempt=1; \
+            while :; do \
+                rm -f "${target}.download"; \
+                if curl --fail --location --silent --show-error \
+                    --connect-timeout 10 --max-time 60 \
+                    "${source}" --output "${target}.download" \
+                    && echo "${checksum}  ${target}.download" | sha256sum --check --strict; then \
+                    mv "${target}.download" "${target}"; \
+                    break 2; \
+                fi; \
+                rm -f "${target}.download"; \
+                if [ "${attempt}" -ge 3 ]; then \
+                    echo "BIRD ${BIRD_VERSION} source exhausted: ${source}" >&2; \
+                    break; \
+                fi; \
+                sleep $((attempt * 5)); \
+                attempt=$((attempt + 1)); \
+            done; \
         done; \
+        test -f "${target}"; \
     fi; \
     echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict; \
     tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1; \
