@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 import shutil
@@ -93,6 +94,81 @@ PR_FILES = {
 
 
 class PrimerContractTests(unittest.TestCase):
+    def test_bird_docker_fetches_verify_each_source_with_bounded_retries(self):
+        # Execute the actual Docker RUN fetch/check body under its POSIX shell,
+        # with real checksum validation and controlled network/sleep functions.
+        stubs = r'''
+set -eu
+curl() {
+    printf '%s\n' "$*" >> "$ATTEMPTS"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --output) shift; destination=$1 ;;
+            https://*) url=$1 ;;
+        esac
+        shift
+    done
+    case "$CASE" in
+        unavailable) return 22 ;;
+        fallback|corrupt)
+            case "$url" in *bird.nic.cz*) return 22 ;; esac ;;
+    esac
+    if [ "$CASE" = corrupt ]; then
+        printf 'wrong bytes\n' > "$destination"
+    else
+        cp "$FIXTURE" "$destination"
+    fi
+}
+sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
+'''
+        for name in ("Dockerfile.bird3", "Dockerfile.bird-v2192", "Dockerfile.bird-v332"):
+            source = (ROOT / "tests/interop" / name).read_text()
+            version = source.split("ARG BIRD_VERSION=", 1)[1].splitlines()[0]
+            body = source.split("RUN set -eux;", 1)[1].split("    tar -xzf", 1)[0]
+            body = body.replace("    mkdir /tmp/bird; \\\n", "")
+            for case in ("primary", "fallback", "unavailable", "corrupt", "warm", "warm_corrupt"):
+                with self.subTest(dockerfile=name, case=case), tempfile.TemporaryDirectory() as temp:
+                    directory = Path(temp)
+                    fixture = directory / "fixture"
+                    fixture.write_bytes(b"checksum-pinned archive fixture")
+                    checksum = hashlib.sha256(fixture.read_bytes()).hexdigest()
+                    staged = directory / "staged"
+                    staged.mkdir()
+                    target = staged / f"bird-{version}.tar.gz"
+                    if case.startswith("warm"):
+                        target.write_bytes(fixture.read_bytes() if case == "warm" else b"bad cache")
+                    script = body.replace("/tmp/bird3-archive", str(staged)).replace("/tmp/bird-archive", str(staged))
+                    if name == "Dockerfile.bird3":
+                        pin = source.split('checksum="', 1)[1].split('"', 1)[0]
+                        script = script.replace(pin, checksum)
+                    attempts, sleeps = directory / "attempts", directory / "sleeps"
+                    attempts.touch()
+                    sleeps.touch()
+                    result = subprocess.run(
+                        ["/bin/sh", "-c", stubs + script + "\n"],
+                        env={**os.environ, "BIRD_VERSION": version, "BIRD_SHA256": checksum,
+                             "FIXTURE": str(fixture), "ATTEMPTS": str(attempts),
+                             "SLEEPS": str(sleeps), "CASE": case},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    success = case in ("primary", "fallback", "warm")
+                    self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
+                    calls = attempts.read_text().splitlines()
+                    expected = {"primary": 1, "fallback": 4, "unavailable": 6, "corrupt": 6,
+                                "warm": 0, "warm_corrupt": 0}[case]
+                    self.assertEqual(len(calls), expected)
+                    self.assertTrue(all("--connect-timeout 10 --max-time 60" in call for call in calls))
+                    if case in ("fallback", "unavailable", "corrupt"):
+                        self.assertTrue(all("bird.nic.cz/download/" in call for call in calls[:3]))
+                        self.assertTrue(all("ftp.openbsd.org/pub/OpenBSD/distfiles/" in call for call in calls[3:]))
+                    budget = 60 * len(calls) + sum(map(int, sleeps.read_text().splitlines()))
+                    self.assertLessEqual(budget, 390)
+                    if success:
+                        self.assertEqual(target.read_bytes(), fixture.read_bytes())
+                    elif case != "warm_corrupt":
+                        self.assertFalse(target.exists())
+                    self.assertFalse(Path(str(target) + ".download").exists())
+
     def test_m110_cannot_retry_a_failed_startup(self):
         relative = ".github/workflows/kernel-dataplane.yml"
         original = '          max_attempts: "1"\n'
@@ -1112,6 +1188,8 @@ class PrimerContractTests(unittest.TestCase):
             (checksum, "0" * 64),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
+            ("readonly BIRD3_MAX_TIME=60", "readonly BIRD3_MAX_TIME=120"),
+            ('--max-time "$BIRD3_MAX_TIME"', "--max-time 120"),
             ("ftp.openbsd.org/pub/OpenBSD/distfiles/", "example.invalid/"),
             ('"$BIRD3_URL" "$BIRD3_FALLBACK_URL"', '"$BIRD3_URL"'),
         ):
@@ -2269,11 +2347,11 @@ class PrimerContractTests(unittest.TestCase):
                 "RUN mkdir -p /tmp/bird3-archive",
             ),
             (
-                'if [ ! -f "/tmp/bird3-archive/${archive}" ]; then',
+                'if [ ! -f "${target}" ]; then',
                 "if true; then",
             ),
             (
-                "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz",
+                "https://bird.nic.cz/download/${archive}",
                 "https://example.invalid/bird-${BIRD_VERSION}.tar.gz",
             ),
             (

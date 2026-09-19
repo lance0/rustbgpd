@@ -448,7 +448,8 @@ def check(root: Path) -> list[str]:
         "readonly BIRD3_ATTEMPTS=3",
         "curl -fsSL",
         "--connect-timeout 10",
-        "--max-time 120",
+        '--max-time "$BIRD3_MAX_TIME"',
+        "readonly BIRD3_MAX_TIME=60",
         "--prepare-archive",
         "--stage-archive",
         "--self-test",
@@ -1748,8 +1749,11 @@ def check(root: Path) -> list[str]:
         "COPY bird3-archive/ /tmp/bird3-archive/",
         f'checksum="{BIRD3_SHA256}"',
         'archive="bird-${BIRD_VERSION}.tar.gz"',
-        'if [ ! -f "/tmp/bird3-archive/${archive}" ]; then',
-        "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz",
+        'target="/tmp/bird3-archive/${archive}"',
+        'if [ ! -f "${target}" ]; then',
+        "https://bird.nic.cz/download/${archive}",
+        "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${archive}",
+        "--connect-timeout 10 --max-time 60",
         'if [ "${attempt}" -ge 3 ]; then',
         'echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict',
         'tar -xzf "/tmp/bird3-archive/${archive}" --strip-components=1',
@@ -1761,7 +1765,7 @@ def check(root: Path) -> list[str]:
         errors.append("Dockerfile.bird3: download URL inventory drifted")
     if not (
         0
-        <= bird3.find("sha256sum --check --strict")
+        <= bird3.find('echo "${checksum}  /tmp/bird3-archive/${archive}" | sha256sum --check --strict')
         < bird3.find('tar -xzf "/tmp/bird3-archive/${archive}"')
     ):
         errors.append("Dockerfile.bird3: extraction precedes checksum verification")
@@ -1779,8 +1783,9 @@ def check(root: Path) -> list[str]:
             'archive="bird-${BIRD_VERSION}.tar.gz"',
             'target="/tmp/bird-archive/${archive}"',
             'if [ ! -f "${target}" ]; then',
-            "--connect-timeout 10 --max-time 120",
+            "--connect-timeout 10 --max-time 60",
             "https://bird.nic.cz/download/${archive}",
+            "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${archive}",
             '--output "${target}.download"',
             'if [ "${attempt}" -ge 3 ]; then',
             'echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict',

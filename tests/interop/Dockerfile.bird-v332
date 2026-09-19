@@ -21,32 +21,35 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
 
 # Hosted CI stages a checksum- and version-verified same-run artifact before
 # this build. The absent-archive branch is only for cold local builds and is
-# deliberately bounded to three attempts.
+# bounded to three 60-second attempts per checksum-verified source.
 COPY bird3-archive/ /tmp/bird-archive/
 
 RUN set -eux; \
     archive="bird-${BIRD_VERSION}.tar.gz"; \
     target="/tmp/bird-archive/${archive}"; \
     if [ ! -f "${target}" ]; then \
-        attempt=1; \
-        while :; do \
-            rm -f "${target}.download"; \
-            if curl --fail --location --silent --show-error \
-                --connect-timeout 10 --max-time 120 \
-                "https://bird.nic.cz/download/${archive}" \
-                --output "${target}.download" \
-                && echo "${BIRD_SHA256}  ${target}.download" | sha256sum --check --strict; then \
-                mv "${target}.download" "${target}"; \
-                break; \
-            fi; \
-            rm -f "${target}.download"; \
-            if [ "${attempt}" -ge 3 ]; then \
-                echo "BIRD ${BIRD_VERSION} local archive fallback failed after ${attempt} attempts" >&2; \
-                exit 1; \
-            fi; \
-            sleep $((attempt * 5)); \
-            attempt=$((attempt + 1)); \
+        for source in "https://bird.nic.cz/download/${archive}" \
+            "https://ftp.openbsd.org/pub/OpenBSD/distfiles/${archive}"; do \
+            attempt=1; \
+            while :; do \
+                rm -f "${target}.download"; \
+                if curl --fail --location --silent --show-error \
+                    --connect-timeout 10 --max-time 60 \
+                    "${source}" --output "${target}.download" \
+                    && echo "${BIRD_SHA256}  ${target}.download" | sha256sum --check --strict; then \
+                    mv "${target}.download" "${target}"; \
+                    break 2; \
+                fi; \
+                rm -f "${target}.download"; \
+                if [ "${attempt}" -ge 3 ]; then \
+                    echo "BIRD ${BIRD_VERSION} source exhausted: ${source}" >&2; \
+                    break; \
+                fi; \
+                sleep $((attempt * 5)); \
+                attempt=$((attempt + 1)); \
+            done; \
         done; \
+        test -f "${target}"; \
     fi; \
     echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict; \
     mkdir /tmp/bird; \
