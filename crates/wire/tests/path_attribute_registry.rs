@@ -154,6 +154,46 @@ fn assigned_value(code: u8) -> Vec<u8> {
     }
 }
 
+#[test]
+fn domain_path_remains_opaque_on_ipv4_unicast() {
+    use rustbgpd_wire::{
+        AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv4UnicastMode, Origin, RawAttribute,
+        UpdateMessage,
+    };
+    use std::net::Ipv4Addr;
+
+    let domain_path = PathAttribute::Unknown(RawAttribute {
+        flags: 0xe0,
+        type_code: 36,
+        data: assigned_value(36).into(),
+    });
+    let attributes = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 2)),
+        domain_path.clone(),
+    ];
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let message = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attributes,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    let legacy = message.parse(true, false, &[]).unwrap();
+    let revised = message.parse_revised(true, false, false, &[]).unwrap();
+    assert_eq!(legacy, revised.update);
+    assert!(revised.malformed.is_empty());
+    assert_eq!(revised.update.announced[0].prefix, prefix);
+    assert!(revised.update.attributes.contains(&domain_path));
+    // Framing recognition does not enable RFC 10039 interworking semantics.
+    validate_update_attributes(&revised.update.attributes, true, true, true).unwrap();
+}
+
 fn assigned_malformed(code: u8) -> Option<(Vec<u8>, ErrorDisposition)> {
     match code {
         23 => Some((Vec::new(), ErrorDisposition::TreatAsWithdraw)),
