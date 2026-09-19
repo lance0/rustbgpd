@@ -24,7 +24,7 @@ bug — file an issue.
 
 | Class | Meaning |
 |---|---|
-| **live** | Change applies on SIGHUP or a supported runtime CRUD RPC without bouncing the BGP session. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()` and the daemon reconciles in place. |
+| **live** | Change applies in place on SIGHUP or a supported runtime CRUD RPC without requiring a replacement session task. Enforcement of the new setting can still stop BGP, such as a lowered prefix limit exceeded by the current route count. The diff routes through `neighbor_runtime_equal()` / `diff_neighbors()` / `diff_policy()`. |
 | **reload-applied** | Change hot-applies to a running subsystem reconciler or derived matcher on SIGHUP / supported runtime CRUD, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem or snapshot consumer **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler) and `[[dynamic_neighbors]]` matcher rebuilds. Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
 | **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
 | **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
@@ -86,11 +86,20 @@ Static-neighbor edits whose **every** changed field is hot-applied
 `max_prefixes_out_ipv6`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
-import/export policy and chain fields) are applied **in place**: the
-session task, its TCP connection, and the FSM are untouched, and policy
-edits trigger the usual Route Refresh / Adj-RIB-Out re-emit. Mixing a
-hot-applied edit with a session-reset edit on the same neighbor applies
-both through one session rebuild.
+import/export policy and chain fields) are applied **in place** without
+replacing the session task. Policy edits trigger the usual Route Refresh /
+Adj-RIB-Out re-emit. Enforcement of newly applied limits can still stop BGP:
+for example, with `max_prefix_action = "shutdown"`, lowering a per-family
+inbound cap below the current count tears down the session immediately. Mixing
+a hot-applied edit with a session-reset edit on the same neighbor applies both
+through one session rebuild.
+
+In `rustbgpd --diff --json`, a field's `impact: "hot_applied"` describes
+this in-place application path; it is not a promise that BGP stays Established.
+`impact: "session_reset"` and the `summary.sessions_will_reset` count describe
+session replacements required to apply the configuration. The count does not
+predict additional stops caused by enforcement of the new limits or admission
+rules, which depend on runtime state.
 
 ---
 
