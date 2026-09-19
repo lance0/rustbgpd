@@ -403,7 +403,9 @@ mod tests {
                 established.prefix_count = 5;
                 let mut active = peer_info("10.0.0.2".parse().unwrap());
                 active.state = rustbgpd_fsm::SessionState::Active;
-                let peers = vec![established, active];
+                let mut stale_established = peer_info("10.0.0.3".parse().unwrap());
+                stale_established.stale = true;
+                let peers = vec![established, active, stale_established];
                 let _ = reply.send(peers);
             }
         });
@@ -420,7 +422,14 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.active_peers, 1, "only Established peers counted");
+        assert!(
+            resp.healthy,
+            "core snapshot succeeded despite unavailable peer state"
+        );
+        assert_eq!(
+            resp.active_peers, 1,
+            "only non-stale Established peers counted"
+        );
         assert_eq!(resp.total_routes, 42, "total_routes from Loc-RIB");
     }
 
