@@ -66,7 +66,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 33 | BGPsec_Path | optional non-transitive; flags `0x80`; RFC 8205 | payload semantics unsupported; correct class ignored; wrong class is treat-as-withdraw | assigned-class matrix below |
 | 34 | BGP Community Container Attribute (temporary assignment in the live IANA registry) | optional transitive; flags `0xc0`; draft-ietf-idr-wide-bgp-communities-11 (work in progress) | opaque retention with Partial on egress; bounded container, Type 1 subtype, atom, and prefix framing; wrong class, malformed framing, or a duplicate attribute is treat-as-withdraw | Community Container framing matrix below; this is not a stable standards-support claim |
 | 35 | Only to Customer (OTC) | optional transitive; flags `0xc0`; exactly one four-octet ASN; RFC 9234 §5 | typed ASN + Partial round-trip; Extended Length and reserved low bits canonicalize; wrong class or length is treat-as-withdraw | OTC codec and transport matrices |
-| 36 | BGP Domain Path (D-PATH) | optional transitive; flags `0xc0`; draft-ietf-bess-evpn-ipvpn-interworking-18 | opaque retention with bounded domain-segment framing; malformed is treat-as-withdraw | assigned framing matrix below |
+| 36 | BGP Domain Path (D-PATH) | optional transitive; flags `0xc0`; RFC 10039 §§4, 11 restrict supporting speakers to IPVPN (SAFI 128) and EVPN (SAFI 70) | framing-only opaque transit on all families; malformed framing is treat-as-withdraw; no interworking semantics | assigned framing matrix and D-PATH boundary below |
 | 37 | SFP attribute | optional transitive; flags `0xc0`; RFC 9015 §3.2.1 | opaque retention with TLV, Hop, and Hop sub-TLV framing; malformed is treat-as-withdraw | assigned framing matrix below |
 | 38 | BFD Discriminator | optional transitive; flags `0xc0`; RFC 9026 §3.1.6 | opaque retention with base and Source-IP TLV framing; malformed is attribute-discard | assigned framing matrix below |
 | 39 | Next Hop Dependent Characteristic (NHC) | optional transitive; flags `0xc0`; draft-ietf-idr-nhc-07 | opaque retention with next-hop and characteristic-TLV framing; malformed or empty characteristics is attribute-discard | assigned framing matrix below |
@@ -83,6 +83,24 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 244-254 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 255 | Reserved for development | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 <!-- registry-census:end -->
+
+### D-PATH boundary
+
+The project treats D-PATH as an opaque optional-transitive attribute, with
+bounded framing validation. This is a deliberate boundary: recognizing its
+wire format does not enable RFC 10039 gateway procedures, domain-loop detection,
+or D-PATH route selection. Valid D-PATH is retained on unicast, VPNv4/VPNv6 and
+EVPN routes; it is re-advertised with Partial set and does not affect best-path
+selection. Malformed framing retains the existing RFC 7606 error handling.
+
+[RFC 10039 §§4 and 11](https://www.rfc-editor.org/rfc/rfc10039.html) require
+supporting speakers to treat D-PATH on other families as withdrawn; §11 also
+describes propagation by non-supporting speakers. The project follows the latter
+boundary rather than claiming D-PATH semantic support from framing checks alone.
+`domain_path_remains_opaque_on_ipv4_unicast` exercises decode and validation;
+`domain_path_remains_opaque_on_vpn_and_evpn_routes` checks transport retention.
+The existing `assigned_opaque_attributes_reach_rib_while_edge_metadata_is_absent`
+test also verifies unicast re-advertisement bytes and Partial.
 
 ## Executable RFC 7606 core matrix
 

@@ -731,6 +731,106 @@ async fn malformed_domain_path_withdraws_route_and_keeps_session() {
 }
 
 #[tokio::test]
+async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        RawAttribute,
+    };
+
+    let domain_path = PathAttribute::Unknown(RawAttribute {
+        flags: 0xe0,
+        type_code: 36,
+        data: Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0]),
+    });
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv6, Safi::MplsVpn),
+        (Afi::L2Vpn, Safi::Evpn),
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+        negotiated.negotiated_families.push((afi, safi));
+        session.negotiated = Some(Arc::new(negotiated));
+        rfc7606_drain(&mut rib_rx);
+        let mut route = make_vpn_rib_route(3);
+        if afi == Afi::Ipv6 {
+            route.nlri.prefix = VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap();
+            route.next_hop = "2001:db8::2".parse().unwrap();
+        }
+        let mut mp = MpReachNlri {
+            afi,
+            safi,
+            next_hop: route.next_hop,
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        };
+        if safi == Safi::Evpn {
+            mp.evpn_announced.push(EvpnRoute::MacIp(EvpnMacIp {
+                rd: route.nlri.route_distinguisher,
+                esi: EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(0),
+                mac: MacAddress([0xaa, 0xbb, 0xcc, 0, 0, 1]),
+                ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
+                label1: MplsLabel::new(100),
+                label2: None,
+            }));
+        } else {
+            mp.vpn_announced.push(rustbgpd_wire::VpnNlriEntry {
+                path_id: 0,
+                nlri: route.nlri,
+            });
+        }
+        let mut attributes = route.attributes.as_ref().clone();
+        attributes.extend([domain_path.clone(), PathAttribute::MpReachNlri(mp)]);
+        session
+            .process_update(UpdateMessage::build(
+                &[],
+                &[],
+                &attributes,
+                true,
+                false,
+                Ipv4UnicastMode::MpReach,
+            ))
+            .await;
+        let retained = match rib_rx.try_recv().expect("accepted D-PATH route") {
+            RibUpdate::VpnRoutesReceived {
+                announced,
+                withdrawn,
+                ..
+            } => {
+                assert_eq!(safi, Safi::MplsVpn);
+                assert_eq!(announced.len(), 1);
+                assert!(withdrawn.is_empty());
+                Arc::clone(&announced[0].attributes)
+            }
+            RibUpdate::RoutesReceived {
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            } => {
+                assert_eq!(safi, Safi::Evpn);
+                assert_eq!(evpn_announced.len(), 1);
+                assert!(evpn_withdrawn.is_empty());
+                Arc::clone(&evpn_announced[0].attributes)
+            }
+            _ => panic!("unexpected RIB update"),
+        };
+        assert!(retained.contains(&domain_path));
+        assert!(malformed_cause_rows(&session).is_empty());
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
+}
+
+#[tokio::test]
 async fn malformed_bfd_discriminator_discards_attribute_and_keeps_route() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, _server) = connected_stream_pair().await;
