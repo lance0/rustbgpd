@@ -5256,6 +5256,74 @@ fn import_default_action(target: &ResolvedPeerPolicy) -> PolicyAction {
         .expect("test target must carry one import policy")
 }
 
+fn missing_interface_policy_config(action: &str, hold_time: u32) -> Config {
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let source = format!(
+        r#"{}
+[peer_groups.edge]
+hold_time = {hold_time}
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65005
+peer_group = "edge"
+import_policy_chain = ["f"]
+"#,
+        live_policy_toml(action)
+    );
+    Config::load_toml_with_diagnostics(&source, "missing-interface policy config").unwrap()
+}
+
+#[test]
+fn live_policy_targets_retain_missing_interface_member() {
+    let previous = missing_interface_policy_config("permit", 90);
+    let candidate = missing_interface_policy_config("deny", 90);
+    let diff = diff_config(&previous, &candidate);
+    assert_eq!(diff.effective_neighbor_impact.len(), 2);
+    assert!(diff.effective_neighbor_impact.iter().all(|impact| {
+        impact.kind == EffectiveNeighborImpactKind::PolicyChain && !impact.is_dynamic_range
+    }));
+    let class = crate::config::classify_config_transaction_v1(&diff);
+    assert!(class.is_committable(), "{class:?}");
+    assert!(
+        class
+            .supported_sections
+            .contains(&"[policy] live impact".to_string())
+    );
+    let targets = resolve_live_policy_targets(&previous, &candidate).unwrap();
+    assert_eq!(targets.static_targets.len(), 2);
+    for target in &targets.static_targets {
+        assert_eq!(import_default_action(target), PolicyAction::Deny);
+    }
+    let scoped = targets
+        .static_targets
+        .iter()
+        .find(|target| target.address == "fe80::5".parse::<std::net::IpAddr>().unwrap())
+        .expect("the accepted scoped member must receive the changed policy");
+    assert_eq!(scoped.interface.as_deref(), Some("rbgp-missing"));
+}
+
+#[test]
+fn session_reshape_targets_require_missing_interface_resolution() {
+    let previous = missing_interface_policy_config("permit", 90);
+    let candidate = missing_interface_policy_config("permit", 180);
+    let diff = diff_config(&previous, &candidate);
+    assert_eq!(diff.effective_neighbor_impact.len(), 1);
+    assert_eq!(diff.effective_neighbor_impact[0].address, "fe80::5");
+    assert_eq!(
+        diff.effective_neighbor_impact[0].kind,
+        EffectiveNeighborImpactKind::SessionReshape
+    );
+    let error = resolve_peer_session_reshape_targets(&previous, &candidate)
+        .err()
+        .expect("a replacement must resolve a fresh interface before mutation");
+    let ConfigTransactionApplyError::InvalidArgument(reason) = error else {
+        panic!("unexpected reshape error: {error:?}");
+    };
+    assert!(reason.contains("rbgp-missing"), "{reason}");
+}
+
 fn resolved_dynamic_policy_target(toml: &str, address: &str) -> ResolvedPeerPolicy {
     let config =
         Config::load_toml_with_diagnostics(toml, "dynamic policy config").expect("valid TOML");

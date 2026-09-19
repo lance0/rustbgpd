@@ -3203,7 +3203,7 @@ pub(crate) fn listener_inbound_auth_inventory(
     config: &Config,
 ) -> Result<ListenerInboundInventory, String> {
     let resolved = config
-        .resolved_neighbors()
+        .resolved_neighbors_for_comparison()
         .map_err(|error| error.to_string())?;
     let md5_keys = resolved
         .iter()
@@ -3630,17 +3630,23 @@ pub(crate) fn plan_reload_peer_actions(
             });
             continue;
         };
-        let old_resolved = prior.resolve_neighbor(old)?;
-        let new_resolved = candidate.resolve_neighbor(new)?;
+        let old_resolved = prior.resolve_neighbor_for_comparison(old)?;
+        let new_resolved = candidate.resolve_neighbor_for_comparison(new)?;
         if let Some(kind) = resolved_session_change(&old_resolved, &new_resolved) {
+            if kind == ReloadPeerActionKind::Replace {
+                // Fresh scope validation precedes coordinator side effects,
+                // not just the later manager-owned session mutations.
+                candidate.resolve_neighbor(new)?;
+            }
             actions.push(ReloadPeerAction {
                 key: peer.clone(),
                 kind,
             });
         }
     }
-    for peer in candidate_by_key.keys() {
+    for (peer, neighbor) in &candidate_by_key {
         if !prior_by_key.contains_key(peer) {
+            candidate.resolve_neighbor(neighbor)?;
             actions.push(ReloadPeerAction {
                 key: peer.clone(),
                 kind: ReloadPeerActionKind::Add,
@@ -5566,10 +5572,10 @@ fn compute_effective_neighbor_impact(
         let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
             continue;
         };
-        let Ok(old_resolved) = old.resolve_neighbor(old_neighbor) else {
+        let Ok(old_resolved) = old.resolve_neighbor_for_comparison(old_neighbor) else {
             continue;
         };
-        let Ok(new_resolved) = new.resolve_neighbor(new_neighbor) else {
+        let Ok(new_resolved) = new.resolve_neighbor_for_comparison(new_neighbor) else {
             continue;
         };
 

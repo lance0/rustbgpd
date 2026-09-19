@@ -694,29 +694,39 @@ fn prepare_tcp_ao_rotation_plan(
     desired: &Config,
     listener_status: &TcpAoRotationStatus,
 ) -> Result<TcpAoReloadPlan, String> {
-    let current_resolved = current
-        .resolved_neighbors()
-        .map_err(|error| error.to_string())?;
-    let desired_resolved = desired
-        .resolved_neighbors()
-        .map_err(|error| error.to_string())?;
-    let static_map = |neighbors: &[config::ResolvedNeighbor]| {
-        neighbors
+    // Static TCP-AO does not inherit from peer groups. Its config-only
+    // inventory needs peer identity and keys, not a current interface index.
+    let static_map = |config: &Config| {
+        config
+            .neighbors
             .iter()
             .filter_map(|neighbor| {
-                let keyring = neighbor.transport_config.tcp_ao.clone()?;
-                Some((
-                    rustbgpd_api::peer_types::PeerKey::new(
-                        neighbor.transport_config.remote_addr.ip(),
-                        neighbor.transport_config.peer_interface.clone(),
-                    ),
-                    keyring,
-                ))
+                let keyring = config::transport_tcp_ao_keyring(neighbor.tcp_ao.as_ref()?);
+                Some(
+                    neighbor
+                        .address
+                        .parse::<IpAddr>()
+                        .map(|address| {
+                            (
+                                rustbgpd_api::peer_types::PeerKey::new(
+                                    address,
+                                    neighbor.interface.clone(),
+                                ),
+                                keyring,
+                            )
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "invalid TCP-AO neighbor address {:?}: {error}",
+                                neighbor.address
+                            )
+                        }),
+                )
             })
-            .collect::<BTreeMap<_, _>>()
+            .collect::<Result<BTreeMap<_, _>, String>>()
     };
-    let current_static = static_map(&current_resolved);
-    let desired_static = static_map(&desired_resolved);
+    let current_static = static_map(current)?;
+    let desired_static = static_map(desired)?;
     if current_static.keys().collect::<Vec<_>>() != desired_static.keys().collect::<Vec<_>>() {
         return Ok(TcpAoReloadPlan::Unsupported(
             "live TCP-AO rotation may not add or remove a protected static owner".to_string(),
@@ -840,9 +850,16 @@ fn prepare_tcp_ao_rotation_plan(
     // The generation carries the complete both-family listener inventory;
     // the transport layer routes each key to the family socket it can
     // actually protect.
-    let mut listener_keys: Vec<TcpAoListenerKey> = desired_resolved
+    let listener_key =
+        |(peer, keyring): (&rustbgpd_api::peer_types::PeerKey, &TcpAoKeyring)| TcpAoListenerKey {
+            owner: TcpAoListenerOwnerKind::Static,
+            peer: peer.address,
+            prefix_len: if peer.address.is_ipv4() { 32 } else { 128 },
+            config: keyring.clone(),
+        };
+    let mut listener_keys: Vec<TcpAoListenerKey> = desired_static
         .iter()
-        .filter_map(crate::tcp_ao_listener_key_for_neighbor)
+        .map(listener_key)
         .chain(
             desired
                 .dynamic_neighbors
@@ -857,9 +874,9 @@ fn prepare_tcp_ao_rotation_plan(
         };
         (key.peer, key.prefix_len, owner)
     });
-    let mut current_listener_keys = current_resolved
+    let mut current_listener_keys = current_static
         .iter()
-        .filter_map(crate::tcp_ao_listener_key_for_neighbor)
+        .map(listener_key)
         .chain(
             current
                 .dynamic_neighbors
@@ -2276,6 +2293,70 @@ pub(crate) async fn reload_config_with_tcp_ao(
         listener_auth: listener_auth_edited,
     });
     info!(route = %route.describe(), "reload route classified");
+    let old_map: std::collections::HashMap<(&str, Option<&str>), &config::Neighbor> = current
+        .neighbors
+        .iter()
+        .map(|neighbor| {
+            (
+                (neighbor.address.as_str(), neighbor.interface.as_deref()),
+                neighbor,
+            )
+        })
+        .collect();
+    let mut hot_changed = Vec::new();
+    let mut rebuild_changed = Vec::new();
+    for neighbor in &diff.changed {
+        let hot = old_map
+            .get(&(neighbor.address.as_str(), neighbor.interface.as_deref()))
+            .is_some_and(|old| config::neighbor_change_hot_applicable(old, neighbor));
+        if hot {
+            hot_changed.push(neighbor);
+        } else {
+            rebuild_changed.push(neighbor.clone());
+        }
+    }
+    // Validate the exact executor's fresh socket identities before listener,
+    // RIB, or peer effects. Sequential reloads use raw field-impact partitions;
+    // they may rebuild even when an explicit value equals an inherited value.
+    let actions = match &route {
+        config::SighupReloadRoute::Rejected { .. } => Vec::new(),
+        config::SighupReloadRoute::Generation => {
+            match config::plan_reload_peer_actions(current, &new_config) {
+                Ok(actions) => actions,
+                Err(error) => return clean_reload_failure("generation.plan", error.to_string()),
+            }
+        }
+        config::SighupReloadRoute::Sequential { .. } => {
+            for neighbor in diff.added.iter().chain(&rebuild_changed) {
+                if let Err(error) = new_config.resolve_neighbor(neighbor) {
+                    return clean_reload_failure("neighbors.preflight", error.to_string());
+                }
+            }
+            for name in &peer_group_diff.changed {
+                let Some(old) = current.peer_groups.get(name) else {
+                    continue;
+                };
+                let Some(new) = new_config.peer_groups.get(name) else {
+                    continue;
+                };
+                if config::peer_group_change_hot_applicable(old, new) {
+                    continue;
+                }
+                // Group changes precede member removal/reassignment, so the
+                // existing members, including those leaving, are reshaped.
+                for neighbor in current
+                    .neighbors
+                    .iter()
+                    .filter(|neighbor| neighbor.peer_group.as_ref() == Some(name))
+                {
+                    if let Err(error) = Config::validate_neighbor_interface(neighbor) {
+                        return clean_reload_failure("neighbors.preflight", error);
+                    }
+                }
+            }
+            Vec::new()
+        }
+    };
     match route {
         config::SighupReloadRoute::Rejected { reasons } => {
             error!(
@@ -2294,10 +2375,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
             );
         }
         config::SighupReloadRoute::Generation => {
-            let actions = match config::plan_reload_peer_actions(current, &new_config) {
-                Ok(actions) => actions,
-                Err(error) => return clean_reload_failure("generation.plan", error.to_string()),
-            };
             let datasets = match dataset_commit.prepare_generation(current, &new_config) {
                 Ok(datasets) => datasets,
                 Err(error) => return clean_reload_failure("generation.datasets", error),
@@ -3279,13 +3356,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
     //    session-reset or unknown-impact field keeps the neighbor on the
     //    existing `ReconcilePeers` rebuild path.
     if !neighbors_unchanged {
-        let old_map: std::collections::HashMap<(&str, Option<&str>), &config::Neighbor> = current
-            .neighbors
-            .iter()
-            .map(|n| ((n.address.as_str(), n.interface.as_deref()), n))
-            .collect();
-        let mut hot_changed: Vec<&config::Neighbor> = Vec::new();
-        let mut rebuild_changed: Vec<config::Neighbor> = Vec::new();
         for n in &diff.changed {
             let old_n = old_map
                 .get(&(n.address.as_str(), n.interface.as_deref()))
@@ -3303,11 +3373,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     "neighbor changed"
                 );
             }
-            if hot {
-                hot_changed.push(n);
-            } else {
-                rebuild_changed.push(n.clone());
-            }
         }
         info!(
             added = diff.added.len(),
@@ -3323,21 +3388,34 @@ pub(crate) async fn reload_config_with_tcp_ao(
             info!(address = %addr, "neighbor removed");
         }
 
-        let peer_configs = match new_config.resolved_neighbors() {
-            Ok(p) => p,
-            Err(e) => {
-                return acknowledge_partial(
-                    &progress,
-                    working_config,
-                    &desired_snapshot,
-                    ReloadStepFailure {
-                        bucket: "neighbors.resolve",
-                        target: "new_config.resolved_neighbors".to_string(),
-                        error: ReloadStepError::Rejected(e.to_string()),
-                    },
-                );
-            }
-        };
+        // Only actual additions/rebuilds need newly resolved socket identity.
+        // Hot payloads carry fields only; the manager retains its accepted scope.
+        let peer_configs = diff
+            .added
+            .iter()
+            .chain(&rebuild_changed)
+            .map(|neighbor| new_config.resolve_neighbor(neighbor))
+            .collect::<Result<Vec<_>, _>>();
+        let hot_configs = hot_changed
+            .iter()
+            .map(|neighbor| new_config.resolve_neighbor_hot_fields(neighbor))
+            .collect::<Result<Vec<_>, _>>();
+        let (peer_configs, hot_configs) =
+            match peer_configs.and_then(|peers| hot_configs.map(|hot| (peers, hot))) {
+                Ok(configs) => configs,
+                Err(e) => {
+                    return acknowledge_partial(
+                        &progress,
+                        working_config,
+                        &desired_snapshot,
+                        ReloadStepFailure {
+                            bucket: "neighbors.resolve",
+                            target: "changed neighbor resolution".to_string(),
+                            error: ReloadStepError::Rejected(e.to_string()),
+                        },
+                    );
+                }
+            };
         let peer_map: std::collections::HashMap<(String, Option<String>), _> = peer_configs
             .into_iter()
             .map(|neighbor| {
@@ -3376,14 +3454,15 @@ pub(crate) async fn reload_config_with_tcp_ao(
         // like any other reload step — safe, because a hot update never
         // deletes anything, and the stale snapshot entry makes the next
         // SIGHUP re-detect and retry the same in-place update.
-        for n in hot_changed {
-            let Some(cfg) = resolve(std::slice::from_ref(n)).pop() else {
-                warn!(
-                    address = %n.address,
-                    "reload: hot-applicable neighbor missing from resolved set; skipping"
-                );
-                continue;
-            };
+        for (n, neighbor) in hot_changed.into_iter().zip(hot_configs) {
+            let cfg = build_peer_mgr_config(
+                &neighbor.transport_config,
+                neighbor.max_prefix_restart_seconds,
+                &neighbor.label,
+                neighbor.import_policy.as_ref(),
+                neighbor.export_policy.as_ref(),
+                neighbor.peer_group.clone(),
+            );
             if let Err(failure) = hot_peer_step(peer_mgr_tx, &mut progress, cfg).await {
                 return owned_step_failure(
                     &progress,
@@ -6602,6 +6681,9 @@ hold_time = 90
             PeerManagerCommand::ClearGlobalExportChain { .. } => {
                 "ClearGlobalExportChain".to_string()
             }
+            PeerManagerCommand::HotUpdatePeer { config, .. } => {
+                format!("HotUpdatePeer({})", config.address)
+            }
             PeerManagerCommand::ReconcilePeers {
                 added,
                 removed,
@@ -7057,6 +7139,312 @@ hold_time = 90
         std::fs::remove_file(&path).ok();
         let tags = tags.lock().unwrap().clone();
         (outcome, tags, calls)
+    }
+
+    async fn drive_scoped_reload(
+        initial: &str,
+        desired: &str,
+        with_listener: bool,
+    ) -> (SighupReloadOutcome, Vec<String>, Vec<GenerationCall>) {
+        let current = load_config_from_toml("scoped-prior", initial);
+        let desired = load_config_from_toml("scoped-desired", desired);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let peer_task = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            while let Some(command) = peer_rx.recv().await {
+                tags.push(cmd_tag(&command));
+                match command {
+                    PeerManagerCommand::HotUpdatePeer { config, reply } => {
+                        assert_eq!(
+                            config.scope_id, None,
+                            "comparison scope cannot leave hot projection"
+                        );
+                        let _ = reply.send(OwnedHotUpdatePeerOutcome::Success);
+                    }
+                    PeerManagerCommand::ReconcilePeers {
+                        added,
+                        removed,
+                        changed,
+                        reply,
+                    } => {
+                        assert!(added.is_empty() && removed.is_empty());
+                        let effects = changed
+                            .into_iter()
+                            .map(|config| {
+                                PeerReconcileEffect::Replaced(
+                                    rustbgpd_api::peer_types::PeerKey::new(
+                                        config.address,
+                                        config.interface,
+                                    ),
+                                )
+                            })
+                            .collect();
+                        let _ = reply.send(rustbgpd_api::peer_types::PeerReconcileOutcome {
+                            effects,
+                            ..Default::default()
+                        });
+                    }
+                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
+                    }
+                    _ => panic!("unexpected scoped reload command"),
+                }
+            }
+            tags
+        });
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+        let (accept_tx, _accept_rx) = mpsc::channel(1);
+        let listener =
+            rustbgpd_transport::BgpListener::bind("127.0.0.1:0".parse().unwrap(), accept_tx)
+                .await
+                .unwrap();
+        let handle = listener.tcp_ao_rotation_handle();
+        let listener_task = tokio::spawn(listener.run());
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reload_config_with_tcp_ao(
+                SighupReloadPlan {
+                    baseline_runtime: current,
+                    desired: AcceptedConfigSnapshot::from_config_for_test(desired),
+                },
+                None,
+                None,
+                &peer_tx,
+                Some(&internal_tx),
+                None,
+                None,
+                None,
+                with_listener.then_some(&handle),
+                None,
+            ),
+        )
+        .await;
+        drop(internal_tx);
+        drop(peer_tx);
+        let calls = generation.await.unwrap();
+        listener_task.abort();
+        let _ = listener_task.await;
+        let tags = peer_task.await.unwrap();
+        (
+            outcome.expect("reload must not wait for an unexpected mutation"),
+            tags,
+            calls,
+        )
+    }
+
+    fn accepted_missing_interface_toml() -> String {
+        // Model a previously accepted interface without changing host networking.
+        assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+        format!(
+            "{}\n[[bfd_profiles]]\nname = \"fast\"\n\n[[neighbors]]\naddress = \"fe80::5\"\ninterface = \"rbgp-missing\"\nremote_asn = 65005\nbfd = {{ profile = \"fast\" }}\n",
+            baseline_toml()
+        )
+    }
+
+    #[tokio::test]
+    async fn reload_unrelated_policy_retains_accepted_peer_on_missing_interface() {
+        let initial = accepted_missing_interface_toml();
+        let desired =
+            format!("{initial}\n[policy.definitions.unrelated]\ndefault_action = \"permit\"\n");
+        for with_listener in [false, true] {
+            let (outcome, tags, calls) =
+                drive_scoped_reload(&initial, &desired, with_listener).await;
+            assert!(
+                matches!(&outcome, SighupReloadOutcome::Acknowledged(_)),
+                "unrelated policy must reach generation application despite the missing accepted interface; outcome={outcome:?}, tags={tags:?}, generation_calls={}",
+                calls.len()
+            );
+            assert!(tags.is_empty(), "no sequential peer mutations");
+            assert_eq!(calls.len(), 1);
+            assert!(
+                calls[0].actions.is_empty(),
+                "accepted session stays untouched"
+            );
+            assert!(
+                calls[0]
+                    .candidate
+                    .policy
+                    .definitions
+                    .contains_key("unrelated")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_sequential_auth_and_hot_edit_preserve_missing_interface() {
+        let initial = accepted_missing_interface_toml();
+        let desired = initial
+            .replace(
+                "hold_time = 90",
+                "hold_time = 90\nmd5_password = \"new-secret\"",
+            )
+            .replace(
+                "remote_asn = 65005",
+                "remote_asn = 65005\ndescription = \"new description\"",
+            );
+        for with_listener in [false, true] {
+            let (outcome, tags, calls) =
+                drive_scoped_reload(&initial, &desired, with_listener).await;
+            let accepted =
+                outcome.expect("auth and hot edit must apply despite unrelated missing interface");
+            assert!(calls.is_empty(), "auth compound remains sequential");
+            assert_eq!(
+                accepted
+                    .neighbors
+                    .iter()
+                    .find(|neighbor| neighbor.address == "fe80::5")
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("new description")
+            );
+            assert!(
+                tags.iter().any(|tag| tag.starts_with("HotUpdatePeer")),
+                "{tags:?}"
+            );
+            assert!(
+                tags.iter().any(|tag| tag.starts_with("ReconcilePeers")),
+                "{tags:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_missing_interface_replacement_rejects_before_any_route_effect() {
+        let initial = accepted_missing_interface_toml();
+        for with_listener in [false, true] {
+            for auth_change in [false, true] {
+                // The valid earlier peer edit must not apply before a later
+                // replacement fails. Auth edits select the sequential route.
+                let desired = initial
+                    .replace(
+                        "hold_time = 90",
+                        if auth_change {
+                            "hold_time = 45\nmd5_password = \"new-secret\""
+                        } else {
+                            "hold_time = 45"
+                        },
+                    )
+                    .replace("remote_asn = 65005", "remote_asn = 65015");
+                let (outcome, tags, calls) =
+                    drive_scoped_reload(&initial, &desired, with_listener).await;
+                let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) =
+                    outcome
+                else {
+                    panic!("unresolved replacement must be rejected before effects");
+                };
+                assert_eq!(
+                    failure.bucket,
+                    if auth_change {
+                        "neighbors.preflight"
+                    } else {
+                        "generation.plan"
+                    }
+                );
+                assert!(failure.error.to_string().contains("rbgp-missing"));
+                assert!(tags.is_empty(), "no earlier peer/auth mutation: {tags:?}");
+                assert!(calls.is_empty(), "no generation dispatch");
+            }
+        }
+    }
+
+    async fn assert_raw_equal_rebuild_scope_preflight(group_edit: bool) {
+        let initial = accepted_missing_interface_toml()
+            .replace(
+                "[[bfd_profiles]]",
+                if group_edit {
+                    "[peer_groups.edge]\n\n[[bfd_profiles]]"
+                } else {
+                    "[peer_groups.edge]\nhold_time = 90\n\n[[bfd_profiles]]"
+                },
+            )
+            .replace(
+                "remote_asn = 65005",
+                if group_edit {
+                    "remote_asn = 65005\npeer_group = \"edge\"\nhold_time = 90"
+                } else {
+                    "remote_asn = 65005\npeer_group = \"edge\""
+                },
+            );
+        // Only the first (IPv4) member changes authentication. The missing
+        // member's effective hold time stays 90, but its raw classifier rebuilds.
+        let desired = initial.replacen(
+            "hold_time = 90",
+            "hold_time = 90\nmd5_password = \"new-secret\"",
+            1,
+        );
+        let desired = if group_edit {
+            desired.replace(
+                "[peer_groups.edge]\n",
+                "[peer_groups.edge]\nhold_time = 90\n",
+            )
+        } else {
+            desired.replace(
+                "peer_group = \"edge\"",
+                "peer_group = \"edge\"\nhold_time = 90",
+            )
+        };
+        let current_config = load_config_from_toml("raw-equal-prior", &initial);
+        let desired_config = load_config_from_toml("raw-equal-desired", &desired);
+        let actions = config::plan_reload_peer_actions(&current_config, &desired_config).unwrap();
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.key.address != "fe80::5".parse::<IpAddr>().unwrap()),
+            "effective generation planning deliberately has no action for this member"
+        );
+        for with_listener in [true, false] {
+            let (outcome, tags, calls) =
+                drive_scoped_reload(&initial, &desired, with_listener).await;
+            assert!(
+                matches!(&outcome, SighupReloadOutcome::CleanNoEffect(_)),
+                "raw sequential rebuild must reject before any effects; outcome={outcome:?}, tags={tags:?}, generation_calls={}",
+                calls.len()
+            );
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = outcome
+            else {
+                unreachable!()
+            };
+            assert_eq!(failure.bucket, "neighbors.preflight");
+            assert!(failure.error.to_string().contains("rbgp-missing"));
+            assert!(
+                tags.is_empty(),
+                "no earlier auth/member/group effects: {tags:?}"
+            );
+            assert!(calls.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_sequential_raw_member_rebuild_preflights_missing_interface() {
+        assert_raw_equal_rebuild_scope_preflight(false).await;
+    }
+
+    #[tokio::test]
+    async fn reload_sequential_raw_group_rebuild_preflights_missing_interface() {
+        assert_raw_equal_rebuild_scope_preflight(true).await;
+    }
+
+    #[tokio::test]
+    async fn reload_new_or_changed_interface_rejects_before_any_effect() {
+        let initial = accepted_missing_interface_toml();
+        for with_listener in [false, true] {
+            for desired in [
+                format!(
+                    "{initial}\n[[neighbors]]\naddress = \"fe80::6\"\ninterface = \"rbgp-missing\"\nremote_asn = 65006\n"
+                ),
+                initial.replace("rbgp-missing", "rbgp-missing2"),
+            ] {
+                let (outcome, tags, calls) =
+                    drive_scoped_reload(&initial, &desired, with_listener).await;
+                assert!(matches!(outcome, SighupReloadOutcome::CleanNoEffect(_)));
+                assert!(tags.is_empty());
+                assert!(calls.is_empty());
+            }
+        }
     }
 
     /// A generation-class candidate combined with a family the generation

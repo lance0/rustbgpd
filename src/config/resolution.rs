@@ -40,6 +40,17 @@ impl Config {
             .map_err(|err| format!("interface {interface:?} does not exist or is invalid: {err}"))
     }
 
+    /// Check a sequential reshape's existing interface without resolving its
+    /// policies against a later candidate snapshot. Group edits run before
+    /// neighbor removals and policy deletion, so those snapshots can differ.
+    pub(crate) fn validate_neighbor_interface(neighbor: &Neighbor) -> Result<(), String> {
+        if let Some(interface) = neighbor.interface.as_deref() {
+            Self::interface_index(interface)
+                .map_err(|error| format!("neighbor {:?}: {error}", neighbor.address))?;
+        }
+        Ok(())
+    }
+
     /// Resolve the effective cluster ID.
     ///
     /// Returns `Some` if explicitly configured, or if any neighbor is an RR client
@@ -733,7 +744,51 @@ impl Config {
         external_pinned: bool,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let mut store = SetStore::new();
-        self.resolve_neighbor_pinned_with_store(neighbor, external_pinned, &mut store)
+        self.resolve_neighbor_pinned_with_store(neighbor, external_pinned, &mut store, None)
+    }
+
+    /// Configuration comparison only: the placeholder scope must never be
+    /// installed in a transport. Interface names remain part of peer identity.
+    pub(super) fn resolve_neighbor_for_comparison(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        self.resolve_neighbor_pinned_with_store(neighbor, false, &mut SetStore::new(), Some(0))
+    }
+
+    /// Project fields for a `HotUpdatePeer` payload only. A hot update never
+    /// installs socket identity; do not expose the comparison scope to it.
+    pub(crate) fn resolve_neighbor_hot_fields(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        let mut resolved = self.resolve_neighbor_for_comparison(neighbor)?;
+        resolved.transport_config.peer_scope_id = None;
+        Ok(resolved)
+    }
+
+    /// Hot updates retain the existing transport's accepted interface scope;
+    /// additions and replacements must use the normal, checked resolver.
+    pub(crate) fn resolve_neighbor_for_hot_update(
+        &self,
+        neighbor: &Neighbor,
+        accepted: &TransportConfig,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        if neighbor.address.parse::<IpAddr>().ok() != Some(accepted.remote_addr.ip())
+            || neighbor.interface != accepted.peer_interface
+        {
+            return Err(ConfigError::InvalidNeighborConfig {
+                address: neighbor.address.clone(),
+                field: "interface".to_string(),
+                reason: "hot update does not match the accepted peer identity".to_string(),
+            });
+        }
+        self.resolve_neighbor_pinned_with_store(
+            neighbor,
+            false,
+            &mut SetStore::new(),
+            accepted.peer_scope_id,
+        )
     }
 
     #[expect(
@@ -745,6 +800,7 @@ impl Config {
         neighbor: &Neighbor,
         external_pinned: bool,
         store: &mut SetStore,
+        scope_override: Option<u32>,
     ) -> Result<ResolvedNeighbor, ConfigError> {
         let router_id: Ipv4Addr = self
             .global
@@ -805,13 +861,16 @@ impl Config {
 
         let (remote_addr, peer_interface, peer_scope_id) =
             if let (IpAddr::V6(v6), Some(interface)) = (peer_addr, neighbor.interface.as_ref()) {
-                let scope_id = Self::interface_index(interface).map_err(|err| {
-                    ConfigError::InvalidNeighborConfig {
-                        address: neighbor.address.clone(),
-                        field: "interface".to_string(),
-                        reason: err,
-                    }
-                })?;
+                let scope_id = match scope_override.filter(|_| v6.is_unicast_link_local()) {
+                    Some(scope) => scope,
+                    None => Self::interface_index(interface).map_err(|err| {
+                        ConfigError::InvalidNeighborConfig {
+                            address: neighbor.address.clone(),
+                            field: "interface".to_string(),
+                            reason: err,
+                        }
+                    })?,
+                };
                 (
                     SocketAddr::V6(SocketAddrV6::new(v6, BGP_PORT, 0, scope_id)),
                     Some(interface.clone()),
@@ -1105,6 +1164,20 @@ impl Config {
     }
 
     pub fn resolved_neighbors(&self) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
+        self.resolved_neighbors_with_scope(None)
+    }
+
+    /// Scope-independent projection for configuration inventories only.
+    pub(crate) fn resolved_neighbors_for_comparison(
+        &self,
+    ) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
+        self.resolved_neighbors_with_scope(Some(0))
+    }
+
+    fn resolved_neighbors_with_scope(
+        &self,
+        scope_override: Option<u32>,
+    ) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
         let mut resolved = Vec::with_capacity(self.neighbors.len());
         for chunk in self
             .neighbors
@@ -1112,8 +1185,12 @@ impl Config {
         {
             let mut store = SetStore::new();
             for neighbor in chunk {
-                resolved
-                    .push(self.resolve_neighbor_pinned_with_store(neighbor, false, &mut store)?);
+                resolved.push(self.resolve_neighbor_pinned_with_store(
+                    neighbor,
+                    false,
+                    &mut store,
+                    scope_override,
+                )?);
             }
         }
         Ok(resolved)

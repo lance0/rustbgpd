@@ -159,13 +159,13 @@ pub(super) fn resolve_live_policy_targets(
             ))
         })?;
         let resolved = candidate
-            .resolve_neighbor(neighbor)
+            .effective_policy_for_neighbor(neighbor, false)
             .map_err(|error| ConfigTransactionApplyError::InvalidArgument(error.to_string()))?;
         targets.static_targets.push(ResolvedPeerPolicy {
             address,
             interface: neighbor.interface.clone(),
-            import_policy: resolved.import_policy,
-            export_policy: resolved.export_policy,
+            import_policy: resolved.import,
+            export_policy: resolved.export,
         });
     }
     Ok(targets)

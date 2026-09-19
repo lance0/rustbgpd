@@ -5054,7 +5054,7 @@ impl PeerManager {
                 )));
             };
             let resolved = next_config
-                .resolve_neighbor(neighbor)
+                .resolve_neighbor_for_hot_update(neighbor, &managed.transport_config)
                 .map_err(catalog_config_error)?;
             cohort.push((
                 Self::peer_manager_config_from_resolved(resolved, false),

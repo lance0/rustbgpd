@@ -1,6 +1,93 @@
 use super::*;
 
 #[tokio::test]
+async fn transaction_plan_retains_missing_interface_member() {
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let mut mgr = test_peer_manager();
+    mgr.current_config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+hold_time = 90
+
+[policy.definitions.f]
+default_action = "permit"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rbgp-missing"
+remote_asn = 65005
+peer_group = "edge"
+import_policy_chain = ["f"]
+"#,
+    );
+    let initial = toml::to_string_pretty(&mgr.current_config).unwrap();
+    let candidate = initial.replace("default_action = \"permit\"", "default_action = \"deny\"");
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    mgr.rib_tx = rib_tx;
+    let responder = tokio::spawn(async move {
+        for _ in 0..5 {
+            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+                panic!("transaction plan snapshot query missing");
+            };
+            let _ = reply.send(rustbgpd_rib::UpdateGroupSnapshot::default());
+        }
+    });
+    let noop = mgr
+        .plan_config_transaction(&initial, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        noop.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
+    );
+    let changed = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        changed.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert!(
+        changed
+            .supported_sections
+            .contains(&"[policy] live impact".to_string())
+    );
+    for candidate in [
+        initial.replace(
+            "remote_asn = 65005",
+            "remote_asn = 65005\ndescription = \"changed\"",
+        ),
+        initial.replace("remote_asn = 65005", "remote_asn = 65005\nhold_time = 90"),
+        initial.replace(
+            "[peer_groups.edge]",
+            "[peer_groups.edge]\nmax_prefixes = 1000",
+        ),
+    ] {
+        let error = mgr
+            .plan_config_transaction(&candidate, None, true)
+            .await
+            .unwrap_err();
+        let rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::InvalidCandidate(reason) =
+            error
+        else {
+            panic!("unexpected fresh-scope planning error: {error:?}");
+        };
+        assert!(reason.contains("rbgp-missing"), "{reason}");
+    }
+    responder.await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_live_snapshot_is_rejected_before_candidate_validation() {
     let config = load_test_config(
         r#"

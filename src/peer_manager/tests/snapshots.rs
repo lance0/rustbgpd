@@ -135,6 +135,21 @@ async fn warm_checkpoint_session_query_returns_current_negotiated_identity() {
     neighbor.gr_restart_time = Some(120);
     mgr.current_config.neighbors.push(neighbor);
 
+    // Scoped peers are not checkpoint candidates, and their temporarily
+    // absent interface must not exclude the eligible numbered peer.
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    let scoped = PeerKey::new("fe80::5".parse().unwrap(), Some("rbgp-missing".to_string()));
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &scoped,
+        65005,
+        warm_checkpoint_peer_handle(None),
+        false,
+    );
+    let mut neighbor = config_neighbor(scoped.address, 65005);
+    neighbor.interface.clone_from(&scoped.interface);
+    mgr.current_config.neighbors.push(neighbor);
+
     let capture = mgr.query_warm_checkpoint_capture().await.unwrap();
     assert_eq!(capture.local_asn, 65001);
     assert_eq!(capture.local_router_id, Ipv4Addr::new(10, 0, 0, 1));

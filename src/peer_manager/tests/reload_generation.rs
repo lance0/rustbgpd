@@ -3793,3 +3793,108 @@ async fn dataset_generation_single_replacement_failure_restores_data_before_cons
     );
     harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn generation_hot_update_retains_missing_interface_scope_and_session() {
+    let config: Config = toml::from_str(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[peer_groups.edge]
+hold_time = 90
+[[neighbors]]
+address = "fe80::5"
+interface = "lo"
+remote_asn = 65005
+peer_group = "edge"
+"#,
+    )
+    .unwrap();
+    let addr: IpAddr = "fe80::5".parse().unwrap();
+    let mut harness = GenerationHarness::new(&config);
+    let mut managed = harness.mgr.peers.remove(&key(addr)).unwrap();
+    let session_id = managed.session_id;
+    let peer = scoped_key(addr, "rbgp-missing");
+    // Preserve a synthetic accepted index after the interface disappears.
+    assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
+    managed.transport_config.peer_interface = peer.interface.clone();
+    managed.transport_config.peer_scope_id = Some(42);
+    managed.transport_config.remote_addr = "[fe80::5%42]:179".parse().unwrap();
+    harness.mgr.register_session(session_id, &peer);
+    harness.mgr.peers.insert(peer.clone(), managed);
+    harness.mgr.current_config.neighbors[0].interface = peer.interface.clone();
+    let mut candidate = harness.mgr.current_config.clone();
+    candidate.neighbors[0].description = Some("updated description".into());
+    let actions = plan_reload_peer_actions(&harness.mgr.current_config, &candidate).unwrap();
+    assert_eq!(
+        actions,
+        vec![ReloadPeerAction {
+            key: peer.clone(),
+            kind: ReloadPeerActionKind::HotUpdate
+        }]
+    );
+    let resolved = candidate
+        .resolve_neighbor_for_hot_update(
+            &candidate.neighbors[0],
+            &harness.mgr.peers[&peer].transport_config,
+        )
+        .unwrap();
+    assert_eq!(resolved.transport_config.peer_scope_id, Some(42));
+    assert_eq!(
+        resolved.transport_config.remote_addr,
+        "[fe80::5%42]:179".parse().unwrap()
+    );
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let retained = &harness.mgr.peers[&peer];
+    assert_eq!(
+        retained.session_id, session_id,
+        "hot update cannot replace the session"
+    );
+    assert_eq!(retained.transport_config.peer_scope_id, Some(42));
+    assert_eq!(retained.description, "updated description");
+    let mut hot = PeerManager::peer_manager_config_from_resolved(
+        candidate
+            .resolve_neighbor_hot_fields(&candidate.neighbors[0])
+            .unwrap(),
+        false,
+    );
+    assert_eq!(
+        hot.scope_id, None,
+        "hot command cannot carry a comparison index"
+    );
+    hot.description = "sequential description".into();
+    assert!(matches!(
+        harness.mgr.hot_update_peer_owned(hot).await,
+        rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome::Success,
+    ));
+    assert_eq!(harness.mgr.peers[&peer].session_id, session_id);
+    assert_eq!(
+        harness.mgr.peers[&peer].transport_config.peer_scope_id,
+        Some(42)
+    );
+    assert_eq!(
+        harness.mgr.peers[&peer].description,
+        "sequential description"
+    );
+    harness
+        .mgr
+        .apply_peer_group_change(
+            super::peer_groups::edge_group_max_prefixes_event(90, 5000),
+            vec![addr],
+        )
+        .await
+        .expect("inherited hot edit retains accepted scope");
+    let retained = &harness.mgr.peers[&peer];
+    assert_eq!(retained.session_id, session_id);
+    assert_eq!(retained.transport_config.peer_scope_id, Some(42));
+    assert_eq!(retained.transport_config.max_prefixes, Some(5000));
+    harness.shutdown().await;
+}
