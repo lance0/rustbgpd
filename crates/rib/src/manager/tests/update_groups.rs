@@ -6086,6 +6086,191 @@ async fn dirty_resync_tick_attempts_each_peer_at_most_once() {
     );
 }
 
+fn warm_full_outbound_warning() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(1, 0, None);
+    let _permits: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peers[0]]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    distribute_direct_route(
+        &mut manager,
+        Ipv4Addr::new(192, 0, 2, 42),
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+    );
+    tracing::callsite::rebuild_interest_cache();
+}
+
+#[test]
+fn distribution_skips_closed_receivers_before_peer_down() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let closed: Vec<_> = (1..=1_000_u32)
+        .map(|index| {
+            IpAddr::V4(Ipv4Addr::from(
+                u32::from(Ipv4Addr::new(10, 42, 0, 0)) + index,
+            ))
+        })
+        .collect();
+    for &peer in &closed {
+        drop(register_direct_peer(&mut manager, peer));
+    }
+    let healthy: IpAddr = "10.43.0.1".parse().unwrap();
+    let mut healthy_rx = register_direct_peer(&mut manager, healthy);
+    assert_eq!(healthy_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(
+        CaptureSubscriber {
+            level: tracing::Level::WARN,
+            events: Arc::clone(&captured),
+        },
+        || {
+            warm_full_outbound_warning();
+            captured.lock().unwrap().clear();
+            let source = Ipv4Addr::new(192, 0, 2, 42);
+            for index in 0..4 {
+                let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, index, 0), 24);
+                distribute_direct_route(&mut manager, source, prefix);
+                let update = healthy_rx.try_recv().unwrap();
+                assert!(
+                    update
+                        .announce
+                        .iter()
+                        .any(|route| route.prefix == Prefix::V4(prefix))
+                );
+            }
+            // The source's real teardown must still withdraw all routes from
+            // the healthy member, despite the unrelated closed registrations.
+            manager.handle_update(RibUpdate::PeerDown {
+                peer: source.into(),
+                session_id: 0,
+            });
+            let update = healthy_rx.try_recv().unwrap();
+            assert_eq!(update.withdraw.len(), 4);
+            assert_eq!(
+                manager.outbound_peers.len(),
+                1_001,
+                "only PeerDown owns deregistration"
+            );
+            assert!(manager.dirty_peers.is_empty());
+        },
+    );
+    let warnings = captured.lock().unwrap();
+    assert!(
+        warnings.is_empty(),
+        "closed channels must not create repeated WARNs: {}",
+        warnings.len()
+    );
+    // Skipping the closed receiver also avoids redundant attempted sends
+    // and their failed-send accounting; this is more than log-level suppression.
+    assert_metric(
+        counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]),
+        0.0,
+        "outbound failed sends",
+    );
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: closed[0],
+        session_id: 0,
+    });
+    assert!(!manager.outbound_peers.contains_key(&closed[0]));
+}
+
+#[test]
+fn distribution_full_live_receiver_still_warns_and_retries() {
+    let (mut manager, peers, mut receivers) = direct_clean_transition_manager(1, 0, None);
+    let peer = peers[0];
+    let permits: Vec<_> = (0..8)
+        .map(|_| {
+            manager.outbound_peers[&peer]
+                .clone()
+                .try_reserve_owned()
+                .unwrap()
+        })
+        .collect();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(
+        CaptureSubscriber {
+            level: tracing::Level::WARN,
+            events: Arc::clone(&captured),
+        },
+        || {
+            warm_full_outbound_warning();
+            captured.lock().unwrap().clear();
+            distribute_direct_route(
+                &mut manager,
+                Ipv4Addr::new(192, 0, 2, 42),
+                Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            );
+        },
+    );
+    assert_eq!(
+        captured.lock().unwrap().len(),
+        1,
+        "full live channels retain WARN"
+    );
+    assert!(manager.dirty_peers.contains(&peer));
+    assert_metric(
+        counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]),
+        1.0,
+        "outbound failed sends",
+    );
+    drop(permits);
+    manager.resync_dirty_peers_bounded();
+    assert_eq!(receivers[0].try_recv().unwrap().announce.len(), 1);
+    assert!(!manager.dirty_peers.contains(&peer));
+}
+
+#[test]
+fn distribution_replacement_of_closed_receiver_routes_normally() {
+    let (mut manager, peers, receivers) = direct_clean_transition_manager(1, 0, None);
+    let peer = peers[0];
+    drop(receivers);
+    let source = Ipv4Addr::new(192, 0, 2, 42);
+    distribute_direct_route(
+        &mut manager,
+        source,
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+    );
+    let (outbound_tx, mut replacement_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        peer,
+        session_id: 1,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while replacement_rx.try_recv().is_ok() {}
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    });
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24);
+    distribute_direct_route(&mut manager, source, prefix);
+    let update = replacement_rx.try_recv().unwrap();
+    assert!(
+        update
+            .announce
+            .iter()
+            .any(|route| route.prefix == Prefix::V4(prefix))
+    );
+    assert_eq!(manager.outbound_session_ids[&peer], 1);
+    assert!(!manager.outbound_channel_gone(peer));
+}
+
 /// LAN-459 regression: a dirty backlog whose outbound channels are all
 /// closed (sessions torn down, e.g. at shutdown) must quiesce in one
 /// tick — the tick drops the dead peers instead of re-marking them, so
