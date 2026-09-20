@@ -216,16 +216,7 @@ impl RibManager {
         // strand the woken RPC in Tokio's non-stealable local scheduling slot.
         // Hand off the executor once, retaining exclusive canonical ownership.
         // Current-thread embedders keep their existing synchronous contract.
-        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            matches!(
-                handle.runtime_flavor(),
-                tokio::runtime::RuntimeFlavor::MultiThread
-            )
-        }) {
-            tokio::task::block_in_place(run)
-        } else {
-            run()
-        }
+        super::with_executor_handoff(run)
     }
 
     fn capture_replacement_summaries(&self) -> SummaryProjection {

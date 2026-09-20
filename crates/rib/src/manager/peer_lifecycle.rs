@@ -1235,11 +1235,27 @@ impl RibManager {
     /// `AdjRibOut` is only populated after a successful channel send. On
     /// failure the peer is marked dirty so `distribute_changes()` will
     /// retry a full resync via the resync timer.
+    /// Initial export only reads inbound/selected routes, so the readiness
+    /// count stays exact while outbound state changes. Standalone exports fence
+    /// general and summary queries; nested owners retain their context/age.
+    pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
+        super::with_executor_handoff(|| {
+            self.with_replacement_readiness(|manager| {
+                manager.send_initial_table_with_readiness(peer);
+            });
+        });
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
     )]
-    pub(super) fn send_initial_table(&mut self, peer: IpAddr) {
+    fn send_initial_table_with_readiness(&mut self, peer: IpAddr) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint_at = |stage| {
+            super::replacement_readiness_checkpoint_at(&readiness, stage, false);
+        };
+        let mut checkpoint = || checkpoint_at("initial_export");
         let mut unicast = super::distribution::UnicastDistributionResult::default();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
@@ -1300,12 +1316,22 @@ impl RibManager {
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
 
-        let mut all_prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
+        let mut all_prefixes: HashSet<Prefix> = self
+            .loc_rib
+            .iter()
+            .inspect(|_| checkpoint_at("initial_inventory"))
+            .map(|r| r.prefix)
+            .collect();
         for rib in self.ribs.values() {
-            all_prefixes.extend(rib.iter().map(|r| r.prefix));
+            all_prefixes.extend(
+                rib.iter()
+                    .inspect(|_| checkpoint_at("initial_inventory"))
+                    .map(|r| r.prefix),
+            );
         }
         let otc_prefixes: HashSet<Prefix> = all_prefixes
             .iter()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .filter(|prefix| {
                 let family = prefix_family(prefix);
                 !self.selection_deferred(family)
@@ -1341,6 +1367,7 @@ impl RibManager {
             // entries replay as-is.
             let rs_control = rs_control_asn.zip(target_peer_asn);
             for staged in group.table.iter() {
+                checkpoint_at("initial_group_replay");
                 if self.selection_deferred(prefix_family(&staged.prefix)) {
                     continue;
                 }
@@ -1379,6 +1406,7 @@ impl RibManager {
             if group.stages_vpn() {
                 vpn_group_replayed = true;
                 for route in group.table.iter_vpn() {
+                    checkpoint_at("initial_group_replay");
                     if route.peer == peer
                         || self.selection_deferred(route.afi_safi())
                         || !super::update_groups::rt_passes(rtc_filter.as_ref(), route)
@@ -1388,9 +1416,21 @@ impl RibManager {
                     vpn_announce.push(route.clone());
                 }
             }
-            current_policy_filtered_routes
-                .extend(group.policy_filtered_for_member(peer, &all_prefixes));
-            grouped_otc_blocked = group.otc_blocked_for_member(peer, Some(&otc_prefixes));
+            current_policy_filtered_routes.extend(
+                group
+                    .policy_filtered_for_member_with_checkpoint(
+                        peer,
+                        &all_prefixes,
+                        &mut checkpoint,
+                    )
+                    .into_iter()
+                    .inspect(|_| checkpoint()),
+            );
+            grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
+                peer,
+                Some(&otc_prefixes),
+                &mut checkpoint,
+            );
         }
         if let Some(gid) = member_of {
             // Export counters for the join, reconstructed from the
@@ -1418,6 +1458,7 @@ impl RibManager {
         let loc_rib = &self.loc_rib;
         let policy_stats = self.export_policy_stats.entry(peer).or_default();
         for prefix in staging_prefixes {
+            checkpoint_at("initial_ungrouped_staging");
             if orf_gated.contains(&prefix_family(prefix)) {
                 continue;
             }
@@ -1431,7 +1472,7 @@ impl RibManager {
                 0
             };
             if prefix_send_max > 0 {
-                Self::distribute_multipath_prefix(
+                Self::distribute_multipath_prefix_with_checkpoint(
                     &self.ribs,
                     &self.unicast_prefix_peers,
                     &initial_view,
@@ -1460,6 +1501,7 @@ impl RibManager {
                     &target_peer_label,
                     &mut unicast,
                     false, // initial dump — equality check is correct
+                    &mut checkpoint,
                 );
                 current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else if per_client_best {
@@ -1473,7 +1515,7 @@ impl RibManager {
                 // requires an eBGP route-server client
                 // (validation-enforced).
                 debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                Self::distribute_multipath_prefix(
+                Self::distribute_multipath_prefix_with_checkpoint(
                     &self.ribs,
                     &self.unicast_prefix_peers,
                     &initial_view,
@@ -1502,11 +1544,12 @@ impl RibManager {
                     &target_peer_label,
                     &mut unicast,
                     false, // initial dump — equality check is correct
+                    &mut checkpoint,
                 );
                 current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                 // ORR peer with a resolved vantage: per-vantage best.
-                Self::distribute_orr_best_prefix(
+                Self::distribute_orr_best_prefix_with_checkpoint(
                     &self.ribs,
                     &self.unicast_prefix_peers,
                     &initial_view,
@@ -1533,6 +1576,7 @@ impl RibManager {
                     &target_peer_label,
                     &mut unicast,
                     false, // initial dump — equality check is correct
+                    &mut checkpoint,
                 );
                 current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             } else {
@@ -1544,7 +1588,7 @@ impl RibManager {
                     policy_stats: &mut *policy_stats,
                     peer_label: &target_peer_label,
                 };
-                Self::distribute_single_best_prefix(
+                Self::distribute_single_best_prefix_with_checkpoint(
                     loc_rib,
                     &initial_view,
                     &self.peer_is_rr_client,
@@ -1564,6 +1608,7 @@ impl RibManager {
                     &mut export_memo,
                     &mut unicast,
                     false, // initial dump — equality check is correct
+                    &mut checkpoint,
                 );
                 current_policy_filtered_routes.extend(std::mem::take(&mut unicast.policy_filtered));
             }
@@ -1572,10 +1617,11 @@ impl RibManager {
         let all_flowspec_rules: HashSet<crate::route::FlowSpecKey> = self
             .loc_rib
             .iter_flowspec()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(crate::route::FlowSpecRoute::selection_key)
             .collect();
         if !all_flowspec_rules.is_empty() {
-            Self::stage_flowspec_rules(
+            Self::stage_flowspec_rules_with_checkpoint(
                 loc_rib,
                 &initial_view,
                 &self.peer_is_rr_client,
@@ -1595,6 +1641,7 @@ impl RibManager {
                 &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
+                &mut checkpoint,
             );
         }
 
@@ -1605,10 +1652,11 @@ impl RibManager {
         let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
             .loc_rib
             .iter_evpn()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(crate::route::EvpnRibRoute::key)
             .collect();
         if !all_evpn_keys.is_empty() {
-            Self::stage_evpn_routes(
+            Self::stage_evpn_routes_with_checkpoint(
                 loc_rib,
                 &initial_view,
                 &self.peer_is_rr_client,
@@ -1631,16 +1679,18 @@ impl RibManager {
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // initial dump — equality check is correct
+                &mut checkpoint,
             );
         }
 
         let all_bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
             .loc_rib
             .iter_bgpls()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(crate::route::BgpLsRibRoute::key)
             .collect();
         if !all_bgpls_keys.is_empty() {
-            Self::stage_bgpls_routes(
+            Self::stage_bgpls_routes_with_checkpoint(
                 loc_rib,
                 &initial_view,
                 &self.peer_is_rr_client,
@@ -1661,6 +1711,7 @@ impl RibManager {
                 &mut bgpls_announce,
                 &mut bgpls_withdraw,
                 false, // initial dump — equality check is correct
+                &mut checkpoint,
             );
         }
 
@@ -1671,6 +1722,7 @@ impl RibManager {
         let mut all_l3vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
             .loc_rib
             .iter_vpn()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(|route| route.nlri.key())
             .collect();
         if peer_add_path_send_max > 0
@@ -1679,7 +1731,11 @@ impl RibManager {
                 .any(|(_, safi)| *safi == Safi::MplsVpn)
         {
             for rib in self.ribs.values() {
-                all_l3vpn_keys.extend(rib.iter_vpn().map(|route| route.nlri.key()));
+                all_l3vpn_keys.extend(
+                    rib.iter_vpn()
+                        .inspect(|_| checkpoint_at("initial_inventory"))
+                        .map(|route| route.nlri.key()),
+                );
             }
         }
         // Skipped when the VPN dump was replayed from the group table
@@ -1712,13 +1768,14 @@ impl RibManager {
                 policy_stats: &mut *policy_stats,
                 peer_label: &target_peer_label,
             };
-            Self::stage_vpn_routes(
+            Self::stage_vpn_routes_with_checkpoint(
                 &vpn_labeled_context,
                 &all_l3vpn_keys,
                 &mut target,
                 rtc_filter.as_ref(),
                 &mut vpn_announce,
                 &mut vpn_withdraw,
+                &mut checkpoint,
             );
         }
 
@@ -1729,6 +1786,7 @@ impl RibManager {
         let mut all_labeled_keys: HashSet<rustbgpd_wire::Prefix> = self
             .loc_rib
             .iter_labeled()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(|route| route.nlri.key())
             .collect();
         if peer_add_path_send_max > 0
@@ -1737,7 +1795,11 @@ impl RibManager {
                 .any(|(_, safi)| *safi == Safi::LabeledUnicast)
         {
             for rib in self.ribs.values() {
-                all_labeled_keys.extend(rib.iter_labeled().map(|route| route.nlri.key()));
+                all_labeled_keys.extend(
+                    rib.iter_labeled()
+                        .inspect(|_| checkpoint_at("initial_inventory"))
+                        .map(|route| route.nlri.key()),
+                );
             }
         }
         if !all_labeled_keys.is_empty() {
@@ -1749,12 +1811,13 @@ impl RibManager {
                 policy_stats: &mut *policy_stats,
                 peer_label: &target_peer_label,
             };
-            Self::stage_labeled_routes(
+            Self::stage_labeled_routes_with_checkpoint(
                 &vpn_labeled_context,
                 &all_labeled_keys,
                 &mut target,
                 &mut labeled_announce,
                 &mut labeled_withdraw,
+                &mut checkpoint,
             );
         }
 
@@ -1764,10 +1827,11 @@ impl RibManager {
         let all_rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
             .loc_rib
             .iter_rtc()
+            .inspect(|_| checkpoint_at("initial_inventory"))
             .map(crate::route::RtcRibRoute::key)
             .collect();
         if !all_rtc_keys.is_empty() {
-            Self::stage_rtc_routes(
+            Self::stage_rtc_routes_with_checkpoint(
                 loc_rib,
                 &initial_view,
                 &self.peer_is_rr_client,
@@ -1788,6 +1852,7 @@ impl RibManager {
                 &mut rtc_announce,
                 &mut rtc_withdraw,
                 false, // initial dump — equality check is correct
+                &mut checkpoint,
             );
         }
 
@@ -1880,6 +1945,7 @@ impl RibManager {
                 None,
                 member_of.is_none().then_some(&otc_prefixes),
             );
+        export_memo.retire_with(&mut checkpoint);
         if !sent {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
             self.metrics.record_outbound_route_drop(&peer.to_string());

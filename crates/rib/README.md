@@ -21,6 +21,15 @@ Current-thread embedders retain synchronous execution. Route queries and
 mutations remain fenced. The projection owns numeric counters and small status
 rows, not route tables or shared policy counters.
 
+Initial table export also services the dedicated readiness lane at bounded
+checkpoints through inventory, replay, staging, commit, and owned route cleanup.
+The exact Loc-RIB count remains fixed because this work only changes outbound
+state. The same executor handoff lets health replies complete during export;
+standalone export leaves general and summary queries and mutations queued.
+Nested export retains the existing owner’s frozen-summary contract, age, and
+stalled-transition verdict. This covers both
+initial registration and negotiated Add-Path limit replay.
+
 Capture completes before summary service starts, and exact-export rejection
 counts can require route-overlay scans. This mechanism does not by itself prove
 a latency bound at every scale. Peer-manager/session fields in the same RPC are

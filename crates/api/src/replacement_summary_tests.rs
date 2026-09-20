@@ -21,8 +21,12 @@ use rustbgpd_wire::{
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
 
-use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerOperatorQuery};
+use crate::control_service::ControlService;
+use crate::peer_types::{
+    EnqueuedOperatorQuery, PeerManagerOperatorQuery, PeerManagerReadinessQuery,
+};
 use crate::policy_service::PolicyService;
+use crate::proto::control_service_server::ControlService as ControlRpc;
 use crate::proto::neighbor_service_server::NeighborService as NeighborRpc;
 use crate::proto::policy_service_server::PolicyService as PolicyRpc;
 use crate::server::AccessMode;
@@ -356,4 +360,177 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     manager_task.abort();
     peer_task.abort();
     outbound_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end fixture holds initial export and proves actual health RPC completion before owner release"
+)]
+async fn health_completes_inside_actual_rib_initial_export() {
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let hold = Arc::new(ProbeHold {
+        armed: AtomicBool::new(true),
+        calls: AtomicUsize::new(0),
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    });
+    let (rib_tx, rib_rx) = mpsc::channel(16);
+    let (query_tx, query_rx) = mpsc::channel(8);
+    let (readiness_tx, readiness_rx) = mpsc::channel(8);
+    let manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx);
+    let manager_task = tokio::spawn(manager.run());
+    let (peer_tx, _peer_rx) = mpsc::channel(1);
+    let (peer_readiness_tx, mut peer_readiness_rx) = mpsc::channel(8);
+    let peer_task = tokio::spawn(async move {
+        while let Some(query) = peer_readiness_rx.recv().await {
+            match query {
+                PeerManagerReadinessQuery::ListPeers { reply } => {
+                    let _ = reply.send(vec![crate::test_support::peer_info(peer)]);
+                }
+                PeerManagerReadinessQuery::Ping { .. } => panic!("unexpected readiness query"),
+            }
+        }
+    });
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+    let service = ControlService::new(
+        AccessMode::ReadOnly,
+        tokio::time::Instant::now(),
+        BgpMetrics::new(),
+        peer_tx,
+        query_tx.clone(),
+        shutdown_tx,
+        None,
+    )
+    .with_peer_manager_readiness(peer_readiness_tx)
+    .with_rib_readiness(readiness_tx.clone());
+    // Seed routes before registration, so both held probes belong to the
+    // initial dump rather than subsequent ordinary route distribution.
+    rib_tx
+        .send(RibUpdate::RoutesReceived {
+            peer: "192.0.2.9".parse().unwrap(),
+            session_id: 0,
+            announced: (0..4).map(route).collect(),
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    rib_tx
+        .send(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(HeldEncoder(hold.clone())),
+        })
+        .await
+        .unwrap();
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(32);
+    rib_tx
+        .send(RibUpdate::PeerUp {
+            peer,
+            session_id: 0,
+            peer_asn: 65001,
+            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(0)
+    );
+    let (general_reply, mut general_response) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount {
+            reply: general_reply,
+        })
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut health_request = tokio::spawn(async move {
+        ControlRpc::get_health(&service, Request::new(proto::HealthRequest {})).await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while readiness_tx.capacity() != 7 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("GetHealth reached the real RIB readiness lane");
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), entered_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    let readiness_capacity = readiness_tx.capacity();
+    let health = tokio::time::timeout(Duration::from_secs(1), &mut health_request).await;
+    let elapsed = started.elapsed();
+    let calls = hold.calls.load(Ordering::SeqCst);
+    let general_fenced = matches!(
+        general_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
+    let outbound_held = outbound_rx.try_recv().is_err();
+    // Capture all results while the owner is held, then release it before
+    // asserting so a failing negative control does not strand the probe.
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        readiness_capacity, 8,
+        "initial-export checkpoint must consume the queued readiness request"
+    );
+    let health = health
+        .expect("GetHealth must complete while the initial-export owner remains held")
+        .unwrap()
+        .expect("GetHealth retains its 200 ms readiness deadline")
+        .into_inner();
+    assert!(elapsed < crate::health_probe::CORE_READINESS_DEADLINE);
+    assert!(health.healthy);
+    assert_eq!(health.total_routes, 4);
+    assert_eq!(calls, 2);
+    assert!(general_fenced);
+    assert!(outbound_held, "initial dump is still held");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), general_response)
+            .await
+            .unwrap()
+            .unwrap(),
+        4
+    );
+    let mut announced = 0;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(update) = outbound_rx.recv().await {
+            announced += update.announce.len();
+            if !update.end_of_rib.is_empty() {
+                assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+                return;
+            }
+        }
+        panic!("outbound closed before initial EoR");
+    })
+    .await
+    .expect("initial dump finishes with EoR after probe release");
+    assert_eq!(announced, 4);
+    manager_task.abort();
+    peer_task.abort();
 }

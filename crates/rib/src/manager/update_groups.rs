@@ -791,6 +791,7 @@ impl GroupRibOut {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::manager) fn otc_blocked_for_member(
         &self,
         member: IpAddr,
@@ -1481,6 +1482,7 @@ impl GroupRibOut {
     /// saturated the actor at high overlap. A scope wider than the
     /// residue (resync-scale callers pass the whole table) keeps the
     /// residue scan, which is the small side by the same argument.
+    #[cfg(test)]
     pub(in crate::manager) fn policy_filtered_for_member(
         &self,
         member: IpAddr,

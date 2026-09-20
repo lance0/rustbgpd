@@ -7831,6 +7831,172 @@ fn queue_replacement_readiness(
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression exercises both registration paths and negotiated limit replay with all non-readiness lanes fenced"
+)]
+fn initial_export_services_interior_readiness_and_fences_other_lanes() {
+    for (ungrouped, limits_update, stage) in [
+        (false, false, "initial_inventory"),
+        (false, false, "initial_group_replay"),
+        (true, false, "initial_ungrouped_staging"),
+        (true, true, "initial_ungrouped_staging"),
+    ] {
+        let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+        fleet.manager.test_force_ungrouped = ungrouped;
+        let peer = "10.54.1.1".parse().unwrap();
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let registration = RibUpdate::PeerUp {
+            peer,
+            session_id: 7,
+            peer_asn: 65_000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: if limits_update {
+                ipv4_sendable()
+            } else {
+                vec![]
+            },
+            add_path_send_max: u32::from(limits_update),
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        };
+        let action = if limits_update {
+            fleet.manager.handle_update(registration);
+            while outbound_rx.try_recv().is_ok() {}
+            RibUpdate::PeerAddPathLimits {
+                peer,
+                session_id: 7,
+                limits: vec![((Afi::Ipv4, Safi::Unicast), 2)],
+            }
+        } else {
+            registration
+        };
+        fleet.manager.replacement_readiness_receipts.clear();
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        fleet.manager.readiness_rx = Some(readiness_rx);
+        let (query_tx, query_rx) = mpsc::channel(1);
+        fleet.manager.query_rx = query_rx;
+        let (reply, general) = oneshot::channel();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+        let general = Arc::new(Mutex::new(general));
+        let (summary_tx, summary_rx) = mpsc::channel(1);
+        fleet.manager.summary_rx = Some(summary_rx);
+        let (reply, summary) = oneshot::channel();
+        summary_tx
+            .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+            .unwrap();
+        let summary = Arc::new(Mutex::new(summary));
+        let (mutation_tx, mutation_rx) = mpsc::channel(1);
+        fleet.manager.rx = mutation_rx;
+        mutation_tx
+            .try_send(RibUpdate::PeerDown {
+                peer,
+                session_id: 7,
+            })
+            .unwrap();
+        let visits = Arc::new(AtomicUsize::new(0));
+        let pending = Mutex::new(None);
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let visits = Arc::clone(&visits);
+            let general = Arc::clone(&general);
+            let summary = Arc::clone(&summary);
+            move |observed| {
+                assert!(matches!(
+                    general.lock().unwrap().try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert!(matches!(
+                    summary.lock().unwrap().try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert_eq!(mutation_tx.capacity(), 0);
+                if observed != stage {
+                    return;
+                }
+                match visits.fetch_add(1, Ordering::Relaxed) {
+                    0 => {
+                        *pending.lock().unwrap() = Some(queue_replacement_readiness(&readiness_tx));
+                    }
+                    1 => assert_eq!(
+                        pending
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .try_recv()
+                            .unwrap(),
+                        Ok(4),
+                        "{stage}: readiness must progress inside the export"
+                    ),
+                    _ => {}
+                }
+            }
+        }));
+        fleet.manager.handle_update(action);
+        assert!(
+            visits.load(Ordering::Relaxed) >= 2,
+            "{stage}: interior not reached"
+        );
+        assert_eq!(fleet.manager.loc_rib.len(), 4);
+        assert_eq!(fleet.manager.outbound_session_ids.get(&peer), Some(&7));
+        assert_eq!(fleet.manager.grouped_member_of(peer).is_none(), ungrouped);
+        assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+        assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+        let mut announced = 0;
+        let mut eor = false;
+        while let Ok(update) = outbound_rx.try_recv() {
+            assert!(!eor, "announcements must precede EoR");
+            announced += update.announce.len();
+            eor = !update.end_of_rib.is_empty();
+        }
+        assert_eq!(announced, 2);
+        assert!(eor);
+        fleet.manager.replacement_readiness_test_hook = None;
+        fleet.manager.drain_general_queries_if_unfenced();
+        assert_eq!(general.lock().unwrap().try_recv().unwrap(), 4);
+        assert!(summary.lock().unwrap().try_recv().is_ok());
+    }
+}
+
+#[test]
+fn initial_export_nested_readiness_keeps_owner_age_and_exact_count() {
+    let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.readiness_rx = Some(rx);
+    fleet.manager.with_replacement_readiness_age(
+        super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE,
+        |manager| {
+            let original = manager.replacement_readiness.clone().unwrap();
+            let mut response = queue_replacement_readiness(&tx);
+            manager.send_initial_table(fleet.members[0]);
+            assert!(Arc::ptr_eq(
+                &original,
+                manager.replacement_readiness.as_ref().unwrap()
+            ));
+            assert_eq!(
+                response.try_recv().unwrap(),
+                Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+            );
+            assert!(manager.replacement_readiness_receipts.is_empty());
+        },
+    );
+    assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+    assert_eq!(fleet.manager.replacement_readiness_receipts[0].count, 4);
+    assert!(fleet.manager.readiness_rx.is_some());
+    assert!(fleet.manager.replacement_readiness.is_none());
+}
+
+#[test]
 fn readiness_wait_records_elapsed_time_at_both_serving_seams() {
     let (_tx, rx) = mpsc::channel(8);
     let metrics = BgpMetrics::new();
