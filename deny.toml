@@ -1,7 +1,7 @@
 # cargo-deny configuration — license / bans / advisories / sources gate.
 #
 # Run locally: `cargo deny check advisories bans licenses sources`
-# Scale workspace: `cargo deny --manifest-path bench/scale/Cargo.toml check --config deny.toml advisories bans licenses sources`
+# Scale workspace (from repo root): `cargo deny --manifest-path bench/scale/Cargo.toml check advisories bans licenses sources`
 # CI: .github/workflows/audit.yml scans both workspaces with this policy
 # daily and on manifest, lockfile, or gate configuration changes.
 #

@@ -102,4 +102,3 @@ jobs:
         with:
           manifest-path: ${{ matrix.workspace }}/Cargo.toml
           command: check advisories bans licenses sources
-          command-arguments: --config deny.toml
