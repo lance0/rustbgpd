@@ -5662,6 +5662,13 @@ impl RibManager {
                     .map(PendingCleanPolicyTransition::elapsed);
                 self.drain_readiness_queries(transition_elapsed);
             }
+            // A session closes its receiver before its queued PeerDown is
+            // handled. Other peers' withdrawals must not prepare more work
+            // for that dead receiver; lifecycle cleanup still owns its state.
+            if self.outbound_channel_gone(peer) {
+                self.drop_gone_dirty_peer(peer);
+                continue;
+            }
             let member_of = self.grouped_member_of(peer);
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
