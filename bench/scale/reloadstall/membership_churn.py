@@ -361,7 +361,7 @@ async def watch(run, binary, port):
         for generation in range(reloads + 1):
             staged = None
             if generation:
-                await wait_until(lambda: (run / "membership-request.json").exists() and
+                await wait_until(lambda generation=generation: (run / "membership-request.json").exists() and
                                  json.loads((run / "membership-request.json").read_text())["generation"] == generation,
                                  600, "next stage")
                 for receiver in receivers:
@@ -369,20 +369,20 @@ async def watch(run, binary, port):
                 (run / f"membership-armed-{generation}").touch()
                 staged = json.loads((run / "membership-request.json").read_text())["staged_monotonic"]
                 expected = {address(member) for member in roster(peers, generation)}
-                # New sockets open only after the generation's API roster is committed.
+                # New sockets open only after the API roster matches the expected roster.
                 async with asyncio.timeout(JOIN_SECONDS):
                     while True:
                         rows = await asyncio.to_thread(cli, run, binary, "neighbor")
                         if {row["address"] for row in rows} == expected:
                             break
                         await asyncio.sleep(0.1)
-                await wait_until(lambda: all(r.closed for r in receivers), 10, "removed member close")
+                await wait_until(lambda receivers=receivers: all(r.closed for r in receivers), 10, "removed member close")
             started = time.monotonic()
             receivers = [Receiver(peers + 2 * generation + offset, offset == 0, port, total, generation) for offset in range(2)]
             for receiver in receivers:
                 tasks.create_task(receiver.run())
             budget = max(0, staged + JOIN_SECONDS - time.monotonic()) if generation else 600
-            await wait_until(lambda: all(r.complete() for r in receivers), budget, "joining inventories")
+            await wait_until(lambda receivers=receivers: all(r.complete() for r in receivers), budget, "joining inventories")
             joined = time.monotonic()
             rows, after = await asyncio.to_thread(snapshot, run, binary, port, peers)
             expected = {address(member) for member in roster(peers, generation)}
