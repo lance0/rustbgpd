@@ -1016,6 +1016,15 @@ fn backpressured_recovery_rotates_past_healthy_peers_and_retries() {
 /// siblings; replaying the whole remainder also touches the final sibling.
 #[test]
 fn a_departed_recovery_head_is_skipped_without_affecting_live_siblings() {
+    stale_recovery_head_is_skipped(false);
+}
+
+#[test]
+fn a_closed_recovery_head_is_pruned_before_live_siblings_replay() {
+    stale_recovery_head_is_skipped(true);
+}
+
+fn stale_recovery_head_is_skipped(closed_registration: bool) {
     let (_tx, rx) = mpsc::channel(1);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.test_force_ungrouped = true;
@@ -1062,7 +1071,18 @@ fn a_departed_recovery_head_is_skipped_without_affecting_live_siblings() {
         ),
     );
 
-    manager.outbound_peers.remove(&peers[0]);
+    drop(outbound.remove(0));
+    if !closed_registration {
+        manager.outbound_peers.remove(&peers[0]);
+    }
+    let before = closed_registration.then(|| ipv4_row(&manager, peers[0]));
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let _capture = tracing::subscriber::set_default(CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: Arc::clone(&captured),
+    });
+    tracing::callsite::rebuild_interest_cache();
+    assert!(manager.resync_tick_pending());
     assert!(manager.drain_outbound_limit_recovery());
     assert_eq!(manager.outbound_limit_recovery_for(peers[0]), vec![]);
     assert_eq!(manager.outbound_limit_recovery_for(peers[1]), vec![]);
@@ -1070,11 +1090,79 @@ fn a_departed_recovery_head_is_skipped_without_affecting_live_siblings() {
         manager.outbound_limit_recovery_for(peers[2]),
         vec![Afi::Ipv4]
     );
-    assert_eq!(wire_prefixes(&mut outbound[0]), HashSet::new());
-    assert_eq!(wire_prefixes(&mut outbound[1]).len(), 2);
-    assert_eq!(wire_prefixes(&mut outbound[2]), HashSet::new());
+    assert_eq!(wire_prefixes(&mut outbound[0]).len(), 2);
+    assert_eq!(wire_prefixes(&mut outbound[1]), HashSet::new());
     assert_eq!(ipv4_row(&manager, peers[1]).usage, 2);
     assert_eq!(ipv4_row(&manager, peers[2]).usage, 1);
+    assert!(manager.drain_outbound_limit_recovery());
+    assert_eq!(wire_prefixes(&mut outbound[0]), HashSet::new());
+    assert_eq!(wire_prefixes(&mut outbound[1]).len(), 2);
+    assert!(!manager.outbound_limit_recovery_pending());
+    assert!(!manager.resync_tick_pending());
+    assert!(captured.lock().unwrap().is_empty());
+    assert!(
+        counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).abs()
+            < f64::EPSILON
+    );
+    if let Some(before) = before {
+        assert_eq!(ipv4_row(&manager, peers[0]).usage, before.usage);
+        assert_eq!(ipv4_row(&manager, peers[0]).blocking, before.blocking);
+    }
+    assert_eq!(
+        manager.outbound_peers.contains_key(&peers[0]),
+        closed_registration
+    );
+}
+
+#[test]
+fn gated_closed_recovery_is_cleaned_once_without_clearing_protocol_gates() {
+    for selection_gate in [false, true] {
+        let (mut manager, peer, receiver) = manager_with_queued_ipv4_recovery(BgpMetrics::new(), 8);
+        let family = (Afi::Ipv4, Safi::Unicast);
+        if selection_gate {
+            manager = manager.with_selection_deferral(SelectionDeferralConfig {
+                timeout: std::time::Duration::from_mins(1),
+                waiters: vec![SelectionDeferralWaiterConfig {
+                    peer: "10.113.1.8".parse().unwrap(),
+                    families: ipv4_sendable(),
+                }],
+            });
+        } else {
+            manager
+                .peer_orf_pending
+                .entry(peer)
+                .or_default()
+                .insert(family);
+        }
+        assert!(
+            !manager.resync_tick_pending(),
+            "live gated recovery stays parked"
+        );
+        drop(receiver);
+        assert!(
+            manager.resync_tick_pending(),
+            "closed gated recovery needs one cleanup tick"
+        );
+        let before = ipv4_row(&manager, peer);
+        assert!(!manager.drain_outbound_limit_recovery());
+        assert!(!manager.outbound_limit_recovery_pending());
+        assert!(!manager.resync_tick_pending());
+        assert!(
+            manager.outbound_peers.contains_key(&peer),
+            "PeerDown still owns teardown"
+        );
+        assert_eq!(ipv4_row(&manager, peer).usage, before.usage);
+        assert_eq!(ipv4_row(&manager, peer).blocking, before.blocking);
+        if selection_gate {
+            assert!(manager.selection_convergence_held(family));
+        } else {
+            assert!(manager.peer_orf_pending[&peer].contains(&family));
+        }
+        assert!(
+            counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]).abs()
+                < f64::EPSILON
+        );
+    }
 }
 
 /// Internal recovery is a family-only export replay, not a route-refresh

@@ -34,6 +34,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Skip closed session receivers in VPN, labeled-unicast, RTC, EVPN, BGP-LS,
+  and FlowSpec distribution as well as unicast. Outbound prefix-limit recovery
+  also discards closed receivers, including entries parked behind selection or
+  ORF gates, so they cannot keep retrying before session teardown. Live peers
+  retain their withdrawals, backpressure retries, and prefix-limit state.
+
 - All-hot peer-group changes on SIGHUP now update already accepted dynamic
   sessions' inherited runtime knobs, including inbound prefix limits and GR
   retention caps. These updates retain the session identity and participate in

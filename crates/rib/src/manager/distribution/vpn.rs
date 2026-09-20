@@ -890,6 +890,10 @@ impl RibManager {
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            if self.outbound_channel_gone(peer) {
+                self.drop_gone_dirty_peer(peer);
+                continue;
+            }
             if let Some(gid) = self.vpn_grouped_member_of(peer) {
                 let Some(stage) = vpn_group_stage.get(&gid) else {
                     continue;

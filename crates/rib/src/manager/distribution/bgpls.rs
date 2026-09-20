@@ -299,6 +299,10 @@ impl RibManager {
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            if self.outbound_channel_gone(peer) {
+                self.drop_gone_dirty_peer(peer);
+                continue;
+            }
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             if !changed_keys.iter().any(|key| {
