@@ -16,6 +16,8 @@ struct GenerationSessionCounters {
     import_installs: AtomicU32,
     export_installs: AtomicU32,
     runtime_config_updates: AtomicU32,
+    runtime_knobs: Mutex<Vec<rustbgpd_transport::PeerRuntimeConfigUpdate>>,
+    drop_runtime_reply: AtomicBool,
     runtime_remove_private_as: Mutex<Option<rustbgpd_transport::RemovePrivateAs>>,
     route_refreshes: AtomicU32,
     refresh_families: Mutex<Vec<(Afi, Safi)>>,
@@ -57,7 +59,10 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     in_task
                         .runtime_config_updates
                         .fetch_add(1, Ordering::SeqCst);
-                    let _ = reply.send(Ok(()));
+                    in_task.runtime_knobs.lock().unwrap().push(*config);
+                    if !in_task.drop_runtime_reply.load(Ordering::SeqCst) {
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 PeerCommand::SendRouteRefresh { afi, safi, reply } => {
                     in_task.refresh_families.lock().unwrap().push((afi, safi));
@@ -230,6 +235,45 @@ impl GenerationHarness {
             mgr.next_session_id = session_id + 1;
         }
         Self { mgr, counters, rib }
+    }
+
+    fn add_dynamic(&mut self, address: &str, group: &str, enabled: bool) -> PeerKey {
+        let address = address.parse().unwrap();
+        let (handle, counters) = generation_session(address);
+        self.counters.insert(address, counters);
+        let session_id = self.mgr.next_session_id;
+        self.mgr.next_session_id += 1;
+        insert_test_dynamic_managed_peer(
+            &mut self.mgr,
+            address,
+            session_id,
+            handle,
+            enabled,
+            "10.9.0.0".parse().unwrap(),
+            24,
+            group,
+        );
+        let peer = key(address);
+        let managed = self.mgr.peers.get_mut(&peer).unwrap();
+        managed.rfc8212_external = true;
+        let resolved = self
+            .mgr
+            .current_config
+            .resolve_dynamic_neighbor(
+                address,
+                managed.remote_asn,
+                &managed.description,
+                &self.mgr.current_config.peer_groups[group],
+                group,
+                managed.rfc8212_external,
+            )
+            .unwrap();
+        managed.transport_config = resolved.transport_config;
+        managed.import_policy = resolved.import_policy;
+        managed.export_policy = resolved.export_policy;
+        managed.max_prefixes = managed.transport_config.max_prefixes;
+        managed.max_prefix_restart_seconds = resolved.max_prefix_restart_seconds;
+        peer
     }
 
     fn session_id(&self, address: &str) -> u64 {
@@ -1394,6 +1438,240 @@ async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
     // The replacement received the final `.rpol` export rule directly.
     assert_eq!(harness.export_med("10.0.0.2"), Some(20));
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn generation_dynamic_hot_group_updates_transport_and_preserves_identity() {
+    let fixture = RsFixture::new();
+    let mut prior = fixture.load();
+    prior
+        .peer_groups
+        .insert("untouched".into(), prior.peer_groups["members"].clone());
+    let mut harness = GenerationHarness::new(&prior);
+    let dynamic = harness.add_dynamic("10.9.0.2", "members", true);
+    let disabled = harness.add_dynamic("10.9.0.3", "members", false);
+    let untouched = harness.add_dynamic("10.9.0.4", "untouched", true);
+    // Preserve a concrete accepted interface, even though resolving a synthetic
+    // dynamic neighbor produces no interface of its own.
+    let mut managed = harness.mgr.peers.remove(&dynamic).unwrap();
+    managed.transport_config.peer_interface = Some("accepted0".into());
+    let dynamic = PeerKey::new(dynamic.address, Some("accepted0".into()));
+    harness.mgr.register_session(managed.session_id, &dynamic);
+    harness.mgr.peers.insert(dynamic.clone(), managed);
+    let identity: Vec<_> = [&dynamic, &disabled, &untouched]
+        .into_iter()
+        .map(|peer| {
+            let managed = &harness.mgr.peers[peer];
+            (
+                managed.session_id,
+                managed.accepted_dynamic_range.clone(),
+                managed.enabled,
+            )
+        })
+        .collect();
+    let count = harness.mgr.dynamic_peer_count;
+    let external = PeerManager::removed_peer_config(&dynamic, &harness.mgr.peers[&dynamic]);
+    assert!(matches!(
+        harness.mgr.hot_update_peer_owned(external).await,
+        rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome::RejectedNoEffect(_)
+    ));
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let mut candidate = prior.clone();
+    candidate.policy = fixture.load().policy;
+    let group = candidate.peer_groups.get_mut("members").unwrap();
+    group.gr_peer_restart_time_max = Some(1800);
+    group.max_prefixes = Some(2000);
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+        panic!("{outcome:?}")
+    };
+    for peer in [&dynamic, &disabled] {
+        let counters = &harness.counters[&peer.address];
+        let knobs = counters.runtime_knobs.lock().unwrap();
+        assert_eq!(
+            knobs.len(),
+            1,
+            "actual dynamic transport command must be sent"
+        );
+        assert_eq!(knobs[0].gr_peer_restart_time_max, 1800);
+        assert_eq!(knobs[0].max_prefixes, Some(2000));
+        let managed = &harness.mgr.peers[peer];
+        assert_eq!(managed.transport_config.gr_peer_restart_time_max, 1800);
+        assert_eq!(managed.max_prefixes, Some(2000));
+        assert_eq!(
+            managed
+                .export_policy
+                .as_ref()
+                .unwrap()
+                .evaluate(&sample_route())
+                .modifications
+                .set_med,
+            Some(20)
+        );
+    }
+    assert_eq!(
+        receipt.hot_updated, 4,
+        "two static and two accepted dynamic members"
+    );
+    assert_eq!(receipt.replaced, 0);
+    assert_eq!(harness.runtime_config_updates("10.9.0.4"), 0);
+    for (peer, before) in [&dynamic, &disabled, &untouched].into_iter().zip(identity) {
+        let managed = &harness.mgr.peers[peer];
+        assert_eq!(
+            (
+                managed.session_id,
+                managed.accepted_dynamic_range.clone(),
+                managed.enabled
+            ),
+            before
+        );
+        assert!(managed.is_dynamic);
+        assert!(managed.rfc8212_external);
+        assert_eq!(managed.remote_asn, 65030);
+        assert_eq!(managed.transport_config.peer_interface, peer.interface);
+    }
+    assert_eq!(harness.mgr.dynamic_peer_count, count);
+    assert_eq!(harness.mgr.current_config, candidate);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn generation_dynamic_hot_group_keeps_mixed_reshape_deferred() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let peer = harness.add_dynamic("10.9.0.2", "members", true);
+    let session = harness.mgr.peers[&peer].session_id;
+    let cap = harness.mgr.peers[&peer]
+        .transport_config
+        .gr_peer_restart_time_max;
+    let mut candidate = prior.clone();
+    let group = candidate.peer_groups.get_mut("members").unwrap();
+    group.gr_peer_restart_time_max = Some(1800);
+    group.hold_time = Some(45);
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(harness.runtime_config_updates("10.9.0.2"), 0);
+    assert_eq!(harness.mgr.peers[&peer].session_id, session);
+    assert_eq!(
+        harness.mgr.peers[&peer]
+            .transport_config
+            .gr_peer_restart_time_max,
+        cap
+    );
+    assert_eq!(harness.mgr.current_config, candidate);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn generation_dynamic_hot_group_restores_transport_after_late_failure() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let peer = harness.add_dynamic("10.9.0.2", "members", true);
+    let session = harness.mgr.peers[&peer].session_id;
+    let cap = harness.mgr.peers[&peer]
+        .transport_config
+        .gr_peer_restart_time_max;
+    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+    let mut candidate = prior.clone();
+    candidate.policy = fixture.load().policy;
+    candidate
+        .peer_groups
+        .get_mut("members")
+        .unwrap()
+        .gr_peer_restart_time_max = Some(1800);
+    candidate
+        .neighbors
+        .iter_mut()
+        .find(|n| n.address == "10.0.0.9")
+        .unwrap()
+        .hold_time = Some(45);
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("10.0.0.9".parse().unwrap()), 0);
+    let outcome = harness.apply(&candidate).await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    let observed: Vec<_> = harness.counters[&peer.address]
+        .runtime_knobs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|knobs| knobs.gr_peer_restart_time_max)
+        .collect();
+    assert_eq!(
+        observed,
+        [1800, cap],
+        "transport must observe candidate and restored prior"
+    );
+    assert_eq!(
+        harness.mgr.peers[&peer]
+            .transport_config
+            .gr_peer_restart_time_max,
+        cap
+    );
+    assert_eq!(harness.export_med("10.9.0.2"), Some(10));
+    assert_eq!(harness.mgr.peers[&peer].session_id, session);
+    assert_eq!(harness.mgr.current_config, prior);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn generation_dynamic_hot_group_ack_loss_never_claims_restoration() {
+    for drop_knob_reply in [false, true] {
+        let fixture = RsFixture::new();
+        let mut prior = fixture.load();
+        prior
+            .peer_groups
+            .insert("dynamic".into(), prior.peer_groups["members"].clone());
+        let mut harness = GenerationHarness::new(&prior);
+        let peer = harness.add_dynamic("10.9.0.2", "dynamic", true);
+        harness.counters[&peer.address]
+            .drop_runtime_reply
+            .store(drop_knob_reply, Ordering::SeqCst);
+        if !drop_knob_reply {
+            let (rib_tx, rib) = spawn_generation_rib(true);
+            harness.mgr.rib_tx = rib_tx;
+            harness.rib.abort();
+            harness.rib = rib;
+        }
+        let mut candidate = prior.clone();
+        candidate
+            .peer_groups
+            .get_mut("dynamic")
+            .unwrap()
+            .remove_private_as = Some("all".into());
+        let outcome = harness.apply(&candidate).await;
+        let ReloadGenerationOutcome::CompensationAmbiguous(error) = outcome else {
+            panic!("{outcome:?}")
+        };
+        let expected = if drop_knob_reply {
+            "failed to hot-apply runtime knobs"
+        } else {
+            "RIB dropped reply"
+        };
+        assert!(error.contains(expected), "{error}");
+        assert_eq!(harness.runtime_config_updates("10.9.0.2"), 1);
+        assert_eq!(
+            *harness.counters[&peer.address]
+                .runtime_remove_private_as
+                .lock()
+                .unwrap(),
+            Some(rustbgpd_transport::RemovePrivateAs::All)
+        );
+        assert_eq!(
+            harness.mgr.peers[&peer].transport_config.remove_private_as,
+            rustbgpd_transport::RemovePrivateAs::Disabled
+        );
+        harness.shutdown().await;
+    }
 }
 
 #[tokio::test]

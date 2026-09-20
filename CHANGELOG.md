@@ -34,6 +34,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- All-hot peer-group changes on SIGHUP now update already accepted dynamic
+  sessions' inherited runtime knobs, including inbound prefix limits and GR
+  retention caps. These updates retain the session identity and participate in
+  generation compensation. Mixed session-shaping group edits still defer those
+  dynamic settings until reconnect.
 - Skip outbound update preparation for closed session receivers awaiting RIB
   teardown, avoiding repeated shutdown warnings and failed-send accounting.
   Healthy peers still receive withdrawals, and full live channels retain their
