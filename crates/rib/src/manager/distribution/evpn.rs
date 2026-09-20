@@ -603,6 +603,11 @@ impl RibManager {
     ) {
         use crate::route::EvpnRibRoute;
 
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(&readiness, "selection_evpn", false);
+        };
+        checkpoint();
         // Every accepted EVPN mutation, including non-best attributes and
         // Types 3/4, invalidates received pages even while selection is deferred.
         if !affected.is_empty() {
@@ -615,9 +620,11 @@ impl RibManager {
 
         let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         for key in affected {
+            checkpoint();
             let candidates: Vec<&EvpnRibRoute> = self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .filter_map(|rib| rib.get_evpn(key))
                 .collect();
             // Capture old state BEFORE recompute_evpn so the event-type
@@ -681,6 +688,7 @@ impl RibManager {
         // projection and therefore do not invalidate its snapshot.
         if changed_keys
             .iter()
+            .inspect(|_| checkpoint())
             .any(|key| rustbgpd_wire::is_dataplane_route_type(key.route_type()))
         {
             self.evpn_dataplane_generation = self.evpn_dataplane_generation.wrapping_add(1);
@@ -702,8 +710,14 @@ impl RibManager {
         self.metrics
             .set_loc_rib_prefixes("evpn", gauge_val(self.loc_rib.evpn_len()));
 
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
         for peer in peers {
+            checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
@@ -736,7 +750,7 @@ impl RibManager {
 
             let mut evpn_announce = Vec::new();
             let mut evpn_withdraw = Vec::new();
-            Self::stage_evpn_routes(
+            Self::stage_evpn_routes_with_checkpoint(
                 &self.loc_rib,
                 rib_out,
                 &self.peer_is_rr_client,
@@ -759,6 +773,7 @@ impl RibManager {
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // EVPN delta path — equality check is correct
+                &mut checkpoint,
             );
 
             if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
@@ -775,5 +790,6 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
     }
 }
