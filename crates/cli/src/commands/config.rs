@@ -3,10 +3,11 @@ use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::{
-    AbortConfigTransactionRequest, ApplyConfigTransactionRequest, ConfigTransactionApplyResponse,
-    ConfigTransactionConfirmation, ConfigTransactionConfirmationStatus,
-    ConfigTransactionPlanResponse, ConfigTransactionPlanStatus, ConfigTransactionStatusResponse,
-    ConfirmConfigTransactionRequest, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
+    AbortConfigTransactionRequest, AbortConfigTransactionResponse, ApplyConfigTransactionRequest,
+    ConfigTransactionApplyResponse, ConfigTransactionConfirmation,
+    ConfigTransactionConfirmationStatus, ConfigTransactionPlanResponse,
+    ConfigTransactionPlanStatus, ConfigTransactionStatusResponse, ConfirmConfigTransactionRequest,
+    ConfirmConfigTransactionResponse, DiffRuntimeConfigRequest, DiffRuntimeConfigResponse,
     GetConfigTransactionStatusRequest, GetEffectiveConfigRequest, ListConfigHistoryRequest,
     ListConfigHistoryResponse, PlanConfigTransactionRequest, RollbackConfigTransactionRequest,
     StreamApplyConfigMetadata, StreamApplyConfigTransactionRequest, StreamPlanConfigEnd,
@@ -538,10 +539,7 @@ pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Re
         .into_inner();
 
     if json {
-        print_json(serde_json::json!({
-            "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
-            "human_text": resp.human_text,
-        }))?;
+        print_json(confirm_to_json(&resp))?;
     } else {
         output::print_text(&resp.human_text)?;
         print_confirmation(resp.confirmation.as_ref())?;
@@ -565,11 +563,7 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
         .into_inner();
 
     if json {
-        print_json(serde_json::json!({
-            "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
-            "runtime_snapshot_token": resp.runtime_snapshot_token,
-            "human_text": resp.human_text,
-        }))?;
+        print_json(abort_to_json(&resp))?;
     } else {
         output::print_text(&resp.human_text)?;
         if !resp.runtime_snapshot_token.is_empty() {
@@ -1071,6 +1065,21 @@ fn confirmation_to_json(confirmation: Option<&ConfigTransactionConfirmation>) ->
     })
 }
 
+fn confirm_to_json(resp: &ConfirmConfigTransactionResponse) -> serde_json::Value {
+    serde_json::json!({
+        "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+        "human_text": resp.human_text,
+    })
+}
+
+fn abort_to_json(resp: &AbortConfigTransactionResponse) -> serde_json::Value {
+    serde_json::json!({
+        "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
+        "runtime_snapshot_token": resp.runtime_snapshot_token,
+        "human_text": resp.human_text,
+    })
+}
+
 fn status_to_json(resp: &ConfigTransactionStatusResponse) -> serde_json::Value {
     serde_json::json!({
         "confirmation": confirmation_to_json(resp.confirmation.as_ref()),
@@ -1511,12 +1520,49 @@ mod tests {
 
     #[test]
     fn effective_to_json_produces_structured_config() {
-        let value = effective_to_json(
-            "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n\n[[neighbors]]\naddress = \"192.0.2.2\"\nhold_time = 90\nremote_asn = 65000\n",
-        )
-        .unwrap();
-        assert_eq!(value["global"]["asn"], 65000);
-        assert_eq!(value["neighbors"][0]["hold_time"], 90);
+        // The RPC carries a TOML document, not per-setting proto fields. Keep
+        // the response exhaustive and preserve unknown keys without a schema.
+        let response = crate::proto::GetEffectiveConfigResponse {
+            toml: r#"
+[global]
+asn = 65000
+router_id = "192.0.2.1"
+[[neighbors]]
+address = "192.0.2.2"
+hold_time = 90
+remote_asn = 65001
+families = ["ipv6_unicast", "ipv4_unicast"]
+[neighbors.bfd]
+enabled = false
+[future_settings]
+"key.with.dots" = "redacted\nvalue"
+empty = []
+negative = -9223372036854775808
+positive = 9223372036854775807
+ratio = 1.25
+nested = [{ label = "first", values = [3, 1, 3] }, { label = "second", values = [] }]
+"#
+            .to_string(),
+        };
+        assert_eq!(
+            effective_to_json(&response.toml).unwrap(),
+            serde_json::json!({
+                "global": {"asn": 65000, "router_id": "192.0.2.1"},
+                "neighbors": [{
+                    "address": "192.0.2.2", "hold_time": 90, "remote_asn": 65001,
+                    "families": ["ipv6_unicast", "ipv4_unicast"], "bfd": {"enabled": false},
+                }],
+                "future_settings": {
+                    "key.with.dots": "redacted\nvalue", "empty": [],
+                    "negative": i64::MIN, "positive": i64::MAX, "ratio": 1.25,
+                    "nested": [
+                        {"label": "first", "values": [3, 1, 3]},
+                        {"label": "second", "values": []},
+                    ],
+                },
+            })
+        );
+        assert_eq!(effective_to_json("").unwrap(), serde_json::json!({}));
     }
 
     #[test]
@@ -2561,6 +2607,80 @@ mod tests {
         assert_eq!(status_to_json(&response), expected);
     }
 
+    #[test]
+    fn confirm_and_abort_json_shapes_are_complete() {
+        let confirmation = ConfigTransactionConfirmation {
+            status: ConfigTransactionConfirmationStatus::Confirmed as i32,
+            confirm_id: "confirmed-handle".to_string(),
+            timeout_seconds: u32::MAX,
+            deadline_unix_seconds: u64::MAX,
+            committed_sections: vec!["[[neighbors]]".to_string(), "[global]".to_string()],
+            runtime_snapshot_token: "kv1:nested:7".to_string(),
+            human_text: "nested confirmation text".to_string(),
+        };
+        let mut confirm = ConfirmConfigTransactionResponse {
+            confirmation: Some(confirmation.clone()),
+            human_text: "outer confirmation text\n".to_string(),
+        };
+        let mut expected_confirmation = serde_json::json!({
+            "status": "confirmed", "confirm_id": "confirmed-handle",
+            "timeout_seconds": u32::MAX, "deadline_unix_seconds": u64::MAX,
+            "committed_sections": ["[[neighbors]]", "[global]"],
+            "runtime_snapshot_token": "kv1:nested:7",
+            "human_text": "nested confirmation text",
+        });
+        assert_eq!(
+            confirm_to_json(&confirm),
+            serde_json::json!({
+                "confirmation": expected_confirmation,
+                "human_text": "outer confirmation text\n",
+            })
+        );
+        confirm.confirmation = None;
+        assert_eq!(
+            confirm_to_json(&confirm),
+            serde_json::json!({
+                "confirmation": null, "human_text": "outer confirmation text\n",
+            })
+        );
+
+        let mut abort = AbortConfigTransactionResponse {
+            confirmation: Some(confirmation),
+            runtime_snapshot_token: "kv1:outer:9".to_string(),
+            human_text: "outer abort text\n".to_string(),
+        };
+        for (status, label) in [
+            (
+                ConfigTransactionConfirmationStatus::Aborted as i32,
+                "aborted",
+            ),
+            (
+                ConfigTransactionConfirmationStatus::AbortFailed as i32,
+                "abort_failed",
+            ),
+            (999, "unspecified"),
+        ] {
+            abort.confirmation.as_mut().unwrap().status = status;
+            expected_confirmation["status"] = serde_json::json!(label);
+            assert_eq!(
+                abort_to_json(&abort),
+                serde_json::json!({
+                    "confirmation": expected_confirmation,
+                    "runtime_snapshot_token": "kv1:outer:9",
+                    "human_text": "outer abort text\n",
+                })
+            );
+        }
+        abort.confirmation = None;
+        assert_eq!(
+            abort_to_json(&abort),
+            serde_json::json!({
+                "confirmation": null, "runtime_snapshot_token": "kv1:outer:9",
+                "human_text": "outer abort text\n",
+            })
+        );
+    }
+
     #[tokio::test]
     async fn history_calls_list_config_history_rpc() {
         let server = spawn_mock_server(None).await;
@@ -2573,51 +2693,68 @@ mod tests {
 
     #[test]
     fn history_json_shape_is_stable() {
-        let value = history_to_json(&ListConfigHistoryResponse {
-            entries: [
-                crate::proto::ConfigHistoryProvenanceStatus::Recorded as i32,
-                crate::proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly as i32,
-                crate::proto::ConfigHistoryProvenanceStatus::Unreadable as i32,
-                crate::proto::ConfigHistoryProvenanceStatus::Unspecified as i32,
-                999,
-            ]
-            .into_iter()
-            .enumerate()
-            .map(
-                |(index, provenance_status)| crate::proto::ConfigHistoryEntry {
-                    index: u32::try_from(index).unwrap(),
+        use crate::proto::ConfigHistoryProvenanceStatus as Provenance;
+        // Exhaustive literals force decisions for new proto fields; the full
+        // expected object also catches losses from the current projection.
+        for (status, label, eligible) in [
+            (Provenance::Recorded as i32, "recorded", true),
+            (Provenance::LegacyTomlOnly as i32, "legacy_toml_only", false),
+            (Provenance::Unreadable as i32, "unreadable", false),
+            (Provenance::MetadataOnly as i32, "metadata_only", false),
+            (Provenance::Unspecified as i32, "unknown", false),
+            (999, "unknown", false),
+        ] {
+            let mut response = ListConfigHistoryResponse {
+                entries: vec![crate::proto::ConfigHistoryEntry {
+                    index: u32::MAX,
                     timestamp_unix_seconds: 1_787_000_000,
                     sha256: "ab".repeat(32),
-                    summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
+                    summary: "distinct retained row".to_string(),
                     source_sha256: "cd".repeat(32),
-                    normalized_toml_bytes: 0,
-                    metadata_only_reason: String::new(),
-                    provenance_status,
-                },
-            )
-            .collect(),
-            human_text: "5 recorded config snapshot(s) retained.\n".to_string(),
-        });
-
-        // Red proof: removing an old key, either additive key, or any exact
-        // status mapping changes these assertions against rendered JSON.
-        assert_eq!(value["entries"][0]["index"], 0);
-        assert_eq!(value["entries"][0]["timestamp_unix_seconds"], 1_787_000_000);
-        assert_eq!(value["entries"][0]["timestamp"], "2026-08-17T20:53:20Z");
-        assert_eq!(value["entries"][0]["sha256"], "ab".repeat(32));
-        assert_eq!(value["entries"][0]["source_sha256"], "cd".repeat(32));
-        assert_eq!(value["entries"][0]["provenance_status"], "recorded");
-        assert_eq!(value["entries"][1]["provenance_status"], "legacy_toml_only");
-        assert_eq!(value["entries"][2]["provenance_status"], "unreadable");
-        assert_eq!(value["entries"][3]["provenance_status"], "unknown");
-        assert_eq!(value["entries"][4]["provenance_status"], "unknown");
+                    normalized_toml_bytes: u64::MAX,
+                    metadata_only_reason: "retained metadata reason".to_string(),
+                    provenance_status: status,
+                }],
+                human_text: "history response\n".to_string(),
+            };
+            let mut expected = serde_json::json!({
+                "entries": [{
+                    "index": u32::MAX,
+                    "timestamp_unix_seconds": 1_787_000_000,
+                    "timestamp": "2026-08-17T20:53:20Z",
+                    "sha256": "ab".repeat(32),
+                    "summary": "distinct retained row",
+                    "source_sha256": "cd".repeat(32),
+                    "normalized_toml_bytes": u64::MAX,
+                    "metadata_only_reason": "retained metadata reason",
+                    "provenance_status": label,
+                    "rollback_eligible": eligible,
+                }],
+                "human_text": "history response\n",
+            });
+            let mut older = response.entries[0].clone();
+            older.index = u32::MAX - 1;
+            older.summary = "distinct older row".to_string();
+            response.entries.push(older);
+            let mut expected_older = expected["entries"][0].clone();
+            expected_older["index"] = serde_json::json!(u32::MAX - 1);
+            expected_older["summary"] = serde_json::json!("distinct older row");
+            expected["entries"]
+                .as_array_mut()
+                .unwrap()
+                .push(expected_older);
+            assert_eq!(history_to_json(&response), expected);
+            response.entries[0].index = 0;
+            expected["entries"][0]["index"] = serde_json::json!(0);
+            expected["entries"][0]["rollback_eligible"] = serde_json::json!(false);
+            assert_eq!(history_to_json(&response), expected);
+        }
         assert_eq!(
-            value["entries"][0]["summary"],
-            "asn 65001, router-id 10.0.0.1, 2 neighbor(s)"
-        );
-        assert_eq!(
-            value["human_text"],
-            "5 recorded config snapshot(s) retained.\n"
+            history_to_json(&ListConfigHistoryResponse {
+                entries: vec![],
+                human_text: String::new(),
+            }),
+            serde_json::json!({"entries": [], "human_text": ""})
         );
     }
 

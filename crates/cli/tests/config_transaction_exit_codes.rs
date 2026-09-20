@@ -1,5 +1,6 @@
 //! Real-process exit codes for `config plan`, `apply`, and `rollback` across
-//! the committable/committed, noop, and rejected transaction statuses.
+//! the committable/committed, noop, and rejected transaction statuses, plus
+//! plain/versioned output contracts for the remaining configuration documents.
 
 // The shared mock resolves `crate::proto`.
 use rustbgpd_api::proto::{self, ConfigTransactionPlanStatus as Status};
@@ -200,5 +201,70 @@ async fn unrecognized_receipt_status_fails_closed_after_printing() {
         assert_eq!(json["status"], "unspecified", "{json}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("invalid"), "{args:?}: {stderr}");
+    }
+}
+
+#[tokio::test]
+async fn remaining_config_documents_preserve_plain_and_versioned_payloads() {
+    let server = test_support::spawn_mock_server(None).await;
+    *server.state.config_effective_toml.lock().await = Some(
+        "[global]\nasn = 65001\n[future_settings]\nenabled = false\nvalues = [3, 1, 3]\n"
+            .to_string(),
+    );
+    for command in [
+        vec!["config", "confirm", "process-confirm"],
+        vec!["config", "abort", "process-abort"],
+        vec!["config", "history"],
+        vec!["config", "effective"],
+    ] {
+        let mut plain_args = vec!["--json"];
+        plain_args.extend_from_slice(&command);
+        let plain = run(&server.addr, &plain_args).await;
+        assert_eq!(plain.status.code(), Some(0), "{command:?}: {plain:?}");
+        assert!(plain.stderr.is_empty(), "{command:?}: {plain:?}");
+        let payload: serde_json::Value = serde_json::from_slice(&plain.stdout).unwrap();
+        // Ordinary output remains the command object, without version metadata.
+        assert!(payload.is_object());
+        assert!(payload.get("format_version").is_none());
+        match command[1] {
+            "confirm" => assert_eq!(payload["confirmation"]["confirm_id"], "process-confirm"),
+            "abort" => assert_eq!(payload["runtime_snapshot_token"], "kv1:rollback:3"),
+            "history" => assert_eq!(payload["entries"].as_array().unwrap().len(), 2),
+            "effective" => assert_eq!(
+                payload,
+                serde_json::json!({
+                    "global": {"asn": 65001},
+                    "future_settings": {"enabled": false, "values": [3, 1, 3]},
+                })
+            ),
+            _ => unreachable!(),
+        }
+        let mut versioned_args = vec!["--json", "--json-version", "1"];
+        versioned_args.extend_from_slice(&command);
+        let versioned = run(&server.addr, &versioned_args).await;
+        assert_eq!(
+            versioned.status.code(),
+            Some(0),
+            "{command:?}: {versioned:?}"
+        );
+        assert!(versioned.stderr.is_empty(), "{command:?}: {versioned:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&versioned.stdout).unwrap(),
+            serde_json::json!({"format": "rbgp-json", "format_version": "1.0", "data": payload})
+        );
+    }
+
+    // Malformed daemon TOML cannot become a successful or partial JSON document.
+    *server.state.config_effective_toml.lock().await = Some("invalid = [".to_string());
+    for args in [
+        vec!["--json", "config", "effective"],
+        vec!["--json", "--json-version", "1", "config", "effective"],
+    ] {
+        let output = run(&server.addr, &args).await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("unparseable effective config TOML")
+        );
     }
 }
