@@ -132,13 +132,13 @@ rebuilt; the transaction executor captures prior static peer configs and
 restores them if apply or persistence fails, and after a successful persist it
 gracefully resets the live dynamic sessions accepted by an affected range so
 they re-accept under the committed config (ADR-0086). Targeted peer-group RPCs
-partition a group edit's changed fields by impact class: an all-`live` change
-set is applied in place to inheriting static and dynamic members without
-replacing sessions. A set mixing in a session-reset, restart-required, or
+and SIGHUP partition a group edit's changed fields by impact class: an all-`live`
+change set applies inherited runtime knobs in place to static and accepted
+dynamic members without replacing sessions. A set mixing in a session-reset, restart-required, or
 unclassified field reshapes static members; accepted dynamic sessions keep
 their running session settings until reconnect, except for the explicit
-`discard_path_attributes` purge. SIGHUP's generation route has a narrower
-accepted-dynamic update surface, described in the peer-group section below.
+`discard_path_attributes` purge. The peer-group section below describes the
+separate policy, prefix-limit and restart-scheduling updates.
 Dynamic-range
 peer-group reassignments and mixed policy/session effective-impact candidates
 remain rejected even though SIGHUP can hot-reconcile some of those shapes
@@ -243,11 +243,19 @@ explicit `discard_path_attributes` purge described below. A committed config
 transaction can reset enabled dynamic members after persistence; see the
 [transaction overlay](#transaction-overlay).
 
-The update path also matters for accepted dynamic members' hot settings.
-Targeted peer-group RPCs apply an all-hot change in place. SIGHUP's generation
-route updates resolved policy chains, outbound prefix maxima and max-prefix
-restart scheduling, but other inherited transport settings (including inbound
-prefix limits and local GR helper timers) currently wait for reconnect.
+An all-hot group change applies inherited runtime knobs to accepted dynamic
+members in place, both through targeted peer-group RPCs and SIGHUP. This includes
+inbound prefix limits, local GR helper timers, and export next-hop/private-AS
+knobs. SIGHUP captures each member's live prior for generation compensation;
+a lost acknowledgement or uncertain restoration fences the reload. Inheritance
+uses the group that accepted the dynamic member, and preserves its session
+identity, interface, learned ASN and administrative state.
+
+A mixed session-shaping group edit retains the reconnect boundary for those
+dynamic transport knobs. Resolved policy chains, RIB-owned outbound prefix
+maxima and manager-owned max-prefix restart scheduling still update through
+their separate paths. Per-peer tracing directives remain scoped to configured
+static neighbors.
 
 | Field | Class | Notes |
 |---|---|---|
@@ -276,7 +284,7 @@ prefix limits and local GR helper timers) currently wait for reconnect.
 | `required_families` | live (static session reset; dynamic next reconnect) | Non-empty neighbor value overrides; empty/absent inherits. A committed config transaction classifies the effective change as `SessionReshape` and bounces affected enabled dynamic ranges after persistence. |
 | `graceful_restart` | live (effective next session) | |
 | `gr_restart_time` | live (effective next session) | |
-| `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` targeted peer-group RPC swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
+| `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` SIGHUP or targeted peer-group RPC swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |

@@ -1084,6 +1084,21 @@ impl PeerManager {
                 ),
             ));
         }
+        self.hot_update_peer_in_place_owned(config).await
+    }
+
+    /// Classified in-place application for preflighted static or dynamic peers.
+    /// External `HotUpdatePeer` commands retain the static-only guard above.
+    pub(super) async fn hot_update_peer_in_place_owned(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+    ) -> rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome {
+        use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+        let peer = PeerKey::new(config.address, config.interface.clone());
+        if !self.peers.contains_key(&peer) {
+            return OwnedHotUpdatePeerOutcome::RejectedNoEffect(PeerLifecycleError::NotFound(peer));
+        }
         match self.hot_update_peer_in_place(config).await {
             Ok(()) => OwnedHotUpdatePeerOutcome::Success,
             Err(error) => OwnedHotUpdatePeerOutcome::KnownDivergence(error),

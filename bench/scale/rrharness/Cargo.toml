@@ -2,6 +2,8 @@
 name = "rrharness"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 rustbgpd-rib = { path = "../../../crates/rib" }
@@ -9,5 +11,5 @@ rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-in
 rustbgpd-wire = { path = "../../../crates/wire" }
 rustbgpd-telemetry = { path = "../../../crates/telemetry" }
 tokio = { version = "1", features = ["full"] }
-pprof = { version = "0.15", features = ["flamegraph"] }
+pprof = "0.15"
 libc = "0.2"

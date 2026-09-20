@@ -358,7 +358,7 @@ impl PeerManager {
         // 3. Hot updates in place: knobs only, policies already match.
         for (next, prior) in resolved.hot {
             let peer = PeerKey::new(next.address, next.interface.clone());
-            match self.hot_update_peer_owned(next).await {
+            match self.hot_update_peer_in_place_owned(next).await {
                 OwnedHotUpdatePeerOutcome::Success => applied.hot_priors.push(prior),
                 OwnedHotUpdatePeerOutcome::RejectedNoEffect(error) => {
                     return self
@@ -602,6 +602,32 @@ impl PeerManager {
                         ReloadPeerActionKind::Add => unreachable!("matched above"),
                     }
                 }
+            }
+        }
+
+        // Group-only hot edits must reach accepted dynamic members too. Their
+        // captured accepting group determines inheritance, not today's matcher.
+        // Session-shaping group edits retain the reconnect boundary.
+        let mut groups: Vec<_> = candidate.peer_groups.iter().collect();
+        groups.sort_by_key(|(name, _)| *name);
+        for (name, group) in groups {
+            let Some(prior_group) = self.current_config.peer_groups.get(name) else {
+                continue;
+            };
+            if !crate::config::peer_group_change_hot_applicable(prior_group, group) {
+                continue;
+            }
+            for (mut next, mut prior) in self
+                .peer_group_hot_cohort(candidate, name, &[])
+                .map_err(|error| error.to_string())?
+            {
+                retain_installed_policy(prior.import_policy.as_ref(), &mut next.import_policy);
+                retain_installed_policy(prior.export_policy.as_ref(), &mut next.export_policy);
+                // The generation policy snapshot owns chain restoration; the
+                // hot-update prior restores only the session's runtime knobs.
+                prior.import_policy.clone_from(&next.import_policy);
+                prior.export_policy.clone_from(&next.export_policy);
+                resolved.hot.push((next, prior));
             }
         }
 
