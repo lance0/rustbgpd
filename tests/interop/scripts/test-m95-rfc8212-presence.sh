@@ -359,8 +359,7 @@ mark_log
 sighup_with "frr-missing"
 
 phase2_log=$(log_since_mark)
-if grep -q "sent ROUTE-REFRESH" <<<"$phase2_log" \
-    || grep -q "soft reset in requested" <<<"$phase2_log"; then
+if grep -q "sent ROUTE-REFRESH" <<<"$phase2_log"; then
     ok "the committed transition issued a real Route Refresh to FRR"
 else
     fail "no Route Refresh was issued for the committed transition"
