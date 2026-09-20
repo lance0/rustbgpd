@@ -107,6 +107,16 @@ class MembershipTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(AssertionError):
                 cell.check_continuity(original, changed)
 
+    def test_snapshot_honors_omitted_false_stale_field(self):
+        row = {"address": cell.address(0), "state": "Established", "uptime_seconds": 100, "flap_count": 0}
+        proc = "header\n0: 0100007F:06FE 0100017F:ABCD 01 0:0 00:0 0 1000 0 12345\n"
+        with patch.object(cell, "cli", return_value=[row]), patch.object(Path, "read_text", return_value=proc):
+            _, core = cell.snapshot(Path("/unused"), "rbgp", 1790, 1)
+            self.assertEqual(core[cell.address(0)]["socket"], ["0100007F:06FE", "0100017F:ABCD", "12345"])
+            row["stale"] = True
+            with self.assertRaises(AssertionError):
+                cell.snapshot(Path("/unused"), "rbgp", 1790, 1)
+
 
 class GateTests(unittest.TestCase):
     def setUp(self):

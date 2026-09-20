@@ -128,7 +128,7 @@ def snapshot(run, binary, port, peers):
     for member in range(peers):
         addr = address(member)
         row = rows[addr]
-        assert row["state"] == "Established" and not row["stale"], (addr, row)
+        assert row["state"] == "Established" and not row.get("stale", False), (addr, row)
         core[addr] = {"socket": sockets[addr], "flaps": row["flap_count"], "uptime": row["uptime_seconds"]}
     return rows, core
 
@@ -385,7 +385,7 @@ async def watch(run, binary, port):
             rows, after = await asyncio.to_thread(snapshot, run, binary, port, peers)
             expected = {address(member) for member in roster(peers, generation)}
             assert set(rows) == expected, "neighbor roster differs from generation"
-            assert all(row["state"] == "Established" and not row["stale"] for row in rows.values())
+            assert all(row["state"] == "Established" and not row.get("stale", False) for row in rows.values())
             if generation:
                 check_continuity(json.loads((run / f"before-{generation}.json").read_text()), after)
             stats = await asyncio.to_thread(cli, run, binary, "policy", "stats")
