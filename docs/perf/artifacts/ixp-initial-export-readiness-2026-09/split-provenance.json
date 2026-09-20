@@ -1,0 +1,25 @@
+{
+  "collected_at": "2026-09-20T19:35:09.328849+00:00",
+  "candidate_daemon": {
+    "source_commit": "7f1f8d864c00078878800825c6f8ad1273614051",
+    "source_status": "",
+    "toolchain": [
+      "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    ],
+    "command": "CARGO_BUILD_JOBS=8 CARGO_TARGET_DIR=<isolated-target> bash scripts/build-lock.sh cargo build --locked --release --bin rustbgpd",
+    "binary": "rustbgpd",
+    "binary_sha256": "fd37bc7234d71f02d8e9a867e46b4514d71b08ea1502b431b7685b9f7e450d26",
+    "build_exit": 0,
+    "private_instrumentation": false
+  },
+  "frozen_driver_helper_checker_source": "e9bda76907904c07403217f051261a36374a1774",
+  "cli_and_rust_harness_build_commit": "d3478c32dd2d320e0c4130f63883ed803f0efa70",
+  "cli_sha256": "f50c90fac7f45c05a568655bdc48ff6a4b44da3174d0f33a10836691997bfd39",
+  "rust_harness_sha256": "8f5c0b1a6d82b75b572e57f9c036a9969184ef7fa1536c73363de05dc54fa3e0",
+  "original_daemon_sha256": "4b063af47400c194e72fe95a886cf43b3ac79723045347272be5eda33b6a819d",
+  "native_provenance_source_fields": "The native driver records its frozen e9 checkout as git source; those fields identify the driver/helper/checker, not the candidate daemon. Candidate runtime source/build is separately bound above.",
+  "runner_sha256": "3766ffa925f25d24f425a95b314ec67e007e34d3f3ba6b79d951f0185030e06e",
+  "frozen_inputs_sha256": "7e49fc14cac63166e7bffa285d538bed4c79fd313e2b8aeda0be2d52d4846872",
+  "thresholds": "Unchanged membership-1 gates, including zero health failures and rejection of ConnectionReset warnings."
+}
