@@ -328,3 +328,66 @@ Receipt run shape (heavy — 700 real sessions × 400k routes; do not run casual
 python3 gen-scenario.py 700 <scenario-dir> 1790 600
 reloadstall 700 400400 <port> <daemon_pid> <live.rpol> <gen-a.rpol> <gen-b.rpol> 4 30 600
 ```
+
+## Membership and dataset churn
+
+The opt-in matrix cell keeps the 700 announcing members and their 400,400
+dual-family routes, and adds two receive-only members. Each of four reloads
+replaces that pair with two new addresses and ASNs. One member in every pair
+uses TCP MD5; every core and rotating member uses GTSM. Each member's import
+policy references its own ASN dataset and dual-family prefix dataset. Removed
+members' policy files and dataset bindings leave the active configuration.
+This exercises membership and binding changes alongside export-policy reloads;
+it does not rotate ownership of the announcing fleet's routes.
+
+Build the daemon, CLI, and harness from the source under test. The helper
+requires Linux and Python 3.11 or newer (`asyncio.TaskGroup` and `timeout`).
+From the repo root, run on an otherwise quiet lab host:
+
+```bash
+out=$(mktemp -d /tmp/membership-cell.XXXXXX)
+ulimit -n 65536
+GEN_DUALSTACK=1 RELOADSTALL_DUALSTACK=1 RELOADSTALL_GTSM=1 \
+RELOADSTALL_MEMBERSHIP_CHURN=1 RELOADSTALL_CYCLE_QUIESCE_SECS=20 \
+N_PEERS=700 TOTAL_PREFIXES=400400 CHANGED_PEERS=600 RELOADS=4 CONTROL_SECS=30 \
+PROBE_PREFIXES='20.0.0.0/24 3001::/48' ARTIFACTS_DIR="$out" \
+    bash bench/scale/matrix/run-matrix.sh rustbgpd >"$out/driver.log" 2>&1
+printf '%s\n' "$?" >"$out/driver.exit"
+python3 bench/scale/reloadstall/check_membership_cell.py \
+    "$out" 700 400400 200200 600 0 4 >"$out/qualification.json"
+```
+
+Use `N_PEERS=20 TOTAL_PREFIXES=11440 CHANGED_PEERS=16` for preparation, and
+pass `20 11440 5720 16 0 4` to the checker. This mode supports an equal family
+split and permit-set-preserving export changes. It owns the stage and final
+evidence hooks; do not supply other commands for those hooks.
+
+The matrix retains its host mutex, two quiet-host samples, per-family exact
+wire inventories, continuous churn overlap, zero-failure health/RIB probes,
+and core session/error checks. The membership mode additionally aborts at
+16 GiB daemon-tree RSS. Every new pair must establish and receive every unique
+base-table prefix in both families, carrying the current generation's export
+marker, within 60 seconds of staging. Each stage
+checks the exact neighbor and dataset-status rosters, nonempty error-free
+datasets, and removal of the old pair's dataset metric series. The checker
+requires the generation reload route and zero daemon ERROR records.
+
+Unchanged-member continuity uses paired daemon-side TCP socket inodes and
+four-tuples from Linux `/proc/net/tcp`, unchanged API flap counts, and
+nondecreasing uptime. The core harness never reconnects these members and
+retains its independent session checks. These observations constrain socket
+reuse ambiguity; they do not expose or compare the daemon's internal actor
+session IDs. Intentional departures are allowed only for the scheduled pair
+after its corresponding reload trigger. They cannot exempt a core peer loss.
+
+`membership_churn.py` is the bounded two-receiver helper, not a second scale
+driver. `RELOADSTALL_STAGE_RELOAD` gives its stage command the 1-based reload
+number; `RELOADSTALL_STAGE_GENERATION` remains `a` or `b`. Scenario receipts
+retain the before/after TCP snapshots, loaded dataset status, metric snapshots,
+and joining IPv4/IPv6 inventories for replay. Run its focused regressions with:
+
+```bash
+python3 -m unittest discover -s bench/scale/reloadstall -p test_membership_churn.py
+```
+
+The [September 2026 membership receipt](../../../docs/perf/ixp-membership-churn-2026-09.md) retains a passing 20+2 preparation, a 702-member cell that failed readiness, and the v0.70.0 rejection control.

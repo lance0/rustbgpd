@@ -1,0 +1,26 @@
+{
+  "runtime_base": "8a02683f49b6165fc810cf5abeeb2744bb749a8a",
+  "runtime_diff": "",
+  "binaries": {
+    "target/release/rustbgpd": "4b063af47400c194e72fe95a886cf43b3ac79723045347272be5eda33b6a819d",
+    "target/release/rbgp": "f50c90fac7f45c05a568655bdc48ff6a4b44da3174d0f33a10836691997bfd39",
+    "bench/scale/target/release/reloadstall": "8f5c0b1a6d82b75b572e57f9c036a9969184ef7fa1536c73363de05dc54fa3e0"
+  },
+  "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "measurement_source_head": "e9bda76907904c07403217f051261a36374a1774",
+  "binary_build_commit": "d3478c32dd2d320e0c4130f63883ed803f0efa70",
+  "runtime_equivalence": "Tracked daemon and CLI source/manifests match runtime_base; the binaries were built at binary_build_commit, not directly on runtime_base.",
+  "negative_control": {
+    "version": "v0.70.0",
+    "tag_commit": "ee6215af61222a43c3a8019ee0352ecd5df77913",
+    "release_archive": "rustbgpd-linux-amd64.tar.gz",
+    "release_archive_sha256": "672639cdc825bf1194c9879b6dd9997b6d2c6f06cabcf39363af89960ff711a0",
+    "daemon_sha256": "d184d1d0b7eb18f0d62d6319e9ff50041d897b03d5215627425b0bb04e808968",
+    "release_checksum_verified": true,
+    "cli_and_harness": "Same hashes as the current-source cell."
+  },
+  "build_commands": [
+    "CARGO_BUILD_JOBS=8 cargo build --release --locked -p rustbgpd -p rustbgpctl --bin rustbgpd --bin rbgp",
+    "CARGO_BUILD_JOBS=8 cargo build --release --locked --manifest-path bench/scale/Cargo.toml -p reloadstall"
+  ]
+}

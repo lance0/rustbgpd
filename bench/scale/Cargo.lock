@@ -857,6 +857,7 @@ dependencies = [
  "bytes",
  "libc",
  "rustbgpd-wire",
+ "socket2",
  "tokio",
 ]
 

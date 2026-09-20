@@ -1364,6 +1364,11 @@ async fn open_stub_stream(
     required: &[(Afi, Safi)],
 ) -> Result<TcpStream, StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
+    if std::env::var("RELOADSTALL_GTSM").as_deref() == Ok("1") {
+        socket2::SockRef::from(&sock)
+            .set_ttl_v4(255)
+            .map_err(|e| StubOpenError::Fatal(format!("GTSM TTL: {e}")))?;
+    }
     sock.bind(SocketAddr::new(local.into(), 0))
         .map_err(|e| StubOpenError::Fatal(format!("bind {local}: {e}")))?;
     let mut stream = sock
@@ -3442,6 +3447,7 @@ fn main() {
                     .arg("-c")
                     .arg(cmd)
                     .env("RELOADSTALL_STAGE_GENERATION", generation)
+                    .env("RELOADSTALL_STAGE_RELOAD", r.to_string())
                     .status();
                 if !matches!(&status, Ok(status) if status.success()) {
                     eprintln!("reload {r} pre-trigger stage failed: {status:?}");
