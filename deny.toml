@@ -1,10 +1,9 @@
 # cargo-deny configuration — license / bans / advisories / sources gate.
 #
 # Run locally: `cargo deny check advisories bans licenses sources`
-# CI: .github/workflows/audit.yml (path-scoped to manifest/lock/deny.toml
-# changes, same scope caveat as cargo-audit had: a release that doesn't
-# touch deps gets no fresh CI scan — the /ship pre-flight runs it locally
-# every release regardless).
+# Scale workspace: `cargo deny --manifest-path bench/scale/Cargo.toml check --config deny.toml advisories bans licenses sources`
+# CI: .github/workflows/audit.yml scans both workspaces with this policy
+# daily and on manifest, lockfile, or gate configuration changes.
 #
 # Advisory ignores broadly mirror .cargo/audit.toml (the local
 # `cargo audit` pre-flight keeps its own copy); every entry MUST carry
