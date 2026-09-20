@@ -690,6 +690,13 @@ fn prepare_outbound_attributes_rtc_adds_rr_attrs_for_ibgp_reflection() {
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),
+        PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
+        PathAttribute::MpReachNlri(empty_nonunicast_reach(
+            Afi::Ipv4,
+            Safi::RtConstrain,
+            route.next_hop,
+        )),
+        PathAttribute::MpUnreachNlri(empty_nonunicast_unreach(Afi::Ipv4, Safi::RtConstrain)),
     ]);
     let attrs = session.prepare_outbound_attributes_rtc(&route, false);
     assert!(
@@ -701,6 +708,11 @@ fn prepare_outbound_attributes_rtc_adds_rr_attrs_for_ibgp_reflection() {
         attrs.iter().any(
             |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
         )
+    );
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::LocalPref(200)))
     );
     assert!(!attrs.iter().any(|a| matches!(
         a,

@@ -160,6 +160,42 @@ client_lacks_route() { ! client_has_route "$1"; }
 # ---------------------------------------------------------------------------
 # Test 1: sessions + capability exchange
 # ---------------------------------------------------------------------------
+
+# BIRD 2.19.2 prints local_caps, then remote_caps, then Session. Require
+# both AFs inside the neighbor's GR subsection, not its MP/LLGR capabilities.
+bird_neighbor_gr_capability() {
+    awk '
+        /^    Local capabilities$/ {
+            locals++
+            if (neighbors || sessions) bad = 1
+            next
+        }
+        /^    Neighbor capabilities$/ {
+            neighbors++
+            if (locals != 1 || sessions) bad = 1
+            in_neighbor = 1
+            next
+        }
+        /^    Session:/ {
+            sessions++
+            if (!in_neighbor) bad = 1
+            in_neighbor = 0
+        }
+        in_neighbor && /^      [^ ]/ {
+            in_gr = ($0 == "      Graceful restart")
+            if (in_gr) grace++
+        }
+        in_neighbor && in_gr && /^        AF supported:/ {
+            for (i = 3; i <= NF; i++) {
+                if ($i == "ipv4") ipv4 = 1
+                if ($i == "ipv6") ipv6 = 1
+            }
+        }
+        END { exit !(locals == 1 && neighbors == 1 && sessions == 1 &&
+                     !bad && grace == 1 && ipv4 && ipv6) }
+    '
+}
+
 test_sessions() {
     log "Test 1: three RR-client sessions Established, GR capability on the wire"
 
@@ -171,9 +207,9 @@ test_sessions() {
     # BIRD reports the peer's (rustbgpd's) capabilities; graceful_restart =
     # true on both BIRD neighbors, so BIRD must see restart-capable.
     local caps
-    caps=$(docker exec "$BIRD1" birdc show protocols all reflector 2>/dev/null)
-    if echo "$caps" | grep -qi "restart"; then
-        ok "bird1 sees a graceful-restart capability from rustbgpd"
+    if caps=$(docker exec "$BIRD1" birdc show protocols all reflector 2>/dev/null) \
+        && bird_neighbor_gr_capability <<<"$caps"; then
+        ok "bird1 sees rustbgpd's graceful-restart capability for ipv4 and ipv6"
     else
         fail "bird1 does not report a graceful-restart capability from rustbgpd"
         echo "$caps" | tail -25 >&2 || true

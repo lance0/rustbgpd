@@ -296,9 +296,18 @@ service origination, SID reconstruction, next-hop rewriting, or SRv6 forwarding.
 
 PMSI Tunnel values use RFC 6514 base type and identifier semantics, the RFC
 7385/IANA registry boundary, and RFC 8317 composite tunnel-type semantics.
+The accepted `0x0a`-`0x0d` assignments come from
+[RFC 9574 §11](https://www.rfc-editor.org/rfc/rfc9574.html#section-11)
+(`0x0a`, Assisted Replication),
+[RFC 8556 §5](https://www.rfc-editor.org/rfc/rfc8556.html#section-5)
+(`0x0b`, BIER), and
+[RFC 10018 §5](https://www.rfc-editor.org/rfc/rfc10018.html#section-5)
+(`0x0c`, SR-MPLS P2MP Tree; `0x0d`, SRv6 P2MP Tree).
 Assigned types without a dedicated enum variant and experimental values remain
 typed through opaque `PmsiTunnelType::Other` state; this is distinct from
-accepting an unassigned value.
+accepting an unassigned value. Preserving these encodings does not implement
+their tunnel procedures or forwarding. Local EVPN origination uses ingress
+replication (`0x06`).
 
 | Wire value | Result |
 |---|---|

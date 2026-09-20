@@ -582,6 +582,13 @@ fn prepare_outbound_attributes_vpn_adds_rr_attrs_for_ibgp_reflection() {
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),
+        PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
+        PathAttribute::MpReachNlri(empty_nonunicast_reach(
+            Afi::Ipv4,
+            Safi::MplsVpn,
+            route.next_hop,
+        )),
+        PathAttribute::MpUnreachNlri(empty_nonunicast_unreach(Afi::Ipv4, Safi::MplsVpn)),
     ]);
     let attrs = session.prepare_outbound_attributes_vpn(&route, false);
     assert!(

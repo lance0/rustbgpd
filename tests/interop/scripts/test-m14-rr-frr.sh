@@ -80,22 +80,24 @@ wait_routes() {
     return 1
 }
 
-# Wait for FRR to have routes from the RR
+# Wait for the reflected prefixes, excluding routes the client originates itself.
 wait_frr_routes() {
     local frr_container=$1
-    local expected=$2
-    log "Waiting for $frr_container to have $expected routes..."
+    shift
+    local expected routes
+    expected=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+    log "Waiting for $frr_container to have reflected routes: $*"
     for i in $(seq 1 20); do
-        local count
-        count=$(docker exec "$frr_container" vtysh -c "show bgp ipv4 unicast json" 2>/dev/null \
-            | grep -o '"prefix":"[^"]*"' | wc -l || true)
-        if [ "$count" -ge "$expected" ]; then
-            ok "$frr_container has $count routes (attempt $i)"
+        if routes=$(docker exec "$frr_container" vtysh -c "show bgp ipv4 unicast json" 2>/dev/null) \
+            && jq -e --argjson expected "$expected" '
+                .routes as $routes | all($expected[]; $routes[.] | type == "array" and length > 0)
+            ' <<<"$routes" >/dev/null; then
+            ok "$frr_container has the reflected routes (attempt $i)"
             return 0
         fi
         sleep 2
     done
-    fail "$frr_container expected $expected routes"
+    fail "$frr_container missing reflected routes: $*"
     return 1
 }
 
@@ -220,10 +222,8 @@ main() {
     wait_routes 3 || true
 
     # Client2 should get client1's routes reflected, and vice versa
-    # Client1 has its own 2 + 1 reflected = at least 1 from RR
-    # Client2 has its own 1 + 2 reflected = at least 2 from RR
-    wait_frr_routes "$FRR_C2" 2 || true
-    wait_frr_routes "$FRR_C1" 1 || true
+    wait_frr_routes "$FRR_C2" "192.168.10.0/24" "192.168.11.0/24" || true
+    wait_frr_routes "$FRR_C1" "192.168.20.0/24" || true
 
     test_rr_rib
     test_client1_to_client2

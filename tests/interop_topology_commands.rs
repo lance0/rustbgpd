@@ -13,6 +13,133 @@ fn repo_path(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn m85_gr_capability_requires_the_neighbors_family_scoped_advertisement() {
+    let source = fs::read_to_string(interop_path("scripts/test-m85-rr-bird.sh")).unwrap();
+    let start = source.find("bird_neighbor_gr_capability() {").unwrap();
+    let end = start + source[start..].find("\n}\n").unwrap() + 3;
+    let output = Command::new("bash")
+        .args(["-c", r#"
+set -euo pipefail
+eval "$HELPER"
+local_caps=$'    Local capabilities\n      Graceful restart\n        AF supported: ipv4 ipv6'
+remote_gr=$'      Graceful restart\n        AF supported: ipv4 ipv6'
+caps() { printf '%s\n    Neighbor capabilities\n%s\n    Session: internal\n' "$local_caps" "$1"; }
+caps "$remote_gr" | bird_neighbor_gr_capability
+# Local GR, MP families, helper-only GR, and LLGR families cannot satisfy it.
+for remote in '' '      Route refresh' \
+    $'      Multiprotocol\n        AF announced: ipv4 ipv6' \
+    '      Graceful restart' \
+    $'      Graceful restart\n        AF supported: ipv4' \
+    $'      Graceful restart\n        AF supported: ipv6' \
+    $'      Graceful restart\n      Long-lived graceful restart\n        AF supported: ipv4 ipv6'; do
+    if caps "$remote" | bird_neighbor_gr_capability; then
+        printf 'false neighbor capability accepted: %q\n' "$remote" >&2
+        exit 1
+    fi
+done
+valid=$(caps "$remote_gr")
+for malformed in '' "$remote_gr" \
+    "${valid/    Local capabilities/    Missing local boundary}" \
+    "${valid/    Neighbor capabilities/    Missing neighbor boundary}" \
+    "${valid/    Session: internal/    Missing session boundary}" \
+    "$valid"$'\n    Neighbor capabilities' \
+    "$valid"$'\n    Local capabilities'; do
+    if bird_neighbor_gr_capability <<<"$malformed"; then
+        echo 'malformed capability boundaries accepted' >&2
+        exit 1
+    fi
+done
+# A family list outside the capability block must not fill a missing family.
+if { caps $'      Graceful restart\n        AF supported: ipv4'; printf '%s\n' "$remote_gr"; } \
+    | bird_neighbor_gr_capability; then exit 1; fi
+"#])
+        .env("HELPER", &source[start..end])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn m14_waits_for_all_reflected_prefixes_not_the_clients_own_routes() {
+    let source = fs::read_to_string(interop_path("scripts/test-m14-rr-frr.sh")).unwrap();
+    assert!(source.contains(r#"wait_frr_routes "$FRR_C2" "192.168.10.0/24" "192.168.11.0/24""#));
+    assert!(source.contains(r#"wait_frr_routes "$FRR_C1" "192.168.20.0/24""#));
+    let start = source.find("wait_frr_routes() {").unwrap();
+    let end = start + source[start..].find("\n}\n").unwrap() + 3;
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+eval "$HELPER"
+log() { :; }; ok() { :; }; fail() { :; }; sleep() { :; }
+docker() { printf '%s' "$reply"; return "$producer_exit"; }
+producer_exit=0
+reply='{"routes":{"192.168.10.0/24":[{}],"192.168.11.0/24":[{}]}}'
+if wait_frr_routes client1 192.168.20.0/24; then exit 1; fi
+reply='{"routes":{"192.168.20.0/24":[{}],"192.168.10.0/24":[{}]}}'
+if wait_frr_routes client2 192.168.10.0/24 192.168.11.0/24; then exit 1; fi
+reply='{"routes":{"192.168.20.0/24":[{}],"192.168.10.0/24":[{}],"192.168.11.0/24":[{}]}}'
+wait_frr_routes client1 192.168.20.0/24
+wait_frr_routes client2 192.168.10.0/24 192.168.11.0/24
+producer_exit=7
+if wait_frr_routes client1 192.168.20.0/24; then exit 1; fi
+producer_exit=0
+for reply in '' '{}' 'not json' \
+    '{"routes":{"192.168.20.0/24":[]}}' \
+    '{"routes":{"192.168.20.0/24":"present"}}' \
+    '{"routes":{"192.168.20.0/24":{"prefix":"192.168.20.0/24"}}}'; do
+    if wait_frr_routes client1 192.168.20.0/24; then exit 1; fi
+done
+"#,
+        ])
+        .env("HELPER", &source[start..end])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn m95_refresh_proof_rejects_a_request_without_a_sent_message() {
+    let source = fs::read_to_string(interop_path("scripts/test-m95-rfc8212-presence.sh")).unwrap();
+    let (_, tail) = source.split_once("phase2_log=$(log_since_mark)\n").unwrap();
+    let (assertion, _) = tail.split_once("\nstatus=").unwrap();
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+ok() { accepted=1; }; fail() { accepted=0; }
+for phase2_log in '' 'soft reset in requested' 'refreshed=[] soft reset in requested'; do
+    accepted=unset
+    eval "$ASSERTION"
+    [[ "$accepted" == 0 ]]
+done
+phase2_log='sent ROUTE-REFRESH'
+accepted=unset
+eval "$ASSERTION"
+[[ "$accepted" == 1 ]]
+"#,
+        ])
+        .env("ASSERTION", assertion)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn route_server_accepted_absence_requires_successful_snapshot() {
     for script in [
         "scripts/test-m104-arouteserver-current-rs-differential.sh",

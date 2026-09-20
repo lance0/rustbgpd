@@ -31,8 +31,8 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
 | FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
-| Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |
-| Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
+| Maintenance | RFC 8326 (Graceful Shutdown), RFC 9003 (Extended Admin Shutdown Communication) | Receiver gating + initiator toggle |
+| Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 9972 (selected BMP statistics), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
 
 ---
 
@@ -104,8 +104,11 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   `RS:1:PEER`, and `RS:101|102|103:PEER` (prepend the announcing member's
   leftmost ASN 1–3× toward `PEER`; `RS:10x:0` = every target). Standard and
   RFC 8195 large forms compose; extended-community control forms are
-  deliberately not implemented (draft-ietf-grow-ixp-ext-comms). Full matrix
-  and evaluation ladder: the [route-server cookbook](../cookbook/route-server.md).
+  deliberately not implemented. The related
+  [draft-ietf-grow-ixp-ext-comms-03](https://datatracker.ietf.org/doc/html/draft-ietf-grow-ixp-ext-comms-03)
+  expired on 2026-06-12 without RFC publication; it is background for this
+  implementation choice, not an RFC requirement. Full matrix and evaluation
+  ladder: the [route-server cookbook](../cookbook/route-server.md).
 - Enforcement is gated per session by `rs_control_communities` (default
   `route_server_client`), evaluated pre-policy on the source route like the
   RFC 1997 gates (its own `rs_control` explain rung), and covers the unicast
@@ -1292,6 +1295,22 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ---
 
+## RFC 9972 — Advanced BMP Statistics Types
+
+- The periodic peer Stats Report emits the selected
+  [RFC 9972 statistics types](https://www.rfc-editor.org/rfc/rfc9972.html#section-8):
+  post-policy Adj-RIB-In types 20/21/23, inbound policy-rejection type 22,
+  and RPKI Invalid/Valid/NotFound types 35/36/37.
+- The family-qualified rows cover negotiated IPv4/IPv6 unicast. Types
+  20/21/23 are omitted under effective Add-Path receive; type 22 requires
+  authoritative reject retention; types 35/36/37 require an authoritative
+  VRP table. Unavailable observations are omitted rather than reported as zero.
+- See the [BMP configuration contract](configuration.md#bmp) for
+  the emission conditions and the [M81 interop entry](../interop.md) for the
+  collector checks. Other RFC 9972 statistics types are outside this emitted set.
+
+---
+
 ## draft-ietf-grow-bmp-tlv-21 — BMPv4 TLV framing (pre-IANA)
 
 - Per-collector `version = 3 | 4`, default 3; v3 output byte-identical
@@ -1329,12 +1348,23 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ---
 
-## RFC 8203 — Admin Shutdown Communication
+<a id="rfc-8203--admin-shutdown-communication"></a>
+## RFC 9003 — Extended Admin Shutdown Communication (obsoletes RFC 8203)
 
-- Cease NOTIFICATION subcode 2 (Administrative Shutdown) carries a
-  UTF-8 reason string.
-- Reason threaded from gRPC `DisableNeighbor` through transport to the
-  NOTIFICATION data field.
+- [RFC 9003 §2](https://www.rfc-editor.org/rfc/rfc9003.html#section-2)
+  permits an optional UTF-8 reason with Cease subcode 2 (Administrative
+  Shutdown) or 4 (Administrative Reset). The gRPC `DisableNeighbor` and
+  `ResetNeighbor` reasons reach the NOTIFICATION data field through transport.
+- The sender deliberately retains a 128-octet interoperability cap, truncating
+  at a UTF-8 character boundary. This follows the recommendation for peers
+  whose extended support is unknown in
+  [§3](https://www.rfc-editor.org/rfc/rfc9003.html#section-3); the receiver
+  accepts the full 255-octet RFC 9003 limit. The send cap is not the RFC's
+  maximum receive length.
+- Receive-side extraction handles both direct administrative subcodes and
+  one [RFC 8538 Hard Reset envelope](https://www.rfc-editor.org/rfc/rfc8538.html#section-3.1)
+  encapsulating either subcode. Other inner errors, nested envelopes, and
+  malformed shutdown strings are not interpreted as a shutdown reason.
 
 ---
 

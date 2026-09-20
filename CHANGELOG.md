@@ -39,6 +39,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retention caps. These updates retain the session identity and participate in
   generation compensation. Mixed session-shaping group edits still defer those
   dynamic settings until reconnect.
+- Skip outbound update preparation for closed session receivers awaiting RIB
+  teardown, avoiding repeated shutdown warnings and failed-send accounting.
+  Healthy peers still receive withdrawals, and full live channels retain their
+  backpressure warnings and resync retries.
+
 - Unrelated SIGHUP changes and policy-only transactions no longer fail merely
   because an accepted IPv6 link-local peer's interface is temporarily missing.
   Hot updates retain its accepted scope, and configuration impact and checkpoint

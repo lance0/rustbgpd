@@ -569,7 +569,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
     let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
     let source_id = Ipv4Addr::new(10, 0, 0, 42);
     session.config.cluster_id = Some(cluster_id);
-    let route = Route {
+    let mut route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         link_local_next_hop: None,
@@ -600,6 +600,27 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         attrs.iter().any(
             |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
         )
+    );
+
+    // RFC 4456 section 8: preserve the originator and prepend to the ordered path.
+    let originator = Ipv4Addr::new(10, 0, 0, 43);
+    let previous = [Ipv4Addr::new(10, 0, 0, 7), Ipv4Addr::new(10, 0, 0, 8)];
+    Arc::make_mut(&mut route.attributes).extend([
+        PathAttribute::OriginatorId(originator),
+        PathAttribute::ClusterList(previous.to_vec()),
+    ]);
+    let attrs =
+        session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::OriginatorId(id) if *id == originator))
+    );
+    assert!(
+        attrs
+            .iter()
+            .any(|a| matches!(a, PathAttribute::ClusterList(ids)
+        if ids.as_slice() == [cluster_id, previous[0], previous[1]]))
     );
 }
 
