@@ -919,7 +919,7 @@ impl RibManager {
             .recovery
             .iter()
             .any(|(&peer, families)| {
-                if !self.outbound_peers.contains_key(&peer)
+                if self.outbound_channel_gone(peer)
                     || !LIMITED_FAMILIES
                         .into_iter()
                         .any(|afi| families.contains(&afi))
@@ -954,7 +954,7 @@ impl RibManager {
     /// Select one runnable family after the last attempted peer, then wrap.
     ///
     /// IPv4 precedes IPv6 within a peer, matching [`LIMITED_FAMILIES`].
-    /// Empty/corrupt entries and departed peers are discarded rather than
+    /// Empty/corrupt entries and closed/departed peers are discarded rather than
     /// parking the queue. Gate-blocked entries remain in place while the
     /// first runnable sibling is selected.
     fn take_next_outbound_limit_recovery(&mut self) -> Option<(IpAddr, Afi)> {
@@ -962,7 +962,9 @@ impl RibManager {
         self.outbound_limit_control
             .recovery
             .retain(|peer, families| {
-                outbound_peers.contains_key(peer)
+                outbound_peers
+                    .get(peer)
+                    .is_some_and(|sender| !sender.is_closed())
                     && LIMITED_FAMILIES
                         .into_iter()
                         .any(|afi| families.contains(&afi))
@@ -1018,7 +1020,7 @@ impl RibManager {
 
     /// Run at most one live family-scoped recovery resync.
     ///
-    /// Departed peers are discarded until one live peer/family is found or
+    /// Closed/departed peers are discarded until one live peer/family is found or
     /// no runnable intent remains. Any runnable remainder stays ordered and
     /// keeps the ordinary resync timer armed for a later actor tick; gated
     /// intent parks until its release message. The replay

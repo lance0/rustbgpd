@@ -776,6 +776,10 @@ impl RibManager {
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            if self.outbound_channel_gone(peer) {
+                self.drop_gone_dirty_peer(peer);
+                continue;
+            }
             // A peer bound to a vantage that resolved this pass takes the
             // per-vantage best; an unresolved vantage silently falls back
             // to the standard Loc-RIB best (same shape as unicast).

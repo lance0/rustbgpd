@@ -635,10 +635,19 @@ fn register_direct_peer_with_families(
     peer: IpAddr,
     sendable_families: Vec<(Afi, Safi)>,
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    register_direct_peer_session(manager, peer, sendable_families, 0)
+}
+
+fn register_direct_peer_session(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    sendable_families: Vec<(Afi, Safi)>,
+    session_id: u64,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     let (outbound_tx, outbound_rx) = mpsc::channel(8);
     manager.handle_update(RibUpdate::PeerUp {
         peer,
-        session_id: 0,
+        session_id,
         peer_asn: 65_000,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx,
@@ -6084,6 +6093,255 @@ async fn dirty_resync_tick_attempts_each_peer_at_most_once() {
         started.elapsed() < std::time::Duration::from_secs(30),
         "the tick must terminate without spinning the budget loop"
     );
+}
+
+fn family_distribution_cases() -> [(Afi, Safi, bool); 7] {
+    [
+        (Afi::Ipv4, Safi::MplsVpn, false),
+        (Afi::Ipv4, Safi::MplsVpn, true),
+        (Afi::Ipv4, Safi::LabeledUnicast, false),
+        (Afi::Ipv4, Safi::RtConstrain, false),
+        (Afi::L2Vpn, Safi::Evpn, false),
+        (Afi::BgpLs, Safi::BgpLs, false),
+        (Afi::Ipv4, Safi::FlowSpec, false),
+    ]
+}
+
+fn announce_family_route(manager: &mut RibManager, source: Ipv4Addr, safi: Safi, index: u8) {
+    use crate::route::RouteOrigin;
+    let peer = IpAddr::V4(source);
+    let update = match safi {
+        Safi::MplsVpn => RibUpdate::VpnRoutesReceived {
+            peer,
+            session_id: 0,
+            announced: vec![VpnRibRoute {
+                origin_type: RouteOrigin::Ebgp,
+                ..make_vpn_rib_route(source, index, 100, 100)
+            }],
+            withdrawn: vec![],
+        },
+        Safi::LabeledUnicast => RibUpdate::LabeledRoutesReceived {
+            peer,
+            session_id: 0,
+            announced: vec![crate::route::LabeledRibRoute {
+                origin_type: RouteOrigin::Ebgp,
+                ..make_labeled_rib_route(source, index, 100, 100)
+            }],
+            withdrawn: vec![],
+        },
+        Safi::RtConstrain => RibUpdate::RtcRoutesReceived {
+            peer,
+            session_id: 0,
+            announced: vec![crate::route::RtcRibRoute {
+                origin_type: RouteOrigin::Ebgp,
+                ..make_rtc_rib_route(source, u16::from(index), 100)
+            }],
+            withdrawn: vec![],
+        },
+        Safi::BgpLs => RibUpdate::BgpLsRoutesReceived {
+            peer,
+            session_id: 0,
+            announced: vec![BgpLsRibRoute {
+                origin_type: RouteOrigin::Ebgp,
+                ..make_bgpls_route(source, index, 100)
+            }],
+            withdrawn: vec![],
+        },
+        Safi::Evpn | Safi::FlowSpec => {
+            let mut flowspec = make_flowspec_route(source);
+            flowspec.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+                rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(198, 51, index, 0),
+                    24,
+                )),
+            )];
+            RibUpdate::RoutesReceived {
+                peer,
+                session_id: 0,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: if safi == Safi::FlowSpec {
+                    vec![flowspec]
+                } else {
+                    vec![]
+                },
+                flowspec_withdrawn: vec![],
+                evpn_announced: if safi == Safi::Evpn {
+                    vec![EvpnRibRoute {
+                        origin_type: RouteOrigin::Ebgp,
+                        ..make_evpn_imet(source, u32::from(index))
+                    }]
+                } else {
+                    vec![]
+                },
+                evpn_withdrawn: vec![],
+            }
+        }
+        _ => panic!("unsupported family fixture: {safi:?}"),
+    };
+    manager.handle_update(update);
+    while manager.process_next_route_chunk() {}
+}
+
+fn family_delta_counts(update: &OutboundRouteUpdate, safi: Safi) -> (usize, usize) {
+    match safi {
+        Safi::MplsVpn => (update.vpn_announce.len(), update.vpn_withdraw.len()),
+        Safi::LabeledUnicast => (update.labeled_announce.len(), update.labeled_withdraw.len()),
+        Safi::RtConstrain => (update.rtc_announce.len(), update.rtc_withdraw.len()),
+        Safi::BgpLs => (update.bgpls_announce.len(), update.bgpls_withdraw.len()),
+        Safi::Evpn => (update.evpn_announce.len(), update.evpn_withdraw.len()),
+        Safi::FlowSpec => (
+            update.flowspec_announce.len(),
+            update.flowspec_withdraw.len(),
+        ),
+        _ => panic!("unsupported family fixture: {safi:?}"),
+    }
+}
+
+#[test]
+fn family_distribution_skips_closed_receivers_and_keeps_live_withdrawals() {
+    for (afi, safi, ungrouped) in family_distribution_cases() {
+        let (_tx, rx) = mpsc::channel(1);
+        let policy = PolicyChain::new(vec![Policy {
+            entries: vec![],
+            default_action: PolicyAction::Permit,
+        }]);
+        let mut manager =
+            RibManager::new(rx, dummy_query_rx(), Some(policy), None, BgpMetrics::new());
+        manager.test_force_ungrouped = ungrouped;
+        let closed: IpAddr = "10.43.0.1".parse().unwrap();
+        let healthy: IpAddr = "10.43.0.2".parse().unwrap();
+        let family = vec![(afi, safi)];
+        drop(register_direct_peer_with_families(
+            &mut manager,
+            closed,
+            family.clone(),
+        ));
+        let mut healthy_rx =
+            register_direct_peer_with_families(&mut manager, healthy, family.clone());
+        while healthy_rx.try_recv().is_ok() {}
+        if safi == Safi::MplsVpn {
+            assert_eq!(manager.vpn_grouped_member_of(closed).is_some(), !ungrouped);
+        }
+        let before = manager
+            .export_policy_stats
+            .get(&closed)
+            .copied()
+            .unwrap_or_default();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            CaptureSubscriber {
+                level: tracing::Level::WARN,
+                events: Arc::clone(&captured),
+            },
+            || {
+                warm_full_outbound_warning();
+                captured.lock().unwrap().clear();
+                let source = Ipv4Addr::new(192, 0, 2, 42);
+                for index in 1..=3 {
+                    announce_family_route(&mut manager, source, safi, index);
+                    assert_eq!(
+                        family_delta_counts(&healthy_rx.try_recv().unwrap(), safi),
+                        (1, 0)
+                    );
+                }
+                manager.handle_update(RibUpdate::PeerDown {
+                    peer: source.into(),
+                    session_id: 0,
+                });
+                assert_eq!(
+                    family_delta_counts(&healthy_rx.try_recv().unwrap(), safi),
+                    (0, 3)
+                );
+            },
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "{safi:?} grouped={}: closed receiver WARN",
+            !ungrouped
+        );
+        assert_metric(
+            counter_metric_value(&manager.metrics, "bgp_outbound_route_drops_total", &[]),
+            0.0,
+            "closed family failed sends",
+        );
+        assert_eq!(
+            manager
+                .export_policy_stats
+                .get(&closed)
+                .copied()
+                .unwrap_or_default(),
+            before
+        );
+        assert!(manager.outbound_peers.contains_key(&closed));
+        assert!(manager.dirty_peers.is_empty());
+        manager.handle_update(RibUpdate::PeerDown {
+            peer: closed,
+            session_id: 0,
+        });
+        assert!(!manager.outbound_peers.contains_key(&closed));
+    }
+}
+
+#[test]
+fn family_distribution_full_receivers_retry_and_replacements_stay_live() {
+    for (afi, safi, ungrouped) in family_distribution_cases() {
+        let (_tx, rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        manager.test_force_ungrouped = ungrouped;
+        let peer: IpAddr = "10.43.0.1".parse().unwrap();
+        let family = vec![(afi, safi)];
+        let mut receiver = register_direct_peer_with_families(&mut manager, peer, family.clone());
+        while receiver.try_recv().is_ok() {}
+        let permits: Vec<_> = (0..8)
+            .map(|_| {
+                manager.outbound_peers[&peer]
+                    .clone()
+                    .try_reserve_owned()
+                    .unwrap()
+            })
+            .collect();
+        let source = Ipv4Addr::new(192, 0, 2, 42);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(
+            CaptureSubscriber {
+                level: tracing::Level::WARN,
+                events: Arc::clone(&captured),
+            },
+            || {
+                warm_full_outbound_warning();
+                captured.lock().unwrap().clear();
+                announce_family_route(&mut manager, source, safi, 1);
+            },
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "{safi:?}: full receiver keeps WARN"
+        );
+        assert!(manager.dirty_peers.contains(&peer));
+        drop(permits);
+        manager.resync_dirty_peers_bounded();
+        assert_eq!(
+            family_delta_counts(&receiver.try_recv().unwrap(), safi),
+            (1, 0)
+        );
+        assert!(!manager.dirty_peers.contains(&peer));
+        drop(receiver);
+        let mut replacement = register_direct_peer_session(&mut manager, peer, family, 1);
+        while replacement.try_recv().is_ok() {}
+        manager.handle_update(RibUpdate::PeerDown {
+            peer,
+            session_id: 0,
+        });
+        announce_family_route(&mut manager, source, safi, 2);
+        assert_eq!(
+            family_delta_counts(&replacement.try_recv().unwrap(), safi),
+            (1, 0)
+        );
+        assert_eq!(manager.outbound_session_ids[&peer], 1);
+        assert!(!manager.outbound_channel_gone(peer));
+    }
 }
 
 fn warm_full_outbound_warning() {
