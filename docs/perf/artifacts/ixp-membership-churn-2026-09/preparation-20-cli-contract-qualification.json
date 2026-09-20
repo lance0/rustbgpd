@@ -1,0 +1,345 @@
+{
+  "gate_version": "membership-1",
+  "pass": true,
+  "errors": [],
+  "dualstack": [
+    {
+      "reload": "1",
+      "peers_total": "20",
+      "peers_changed": "16",
+      "prefixes_total": "11440",
+      "ipv4_prefixes": "5720",
+      "ipv6_prefixes": "5720",
+      "generation": "b",
+      "filter_count": "0",
+      "v4_completion_p50_s": "0.024422",
+      "v4_completion_p95_s": "0.024908",
+      "v4_completion_max_s": "0.024927",
+      "v6_completion_p50_s": "0.024373",
+      "v6_completion_p95_s": "0.024901",
+      "v6_completion_max_s": "0.024923",
+      "v4_maxgap_p50_ms": "23.290",
+      "v4_maxgap_p95_ms": "23.332",
+      "v4_maxgap_max_ms": "23.379",
+      "v6_maxgap_p50_ms": "23.106",
+      "v6_maxgap_p95_ms": "23.166",
+      "v6_maxgap_max_ms": "23.181",
+      "v4_first_generation_update_p50_ms": "23.524",
+      "v4_first_generation_update_p95_ms": "23.631",
+      "v4_first_generation_update_max_ms": "23.642",
+      "v6_first_generation_update_p50_ms": "23.514",
+      "v6_first_generation_update_p95_ms": "23.567",
+      "v6_first_generation_update_max_ms": "23.583",
+      "v4_filtered_withdrawn": "0",
+      "v4_filtered_expected": "0",
+      "v6_filtered_withdrawn": "0",
+      "v6_filtered_expected": "0",
+      "filtered_leaked": "0",
+      "bystander_withdrawn": "0",
+      "stable_withdrawn": "0",
+      "duplicate_withdrawn": "0",
+      "stable_marker_peers_v4": "4",
+      "stable_marker_peers_v6": "4",
+      "sessions_up": "20",
+      "parse_errors": "0"
+    },
+    {
+      "reload": "2",
+      "peers_total": "20",
+      "peers_changed": "16",
+      "prefixes_total": "11440",
+      "ipv4_prefixes": "5720",
+      "ipv6_prefixes": "5720",
+      "generation": "a",
+      "filter_count": "0",
+      "v4_completion_p50_s": "0.023813",
+      "v4_completion_p95_s": "0.029490",
+      "v4_completion_max_s": "0.029512",
+      "v6_completion_p50_s": "0.023806",
+      "v6_completion_p95_s": "0.029485",
+      "v6_completion_max_s": "0.029507",
+      "v4_maxgap_p50_ms": "22.973",
+      "v4_maxgap_p95_ms": "23.056",
+      "v4_maxgap_max_ms": "23.096",
+      "v6_maxgap_p50_ms": "23.001",
+      "v6_maxgap_p95_ms": "23.065",
+      "v6_maxgap_max_ms": "23.107",
+      "v4_first_generation_update_p50_ms": "22.980",
+      "v4_first_generation_update_p95_ms": "23.056",
+      "v4_first_generation_update_max_ms": "23.096",
+      "v6_first_generation_update_p50_ms": "23.007",
+      "v6_first_generation_update_p95_ms": "23.065",
+      "v6_first_generation_update_max_ms": "23.107",
+      "v4_filtered_withdrawn": "0",
+      "v4_filtered_expected": "0",
+      "v6_filtered_withdrawn": "0",
+      "v6_filtered_expected": "0",
+      "filtered_leaked": "0",
+      "bystander_withdrawn": "0",
+      "stable_withdrawn": "0",
+      "duplicate_withdrawn": "0",
+      "stable_marker_peers_v4": "4",
+      "stable_marker_peers_v6": "4",
+      "sessions_up": "20",
+      "parse_errors": "0"
+    },
+    {
+      "reload": "3",
+      "peers_total": "20",
+      "peers_changed": "16",
+      "prefixes_total": "11440",
+      "ipv4_prefixes": "5720",
+      "ipv6_prefixes": "5720",
+      "generation": "b",
+      "filter_count": "0",
+      "v4_completion_p50_s": "0.023882",
+      "v4_completion_p95_s": "0.023986",
+      "v4_completion_max_s": "0.024145",
+      "v6_completion_p50_s": "0.023887",
+      "v6_completion_p95_s": "0.023995",
+      "v6_completion_max_s": "0.024152",
+      "v4_maxgap_p50_ms": "13.857",
+      "v4_maxgap_p95_ms": "13.877",
+      "v4_maxgap_max_ms": "13.882",
+      "v6_maxgap_p50_ms": "13.973",
+      "v6_maxgap_p95_ms": "13.996",
+      "v6_maxgap_max_ms": "13.996",
+      "v4_first_generation_update_p50_ms": "23.113",
+      "v4_first_generation_update_p95_ms": "23.158",
+      "v4_first_generation_update_max_ms": "23.217",
+      "v6_first_generation_update_p50_ms": "23.125",
+      "v6_first_generation_update_p95_ms": "23.182",
+      "v6_first_generation_update_max_ms": "23.230",
+      "v4_filtered_withdrawn": "0",
+      "v4_filtered_expected": "0",
+      "v6_filtered_withdrawn": "0",
+      "v6_filtered_expected": "0",
+      "filtered_leaked": "0",
+      "bystander_withdrawn": "0",
+      "stable_withdrawn": "0",
+      "duplicate_withdrawn": "0",
+      "stable_marker_peers_v4": "4",
+      "stable_marker_peers_v6": "4",
+      "sessions_up": "20",
+      "parse_errors": "0"
+    },
+    {
+      "reload": "4",
+      "peers_total": "20",
+      "peers_changed": "16",
+      "prefixes_total": "11440",
+      "ipv4_prefixes": "5720",
+      "ipv6_prefixes": "5720",
+      "generation": "a",
+      "filter_count": "0",
+      "v4_completion_p50_s": "0.023133",
+      "v4_completion_p95_s": "0.023262",
+      "v4_completion_max_s": "0.063138",
+      "v6_completion_p50_s": "0.023120",
+      "v6_completion_p95_s": "0.023251",
+      "v6_completion_max_s": "0.063133",
+      "v4_maxgap_p50_ms": "22.484",
+      "v4_maxgap_p95_ms": "22.607",
+      "v4_maxgap_max_ms": "40.415",
+      "v6_maxgap_p50_ms": "22.467",
+      "v6_maxgap_p95_ms": "22.599",
+      "v6_maxgap_max_ms": "40.412",
+      "v4_first_generation_update_p50_ms": "22.484",
+      "v4_first_generation_update_p95_ms": "22.534",
+      "v4_first_generation_update_max_ms": "22.607",
+      "v6_first_generation_update_p50_ms": "22.467",
+      "v6_first_generation_update_p95_ms": "22.526",
+      "v6_first_generation_update_max_ms": "22.599",
+      "v4_filtered_withdrawn": "0",
+      "v4_filtered_expected": "0",
+      "v6_filtered_withdrawn": "0",
+      "v6_filtered_expected": "0",
+      "filtered_leaked": "0",
+      "bystander_withdrawn": "0",
+      "stable_withdrawn": "0",
+      "duplicate_withdrawn": "0",
+      "stable_marker_peers_v4": "4",
+      "stable_marker_peers_v6": "4",
+      "sessions_up": "20",
+      "parse_errors": "0"
+    }
+  ],
+  "churn_overlap": [
+    {
+      "reload": "1",
+      "trigger_us": "33360348",
+      "completion_us": "33385275",
+      "v4_writes": "2",
+      "v4_first_us": "Some(33360359)",
+      "v4_last_us": "Some(33376377)",
+      "v6_writes": "2",
+      "v6_first_us": "Some(33360366)",
+      "v6_last_us": "Some(33376385)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "2",
+      "trigger_us": "53648076",
+      "completion_us": "53677588",
+      "v4_writes": "1",
+      "v4_first_us": "Some(53662360)",
+      "v4_last_us": "Some(53662360)",
+      "v6_writes": "1",
+      "v6_first_us": "Some(53662366)",
+      "v6_last_us": "Some(53662366)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "3",
+      "trigger_us": "73937663",
+      "completion_us": "73961815",
+      "v4_writes": "1",
+      "v4_first_us": "Some(73948374)",
+      "v4_last_us": "Some(73948374)",
+      "v6_writes": "1",
+      "v6_first_us": "Some(73948382)",
+      "v6_last_us": "Some(73948382)",
+      "overlap_observed": "true"
+    },
+    {
+      "reload": "4",
+      "trigger_us": "94236359",
+      "completion_us": "94299497",
+      "v4_writes": "4",
+      "v4_first_us": "Some(94253360)",
+      "v4_last_us": "Some(94298916)",
+      "v6_writes": "4",
+      "v6_first_us": "Some(94253367)",
+      "v6_last_us": "Some(94298924)",
+      "overlap_observed": "true"
+    }
+  ],
+  "membership": [
+    {
+      "generation": 0,
+      "join_export_seconds": 0.10181950614787638,
+      "stage_to_join_seconds": null,
+      "joining": [
+        {
+          "address": "127.1.0.21",
+          "md5": true,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        },
+        {
+          "address": "127.1.0.22",
+          "md5": false,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        }
+      ]
+    },
+    {
+      "generation": 1,
+      "join_export_seconds": 0.05089004500769079,
+      "stage_to_join_seconds": 0.19582705292850733,
+      "joining": [
+        {
+          "address": "127.1.0.23",
+          "md5": true,
+          "export_marker": "65400:2000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        },
+        {
+          "address": "127.1.0.24",
+          "md5": false,
+          "export_marker": "65400:2000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        }
+      ]
+    },
+    {
+      "generation": 2,
+      "join_export_seconds": 0.05058034905232489,
+      "stage_to_join_seconds": 0.17229227907955647,
+      "joining": [
+        {
+          "address": "127.1.0.25",
+          "md5": true,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        },
+        {
+          "address": "127.1.0.26",
+          "md5": false,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        }
+      ]
+    },
+    {
+      "generation": 3,
+      "join_export_seconds": 0.05134845897555351,
+      "stage_to_join_seconds": 0.1697825479786843,
+      "joining": [
+        {
+          "address": "127.1.0.27",
+          "md5": true,
+          "export_marker": "65400:2000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        },
+        {
+          "address": "127.1.0.28",
+          "md5": false,
+          "export_marker": "65400:2000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        }
+      ]
+    },
+    {
+      "generation": 4,
+      "join_export_seconds": 0.05084285815246403,
+      "stage_to_join_seconds": 0.17822174704633653,
+      "joining": [
+        {
+          "address": "127.1.0.29",
+          "md5": true,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        },
+        {
+          "address": "127.1.0.30",
+          "md5": false,
+          "export_marker": "65400:1000",
+          "ipv4": 5720,
+          "ipv6": 5720
+        }
+      ]
+    }
+  ],
+  "queries": {
+    "probes.csv": {
+      "count": 1830,
+      "max_ms": 16.5,
+      "p95_ms": 9.3
+    },
+    "queries.csv": {
+      "count": 840,
+      "max_ms": 12.0,
+      "p95_ms": 9.1
+    }
+  },
+  "peak_sample_rss_kib": 73376,
+  "vmhwm_kib": 68856,
+  "warnings": [
+    {
+      "timestamp": "2026-09-20T17:52:17.138650Z",
+      "phase": "startup",
+      "message": "rfc8212_secure_default_ready: RFC 8212 policy mode is inherited from legacy omission. The retained posture is source=legacy_omission, effective=false: RFC 8212 enforcement remains disabled and missing chains remain permit-all. Choose exactly one explicit posture: set root config_epoch = 1 and [global].ebgp_requires_policy = false, or set root config_epoch = 2 and [global].ebgp_requires_policy = true."
+    }
+  ]
+}

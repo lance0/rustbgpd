@@ -389,3 +389,5 @@ and joining IPv4/IPv6 inventories for replay. Run its focused regressions with:
 ```bash
 python3 -m unittest discover -s bench/scale/reloadstall -p test_membership_churn.py
 ```
+
+The [September 2026 membership receipt](../../../docs/perf/ixp-membership-churn-2026-09.md) retains a passing 20+2 preparation, a 702-member cell that failed readiness, and the v0.70.0 rejection control.
