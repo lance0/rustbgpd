@@ -609,8 +609,8 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.21.1` | `0.21.1` |
-| `rustbgpd-fsm` | `0.8.1` | `0.8.1` |
+| `rustbgpd-wire` | `0.21.1` | `0.21.2` |
+| `rustbgpd-fsm` | `0.8.1` | `0.8.2` |
 | `rustbgpd-rpki` | `0.3.1` | `0.3.1` |
 <!-- published-crate-versions:end -->
 

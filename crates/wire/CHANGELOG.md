@@ -3,6 +3,17 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.21.2 - 2026-09-20
+
+- Documented the sender-side length cap in `encode_shutdown_communication`.
+  The encoder deliberately caps a shutdown communication at 128 bytes for
+  interoperability and truncates longer input at a UTF-8 character boundary,
+  while RFC 9003 section 3 lets a receiver accept up to 255 bytes. An
+  embedder that needs to carry a longer reason string cannot obtain one from
+  this helper. The previous wording gave 128 bytes as the format maximum, so
+  the asymmetry between the two limits was not visible. No public item,
+  encoding, or decoding changed.
+
 ## 0.21.1 - 2026-09-18
 
 - Corrected the `FlowSpecAction::TrafficAction::terminal` field documentation

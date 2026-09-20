@@ -24,6 +24,10 @@ dependency lines together. Existing parse and validation signatures remain
 available; the new `DecodeError` variants extend a `#[non_exhaustive]` enum.
 `rustbgpd-wire` 0.21.1 is a documentation-only patch release on the same line:
 it corrects the `FlowSpecAction::TrafficAction::terminal` field documentation.
+`rustbgpd-wire` 0.21.2 is a second documentation-only patch on the same line:
+`encode_shutdown_communication` now documents its deliberate 128-byte sender
+cap against the 255-byte RFC 9003 section 3 receive limit. Neither patch
+changes a public item, an encoding, or a decoding.
 
 - `UpdateMessage::parse_revised_observed_with_error_context` and
   `validate::validate_update_attributes_with_context` retain offending
@@ -335,7 +339,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.21.1", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.21.2", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

@@ -10,10 +10,11 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.8.1 is released on the `0.8` compatibility line with wire `0.21.1`.
+`rustbgpd-fsm` 0.8.2 is released on the `0.8` compatibility line with wire `0.21.2`.
 Upgrade dependencies that exchange public wire types together. The public API
 is unchanged from `0.8.0`; [Compatibility](#compatibility) describes the one
-ORF negotiation change.
+ORF negotiation change in `0.8.1` and the timer-validation documentation in
+`0.8.2`.
 
 ## Usage
 
@@ -125,6 +126,17 @@ such a family no longer produces an entry. An embedder that holds back
 advertisement for each listed family until the peer's ROUTE-REFRESH no longer
 waits on a family where that message could never apply.
 
+`rustbgpd-fsm 0.8.2` is a documentation-only patch with no public item,
+signature, or runtime behavior change, paired with wire `0.21.2`. It records
+that the FSM does not validate local timer settings, which is the embedding
+application's responsibility: `PeerConfig::hold_time` is sent in OPEN exactly
+as configured, a non-zero `PeerConfig::send_hold_time` must exceed
+`hold_time` (RFC 9687 section 4.4), and `PeerConfig::connect_retry_secs`
+expects a positive value, where zero yields zero-second timer actions rather
+than disabling retries. The send-hold-time documentation previously credited
+that check to "config validation", which belongs to the embedding
+application, not to this crate.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
@@ -147,6 +159,15 @@ waits on a family where that message could never apply.
   is mandatory (`Vec<(Afi, Safi)>`, default empty); an OPEN missing any of
   them is rejected with Unsupported Capability, and an empty list preserves
   RFC 4760 partial-intersection behavior
+- **`PeerConfig` timer fields** — `hold_time`, `send_hold_time` (RFC 9687),
+  and `connect_retry_secs`. The FSM does not validate local timer settings:
+  it sends `hold_time` in OPEN as configured, and the embedding application
+  enforces the RFC 4271 and RFC 9687 ranges, including a non-zero
+  `send_hold_time` greater than `hold_time`
+- **`DEFAULT_HOLD_TIME`** / **`default_send_hold_time`** — the 90-second
+  default hold time and the RFC 9687 §6 send-hold-time derivation (the
+  greater of 8 minutes or twice the configured hold time), so embedders and
+  other crates share one source for both defaults
 - **`graceful_restart_preserves_family`** — rustbgpd's implementation-support
   allowlist for families whose FSM/RIB lifecycle can retain GR/LLGR-stale routes
 
