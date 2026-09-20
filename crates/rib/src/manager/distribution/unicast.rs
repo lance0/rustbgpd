@@ -42,70 +42,6 @@ fn export_deny_attribution(
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
-        clippy::fn_params_excessive_bools,
-        reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together; the bools are independent per-target mode/state flags threaded from the caller's ladder"
-    )]
-    pub(in crate::manager) fn distribute_multipath_prefix(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
-        prefix_peers: &UnicastPrefixPeers,
-        rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
-        prefix: &Prefix,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
-        send_max: u32,
-        stage_path_id_zero: bool,
-        target_is_ebgp: bool,
-        interpret_rfc1997: bool,
-        rs_control_asn: Option<u32>,
-        target_is_rr_client: bool,
-        cluster_id: Option<Ipv4Addr>,
-        sendable: Option<&Vec<(Afi, Safi)>>,
-        llgr: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&PolicyChain>,
-        orf_filter: Option<&crate::orf::OrfFilterSet>,
-        orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
-        memo: &mut super::ExportMemo,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
-        out: &mut UnicastDistributionResult,
-        force: bool,
-    ) {
-        Self::distribute_multipath_prefix_with_checkpoint(
-            ribs,
-            prefix_peers,
-            rib_out,
-            peer_is_rr_client,
-            prefix,
-            target_peer,
-            target_peer_asn,
-            target_peer_group,
-            send_max,
-            stage_path_id_zero,
-            target_is_ebgp,
-            interpret_rfc1997,
-            rs_control_asn,
-            target_is_rr_client,
-            cluster_id,
-            sendable,
-            llgr,
-            export_pol,
-            orf_filter,
-            orr,
-            memo,
-            metrics,
-            policy_stats,
-            target_peer_label,
-            out,
-            force,
-            &mut || {},
-        );
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
     pub(in crate::manager) fn distribute_group_per_client_best_prefix(
@@ -189,66 +125,6 @@ impl RibManager {
             export_pol,
             orf_filter,
             memo,
-            result,
-            force,
-            &mut || {},
-        );
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        clippy::fn_params_excessive_bools,
-        reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
-    )]
-    pub(in crate::manager) fn distribute_orr_best_prefix(
-        ribs: &HashMap<IpAddr, AdjRibIn>,
-        prefix_peers: &UnicastPrefixPeers,
-        rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
-        orr_topology: &crate::orr::OrrTopology,
-        orr_spf: &crate::orr::SpfResult,
-        prefix: &Prefix,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
-        target_is_ebgp: bool,
-        interpret_rfc1997: bool,
-        target_is_rr_client: bool,
-        cluster_id: Option<Ipv4Addr>,
-        sendable: Option<&Vec<(Afi, Safi)>>,
-        llgr: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&PolicyChain>,
-        orf_filter: Option<&crate::orf::OrfFilterSet>,
-        memo: &mut super::ExportMemo,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
-        result: &mut UnicastDistributionResult,
-        force: bool,
-    ) {
-        Self::distribute_orr_best_prefix_with_checkpoint(
-            ribs,
-            prefix_peers,
-            rib_out,
-            peer_is_rr_client,
-            orr_topology,
-            orr_spf,
-            prefix,
-            target_peer,
-            target_peer_asn,
-            target_peer_group,
-            target_is_ebgp,
-            interpret_rfc1997,
-            target_is_rr_client,
-            cluster_id,
-            sendable,
-            llgr,
-            export_pol,
-            orf_filter,
-            memo,
-            metrics,
-            policy_stats,
-            target_peer_label,
             result,
             force,
             &mut || {},
@@ -2001,7 +1877,7 @@ impl RibManager {
 
     /// ADR-0126 per-client-best GROUP staging walk for one prefix: the
     /// shared-once-per-group form of the walk
-    /// [`Self::distribute_multipath_prefix`] performs per peer with
+    /// [`Self::distribute_multipath_prefix_with_checkpoint`] performs per peer with
     /// `send_max = 1, stage_path_id_zero = true`. Candidates are
     /// collected WITHOUT the per-target split-horizon exclusion (that
     /// stays at member emit) and walked in best-path order:
@@ -2707,7 +2583,7 @@ impl RibManager {
     ///
     /// The best is NOT the Loc-RIB best: the candidate set is collected
     /// and filtered per target peer exactly like
-    /// [`Self::distribute_multipath_prefix`] (all Adj-RIB-Ins, split
+    /// [`Self::distribute_multipath_prefix_with_checkpoint`] (all Adj-RIB-Ins, split
     /// horizon, iBGP/RR suppression), then the winner is picked with
     /// [`crate::best_path::best_path_cmp_orr`] using the vantage's SPF
     /// cost to each candidate's `NEXT_HOP`. The export tail (policy,

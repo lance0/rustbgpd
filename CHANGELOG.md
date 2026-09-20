@@ -34,6 +34,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Service live RIB readiness during initial table export, including negotiated
+  Add-Path limit replay. Bounded checkpoints and an executor handoff allow
+  health replies to complete while the synchronous export still owns the RIB;
+  ordinary reads and mutations remain queued, and health deadlines are unchanged.
+
 - Skip closed session receivers in VPN, labeled-unicast, RTC, EVPN, BGP-LS,
   and FlowSpec distribution as well as unicast. Outbound prefix-limit recovery
   also discards closed receivers, including entries parked behind selection or

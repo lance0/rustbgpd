@@ -43,6 +43,21 @@ use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
+/// Let independent response tasks run while a synchronous actor retains
+/// exclusive state ownership. Current-thread embedders remain synchronous.
+fn with_executor_handoff<T>(work: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+        matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        )
+    }) {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
+}
+
 /// Release owned temporary elements while the actor still owns readiness.
 fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
     checkpoint();
@@ -1859,7 +1874,7 @@ impl RibManager {
         self
     }
 
-    /// Export replacement does not change Loc-RIB cardinality. Keep that exact
+    /// Outbound export/replacement does not change Loc-RIB cardinality. Keep that exact
     /// actor-owned invariant while readiness acknowledgements and optional
     /// frozen operator summaries interleave.
     fn with_replacement_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
