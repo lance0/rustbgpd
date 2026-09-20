@@ -15,6 +15,10 @@ Those compatibility changes do not alter runtime behavior. `0.3.1` adds no
 public item; it bounds the configured RTR client timers, as the RTR client
 entry below describes.
 
+The source tree prepares `0.3.2`, adding `AspaTable::providers` for borrowed,
+sorted merged-provider lookup and `aspa_verify::validation_context` for shared
+eBGP context construction. These additive helpers preserve verifier behavior.
+
 ## What this crate provides
 
 - **VRP table** — a synchronous, immutable `VrpTable` for RFC 6811 origin
@@ -73,7 +77,7 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.3.1", path = "../rustbgpd/crates/rpki" }
+rustbgpd-rpki = { version = "0.3.2", path = "../rustbgpd/crates/rpki" }
 rustbgpd-wire = { version = "0.21.2", path = "../rustbgpd/crates/wire" }
 ```
 
@@ -139,7 +143,8 @@ The crate-root facade exports the primary application surface:
 - `VrpManager`, `RpkiTableUpdate`, and `AspaTableUpdate`
 
 The public modules are also part of the public API. They expose the advanced
-ASPA helpers (`ProviderAuth`, `verify`, `verify_detailed`, `verify_upstream`),
+ASPA helpers (`ProviderAuth`, `verify`, `verify_detailed`, `verify_upstream`,
+`validation_context`),
 the raw RTR PDU codec (`RtrPdu`, its version constants, `RtrDecodeError`, and
 `RtrEncodeError`), the client-side `RtrError`, and the module-qualified forms
 of the facade types. Publishing `0.1.0` froze all of those public paths for

@@ -3115,6 +3115,56 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{}' localhost:50051 rustbgpd.v1.RpkiService/ListCaches
 ```
 
+### ASPA provider and path diagnostics
+
+`LookupAspa` and `VerifyAsPath` are `sensitive_read` methods outside the narrow
+v1 contract. Each call clones the current authoritative validation snapshot
+once, releases the watch borrow, and uses that immutable ASPA table throughout.
+No snapshot epoch, per-cache provenance, or freshness claim is attached: those
+metadata are not present in the merged table.
+
+```bash
+rbgp rpki aspa 64497
+rbgp --json rpki verify-path --role peer --neighbor-asn 64496 "64496 64497"
+```
+
+`LookupAspa` takes a nonzero `customer_asn`. It returns `found` plus at most
+256 sorted, deduplicated `provider_asns` from the effective merged table;
+`complete` and exact `omitted` describe truncation. A missing customer has
+`found: false`; a present empty provider set has `found: true`. AS0 providers
+remain visible. An authoritative empty table yields a complete missing result.
+
+`VerifyAsPath` takes `segments` of kind `SEQUENCE` or `SET`, an explicit nonzero
+`neighbor_asn`, and `local_role`. The role describes the receiving speaker:
+`CUSTOMER` selects downstream verification; `PROVIDER`, `PEER`, `ROUTE_SERVER`,
+`RS_CLIENT`, and explicit `NONE` select upstream verification. Only `RS_CLIENT`
+exempts the first-AS neighbor comparison. `UNSPECIFIED` and unknown roles or
+segment kinds are invalid arguments. There is no caller-controlled exemption.
+
+The request is limited to 4096 nonzero ASNs across at most 4096 nonempty
+segments. An empty segment list represents an empty path. Empty paths, any
+AS_SET, and nonexempt first-AS mismatches produce `INVALID` without an
+`invalid_hop`. The `validation` result otherwise comes directly from the shared
+ASPA verifier; `invalid_hop`, when present, is its first proven
+`NotProviderPlus` customer/provider pair. Consecutive prepends retain the
+verifier's existing compression semantics. The verdict uses the complete table,
+independently of the provider-lookup display limit.
+
+This is hypothetical eBGP IPv4/IPv6-unicast verification of an **effective
+four-octet AS_PATH**, after AS4 reconstruction. It does not evaluate a complete
+UPDATE, peer admission, other address families, or import policy. Live ingress
+may treat an AS_SET or first-AS mismatch as a withdrawal before reaching ASPA.
+An absent authoritative ASPA table returns `FAILED_PRECONDITION` from both
+methods; an authoritative empty table still runs the verifier, so structural
+invalidity is not hidden as `UNKNOWN`. Malformed or oversized requests return
+`INVALID_ARGUMENT` before table lookup. Successful diagnostic verdicts,
+including `invalid`, produce CLI exit 0; malformed CLI input exits 2 before
+connecting, and operational RPC failures exit 1.
+
+The CLI accepts whitespace-separated decimal ASNs and `{ASN ASN}` sets in a
+quoted literal, with a 65536-byte text limit. Both calls use its complete
+30-second unary response deadline. Add `--json` for machine-readable results.
+
 ---
 
 ## Proto File

@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rbgp rpki aspa CUSTOMER_ASN` and `rbgp rpki verify-path --role ROLE
+  --neighbor-asn ASN "AS_PATH"` expose bounded merged-provider lookup and
+  literal eBGP-unicast path verification through two `sensitive_read` RPCs.
+  Results distinguish unavailable ASPA data, missing attestations, and
+  authoritative empty data; verification reuses the ingress verifier and
+  reports the first proven invalid customer/provider pair when available.
+
 ## [0.71.0] — 2026-09-20
 
 ### Added

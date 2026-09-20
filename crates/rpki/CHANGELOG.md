@@ -3,6 +3,14 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.3.2 - Unreleased
+
+- Add `AspaTable::providers`, a borrowed sorted merged-provider lookup that
+  distinguishes an absent customer from a present empty set and preserves AS0.
+- Add `aspa_verify::validation_context` to derive the local-role first-AS
+  exemption consistently from an explicit neighbor ASN. Verification behavior
+  and existing context fields remain unchanged.
+
 ## 0.3.1 - 2026-09-18
 
 - `RtrClient::new` now raises a `RtrClientConfig::refresh_interval` or
