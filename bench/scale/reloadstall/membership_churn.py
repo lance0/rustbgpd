@@ -110,6 +110,8 @@ def install(run, generation):
 def cli(run, binary, *args):
     result = subprocess.run([binary, "--addr", f"unix://{run}/grpc.sock", "--json", *args],
                             check=True, capture_output=True, text=True, timeout=10)
+    # Preserve the last successful real response before interpreting optional fields.
+    (run / f"last-{args[0]}.json").write_text(result.stdout)
     return json.loads(result.stdout)
 
 
