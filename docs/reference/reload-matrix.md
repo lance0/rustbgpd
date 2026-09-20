@@ -78,6 +78,18 @@ waiting for a natural flap. The matrix calls this out per row as
 "live (effective next session)"; `rustbgpd --diff` annotates these
 fields "session reset".
 
+An ordinary rebuild closes the old session with Cease/Administrative Shutdown,
+without an [RFC 8538](https://www.rfc-editor.org/rfc/rfc8538.html#section-4)
+Hard Reset. Routes learned from that session are withdrawn
+and re-learned, with one exception: if the old session has `graceful_restart`
+enabled and the peer advertised GR with the Notification (N) bit, routes in
+the peer's advertised GR families are held stale. Other families are still
+withdrawn. Retention ends when the replacement session completes recovery or
+the GR (and, where negotiated, LLGR) timers expire. This uses the old session's
+negotiated capabilities and running configuration, including when the reload
+changes the GR settings themselves. The explicit purge reset for
+`discard_path_attributes` bypasses this retention.
+
 Static-neighbor edits whose **every** changed field is hot-applied
 (`description`, `max_prefixes`, `max_prefixes_ipv4`,
 `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
@@ -119,13 +131,15 @@ static-neighbor peer-group reassignments that require affected sessions to be
 rebuilt; the transaction executor captures prior static peer configs and
 restores them if apply or persistence fails, and after a successful persist it
 gracefully resets the live dynamic sessions accepted by an affected range so
-they re-accept under the committed config (ADR-0086). SIGHUP and targeted
-peer-group RPCs partition a group edit's changed fields by impact class: an
-all-`live` change set is applied in place to every inheriting member, static
-and dynamic, with no session reset, while a set mixing in any session-reset,
-restart-required, or unclassified field reshapes as before. Session-shaping
-peer-group edits on those paths still leave dynamic sessions on their running
-config until reconnect. Dynamic-range
+they re-accept under the committed config (ADR-0086). Targeted peer-group RPCs
+partition a group edit's changed fields by impact class: an all-`live` change
+set is applied in place to inheriting static and dynamic members without
+replacing sessions. A set mixing in a session-reset, restart-required, or
+unclassified field reshapes static members; accepted dynamic sessions keep
+their running session settings until reconnect, except for the explicit
+`discard_path_attributes` purge. SIGHUP's generation route has a narrower
+accepted-dynamic update surface, described in the peer-group section below.
+Dynamic-range
 peer-group reassignments and mixed policy/session effective-impact candidates
 remain rejected even though SIGHUP can hot-reconcile some of those shapes
 best-effort.
@@ -183,17 +197,17 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `tcp_ao` | live (ordered rotation generations) / otherwise restart-required | SIGHUP can append non-preferred successor MKTs, then on a later SIGHUP select an already-installed successor as local RNext. Selection is one-shot observed across the affected protected-session cohort; predecessor deprecation metadata commits in that same immutable generation only after verified successor traffic increases beyond each affected socket's baseline. A later SIGHUP may delete only deprecated, unselected MKTs while preserving the exact owner set, survivor order, key definitions, and selected key. Adding and selecting together, setting Current, key edits/reordering, non-deprecated/selected-key deletion, or owner changes are rejected/pinned. Runtime config transactions remain conservatively restart-required because they do not run the SIGHUP coordinator. |
 | `bfd` | reload-applied | SIGHUP adds, removes, enables, or disables the member's BFD session, including the first BFD session after startup. New sockets are prepared before peer changes; the actor acknowledges the new session set before the runtime snapshot advances. Strict mode can withhold BGP until BFD permits it. Profile definitions remain restart-required; config transactions do not apply BFD changes. |
 | `tcp_mss` | restart-required | `TCP_MAXSEG` is installed when sockets are created. Active opens use the neighbor's effective value; each bound passive listener socket carries the smallest effective value across resolved static neighbors of its own address family, and every accepted child inherits its family's clamp. A family whose resolved static neighbors set no clamp is left unclamped, so an IPv4 tunnel constraint no longer down-clamps IPv6 sessions. SIGHUP keeps the startup values. |
-| `ttl_security` | live (effective next session) | New value passed through reconcile; takes effect on next TCP connect (GTSM is a socket option). |
+| `ttl_security` | live (effective next session) | On SIGHUP the reconciler rebuilds the static session and replaces the listener selector; GTSM takes effect on the replacement TCP connection. |
 | `ttl_security_hops` | live (effective next session) | Inherited GTSM distance; a static session is rebuilt and the listener's inbound minimum is replaced by the SIGHUP coordinator. Runtime transactions remain restart-required because they cannot update the listener inventory. |
-| `families` | live (effective next session) | Address families to negotiate in OPEN. Negotiated capability set is fixed for the life of a session. |
+| `families` | live (effective next session) | Address families to negotiate in OPEN. On SIGHUP the reconciler rebuilds the session immediately to negotiate the new set. |
 | `required_families` | live (effective next session) | OPEN-time minimum negotiated family set. Static peers are rebuilt; accepted dynamic sessions keep their running config until reconnect unless a committed config transaction bounces the affected enabled range after persistence. |
-| `graceful_restart` | live (effective next session) | GR capability advertised in OPEN. Toggling on an established session has no in-session effect. |
-| `gr_restart_time` | live (effective next session) | Advertised in GR capability. |
+| `graceful_restart` | live (effective next session) | GR capability advertised in OPEN. On SIGHUP the reconciler rebuilds the session immediately; route retention follows the [session-establishment caveat](#session-establishment-caveat). |
+| `gr_restart_time` | live (effective next session) | Advertised in GR capability. On SIGHUP the reconciler rebuilds the session immediately to advertise the new value. |
 | `gr_peer_restart_time_max` | live | Local-only cap on the received GR Restart Time. Hot-applied in place; the new value governs the next GR peer-down event and never changes the OPEN capability. |
 | `gr_stale_routes_time` | live | Used by the local stale-route reaper for received GR routes. Hot-applied in place; the new value governs the next GR peer-down event. |
-| `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. |
+| `llgr_stale_time` | live (effective next session) | RFC 9494 LLGR capability stale time. On SIGHUP the reconciler rebuilds the session immediately to advertise the new value. |
 | `local_ipv6_nexthop` | live | Used on outbound advertisements; new value applied on next route emission. |
-| `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path + reflection behavior. Registered with the RIB manager at session establishment; the running session's Adj-RIB-Out is not re-evaluated in place. On SIGHUP the reconciler rebuilds the session: the running session is closed with a Cease/Administrative Shutdown NOTIFICATION (not an RFC 8538 Hard Reset), the routes learned from the peer are withdrawn and then re-learned, and the peer is re-advertised under the new flag once the replacement session establishes. The one exception to the withdrawal: when `graceful_restart` is enabled for the neighbor and the peer advertised the Graceful Restart capability with the RFC 8538 Notification bit, routes in the peer's Graceful Restart families are held stale until the replacement session's End-of-RIB or the Graceful Restart (and, where negotiated, Long-Lived Graceful Restart) timers expire; its other families are still withdrawn. Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
+| `route_reflector_client` | live (effective next session) | RFC 4456 RR-client flag affects iBGP best-path and reflection behavior. Registered with the RIB manager at session establishment; on SIGHUP the reconciler rebuilds the session and re-advertises under the new flag. Route withdrawal and GR retention follow the [session-establishment caveat](#session-establishment-caveat). Annotated "session reset: session re-establish" by `rustbgpd --diff`. |
 | `orr_vantage` | live (effective next session) | RFC 9107 ORR vantage point (the client's IGP location as a BGP-LS topology node), or `"peer_address"` for the peer's own peering address. Resolved to a concrete address during neighbor resolution and registered with the RIB manager at session establishment; on SIGHUP the reconciler rebuilds the session so the new vantage applies right away. Drives the vantage registry, cached SPF state, per-vantage best-path selection, and `rbgp orr` status. |
 | `route_server_client` | live (effective next session) | Transparent RS-client behavior on egress. Bound at session establishment; on SIGHUP the reconciler rebuilds the session so the new mode applies right away. |
 | `send_non_transitive_extended_communities` | live (effective next session) | Plain-eBGP opt-in for exporting non-transitive Extended Communities. SIGHUP rebuilds the session and the replacement export profile applies the value to the next advertisement; iBGP and route-server-client sessions remain preserving. |
@@ -202,12 +216,12 @@ that rebuild sessions still require fresh scope resolution during planning.
 | `interpret_rfc1997` | live (effective next session) | RFC 1997 `NO_EXPORT` egress enforcement (derived default: `true` unless `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
 | `rs_control_communities` | live (effective next session) | RFC 7947 §2.3.2 / RFC 8195 route-server control-community enforcement (derived default: `true` when `route_server_client` is set). Same session-re-establish bucket as `next_hop_ownership`. |
 | `role` | live (effective next session) | RFC 9234 BGP Role capability — advertised in OPEN. Compatibility check + NOTIFICATION 2/11 enforcement happen at OPEN time, so role changes require a session bounce to renegotiate. The §5 OTC procedures (driven by the local role) re-evaluate against the next received/emitted UPDATE. |
-| `strict_role` | live (effective next session) | Strict-mode toggle. Without an OPEN renegotiation, the existing session keeps whatever it negotiated. |
+| `strict_role` | live (effective next session) | Strict-mode toggle. On SIGHUP the reconciler rebuilds the session immediately and applies the new requirement to OPEN negotiation. |
 | `prefix_orf_receive` | live (effective next session) | RFC 5291/5292 Address-Prefix ORF receive capability — advertised in OPEN. Like `add_path`/`role`, a toggle is reconciled by the ReconcilePeers delete/re-add path and takes effect on the next session; an established session keeps whatever ORF it negotiated. Reported by `describe_neighbor_changes`; a transaction-model edit is a supported `[[neighbors]] modify`. |
 | `disable_ipv4_unicast` | live (effective next session) | IPv6-only peering: drops IPv4 unicast from the advertised MultiProtocol capability and suppresses the RFC 4760 §8 implicit-IPv4 fallback — both OPEN-time properties, so a toggle takes effect on the next session. Rejected at load when the effective `families` resolve to `ipv4_unicast` only. |
 | `remove_private_as` | live | Applied to every outbound advertisement; the next distribution pass picks up the new value. |
 | `discard_path_attributes` | live (purge session reset) | Effective-list changes purge-reset the primary and any inbound collision candidate before rebuilding the static peer. Ordinary GR retention is bypassed: Cease/4 is sent normally, or RFC 8538 Cease/9 wraps Administrative Reset when Notification GR is negotiated. Previously accepted routes disappear before the replacement session can relearn them. None and an explicit empty list are effective-equivalent. |
-| `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes are negotiated in OPEN. Mid-session changes are no-ops until renegotiation. |
+| `add_path` | live (effective next session) | RFC 7911 Add-Path send/receive modes are negotiated in OPEN. On SIGHUP the reconciler rebuilds the session immediately to negotiate the new modes. |
 | `log_level` | live | Per-peer tracing filter, re-applied on SIGHUP via the tracing [`reload`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/reload/index.html) handle: the reload rebuilds the full `EnvFilter` (the `RUST_LOG` base level plus every per-peer directive) and swaps it into the running subscriber, so a level edit takes effect without a restart. The global base level stays restart-required (read once from `RUST_LOG`). |
 | `import_policy` | live | Inline import statements; re-evaluated against all received routes on reconcile. When `[global] ebgp_requires_policy` is on, an edit that moves this direction between explicit policy and the ADR-0112 reserved deny is a *policy-presence transition*: every affected peer is qualified for Route Refresh before any peer is modified, and one Established peer without the capability — or one down peer whose GR/LLGR stale routes the RIB still holds — rejects the whole edit with nothing mutated. |
 | `export_policy` | live | Inline export statements; re-evaluated against the Adj-RIB-Out on next distribution. |
@@ -222,10 +236,23 @@ each reconcile. Neighbor-level policy fields override inherited peer-group
 policy fields. TCP-AO is never inherited: static neighbors and dynamic ranges
 configure their keyring directly.
 
+For the rows below, "Same as neighbor" applies to inheriting static members.
+Session-shaping changes rebuild those members on SIGHUP. Accepted dynamic
+members keep their running session settings until reconnect, except for the
+explicit `discard_path_attributes` purge described below. A committed config
+transaction can reset enabled dynamic members after persistence; see the
+[transaction overlay](#transaction-overlay).
+
+The update path also matters for accepted dynamic members' hot settings.
+Targeted peer-group RPCs apply an all-hot change in place. SIGHUP's generation
+route updates resolved policy chains, outbound prefix maxima and max-prefix
+restart scheduling, but other inherited transport settings (including inbound
+prefix limits and local GR helper timers) currently wait for reconnect.
+
 | Field | Class | Notes |
 |---|---|---|
 | `hold_time` | live (effective next session) | Same as neighbor. |
-| `min_hold_time` | live (effective next session) | Same as neighbor; static and dynamic group members are session-reshaped. |
+| `min_hold_time` | live (effective next session) | Same as neighbor; static members are rebuilt, while accepted dynamic members follow the group caveat above. |
 | `send_hold_time` | live (effective next session) | Same as neighbor. |
 | `slow_peer_threshold_pct` | live (session reset) | Same as neighbor; a group slow_peer edit is never all-hot, so static members are session-reshaped via the conservative fallback. |
 | `slow_peer_duration` | live (session reset) | Same as neighbor; same conservative-reshape fallback as the threshold. |
@@ -249,7 +276,7 @@ configure their keyring directly.
 | `required_families` | live (static session reset; dynamic next reconnect) | Non-empty neighbor value overrides; empty/absent inherits. A committed config transaction classifies the effective change as `SessionReshape` and bounces affected enabled dynamic ranges after persistence. |
 | `graceful_restart` | live (effective next session) | |
 | `gr_restart_time` | live (effective next session) | |
-| `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` group edit swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
+| `gr_peer_restart_time_max` | live | Inherited local helper cap. An all-`live` targeted peer-group RPC swaps the cap in place on static and dynamic members alike; a change set that also moves a session-reset field rebuilds static members and leaves accepted dynamic members on their running cap until reconnect. A committed config transaction follows the transaction-overlay behavior above and bounces enabled dynamic members. |
 | `gr_stale_routes_time` | live | |
 | `llgr_stale_time` | live (effective next session) | |
 | `local_ipv6_nexthop` | live | |

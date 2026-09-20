@@ -199,7 +199,10 @@ tagging announcements for the *target* member's ASN — the same convention the
 major IXPs document. `RS` below is the route server's ASN, `PEER` the target
 member's ASN. The standard (16-bit) forms exist only when both ASNs fit 16 bits;
 the RFC 8195 large-community forms work for 4-byte ASNs. Extended-community
-control forms are deliberately not implemented (draft-ietf-grow-ixp-ext-comms).
+control forms are deliberately not implemented. The related
+[draft-ietf-grow-ixp-ext-comms-03](https://datatracker.ietf.org/doc/html/draft-ietf-grow-ixp-ext-comms-03)
+expired on 2026-06-12 without RFC publication. It provides background for this
+implementation choice, not an RFC requirement.
 
 | Member intent | Standard | Large |
 |---|---|---|

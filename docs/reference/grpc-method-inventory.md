@@ -181,7 +181,7 @@ shape itself does not raise the tier.
 | `DeleteFibTable` | `mutating` | Remove a `[[fib_tables]]` entry by name; withdraws its kernel rows. |
 | `ListFibTables` | `sensitive_read` | Configured FIB table set + runtime availability. |
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
-| `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
+| `ListFlowSpecRoutes` | `sensitive_read` | RFC 8955 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 | `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
 | `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
@@ -223,7 +223,7 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `AddPath` | `operator_only` | Originates a unicast route from the daemon. Can pollute the global table; can inject community-tagged routes (BLACKHOLE, GRACEFUL_SHUTDOWN, custom). |
 | `DeletePath` | `operator_only` | Withdraws an originated route. Lower-impact than Add, but classifying the inverse separately gives a misleading defense surface — treat as the same risk class. |
-| `AddFlowSpec` | `operator_only` | Installs RFC 5575 traffic-filter rules. Dataplane impact at line rate; one rule can drop or rate-limit arbitrary traffic. |
+| `AddFlowSpec` | `operator_only` | Installs RFC 8955 traffic-filter rules. Dataplane impact at line rate; one rule can drop or rate-limit arbitrary traffic. |
 | `DeleteFlowSpec` | `operator_only` | Same risk class as Add. |
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |
