@@ -305,6 +305,12 @@ import sys
 
 root, tmp = map(Path, sys.argv[1:])
 source = (root / "bench/scale/matrix/run-matrix.sh").read_text()
+setup = source.split('    rm -rf "$run"\n', 1)[1].split('\n    local daemon_pid', 1)[0]
+for cell, mode in (("rustbgpd", 0o700), ("bird", 0o775)):
+    run, artifacts = tmp / (cell + "-run"), tmp / (cell + "-artifacts")
+    subprocess.run(["bash", "-c", 'umask 002\ncell=$1\nrun=$2\ncdir=$3\n' + setup,
+                    "setup", cell, str(run), str(artifacts)], check=True)
+    assert run.stat().st_mode & 0o777 == mode, (cell, oct(run.stat().st_mode))
 probes = source.split("probe_health_loop() {", 1)[1].split("\n# run_cell ", 1)[0]
 cleanup = source.split("    # Collect artifacts, then teardown.\n", 1)[1].split(
     "\n}\n\nfor cell ", 1

@@ -360,6 +360,11 @@ run_cell() {
     local run="/tmp/ixp-$cell"
     rm -rf "$run"
     mkdir -p "$cdir" "$run"
+    # Native runtime markers and the gRPC UDS require a private parent,
+    # independent of the caller's umask. Preserve container mount permissions.
+    if [ "$cell" = rustbgpd ]; then
+        chmod 700 "$run" || return 1
+    fi
 
     local daemon_pid="" container="" reload_cmd="" pid_arg="" generator image_ref image_id workload_hash
     local live a b
