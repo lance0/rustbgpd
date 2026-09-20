@@ -135,13 +135,13 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             )
 
     def test_workspace_release_change_requires_explicit_target_review(self):
-        check.validate_workspace_release("0.70.2")
+        check.validate_workspace_release("0.71.0")
         with self.assertRaisesRegex(
             ValueError,
             "select the target changelog section explicitly and review whether the "
             "released metric baseline must roll",
         ):
-            check.validate_workspace_release("0.70.3")
+            check.validate_workspace_release("0.71.1")
 
     def test_exceptions_are_reasoned_narrow_and_nonredundant(self):
         with self.assertRaisesRegex(ValueError, "specific reasons"):

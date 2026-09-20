@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.71.0] — 2026-09-20
+
 ### Added
 
 - Per-member BFD attachments now apply on SIGHUP: add or remove a neighbor,
@@ -21,16 +23,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restart-required, and BFD changes remain unsupported in config transactions.
   Apply attachment edits separately from TCP-AO rotation or edits to existing
   listener MD5/GTSM settings; mixed candidates are rejected before any effect.
-  In `--diff --json`, `restart_required.bfd_changed` now describes profile
-  definitions only; attachment changes appear in the neighbor/peer-group diff.
   Peer-group RPC edits preserve file-defined BFD settings and reject effective
   BFD membership changes with instructions to use SIGHUP.
-  Upgrade note: a BFD attachment previously ignored by SIGHUP now takes effect;
-  review pending neighbor and peer-group BFD edits before reloading. New
-  profile definitions still require a restart before members can use them.
 - `rbgp -j --json-version 1` emits a versioned `rbgp-json` document for
   supported inspection and management commands, preserving the existing result
   under `data`. Ordinary `-j` output and existing streaming formats are unchanged.
+
+### Changed
+
+- This release publishes documentation-only patch releases of two
+  independently versioned crates: `rustbgpd-wire` 0.21.1 → 0.21.2, whose
+  RFC 9003 shutdown-communication encoder now documents the deliberate
+  128-byte sender cap alongside the 255-byte receive limit, and
+  `rustbgpd-fsm` 0.8.1 → 0.8.2, whose `PeerConfig` timer fields now document
+  that the FSM does not validate local timer settings and that the embedding
+  application must enforce the RFC 4271 and RFC 9687 ranges. No public item
+  was added, removed, or changed in either crate, and no encode, decode, or
+  state-machine behavior changed, so each stays on its current compatibility
+  line. `rustbgpd-fsm` 0.8.2 requires wire 0.21.2 or later on the 0.21 line.
+  `rustbgpd-rpki` 0.3.1 is unchanged this cycle and is not republished.
 
 ### Fixed
 
@@ -67,6 +78,39 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   explicit teardown paths retain immediate collection. The existing
   `bgp_rib_actor_work_duration_seconds` histogram adds `work_unit="attribute_gc"`
   for deadline-triggered sweeps outside ingest chunks.
+
+### Upgrade notes
+
+- A BFD attachment that SIGHUP previously ignored now takes effect. Review
+  pending neighbor and peer-group BFD edits before reloading, because a
+  reload that was previously a no-op for BFD now establishes or tears down
+  BFD sessions. New profile definitions still require a restart before
+  members can use them, and BFD changes remain unsupported in config
+  transactions.
+- In `--diff --json`, `restart_required.bfd_changed` now describes profile
+  definitions only; an attachment change appears in the neighbor and
+  peer-group diff instead. A consumer that gates a restart on that field sees
+  a BFD attachment edit as an ordinary reload from this release on.
+- An all-hot peer-group change applied by SIGHUP now updates the inherited
+  runtime knobs of already accepted dynamic sessions, including inbound
+  prefix limits and graceful-restart retention caps. A lowered inbound prefix
+  limit therefore applies to a live dynamic session at reload rather than at
+  its next reconnect. Mixed session-shaping group edits still defer those
+  dynamic settings until reconnect.
+- Unicast attribute-intern collection is now deferred until at most 4,096
+  displaced routes, plus the triggering chunk, or a one-second actor
+  deadline, so the interned attribute table can read larger immediately after
+  a large replacement than it did before. A final source withdrawal, explicit
+  teardown, and small tables still collect immediately.
+  `bgp_rib_actor_work_duration_seconds` gains the `work_unit="attribute_gc"`
+  label series for deadline-triggered sweeps outside ingest chunks; a
+  dashboard that enumerates `work_unit` values sees one more.
+- Upgrading directly from 0.70.0 also picks up the `bgp_event_outbox_storage_failed`
+  gauge added in 0.70.2. It reads `1` once the event-history storage thread has
+  stopped while the daemon runs, which is when the outbox refuses producer
+  events and durable cursor subscriptions and `bgp_event_outbox_degraded` is
+  also `1`. It distinguishes that runtime failure from shutdown-time drops and
+  does not auto-clear; restart the daemon to recover.
 
 ## [0.70.2] — 2026-09-18
 

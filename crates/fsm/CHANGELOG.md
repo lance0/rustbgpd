@@ -3,6 +3,19 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.8.2 - 2026-09-20
+
+- Documented that the FSM does not validate local timer settings, so the
+  embedding application owns their ranges. `PeerConfig::hold_time` is sent in
+  OPEN exactly as configured, including a value RFC 4271 section 4.2 does not
+  permit. A non-zero `PeerConfig::send_hold_time` must exceed `hold_time`
+  (RFC 9687 section 4.4); the previous wording attributed that check to
+  "config validation", which belongs to the embedding application rather than
+  to this crate. `PeerConfig::connect_retry_secs` expects a positive value and
+  defaults to 120 seconds (RFC 4271 section 10), normal exponential backoff is
+  capped at 300 seconds, and zero yields zero-second timer actions rather than
+  disabling retries. No public item or runtime behavior changed.
+
 ## 0.8.1 - 2026-09-18
 
 - `validate_open` now limits `NegotiatedSession::negotiated_orf_recv` to the
