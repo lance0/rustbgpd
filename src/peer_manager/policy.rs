@@ -5014,7 +5014,7 @@ impl PeerManager {
     /// member's next config paired with its captured live prior, in apply
     /// order. Takes `&self` so it cannot touch a peer — a resolution
     /// failure rejects the whole edit with zero peers mutated.
-    fn peer_group_hot_cohort(
+    pub(super) fn peer_group_hot_cohort(
         &self,
         next_config: &Config,
         group: &str,
