@@ -1,0 +1,31 @@
+{
+  "collected_at": "2026-09-20T19:53:15.380142+00:00",
+  "candidate_daemon": {
+    "source_commit": "7f1f8d864c00078878800825c6f8ad1273614051",
+    "source_status": "",
+    "toolchain": [
+      "rustc 1.98.1 (48a229cea 2026-09-01)",
+      "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    ],
+    "command": "CARGO_BUILD_JOBS=8 CARGO_TARGET_DIR=<isolated-target> bash scripts/build-lock.sh cargo build --locked --release --bin rustbgpd",
+    "binary": "rustbgpd",
+    "binary_sha256": "fd37bc7234d71f02d8e9a867e46b4514d71b08ea1502b431b7685b9f7e450d26",
+    "build_exit": 0,
+    "private_instrumentation": false
+  },
+  "frozen_driver_and_checker_source": "e9bda76907904c07403217f051261a36374a1774",
+  "cli_and_rust_harness_build_commit": "d3478c32dd2d320e0c4130f63883ed803f0efa70",
+  "cli_sha256": "f50c90fac7f45c05a568655bdc48ff6a4b44da3174d0f33a10836691997bfd39",
+  "rust_harness_sha256": "8f5c0b1a6d82b75b572e57f9c036a9969184ef7fa1536c73363de05dc54fa3e0",
+  "original_daemon_sha256": "4b063af47400c194e72fe95a886cf43b3ac79723045347272be5eda33b6a819d",
+  "original_helper_sha256": "ca230fb7ecbf3cea6781645687c328cbd7c1d0b2688844c9a0d8dc78208d2126",
+  "reviewed_helper": {
+    "source_commit": "23bd7927347eedd81d4fa513d93bb3b91656e2bb",
+    "sha256": "8921bd8e51e87ece8952cf171258ac91c9af9861085bd262acdba678a65a191c",
+    "path": "bench/scale/reloadstall/membership_churn.py"
+  },
+  "native_provenance_source_fields": "The native driver records frozen e9 as its git source and dirty=true solely because the reviewed helper is substituted. Driver/checker remain frozen; reviewed helper and candidate daemon source/build are bound separately above.",
+  "runner_sha256": "ccba97143912403979be563f16f311457463799ea9fcc0a817a998c8784ad872",
+  "frozen_inputs_sha256": "2e5211665b6a65c8bea2820a482ce602d782f3655055bfe446d9f7c62f42ca7f",
+  "thresholds": "Unchanged membership-1 gates, including zero health failures and rejection of ConnectionReset warnings."
+}

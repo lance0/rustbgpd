@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Focused membership evidence regressions; no daemon or sockets required."""
+"""Focused membership evidence and loopback TCP lifecycle regressions; no daemon."""
+import asyncio
 import copy
 import gzip
 import json
@@ -116,6 +117,210 @@ class MembershipTests(unittest.TestCase):
             row["stale"] = True
             with self.assertRaises(AssertionError):
                 cell.snapshot(Path("/unused"), "rbgp", 1790, 1)
+
+
+class ReceiverLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.cease_seen = asyncio.Event()
+        self.fin_seen = asyncio.Event()
+        self.release_eof = asyncio.Event()
+        self.config_remove = asyncio.Event()
+        self.removal_mode = False
+        self.server_tasks = []
+        self.reader_tasks = []
+        self.receivers = []
+        # Pending UPDATEs precede the final notification; receipt of Cease
+        # alone must not complete cleanup before actual TCP EOF.
+        attributes = (b"\x40\x01\x01\0"  # ORIGIN IGP
+                      + b"\x40\x02\x06\x02\x01" + struct.pack("!I", 65000)
+                      + b"\x40\x03\x04\xc0\0\x02\x01")
+        update = b"\0\0" + struct.pack("!H", len(attributes)) + attributes + b"\x18\x14\0\0"
+        self.terminal_data = cell.frame(2, update) + cell.frame(3, b"\x06\x02")
+        self.server = await asyncio.start_server(self.accept, "127.0.0.1", 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        self.addAsyncCleanup(self.close_connections)
+
+    def accept(self, reader, writer):
+        self.server_tasks.append(asyncio.create_task(self.serve(reader, writer)))
+
+    async def message(self, reader):
+        header = await reader.readexactly(19)
+        self.assertEqual(header[:16], b"\xff" * 16)
+        length, kind = struct.unpack("!HB", header[16:])
+        return kind, await reader.readexactly(length - 19)
+
+    async def serve(self, reader, writer):
+        try:
+            kind, body = await self.message(reader)
+            self.assertEqual(kind, 1)
+            writer.write(cell.frame(1, body) + cell.frame(4))
+            await writer.drain()
+            if self.removal_mode:
+                await self.config_remove.wait()
+                writer.write(cell.frame(3, b"\x06\x02"))
+                await writer.drain()
+                # Keep the daemon write half open: config removal retains its
+                # notification-driven close rather than requiring terminal EOF.
+                await self.release_eof.wait()
+                return
+            while True:
+                kind, body = await self.message(reader)
+                if kind == 3:
+                    self.assertEqual(body, b"\x06\x02")
+                    self.cease_seen.set()
+                    break
+                self.assertEqual((kind, body), (4, b""))
+            self.assertEqual(await reader.read(), b"", "message sent after final Cease")
+            self.fin_seen.set()
+            await asyncio.sleep(0.03)
+            writer.write(self.terminal_data)
+            await writer.drain()
+            await self.release_eof.wait()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def start_receiver(self, keepalive=None):
+        receiver = cell.Receiver(20 + len(self.receivers), False, self.port, 1)
+
+        async def frequent_keepalives():
+            while True:
+                await asyncio.sleep(0.005)
+                receiver.writer.write(cell.frame(4))
+                await receiver.writer.drain()
+
+        receiver.keepalive = keepalive or frequent_keepalives
+        self.receivers.append(receiver)
+        self.reader_tasks.append(asyncio.create_task(receiver.run()))
+        await cell.wait_until(lambda: receiver.established, 1, "test establishment")
+        return receiver
+
+    async def close_connections(self):
+        self.release_eof.set()
+        for task in self.reader_tasks + self.server_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.reader_tasks, *self.server_tasks, return_exceptions=True)
+        self.server.close()
+        await self.server.wait_closed()
+
+    def assert_reaped(self):
+        self.assertTrue(all(task.done() for task in self.reader_tasks))
+        for receiver in self.receivers:
+            self.assertTrue(receiver.closed)
+            self.assertTrue(receiver.keepalive_task.done())
+            self.assertTrue(receiver.writer.is_closing())
+
+    async def test_terminal_drain_consumes_delayed_updates_and_waits_for_eof(self):
+        receiver = await self.start_receiver()
+        finish = asyncio.create_task(cell.finish_receivers(self.receivers, self.reader_tasks, 1))
+        try:
+            await asyncio.wait_for(self.fin_seen.wait(), 0.5)
+            self.assertTrue(receiver.keepalive_task.done())
+            await cell.wait_until(lambda: receiver.inventories[4] == {0}, 0.5,
+                                  "delayed terminal UPDATE")
+            self.assertFalse(finish.done(), "terminal reader completed before TCP EOF")
+            self.release_eof.set()
+            await finish
+            await asyncio.gather(*self.server_tasks)
+            self.assert_reaped()
+        finally:
+            finish.cancel()
+            await asyncio.gather(finish, return_exceptions=True)
+
+    async def test_terminal_no_eof_times_out_and_reaps_the_whole_fleet(self):
+        self.terminal_data = b""
+        await self.start_receiver()
+        await self.start_receiver()
+        started = asyncio.get_running_loop().time()
+        with self.assertRaises(TimeoutError):
+            await cell.finish_receivers(self.receivers, self.reader_tasks, 0.15)
+        self.assertLess(asyncio.get_running_loop().time() - started, 1)
+        self.assertTrue(self.fin_seen.is_set())
+        self.assert_reaped()
+        self.release_eof.set()
+        await asyncio.gather(*self.server_tasks)
+
+    async def test_fleet_timeout_during_keepalive_join_cannot_start_final_write(self):
+        joining = asyncio.Event()
+        drain_started = asyncio.Event()
+        release_drain = asyncio.Event()
+
+        async def delayed_keepalive_stop():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                joining.set()
+                await asyncio.Event().wait()
+
+        async def blocked_drain():
+            drain_started.set()
+            await release_drain.wait()
+
+        receiver = await self.start_receiver(delayed_keepalive_stop)
+        # Let even a cancellation-swallowing implementation eventually leave
+        # its blocked write; assert the forbidden write rather than hanging CI.
+        loop = asyncio.get_running_loop()
+        release = loop.call_later(0.15, release_drain.set)
+        eof = loop.call_later(0.15, self.release_eof.set)
+        timed_out = False
+        try:
+            with patch.object(receiver.writer, "drain", blocked_drain):
+                try:
+                    await asyncio.wait_for(
+                        cell.finish_receivers(self.receivers, self.reader_tasks, 0.03), 1)
+                except TimeoutError:
+                    timed_out = True
+            self.assertTrue(joining.is_set())
+            self.assertFalse(drain_started.is_set(), "final write started after fleet deadline")
+            self.assertTrue(timed_out)
+            self.assert_reaped()
+        finally:
+            release.cancel()
+            eof.cancel()
+
+    async def test_terminal_malformed_and_truncated_frames_fail(self):
+        cases = [
+            (b"\0" * 19, "invalid BGP header"),
+            (cell.frame(4)[:10], "truncated BGP header"),
+            (cell.frame(2, b"\0" * 4)[:-1], "IncompleteReadError"),
+            (cell.frame(2, b"\0"), "short UPDATE"),
+            (cell.frame(3, b"\x06\x02") + cell.frame(4),
+             "data after terminal NOTIFICATION"),
+        ]
+        for data, expected in cases:
+            with self.subTest(expected=expected):
+                self.terminal_data = data
+                self.release_eof.set()
+                receiver = await self.start_receiver()
+                with self.assertRaises(ExceptionGroup) as caught:
+                    await cell.finish_receivers([receiver], [self.reader_tasks[-1]], 1)
+                self.assertIn(expected, repr(caught.exception))
+                self.assert_reaped()
+        await asyncio.gather(*self.server_tasks)
+
+    async def test_terminal_write_failure_propagates_and_reaps_reader(self):
+        receiver = await self.start_receiver()
+
+        async def failed_write():
+            raise ConnectionError("terminal drain failed")
+
+        with patch.object(receiver.writer, "drain", failed_write):
+            with self.assertRaises(ExceptionGroup) as caught:
+                await cell.finish_receivers(self.receivers, self.reader_tasks, 1)
+        self.assertIn("terminal drain failed", repr(caught.exception))
+        self.assert_reaped()
+
+    async def test_config_removal_still_completes_on_expected_notification(self):
+        self.removal_mode = True
+        receiver = await self.start_receiver()
+        receiver.removing = True
+        self.config_remove.set()
+        await asyncio.wait_for(self.reader_tasks[0], 0.5)
+        self.assertFalse(self.release_eof.is_set())
+        self.assert_reaped()
+        self.release_eof.set()
+        await asyncio.gather(*self.server_tasks)
 
 
 class GateTests(unittest.TestCase):

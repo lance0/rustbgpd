@@ -276,6 +276,8 @@ class Receiver:
         self.inventories = {4: set(), 6: set()}
         self.closed = False
         self.removing = False
+        self.finishing = False
+        self.keepalive_task = None
         self.established = False
         self.writer = None
         self.marker = 2000 if generation % 2 else 1000
@@ -299,7 +301,7 @@ class Receiver:
             self.writer.write(frame(1, body))
             await self.writer.drain()
             async with asyncio.TaskGroup() as group:
-                keepalive = group.create_task(self.keepalive())
+                self.keepalive_task = group.create_task(self.keepalive())
                 while True:
                     try:
                         header = await reader.readexactly(19)
@@ -322,10 +324,12 @@ class Receiver:
                         apply_update(body, self.inventories, self.total, None if self.removing else self.marker)
                     elif kind == 3:
                         assert self.removing and body[:2] == b"\x06\x02", f"unexpected notification: {body.hex()}"
+                        if self.finishing and await reader.read(1):
+                            raise ValueError("data after terminal NOTIFICATION")
                         break
                     else:
                         raise ValueError(f"unexpected BGP message {kind}")
-                keepalive.cancel()
+                self.keepalive_task.cancel()
         finally:
             self.closed = True
             if self.writer:
@@ -333,6 +337,19 @@ class Receiver:
                 await self.writer.wait_closed()
             else:
                 sock.close()
+
+    async def finish(self):
+        """Send the final message, then leave the strict reader alive through EOF."""
+        self.removing = self.finishing = True
+        self.keepalive_task.cancel()
+        try:
+            await self.keepalive_task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+        self.writer.write(frame(3, b"\x06\x02"))
+        await self.writer.drain()
+        self.writer.write_eof()
 
     async def keepalive(self):
         while True:
@@ -342,6 +359,20 @@ class Receiver:
 
     def complete(self):
         return self.established and not self.closed and all(len(v) == self.total for v in self.inventories.values())
+
+
+async def finish_receivers(receivers, reader_tasks, timeout=15):
+    """One fleet deadline covers final writes and EOF; failures still reap owners."""
+    try:
+        async with asyncio.timeout(timeout):
+            async with asyncio.TaskGroup() as writers:
+                for receiver in receivers:
+                    writers.create_task(receiver.finish())
+            await asyncio.gather(*reader_tasks)
+    finally:
+        for task in reader_tasks:
+            task.cancel()
+        await asyncio.gather(*reader_tasks, return_exceptions=True)
 
 
 async def wait_until(predicate, timeout, detail):
@@ -379,8 +410,7 @@ async def watch(run, binary, port):
                 await wait_until(lambda receivers=receivers: all(r.closed for r in receivers), 10, "removed member close")
             started = time.monotonic()
             receivers = [Receiver(peers + 2 * generation + offset, offset == 0, port, total, generation) for offset in range(2)]
-            for receiver in receivers:
-                tasks.create_task(receiver.run())
+            reader_tasks = [tasks.create_task(receiver.run()) for receiver in receivers]
             budget = max(0, staged + JOIN_SECONDS - time.monotonic()) if generation else 600
             await wait_until(lambda receivers=receivers: all(r.complete() for r in receivers), budget, "joining inventories")
             joined = time.monotonic()
@@ -413,11 +443,7 @@ async def watch(run, binary, port):
         await wait_until(lambda: (finish / "ready").exists(), 120, "harness final evidence")
         (finish / "ack").write_text("membership gates passed\n")
         await wait_until(lambda: (run / "membership-stop").exists(), 120, "driver cleanup")
-        for receiver in receivers:
-            receiver.removing = True
-            receiver.writer.write(frame(3, b"\x06\x02"))
-            await receiver.writer.drain()
-            receiver.writer.close()
+        await finish_receivers(receivers, reader_tasks)
 
 
 def main():
