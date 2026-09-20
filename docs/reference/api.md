@@ -905,7 +905,7 @@ acknowledgement, and restores both live peers and the snapshot on a publication
 failure. Live dynamic sessions accepted by an affected
 `[[dynamic_neighbors]]` range cannot be delete/re-added (they exist only
 because the remote dialed in), so after a successful persist the executor
-gracefully resets them with a Cease NOTIFICATION carrying an RFC 8203 shutdown
+gracefully resets them with a Cease NOTIFICATION carrying an RFC 9003 shutdown
 communication; each remote's reconnect is re-accepted under the committed
 config, and the `dynamic_neighbor_limit` slot accounting stays owned by the
 normal session-idle reaping. The dynamic reset is post-persist and best-effort
@@ -1078,8 +1078,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 `ResetNeighbor` is the one-shot session bounce (`bgpctl neighbor <peer>
 clear`, `clear bgp <peer>`): the session sends Cease / Administrative Reset
 (RFC 4486 subcode 4) carrying `reason` as an RFC 9003 shutdown communication
-(truncated to 128 bytes at a UTF-8 boundary, like `DisableNeighbor`) and closes
-the TCP connection. The peer's enable/disable state is untouched, so no
+(deliberately capped at 128 bytes for interoperability, truncating at a UTF-8
+boundary like `DisableNeighbor`) and closes the TCP connection. The peer's
+enable/disable state is untouched, so no
 `EnableNeighbor` follow-up is needed. A static active-open peer reconnects on
 its normal schedule; if it is already Idle, reset clears any NOTIFICATION
 backoff and starts the connection immediately. An accepted dynamic peer follows
@@ -2392,7 +2393,7 @@ Unified event types:
 | `BGP_EVENT_TYPE_PEER_REMOVED` | Peer left the authoritative managed set after session retirement; payload carries no FSM state or role and preserves the exact scoped peer label |
 | `BGP_EVENT_TYPE_PEER_ENABLED` | Operator enabled a configured peer |
 | `BGP_EVENT_TYPE_PEER_DISABLED` | Operator disabled a configured peer |
-| `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 8203 shutdown reason |
+| `BGP_EVENT_TYPE_NOTIFICATION_SENT` | rustbgpd sent a BGP NOTIFICATION; payload carries direction, code, subcode, description, session role, and optional RFC 9003 shutdown reason |
 | `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED` | rustbgpd received a BGP NOTIFICATION from the peer; payload carries the same metadata |
 | `BGP_EVENT_TYPE_BFD_SESSION_UP` | BFD session transitioned to Up |
 | `BGP_EVENT_TYPE_BFD_SESSION_DOWN` | BFD session transitioned to Down |

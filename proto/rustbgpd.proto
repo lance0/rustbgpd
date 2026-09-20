@@ -1048,8 +1048,9 @@ message ReplayOutboundResponse {
 
 message ResetNeighborRequest {
   string address = 1;
-  // Optional RFC 9003 shutdown communication; truncated to 128 bytes at a
-  // UTF-8 boundary exactly like DisableNeighborRequest.reason.
+  // Optional RFC 9003 shutdown communication. The sender deliberately caps it
+  // at 128 bytes for interoperability (RFC 9003 section 3), truncating at a
+  // UTF-8 boundary like DisableNeighborRequest.reason.
   string reason = 2;
   string interface = 3;
 }
@@ -3001,7 +3002,7 @@ message NotificationEvent {
   // `primary` for the managed peer session, `inbound_candidate` for a
   // collision-resolution candidate.
   string session_role = 8;
-  // RFC 8203 shutdown communication reason, when present.
+  // RFC 9003 shutdown communication reason, when present.
   string shutdown_reason = 9;
   // Stable operator-facing reason/summary string for this event.
   string reason = 10;
