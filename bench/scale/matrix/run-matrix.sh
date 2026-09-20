@@ -35,6 +35,8 @@
 #                RELOADSTALL_DUALSTACK=1; filtering: GEN_FILTER_COUNT=K +
 #                RELOADSTALL_FILTER_COUNT=K). RELOADSTALL_IPV4_PREFIXES selects
 #                an exact IPv4 inventory in dual-stack mode; IPv6 gets the rest.
+#              RELOADSTALL_MEMBERSHIP_CHURN=1 adds two rotating receive-only
+#                members to the rustbgpd dual-stack cell (see reloadstall/README.md).
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -61,6 +63,21 @@ PROBE_PREFIXES="${PROBE_PREFIXES:-}"
 ART="${ARTIFACTS_DIR:-$REPO/bench/scale/matrix/artifacts}"
 COMPETITOR_GENERATION="${COMPETITOR_GENERATION:-historical}"
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB
+MEMBERSHIP_CHURN="${RELOADSTALL_MEMBERSHIP_CHURN:-0}"
+case "$MEMBERSHIP_CHURN" in
+    0 | 1) ;;
+    *) echo 'RELOADSTALL_MEMBERSHIP_CHURN must be 0 or 1' >&2; exit 2 ;;
+esac
+if [ "$MEMBERSHIP_CHURN" = 1 ]; then
+    RSS_LIMIT_KIB=$((16 * 1024 * 1024))
+    if [ "${GEN_DUALSTACK:-0}" != 1 ] || [ "${RELOADSTALL_DUALSTACK:-0}" != 1 ] ||
+       [ "${RELOADSTALL_GTSM:-0}" != 1 ] || [ -z "$CHANGED_PEERS" ] ||
+       [ -z "$PROBE_PREFIXES" ] || [ -n "$FLAPSTORM" ] ||
+       [ -n "${RELOADSTALL_STAGE_CMD:-}" ] || [ -n "${RELOADSTALL_EVIDENCE_DIR:-}" ]; then
+        echo 'membership cell requires dual stack, GTSM, changed peers, probes, and no flapstorm' >&2
+        exit 2
+    fi
+fi
 
 competitor_image_ref() {
     local cell=$1
@@ -183,6 +200,10 @@ fi
 
 CELLS=("$@")
 [ ${#CELLS[@]} -eq 0 ] && CELLS=(rustbgpd bird openbgpd)
+if [ "$MEMBERSHIP_CHURN" = 1 ] && { [ ${#CELLS[@]} -ne 1 ] || [ "${CELLS[0]}" != rustbgpd ]; }; then
+    echo 'membership churn requires exactly the rustbgpd cell' >&2
+    exit 2
+fi
 for cell in "${CELLS[@]}"; do
     case $cell in rustbgpd | bird | openbgpd) ;; *)
         echo "unknown cell: $cell (want rustbgpd|bird|openbgpd)" >&2; exit 2 ;;
@@ -203,6 +224,9 @@ mkdir -p "$ART"
 COMMON_SOURCES=(bench/scale/provenance.sh bench/scale/matrix/run-matrix.sh
     bench/scale/matrix/verify-provenance.py bench/scale/matrix/rss-sampler.sh
     bench/scale/host-quiet.sh tests/soak/host-lock.sh)
+if [ "$MEMBERSHIP_CHURN" = 1 ]; then
+    COMMON_SOURCES+=(bench/scale/reloadstall/membership_churn.py)
+fi
 declare -A SOURCE_HASHES
 snapshot_source() {
     local relative=$1
@@ -339,6 +363,11 @@ run_cell() {
 
     local daemon_pid="" container="" reload_cmd="" pid_arg="" generator image_ref image_id workload_hash
     local live a b
+    local membership_pid=""
+    if [ "$MEMBERSHIP_CHURN" = 1 ] && [ "$cell" != rustbgpd ]; then
+        echo 'membership churn applies only to the rustbgpd cell' >&2
+        return 1
+    fi
     case $cell in
     rustbgpd)
         [ -x "$REPO/target/release/rustbgpd" ] || {
@@ -355,6 +384,9 @@ run_cell() {
         fi
         # shellcheck disable=SC2086 # CHANGED_PEERS is an optional single positional
         python3 "$RSTALL/gen-scenario.py" "$N_PEERS" "$run" "$PORT" $CHANGED_PEERS || return 1
+        if [ "$MEMBERSHIP_CHURN" = 1 ]; then
+            python3 "$RSTALL/membership_churn.py" prepare "$run" "$N_PEERS" "$TOTAL" "$RELOADS" || return 1
+        fi
         recheck_cell_provenance "$cell" || return 1
         "$REPO/target/release/rustbgpd" "$run/config.toml" \
             >"$cdir/daemon.log" 2>&1 &
@@ -435,6 +467,13 @@ run_cell() {
 
     # Harness in the background so the RSS guard can abort the cell.
     local settlement_env=()
+    if [ "$MEMBERSHIP_CHURN" = 1 ]; then
+        python3 "$RSTALL/membership_churn.py" watch "$run" "$RBGP" "$PORT" >"$cdir/membership.log" 2>&1 &
+        membership_pid=$!
+        local stage_command
+        printf -v stage_command 'python3 %q stage %q %q %q' "$RSTALL/membership_churn.py" "$run" "$RBGP" "$PORT"
+        settlement_env+=("RELOADSTALL_STAGE_CMD=$stage_command" "RELOADSTALL_EVIDENCE_DIR=$run/membership-finish")
+    fi
     if [ "$cell" = rustbgpd ] && [ -z "$FLAPSTORM" ] && [ "$RELOADS" -gt 0 ]; then
         settlement_env+=(RELOADSTALL_RELOAD_METRICS_ADDR=127.0.0.1:9179)
     fi
@@ -448,7 +487,7 @@ run_cell() {
         '' | *[!0-9]*) ;;
         *)
             if [ "$last_kib" -gt "$RSS_LIMIT_KIB" ]; then
-                echo "cell $cell: daemon RSS ${last_kib} KiB > 100 GiB, aborting cell" >&2
+                echo "cell $cell: daemon RSS ${last_kib} KiB > ${RSS_LIMIT_KIB} KiB, aborting cell" >&2
                 kill "$hpid" 2>/dev/null
                 rc=99
             fi
@@ -463,6 +502,13 @@ run_cell() {
 
     # Collect artifacts, then teardown.
     local cleanup_rc=0 child_rc p
+    if [ -n "$membership_pid" ]; then
+        touch "$run/membership-stop"
+        if [ "$hrc" -ne 0 ]; then
+            kill "$membership_pid" 2>/dev/null || true
+        fi
+        wait "$membership_pid" || cleanup_rc=1
+    fi
     kill "$sampler_pid" 2>/dev/null || true
     for p in "${probe_pids[@]}"; do
         kill "$p" 2>/dev/null || true

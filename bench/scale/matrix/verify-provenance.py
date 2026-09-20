@@ -63,7 +63,17 @@ def verify(path, expected_cell, competitor_generation="historical"):
     sources = data["sources"]
     if set(sources) != {"common", "generator", "reloadstall"}:
         fail("wrong source fields")
-    hashed_map(sources["common"], COMMON)
+    if not isinstance(data["workload"], dict):
+        fail("malformed workload identity")
+    common = COMMON.copy()
+    inputs = data["workload"].get("inputs", {})
+    if not isinstance(inputs, dict):
+        fail("malformed workload inputs")
+    if inputs.get("RELOADSTALL_MEMBERSHIP_CHURN") == "1":
+        if cell != "rustbgpd":
+            fail("membership churn only supports rustbgpd")
+        common.add("bench/scale/reloadstall/membership_churn.py")
+    hashed_map(sources["common"], common)
     hashed_map(sources["generator"], {GENERATORS[cell]})
     if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] != "bench/scale/target/release/reloadstall" or not HASH.fullmatch(sources["reloadstall"]["sha256"]):
         fail("malformed reloadstall identity")

@@ -55,6 +55,12 @@ v=value(); v["workload"]["inputs"]={}; accepted("missing-input-fields",v,False)
 v=value(); v["workload"]["inputs"]={**inputs,"GEN_DUALSTACK":"1","RELOADSTALL_IPV4_PREFIXES":"360360"}; accepted("asymmetric-inputs",v,True)
 v=value(); v["workload"]["inputs"]={**inputs,"RELOADSTALL_IPV4_PREFIXES":360360}; accepted("malformed-input-value",v,False)
 v=value(); v["workload"]["inputs"]={**inputs,"UNTRACKED":"value"}; accepted("unknown-input-key",v,False)
+v=value(); v["workload"]["inputs"]={**inputs,"RELOADSTALL_MEMBERSHIP_CHURN":"1"}
+accepted("membership-missing-helper-hash",v,False)
+v["sources"]["common"]={**common,"bench/scale/reloadstall/membership_churn.py":h}
+accepted("membership-with-helper-hash",v,True)
+v["sources"]["common"]["bench/scale/reloadstall/membership_churn.py"]="changed"
+accepted("membership-helper-mutation",v,False)
 
 accepted("historical-bird-default", value("bird"), True)
 accepted("historical-open-explicit", value("openbgpd"), True, generation="historical")
@@ -352,6 +358,7 @@ cell=rustbgpd
 cdir=$PROBE_FIXTURE
 run=$cdir/run
 container=""
+membership_pid=""
 rc=0
 hrc=0
 recheck_cell_provenance() { return 0; }
@@ -498,4 +505,5 @@ finally:
         pass
     process.wait()
 PY
-echo "scale provenance tests pass"
+python3 -m unittest discover -s "$root/bench/scale/reloadstall" -p test_membership_churn.py
+echo "scale provenance and membership evidence tests pass"

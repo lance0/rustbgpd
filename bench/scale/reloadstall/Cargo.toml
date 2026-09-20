@@ -8,3 +8,4 @@ rustbgpd-wire = { path = "../../../crates/wire" }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 libc = "0.2"
+socket2.workspace = true
