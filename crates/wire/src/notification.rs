@@ -153,8 +153,10 @@ pub mod cease_subcode {
 
 /// Encode a shutdown communication reason string (RFC 9003).
 ///
-/// The format is: 1-byte length prefix + UTF-8 string, max 128 bytes.
-/// If the reason exceeds 128 bytes, it is truncated at a char boundary.
+/// The format is a 1-byte length prefix plus a UTF-8 string. The sender
+/// deliberately caps the string at 128 bytes for interoperability (RFC 9003
+/// section 3); the RFC 9003 receive limit is 255 bytes. Longer input is
+/// truncated at a UTF-8 character boundary.
 /// An empty reason encodes as a zero-length field (`[0]`).
 #[must_use]
 pub fn encode_shutdown_communication(reason: &str) -> bytes::Bytes {
