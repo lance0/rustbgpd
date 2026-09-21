@@ -89,6 +89,13 @@
         "$ref": "#/$defs/FibTableConfig"
       }
     },
+    "flowspec": {
+      "description": "`FlowSpec` cross-RIB feasibility validation. Default off preserves\nexisting deployments; changes require a daemon restart.",
+      "$ref": "#/$defs/FlowSpecConfig",
+      "default": {
+        "validation": "off"
+      }
+    },
     "global": {
       "description": "Daemon-wide BGP settings (ASN, router ID, listeners, telemetry).",
       "$ref": "#/$defs/Global"
@@ -1048,6 +1055,33 @@
         "name",
         "table_id",
         "metric"
+      ]
+    },
+    "FlowSpecConfig": {
+      "description": "Startup-only `FlowSpec` receive-side feasibility validation.",
+      "type": "object",
+      "properties": {
+        "validation": {
+          "description": "`off` preserves existing admission and selection; `rfc9117` enables\ncross-RIB validation for received IPv4 and IPv6 `FlowSpec` candidates.",
+          "$ref": "#/$defs/FlowSpecValidationMode",
+          "default": "off"
+        }
+      },
+      "additionalProperties": false
+    },
+    "FlowSpecValidationMode": {
+      "description": "`FlowSpec` feasibility mode. Omission deliberately preserves compatibility.",
+      "oneOf": [
+        {
+          "description": "Keep existing import-policy admission without cross-RIB validation.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Apply RFC 8955 validation as revised by RFC 9117, with RFC 8956 IPv6 rules.",
+          "type": "string",
+          "const": "rfc9117"
+        }
       ]
     },
     "Global": {

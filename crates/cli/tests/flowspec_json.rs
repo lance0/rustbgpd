@@ -18,6 +18,8 @@ async fn flowspec_json_covers_proto_fields() {
     // Keep generated route, component, and action fixtures exhaustive: a new
     // API field must prompt a projection decision and an expected-output update.
     *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+        received_routes: Vec::new(),
+        received_view: false,
         routes: vec![
             proto::FlowSpecRouteEntry {
                 components: vec![
@@ -168,4 +170,198 @@ async fn flowspec_json_covers_proto_fields() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
         serde_json::json!([])
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn received_flowspec_json_projection_covers_proto_fields_and_pending_results() {
+    let server = test_support::spawn_mock_server(None).await;
+    let states = [
+        (proto::FlowSpecValidationStatus::Disabled, "disabled", false),
+        (proto::FlowSpecValidationStatus::Pending, "pending", true),
+        (proto::FlowSpecValidationStatus::Local, "local", false),
+        (proto::FlowSpecValidationStatus::Feasible, "feasible", true),
+        (
+            proto::FlowSpecValidationStatus::Infeasible,
+            "infeasible",
+            true,
+        ),
+        (
+            proto::FlowSpecValidationStatus::Unspecified,
+            "unknown",
+            false,
+        ),
+    ];
+    // The nested selected-route projection is covered exhaustively above.
+    // These literals pin every received wrapper and response field separately.
+    *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+        routes: Vec::new(),
+        received_routes: states
+            .iter()
+            .map(|(status, _, pending)| proto::ReceivedFlowSpecRouteEntry {
+                route: Some(proto::FlowSpecRouteEntry {
+                    components: Vec::new(),
+                    actions: Vec::new(),
+                    peer_address: "2001:db8::1".into(),
+                    afi_safi: proto::AddressFamily::Ipv6Flowspec as i32,
+                    as_path: vec![65001],
+                    communities: Vec::new(),
+                    extended_communities: vec![u64::MAX],
+                }),
+                path_id: u32::MAX,
+                selected: *status == proto::FlowSpecValidationStatus::Feasible,
+                validation: *status as i32,
+                reason: if *status == proto::FlowSpecValidationStatus::Infeasible {
+                    "no_covering_unicast".into()
+                } else {
+                    String::new()
+                },
+                pending: *pending,
+            })
+            .collect(),
+        received_view: true,
+    };
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(["--addr", &server.addr])
+            .args(args)
+            .env("NO_COLOR", "1")
+            .output()
+            .expect("run rbgp")
+    };
+    let args = [
+        "--json",
+        "flowspec",
+        "received",
+        "2001:db8::1",
+        "-a",
+        "ipv6_flowspec",
+    ];
+    let output = run(&args);
+    assert!(output.status.success(), "{output:?}");
+    let expected: Vec<_> = states
+        .iter()
+        .map(|(status, name, pending)| {
+            serde_json::json!({
+                "route": {
+                    "components": [], "component_details": [], "actions": [],
+                    "peer_address": "2001:db8::1", "afi_safi": "ipv6_flowspec",
+                    "as_path": [65001], "communities": [], "extended_communities": [u64::MAX],
+                },
+                "path_id": u32::MAX,
+                "selected": *status == proto::FlowSpecValidationStatus::Feasible,
+                "validation": name,
+                "reason": if *status == proto::FlowSpecValidationStatus::Infeasible {
+                    "no_covering_unicast"
+                } else { "" },
+                "pending": pending,
+            })
+        })
+        .collect();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!(expected)
+    );
+    assert_eq!(
+        *server.state.last_list_flowspec.lock().await,
+        Some(proto::ListFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv6Flowspec as i32,
+            received_peer_address: "2001:db8::1".into(),
+        })
+    );
+
+    let output = run(&["flowspec", "received", "2001:db8::1"]);
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("path-id=4294967295 selected=true validation=feasible pending=true reason=-")
+    );
+    assert!(text.contains("path-id=4294967295 selected=false validation=infeasible pending=true reason=no_covering_unicast"));
+
+    // The transport acknowledgement is consumed before output, not exposed as
+    // an extra JSON envelope. The standard version wrapper still owns framing.
+    let output = run(&[
+        "--json-version",
+        "1",
+        "--json",
+        "flowspec",
+        "received",
+        "2001:db8::1",
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    let versioned: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(versioned["format_version"], "1.0");
+    assert_eq!(versioned["data"], serde_json::json!(expected));
+
+    *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+        routes: Vec::new(),
+        received_routes: vec![proto::ReceivedFlowSpecRouteEntry {
+            route: None,
+            path_id: 0,
+            selected: false,
+            validation: 99,
+            reason: String::new(),
+            pending: false,
+        }],
+        received_view: true,
+    };
+    let output = run(&args);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!([{"route": null, "path_id": 0, "selected": false,
+            "validation": "unknown", "reason": "", "pending": false}])
+    );
+
+    server
+        .state
+        .list_flowspec_response
+        .lock()
+        .await
+        .received_routes
+        .clear();
+    let output = run(&args);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!([])
+    );
+    let output = run(&["flowspec", "received", "2001:db8::1"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "No received FlowSpec routes\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn received_flowspec_rejects_unacknowledged_old_server_view_without_output() {
+    let server = test_support::spawn_mock_server(None).await;
+    // Older servers ignore the request's new selector, returning selected rows
+    // or an empty table. Neither is evidence about retained received routes.
+    for routes in [vec![proto::FlowSpecRouteEntry::default()], Vec::new()] {
+        *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+            routes,
+            received_routes: Vec::new(),
+            received_view: false,
+        };
+        for flags in [
+            vec![],
+            vec!["--json"],
+            vec!["--json", "--json-version", "1"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+                .args(["--addr", &server.addr])
+                .args(flags)
+                .args(["flowspec", "received", "192.0.2.1"])
+                .output()
+                .expect("run rbgp");
+            assert!(!output.status.success(), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(
+                String::from_utf8(output.stderr)
+                    .unwrap()
+                    .contains("received FlowSpec diagnostics require a newer daemon")
+            );
+        }
+    }
 }

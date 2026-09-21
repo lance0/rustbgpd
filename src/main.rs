@@ -4112,6 +4112,9 @@ async fn run<T>(
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
         .with_readiness_queries(rib_readiness_rx)
         .with_summary_queries(rib_summary_rx);
+    if config.flowspec.validation == config::FlowSpecValidationMode::Rfc9117 {
+        rib_manager = rib_manager.with_flowspec_validation(config.global.asn);
+    }
     #[cfg(target_os = "linux")]
     if (config.global.honor_blackhole && config.global.install_blackhole_discard)
         || !config.fib_tables.is_empty()
@@ -8824,6 +8827,7 @@ peer_group = "plain"
             ],
             peer_groups: std::collections::HashMap::new(),
             policy: crate::config::PolicyConfig::default(),
+            flowspec: crate::config::FlowSpecConfig::default(),
             rpki: None,
             bmp: None,
             gnmi_dialout: None,

@@ -1865,6 +1865,7 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
         .telemetry
         .prometheus_addr
         .clone_from(&current.global.telemetry.prometheus_addr);
+    new_config.flowspec = current.flowspec;
     new_config.rpki.clone_from(&current.rpki);
     new_config.bmp.clone_from(&current.bmp);
     new_config.mrt.clone_from(&current.mrt);
@@ -1955,6 +1956,13 @@ pub(crate) async fn reload_config_with_tcp_ao(
     restart_new_global.dynamic_neighbor_limit = restart_current_global.dynamic_neighbor_limit;
     if restart_new_global != restart_current_global {
         error!("[global] changed — requires full restart to take effect");
+    }
+    if new_config.flowspec != current.flowspec {
+        error!(
+            "[flowspec] changed — receive-side feasibility validation is configured \
+             once at startup. Restart rustbgpd to apply; the RIB keeps its \
+             startup validation mode until then."
+        );
     }
     if new_config.rpki != current.rpki {
         error!("[rpki] changed — requires full restart to take effect");
@@ -9751,6 +9759,52 @@ hold_time = 90
             returned.desired.event_history.enabled,
             "desired TOML must preserve the operator's edit for restart"
         );
+    }
+
+    #[tokio::test]
+    async fn reload_pins_flowspec_validation_and_preserves_desired_mode() {
+        for (running, desired) in [("off", "rfc9117"), ("rfc9117", "off")] {
+            let initial = format!(
+                "{}\n[flowspec]\nvalidation = \"{running}\"\n",
+                baseline_toml()
+            );
+            let candidate = format!(
+                "{}\n[flowspec]\nvalidation = \"{desired}\"\n",
+                baseline_toml()
+            );
+            let (outcomes, tags) = drive_reloads(&initial, &candidate, 2).await;
+            assert!(
+                tags.is_empty(),
+                "validation-only edit must not reconcile peers: {tags:?}"
+            );
+            let expected_running = if running == "off" {
+                config::FlowSpecValidationMode::Off
+            } else {
+                config::FlowSpecValidationMode::Rfc9117
+            };
+            let expected_desired = if desired == "off" {
+                config::FlowSpecValidationMode::Off
+            } else {
+                config::FlowSpecValidationMode::Rfc9117
+            };
+            assert_eq!(outcomes.len(), 2);
+            for returned in outcomes {
+                let returned = returned.expect("reload retains a pinned runtime snapshot");
+                assert_eq!(returned.flowspec.validation, expected_running);
+                assert_eq!(returned.desired.flowspec.validation, expected_desired);
+                assert_eq!(
+                    returned.effective_redacted().flowspec.validation,
+                    expected_running
+                );
+                let remaining = config::diff_config(&returned, &returned.desired);
+                assert!(
+                    remaining.flowspec_changed,
+                    "the restart requirement must remain visible"
+                );
+                assert!(remaining.has_restart_required_changes());
+                assert!(!config::classify_config_transaction_v1(&remaining).is_committable());
+            }
+        }
     }
 
     #[tokio::test]

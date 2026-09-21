@@ -8,6 +8,7 @@ pub use bench_support::{
     bench_evpn_dataplane_legacy_snapshot,
 };
 mod distribution;
+mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
 mod outbound_prefix_limits;
@@ -851,6 +852,8 @@ pub struct RibManager {
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// Retained receive-side `FlowSpec` feasibility; empty when disabled.
+    flowspec_validation: flowspec_validation::ValidationState,
     /// One explicit shared policy transition advanced by the actor itself.
     /// While present, only the dedicated type-narrow readiness lane may
     /// interleave; general queries, primary mutations, and timers remain
@@ -1063,6 +1066,8 @@ struct ReplacementReadiness {
     rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     metrics: BgpMetrics,
     count: usize,
+    /// Only selection release changes Loc-RIB while this owner is held.
+    selection_release: bool,
     started: tokio::time::Instant,
     last_service: std::time::Instant,
     budget: std::time::Duration,
@@ -1106,7 +1111,7 @@ fn replacement_readiness_checkpoint_at(
     replacement_readiness_checkpoint(readiness, force);
 }
 
-/// Call only on the actor while its synchronous replacement fence is held.
+/// Call only on the actor while its synchronous readiness owner is held.
 /// The shared handle exposes readiness and frozen values; canonical RIB
 /// state remains exclusively owned by the actor.
 #[expect(
@@ -1819,6 +1824,7 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
+            flowspec_validation: flowspec_validation::ValidationState::default(),
             pending_clean_policy_transition: None,
             post_commit_query_trace: None,
             pending_destination_prestage: None,
@@ -1890,6 +1896,22 @@ impl RibManager {
         age: std::time::Duration,
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        self.with_readiness_owner(age, false, work)
+    }
+
+    /// Selection retains exclusive actor ownership and its existing gate/EoR
+    /// order. Only its dedicated readiness lane can observe completed unicast
+    /// mutations; replacement owners continue to use their frozen count.
+    fn with_selection_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        with_executor_handoff(|| self.with_readiness_owner(std::time::Duration::ZERO, true, work))
+    }
+
+    fn with_readiness_owner<T>(
+        &mut self,
+        age: std::time::Duration,
+        selection_release: bool,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if self.replacement_readiness.is_some() {
             return work(self);
         }
@@ -1903,6 +1925,7 @@ impl RibManager {
             rx: self.readiness_rx.take(),
             metrics: self.metrics.clone(),
             count: self.loc_rib.len(),
+            selection_release,
             started,
             last_service: std::time::Instant::now(),
             budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -1951,6 +1974,21 @@ impl RibManager {
                 });
         }
         result
+    }
+
+    /// Call only after a complete prefix mutation, before any checkpoint can
+    /// answer from the new selection. Never alter a frozen replacement owner.
+    fn selection_readiness_checkpoint(&self) {
+        if let Some(context) = &self.replacement_readiness {
+            let mut context = context
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !context.selection_release {
+                return;
+            }
+            context.count = self.loc_rib.len();
+        }
+        self.replacement_checkpoint_at("selection_recompute", false);
     }
 
     fn replacement_checkpoint_at(&self, stage: &'static str, force: bool) {
@@ -3363,6 +3401,13 @@ impl RibManager {
             RibUpdate::QueryFlowSpecRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_flowspec(), filter.as_ref(), reply);
             }
+            RibUpdate::QueryReceivedFlowSpecRoutes {
+                peer,
+                filter,
+                reply,
+            } => {
+                self.send_received_flowspec(peer, filter.as_ref(), reply);
+            }
             RibUpdate::ExplainEvpnRoute {
                 key,
                 received_from,
@@ -4068,6 +4113,7 @@ impl RibManager {
         let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
         if let Some(rib) = self.ribs.get(&peer) {
             for route in rib.iter_rtc() {
+                self.replacement_checkpoint_at("selection_rtc_membership", false);
                 if route.nlri.is_default() {
                     has_default = true;
                 } else {
@@ -4378,6 +4424,16 @@ impl RibManager {
                 continue;
             }
 
+            // One bounded validation slice per ordinary actor turn, including
+            // under sustained primary traffic. Clean transitions above retain
+            // their existing ownership fence.
+            let validated_flowspec = self.process_flowspec_validation_chunk();
+            if validated_flowspec {
+                self.drain_readiness_queries(None);
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
+            }
+
             // Arm the resync timer when resync work transitions none → some.
             if self.resync_tick_pending() && !resync_armed {
                 resync_sleep
@@ -4539,6 +4595,15 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
+            } else if validated_flowspec {
+                // Do not sleep while validation remains queued, but admit a
+                // primary update between slices instead of monopolizing turns.
+                if let Ok(update) = self.rx.try_recv() {
+                    self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                        manager.handle_update(update);
+                    });
+                    self.drain_general_queries_if_unfenced();
+                }
             } else if needs_timers {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {

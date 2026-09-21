@@ -517,6 +517,9 @@ _rbgp() {
             rbgp__subcmd__flowspec,help)
                 cmd="rbgp__subcmd__flowspec__subcmd__help"
                 ;;
+            rbgp__subcmd__flowspec,received)
+                cmd="rbgp__subcmd__flowspec__subcmd__received"
+                ;;
             rbgp__subcmd__flowspec__subcmd__help,add)
                 cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__add"
                 ;;
@@ -525,6 +528,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__flowspec__subcmd__help,help)
                 cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__help"
+                ;;
+            rbgp__subcmd__flowspec__subcmd__help,received)
+                cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__received"
                 ;;
             rbgp__subcmd__help,bfd)
                 cmd="rbgp__subcmd__help__subcmd__bfd"
@@ -771,6 +777,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__flowspec,delete)
                 cmd="rbgp__subcmd__help__subcmd__flowspec__subcmd__delete"
+                ;;
+            rbgp__subcmd__help__subcmd__flowspec,received)
+                cmd="rbgp__subcmd__help__subcmd__flowspec__subcmd__received"
                 ;;
             rbgp__subcmd__help__subcmd__neighbor,add)
                 cmd="rbgp__subcmd__help__subcmd__neighbor__subcmd__add"
@@ -5208,7 +5217,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec)
-            opts="-a -s -j -h --family --addr --token-file --json --json-version --json-lines --no-color --pager --help add delete help"
+            opts="-a -s -j -h --family --addr --token-file --json --json-version --json-lines --no-color --pager --help received add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5346,7 +5355,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec__subcmd__help)
-            opts="add delete help"
+            opts="received add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5394,6 +5403,62 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__flowspec__subcmd__help__subcmd__received)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__flowspec__subcmd__received)
+            opts="-a -s -j -h --family --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --family)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -a)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -6380,7 +6445,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__flowspec)
-            opts="add delete"
+            opts="received add delete"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6408,6 +6473,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__flowspec__subcmd__delete)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__flowspec__subcmd__received)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

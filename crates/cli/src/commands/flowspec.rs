@@ -60,53 +60,122 @@ fn format_action(a: &FlowSpecAction) -> String {
     }
 }
 
-pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Result<(), CliError> {
+fn route_to_json(route: &crate::proto::FlowSpecRouteEntry) -> serde_json::Value {
+    serde_json::json!({
+        "components": route.components.iter().map(format_component).collect::<Vec<_>>(),
+        "component_details": route.components.iter().map(|component| serde_json::json!({
+            "type": component.r#type,
+            "prefix": component.prefix,
+            "value": component.value,
+            "offset": component.offset,
+        })).collect::<Vec<_>>(),
+        "actions": route.actions.iter().map(format_action).collect::<Vec<_>>(),
+        "peer_address": route.peer_address,
+        "afi_safi": output::format_family(route.afi_safi),
+        "as_path": route.as_path,
+        "communities": route.communities.iter().map(|c| output::format_community(*c)).collect::<Vec<_>>(),
+        "extended_communities": route.extended_communities,
+    })
+}
+
+fn validation_name(validation: i32) -> &'static str {
+    use crate::proto::FlowSpecValidationStatus;
+    match FlowSpecValidationStatus::try_from(validation) {
+        Ok(FlowSpecValidationStatus::Disabled) => "disabled",
+        Ok(FlowSpecValidationStatus::Pending) => "pending",
+        Ok(FlowSpecValidationStatus::Local) => "local",
+        Ok(FlowSpecValidationStatus::Feasible) => "feasible",
+        Ok(FlowSpecValidationStatus::Infeasible) => "infeasible",
+        Ok(FlowSpecValidationStatus::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn received_route_to_json(row: &crate::proto::ReceivedFlowSpecRouteEntry) -> serde_json::Value {
+    serde_json::json!({
+        "route": row.route.as_ref().map(route_to_json),
+        "path_id": row.path_id,
+        "selected": row.selected,
+        "validation": validation_name(row.validation),
+        "reason": row.reason,
+        "pending": row.pending,
+    })
+}
+
+fn print_route(route: &crate::proto::FlowSpecRouteEntry) -> Result<(), CliError> {
+    let components: Vec<String> = route.components.iter().map(format_component).collect();
+    let actions: Vec<String> = route.actions.iter().map(format_action).collect();
+    outln!(
+        "  match [{}] action [{}] from {} ({})",
+        components.join(", "),
+        actions.join(", "),
+        route.peer_address,
+        output::format_family(route.afi_safi),
+    )?;
+    Ok(())
+}
+
+pub async fn list(
+    connection: Connection,
+    family: Option<i32>,
+    received_peer: Option<std::net::IpAddr>,
+    json: bool,
+) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
     let resp = read_rpc(
         "ListFlowSpecRoutes",
         client.list_flow_spec_routes(ListFlowSpecRequest {
             afi_safi: family.unwrap_or(0),
+            received_peer_address: received_peer
+                .map(|peer| peer.to_string())
+                .unwrap_or_default(),
         }),
     )
     .await?
     .into_inner();
 
-    if json {
-        let out: Vec<serde_json::Value> = resp
-            .routes
-            .iter()
-            .map(|route| {
-                serde_json::json!({
-                    "components": route.components.iter().map(format_component).collect::<Vec<_>>(),
-                    "component_details": route.components.iter().map(|component| serde_json::json!({
-                        "type": component.r#type,
-                        "prefix": component.prefix,
-                        "value": component.value,
-                        "offset": component.offset,
-                    })).collect::<Vec<_>>(),
-                    "actions": route.actions.iter().map(format_action).collect::<Vec<_>>(),
-                    "peer_address": route.peer_address,
-                    "afi_safi": output::format_family(route.afi_safi),
-                    "as_path": route.as_path,
-                    "communities": route.communities.iter().map(|c| output::format_community(*c)).collect::<Vec<_>>(),
-                    "extended_communities": route.extended_communities,
-                })
-            })
-            .collect();
+    if received_peer.is_some() {
+        if !resp.received_view {
+            return Err(tonic::Status::unimplemented(
+                "received FlowSpec diagnostics require a newer daemon",
+            )
+            .into());
+        }
+        if json {
+            let rows: Vec<_> = resp
+                .received_routes
+                .iter()
+                .map(received_route_to_json)
+                .collect();
+            output::print_json_pretty(&rows)?;
+        } else if resp.received_routes.is_empty() {
+            outln!("No received FlowSpec routes")?;
+        } else {
+            for row in &resp.received_routes {
+                if let Some(route) = &row.route {
+                    print_route(route)?;
+                }
+                outln!(
+                    "    path-id={} selected={} validation={} pending={} reason={}",
+                    row.path_id,
+                    row.selected,
+                    validation_name(row.validation),
+                    row.pending,
+                    if row.reason.is_empty() {
+                        "-"
+                    } else {
+                        &row.reason
+                    },
+                )?;
+            }
+        }
+    } else if json {
+        let out: Vec<_> = resp.routes.iter().map(route_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if resp.routes.is_empty() {
         outln!("No FlowSpec routes")?;
     } else {
         for route in &resp.routes {
-            let components: Vec<String> = route.components.iter().map(format_component).collect();
-            let actions: Vec<String> = route.actions.iter().map(format_action).collect();
-            outln!(
-                "  match [{}] action [{}] from {} ({})",
-                components.join(", "),
-                actions.join(", "),
-                route.peer_address,
-                output::format_family(route.afi_safi),
-            )?;
+            print_route(route)?;
         }
     }
     Ok(())

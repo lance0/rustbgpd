@@ -5,8 +5,8 @@ use serde::{Serialize, Serializer};
 
 use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
-    EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, Global,
-    GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
+    EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
+    Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
     PeerGroupConfig, PolicyConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
@@ -373,6 +373,7 @@ struct CanonicalConfig<'a> {
     policy: &'a PolicyConfig,
     dynamic_neighbors: &'a [DynamicNeighborConfig],
     rpki: &'a Option<RpkiConfig>,
+    flowspec: &'a FlowSpecConfig,
     bmp: &'a Option<BmpConfig>,
     gnmi_dialout: &'a Option<GnmiDialoutConfig>,
     mrt: &'a Option<MrtConfig>,
@@ -398,6 +399,7 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
             policy,
             dynamic_neighbors,
             rpki,
+            flowspec,
             bmp,
             gnmi_dialout,
             mrt,
@@ -424,6 +426,7 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
             policy,
             dynamic_neighbors,
             rpki,
+            flowspec,
             bmp,
             gnmi_dialout,
             mrt,

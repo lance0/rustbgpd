@@ -272,11 +272,12 @@ const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
 /// Closed labels for RIB ingest components. Distribution can serve readiness
 /// internally; these component durations do not bound readiness latency.
-const RIB_ACTOR_WORK_UNITS: [&str; 4] = [
+const RIB_ACTOR_WORK_UNITS: [&str; 5] = [
     "route_chunk",
     "distribute_flush",
     "exact_export_retire",
     "attribute_gc",
+    "flowspec_validation",
 ];
 
 /// Closed labels for the actor seam that served a readiness query.
@@ -1543,7 +1544,7 @@ impl BgpMetrics {
         let rib_actor_work_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_actor_work_duration_seconds",
-                "Wall-clock duration of RIB actor ingest components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, `exact_export_retire` covers the following rejection retirement, and `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
+                "Wall-clock duration of RIB actor work components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, `exact_export_retire` covers the following rejection retirement, `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks, and `flowspec_validation` covers a receive-side validation slice including completed selection/distribution. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["work_unit"],
@@ -7774,6 +7775,7 @@ mod tests {
                 "attribute_gc",
                 "distribute_flush",
                 "exact_export_retire",
+                "flowspec_validation",
                 "route_chunk"
             ]
         );

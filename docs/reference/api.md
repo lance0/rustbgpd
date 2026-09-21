@@ -1866,6 +1866,35 @@ also emits ordered `component_details` records with the API component `type`,
 `prefix`, `value`, and `offset`. The explicit offset preserves the RFC 8956
 IPv6 prefix-match semantics, including zero and nonzero values.
 
+The ordinary `ListFlowSpecRoutes` response remains the selected Loc-RIB view
+in `routes`. Set `received_peer_address` to an IP address to inspect that
+peer's retained, post-import-policy candidates instead, including nonselected
+and infeasible rules. `afi_safi` narrows either view. Invalid peer addresses
+are rejected before the query reaches the RIB.
+
+Received mode returns `received_routes` and sets `received_view: true`, even
+when empty; ordinary mode leaves both unset. Clients must check this
+acknowledgement because older servers ignore the additive request field.
+`rbgp flowspec received PEER [-a ipv4_flowspec|ipv6_flowspec]` performs that
+check and reports an unsupported operation instead of displaying an older
+server's selected routes as received candidates.
+
+Each received row contains the existing `route` projection plus `path_id`,
+`selected`, `validation`, `reason`, and `pending`. Validation is `disabled`,
+`local`, `feasible`, or `infeasible`; `pending` is the validation value only
+when no result has completed for this candidate. Otherwise a pending
+revalidation preserves the last completed value and reason, with
+`pending: true`. Selection is reported independently: a completed feasible
+result does not mean the candidate currently owns the selected entry.
+
+Infeasibility reasons are `missing_destination`, `nonzero_destination_offset`,
+`no_covering_unicast`, `missing_as_path`, `unsupported_as_path`,
+`originator_mismatch`, `leftmost_as_mismatch`, `unknown_neighbor_as`, and
+`conflicting_more_specific`. An empty reason means no completed failure.
+Received means retained after import policy, not a historical record of every
+UPDATE. See [the feasibility decision](../adr/0135-flowspec-feasibility.md)
+for opt-in validation and convergence semantics.
+
 ### List EVPN routes
 
 `ListEvpnRoutes` retains its existing unpaginated best-route view. The additive

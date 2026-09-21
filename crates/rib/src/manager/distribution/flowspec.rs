@@ -175,55 +175,6 @@ impl RibManager {
     /// for initial table dump and ROUTE-REFRESH responses.
     #[expect(
         clippy::too_many_arguments,
-        reason = "FlowSpec staging keeps the family-local export ladder together"
-    )]
-    pub(in crate::manager) fn stage_flowspec_rules(
-        loc_rib: &LocRib,
-        rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
-        keys: &HashSet<FlowSpecKey>,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
-        target_is_ebgp: bool,
-        interpret_rfc1997: bool,
-        target_is_rr_client: bool,
-        cluster_id: Option<Ipv4Addr>,
-        sendable: Option<&Vec<(Afi, Safi)>>,
-        llgr: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&PolicyChain>,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
-        fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
-        fs_withdraw: &mut Vec<FlowSpecKey>,
-    ) {
-        Self::stage_flowspec_rules_with_checkpoint(
-            loc_rib,
-            rib_out,
-            peer_is_rr_client,
-            keys,
-            target_peer,
-            target_peer_asn,
-            target_peer_group,
-            target_is_ebgp,
-            interpret_rfc1997,
-            target_is_rr_client,
-            cluster_id,
-            sendable,
-            llgr,
-            export_pol,
-            metrics,
-            policy_stats,
-            target_peer_label,
-            fs_announce,
-            fs_withdraw,
-            &mut || {},
-        );
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "FlowSpec staging keeps the family-local export ladder together"
     )]
@@ -415,11 +366,41 @@ impl RibManager {
         &mut self,
         affected: &HashSet<FlowSpecKey>,
     ) {
+        self.with_selection_readiness(|manager| {
+            manager.sync_flowspec_validation(affected);
+            manager.recompute_validated_flowspec_inner(affected);
+        });
+    }
+
+    pub(in crate::manager) fn recompute_validated_flowspec(
+        &mut self,
+        affected: &HashSet<FlowSpecKey>,
+    ) {
+        self.with_selection_readiness(|manager| {
+            manager.recompute_validated_flowspec_inner(affected);
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
+    )]
+    fn recompute_validated_flowspec_inner(&mut self, affected: &HashSet<FlowSpecKey>) {
         use crate::route::FlowSpecRoute;
 
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "selection_flowspec",
+                false,
+            );
+        };
+        checkpoint();
         self.record_deferred_flowspec(affected);
-        let affected: HashSet<_> = affected
+        let mut affected: HashSet<_> = affected
             .iter()
+            .inspect(|_| checkpoint())
             .filter(|key| !self.selection_deferred((key.afi, Safi::FlowSpec)))
             .cloned()
             .collect();
@@ -430,11 +411,13 @@ impl RibManager {
         let mut changed_keys: HashSet<FlowSpecKey> = HashSet::new();
 
         for key in &affected {
-            let candidates: Vec<&FlowSpecRoute> = self
-                .ribs
-                .values()
-                .flat_map(|rib| rib.iter_flowspec_key(key))
-                .collect();
+            checkpoint();
+            let candidates: Vec<&FlowSpecRoute> = self.flowspec_validation.selection_candidates(
+                key,
+                &self.ribs,
+                &self.loc_rib,
+                &checkpoint,
+            );
             let did_change = self
                 .loc_rib
                 .recompute_flowspec(key.clone(), candidates.into_iter());
@@ -444,6 +427,7 @@ impl RibManager {
         }
 
         if changed_keys.is_empty() {
+            super::super::retire_hash_set(&mut affected, &mut checkpoint);
             return;
         }
 
@@ -451,8 +435,14 @@ impl RibManager {
             .set_loc_rib_prefixes("flowspec", gauge_val(self.loc_rib.flowspec_len()));
 
         // Distribute FlowSpec changes to outbound peers
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
         for peer in peers {
+            checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
@@ -487,7 +477,7 @@ impl RibManager {
 
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
-            Self::stage_flowspec_rules(
+            Self::stage_flowspec_rules_with_checkpoint(
                 &self.loc_rib,
                 rib_out,
                 &self.peer_is_rr_client,
@@ -507,6 +497,7 @@ impl RibManager {
                 &target_peer_label,
                 &mut fs_announce,
                 &mut fs_withdraw,
+                &mut checkpoint,
             );
 
             if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
@@ -523,5 +514,7 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+        super::super::retire_hash_set(&mut affected, &mut checkpoint);
     }
 }

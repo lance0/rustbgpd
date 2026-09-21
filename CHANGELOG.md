@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in received FlowSpec feasibility validation against the unicast RIB,
+  including automatic revalidation after unicast changes. Set
+  `[flowspec] validation = "rfc9117"` at startup; the default remains `"off"`.
+  Infeasible candidates remain available through the received-peer FlowSpec
+  view with their reason and pending state. Local injection remains trusted
+  origination, and validation does not add a FlowSpec dataplane. The RIB
+  actor-work histogram adds the `flowspec_validation` work-unit label.
+
 ## [0.71.0] — 2026-09-20
 
 ### Added

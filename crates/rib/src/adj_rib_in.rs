@@ -21,7 +21,9 @@ use std::sync::Arc;
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
 // `BgpLsRouteKey` joins the same class once ADR-0077 receive wiring lands.
 // Aliased to the std names so the storage type declarations read unchanged.
-use rustbgpd_wire::{Afi, EvpnRouteKey, PathAttribute, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{
+    Afi, EvpnRouteKey, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, RpkiValidation, Safi,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
@@ -336,6 +338,42 @@ impl AdjRibIn {
                     .filter_map(move |(_, handle)| routes.get(handle))
             })
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
+    }
+
+    /// Resume a received-candidate scan inside one covering prefix, including
+    /// losing Add-Path paths. The trie seeks directly to the relevant subtree.
+    /// The cursor is a prefix plus the next native path index, not API order.
+    /// Its owner must invalidate it on any relevant candidate mutation.
+    pub(crate) fn iter_covered_from(
+        &self,
+        covering: Prefix,
+        after: Option<(Prefix, usize)>,
+    ) -> impl Iterator<Item = ((Prefix, usize), &Route)> {
+        let routes = &self.routes;
+        self.prefix_index
+            .iter_from(Some(after.map_or(covering, |cursor| cursor.0)))
+            .take_while(move |(prefix, _)| match (covering, *prefix) {
+                (Prefix::V4(cover), Prefix::V4(prefix)) => {
+                    prefix.len >= cover.len && Ipv4Prefix::new(prefix.addr, cover.len) == cover
+                }
+                (Prefix::V6(cover), Prefix::V6(prefix)) => {
+                    prefix.len >= cover.len && Ipv6Prefix::new(prefix.addr, cover.len) == cover
+                }
+                _ => false,
+            })
+            .flat_map(move |(prefix, ids)| {
+                let start = after
+                    .filter(|cursor| cursor.0 == prefix)
+                    .map_or(0, |cursor| cursor.1);
+                ids.iter()
+                    .enumerate()
+                    .skip(start)
+                    .filter_map(move |(index, (_, handle))| {
+                        routes
+                            .get(*handle)
+                            .map(|route| ((prefix, index + 1), route))
+                    })
+            })
     }
 
     /// Mutate every unicast route while maintaining exact RPKI path counts.
@@ -750,6 +788,10 @@ impl AdjRibIn {
     /// Iterate over all `FlowSpec` routes.
     pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
         self.flowspec_routes.values()
+    }
+
+    pub(crate) fn get_flowspec(&self, key: &FlowSpecRouteKey) -> Option<&FlowSpecRoute> {
+        self.flowspec_routes.get(key)
     }
 
     // --- EVPN methods (RFC 7432) ---

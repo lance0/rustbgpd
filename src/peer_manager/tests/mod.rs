@@ -261,6 +261,7 @@ fn make_dynamic_manager_config() -> Config {
             description: Some("ix-auto".to_string()),
             tcp_ao: None,
         }],
+        flowspec: crate::config::FlowSpecConfig::default(),
         rpki: None,
         bmp: None,
         gnmi_dialout: None,

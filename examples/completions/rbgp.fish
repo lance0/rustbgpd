@@ -943,20 +943,32 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -f -a "add" -d 'Add a FlowSpec rule'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -f -a "delete" -d 'Delete a FlowSpec rule'
-complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -f -a "add" -d 'Add a FlowSpec rule'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -f -a "delete" -d 'Delete a FlowSpec rule'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from received add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s a -l family -d 'Address family (ipv4_flowspec or ipv6_flowspec)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s a -l family -d 'Address family (required: ipv4_flowspec or ipv6_flowspec)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l match -d 'Match components (e.g., dest=10.0.0.0/24 port==80)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l action -d 'Actions (e.g., drop, rate=1000, redirect=65001:100)' -r
@@ -982,6 +994,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "add" -d 'Add a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
@@ -1957,6 +1970,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from topology" -f -a "links" -d 'List usable directed topology links (with IGP metrics)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from diff" -f -a "advertised" -d 'Compare the live Adj-RIB-Out against an incumbent NDJSON snapshot'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from diff" -f -a "snapshot" -d 'Produce an `rbgp-ribsnap/1` snapshot from an incumbent\'s own output (offline; no daemon connection)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from flowspec" -f -a "received" -d 'Show retained received candidates, including infeasible and nonselected rules'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from flowspec" -f -a "add" -d 'Add a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from flowspec" -f -a "delete" -d 'Delete a FlowSpec rule'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from evpn" -f -a "received" -d 'Accepted post-policy EVPN routes from a peer; absence does not prove it sent none'

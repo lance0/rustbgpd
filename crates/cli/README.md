@@ -214,6 +214,7 @@ rbgp policy stats [--neighbor <addr>]                     # live per-term hit co
 rbgp policy counters [--neighbor <addr>]                  # alias
 
 rbgp flowspec
+rbgp flowspec received 192.0.2.1 -a ipv4_flowspec
 rbgp flowspec add -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80" --action drop
 rbgp flowspec delete -a ipv4_flowspec --match "dest=192.0.2.0/24 port==80"
 rbgp fib-table list
@@ -228,6 +229,15 @@ action. The field is an empty array when the route has none; `actions` retains
 its formatted summaries. `components` retains its legacy formatted component summaries;
 `component_details` preserves each component's API type, prefix, value, and
 offset, including zero offsets and unknown types.
+
+`rbgp flowspec received PEER` inspects retained candidates from one peer,
+including infeasible and nonselected rules. JSON rows wrap the ordinary
+`route` object with `path_id`, `selected`, `validation`, `reason`, and
+`pending`. While revalidation is pending, `validation` and `reason` describe
+the last completed result; a candidate with no completed result reports
+`validation: "pending"`. This command requires a daemon that acknowledges the
+received view and does not fall back to selected routes on older servers.
+Ordinary `rbgp flowspec` and its JSON shape remain the selected-route view.
 
 For large accepted unicast listings, use `rbgp --json-lines rib`,
 `rbgp --json-lines rib received 192.0.2.1`, or

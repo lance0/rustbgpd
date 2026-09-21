@@ -236,12 +236,21 @@ impl crate::update::ExactExportEncoder for IngestReadinessEncoder {
 /// outbound peer boundary leaves the query queued when the second real
 /// exact-export probe runs, so `answered_before_later_probe` stays false and
 /// this test goes red.
-#[test]
+#[tokio::test(start_paused = true)]
+async fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
+    assert_mixed_fanout_readiness(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn selection_release_services_readiness_mid_mixed_fanout() {
+    assert_mixed_fanout_readiness(true).await;
+}
+
 #[expect(
     clippy::too_many_lines,
-    reason = "the regression keeps the mixed fanout setup and mid-pass observation together"
+    reason = "the shared fixture compares ingest and gated release through the same mixed peer fanout"
 )]
-fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
+async fn assert_mixed_fanout_readiness(selection_release: bool) {
     const GROUPED_PEERS: usize = 4;
     const FALLBACK_PEERS: usize = 2;
     let (_tx, rx) = mpsc::channel(1);
@@ -249,6 +258,16 @@ fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
         .with_readiness_queries(readiness_rx);
+    if selection_release {
+        manager = manager.with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: std::time::Duration::from_secs(1),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: "192.0.2.51".parse().unwrap(),
+                families: ipv4_sendable(),
+            }],
+        });
+        manager.flush_poll_budget = std::time::Duration::ZERO;
+    }
     let (general_reply, mut general_response) = oneshot::channel();
     query_tx
         .try_send(RibUpdate::QueryLocRibCount {
@@ -309,7 +328,11 @@ fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
             negotiated_orf_recv: vec![],
             negotiated_llgr_families: vec![],
         });
-        assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        if selection_release {
+            assert!(outbound_rx.try_recv().is_err());
+        } else {
+            assert_eq!(outbound_rx.try_recv().unwrap().end_of_rib, ipv4_sendable());
+        }
         receivers.push(outbound_rx);
     }
 
@@ -339,6 +362,13 @@ fn ordinary_ingest_services_readiness_mid_mixed_fanout() {
         evpn_withdrawn: vec![],
     });
     while manager.process_next_route_chunk() {}
+    if selection_release {
+        assert_eq!(manager.loc_rib.len(), 0);
+        assert_eq!(probe.probes.load(Ordering::Relaxed), 0);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        manager.expire_selection_deferral();
+        assert_eq!(manager.loc_rib.len(), 1);
+    }
 
     assert_eq!(
         probe.probes.load(Ordering::Relaxed),

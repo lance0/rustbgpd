@@ -884,12 +884,16 @@ impl RibManager {
         else {
             return;
         };
-        let deferred = affected.iter().filter_map(|prefix| {
-            let family = super::helpers::prefix_family(prefix);
-            selection
-                .selection_deferred(family)
-                .then_some((family, prefix))
-        });
+        let readiness = self.replacement_readiness.clone();
+        let deferred = affected
+            .iter()
+            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .filter_map(|prefix| {
+                let family = super::helpers::prefix_family(prefix);
+                selection
+                    .selection_deferred(family)
+                    .then_some((family, prefix))
+            });
         let current_len = self.deferred_selection_keys.len();
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
             &mut self.deferred_selection_keys.unicast,
@@ -914,12 +918,16 @@ impl RibManager {
         else {
             return;
         };
-        let deferred = affected.iter().filter_map(|key| {
-            let family = (key.afi, Safi::FlowSpec);
-            selection
-                .selection_deferred(family)
-                .then_some((family, key))
-        });
+        let readiness = self.replacement_readiness.clone();
+        let deferred = affected
+            .iter()
+            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .filter_map(|key| {
+                let family = (key.afi, Safi::FlowSpec);
+                selection
+                    .selection_deferred(family)
+                    .then_some((family, key))
+            });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
@@ -963,12 +971,16 @@ impl RibManager {
         else {
             return;
         };
-        let deferred = affected.iter().filter_map(|key| {
-            let family = key.afi_safi();
-            selection
-                .selection_deferred(family)
-                .then_some((family, key))
-        });
+        let readiness = self.replacement_readiness.clone();
+        let deferred = affected
+            .iter()
+            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .filter_map(|key| {
+                let family = key.afi_safi();
+                selection
+                    .selection_deferred(family)
+                    .then_some((family, key))
+            });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
@@ -994,12 +1006,16 @@ impl RibManager {
         else {
             return;
         };
-        let deferred = affected.iter().filter_map(|key| {
-            let family = key.afi_safi();
-            selection
-                .selection_deferred(family)
-                .then_some((family, key))
-        });
+        let readiness = self.replacement_readiness.clone();
+        let deferred = affected
+            .iter()
+            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .filter_map(|key| {
+                let family = key.afi_safi();
+                selection
+                    .selection_deferred(family)
+                    .then_some((family, key))
+            });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
@@ -1025,12 +1041,16 @@ impl RibManager {
         else {
             return;
         };
-        let deferred = affected.iter().filter_map(|key| {
-            let family = key.family.to_afi_safi();
-            selection
-                .selection_deferred(family)
-                .then_some((family, key))
-        });
+        let readiness = self.replacement_readiness.clone();
+        let deferred = affected
+            .iter()
+            .inspect(|_| super::replacement_readiness_checkpoint(&readiness, false))
+            .filter_map(|key| {
+                let family = key.family.to_afi_safi();
+                selection
+                    .selection_deferred(family)
+                    .then_some((family, key))
+            });
         let current_len = self.deferred_selection_keys.len();
         let limits = self.deferred_selection_keys.limits;
         let newly_overflowed = DeferredSelectionKeys::extend_bounded(
@@ -1105,14 +1125,6 @@ impl RibManager {
     }
 
     #[cfg(test)]
-    pub(in crate::manager) fn recompute_released_selection_family_for_test(
-        &mut self,
-        family: (Afi, Safi),
-    ) {
-        self.recompute_released_selection_family(family);
-    }
-
-    #[cfg(test)]
     pub(in crate::manager) fn deferred_selection_ledger_state_for_test(
         &self,
         family: (Afi, Safi),
@@ -1184,14 +1196,17 @@ impl RibManager {
         families: &[(Afi, Safi)],
         reason: &'static str,
     ) {
-        if !families.is_empty() {
+        if families.is_empty() {
+            return;
+        }
+        self.with_selection_readiness(|manager| {
             // Timer expiry and all-EoR release can recompute Loc-RIB directly
             // without a new RibUpdate. Fence every view before the release.
-            self.advance_all_route_pages();
-        }
-        for &family in families {
-            self.complete_selection_family(family, false, reason);
-        }
+            manager.advance_all_route_pages();
+            for &family in families {
+                manager.complete_selection_family(family, false, reason);
+            }
+        });
     }
 
     pub(super) fn apply_selection_deferral_transitions(
@@ -1199,6 +1214,11 @@ impl RibManager {
         transitions: impl IntoIterator<Item = SelectionDeferralTransition>,
         reason: &'static str,
     ) {
+        let mut transitions = transitions.into_iter().peekable();
+        if transitions.peek().is_none() {
+            return;
+        }
+        self.with_selection_readiness(|manager| {
         for transition in transitions {
             match transition {
                 SelectionDeferralTransition::Stage { family } => {
@@ -1208,20 +1228,21 @@ impl RibManager {
                         reason,
                         "RFC 4724 route selection staged while collision-failback convergence remains held"
                     );
-                    self.recompute_released_selection_family(family);
+                    manager.recompute_released_selection_family(family);
                 }
                 SelectionDeferralTransition::Release {
                     family,
                     already_staged,
                     release_reason,
                 } => {
-                    if let Some(selection) = self.selection_deferral.as_mut() {
-                        selection.release(family, release_reason, &self.metrics);
+                    if let Some(selection) = manager.selection_deferral.as_mut() {
+                        selection.release(family, release_reason, &manager.metrics);
                     }
-                    self.complete_selection_family(family, already_staged, reason);
+                    manager.complete_selection_family(family, already_staged, reason);
                 }
             }
         }
+        });
     }
 
     fn complete_selection_family(
@@ -1230,6 +1251,10 @@ impl RibManager {
         already_staged: bool,
         reason: &'static str,
     ) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint =
+            || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
+        checkpoint();
         tracing::info!(
             afi = ?family.0,
             safi = ?family.1,
@@ -1246,9 +1271,11 @@ impl RibManager {
         let peers: Vec<_> = self
             .peer_sendable_families
             .iter()
+            .inspect(|_| checkpoint())
             .filter_map(|(&peer, sendable)| sendable.contains(&family).then_some(peer))
             .collect();
         for peer in peers {
+            checkpoint();
             self.pending_eor.entry(peer).or_default().insert(family);
             if !self.dirty_peers.contains(&peer) {
                 self.flush_pending_eor(peer);
@@ -1257,9 +1284,11 @@ impl RibManager {
         let refresh_peers: Vec<_> = self
             .selection_deferred_refresh
             .iter()
+            .inspect(|_| checkpoint())
             .filter_map(|(&peer, families)| families.contains(&family).then_some(peer))
             .collect();
         for peer in refresh_peers {
+            checkpoint();
             if let Some(families) = self.selection_deferred_refresh.get_mut(&peer) {
                 families.remove(&family);
                 if families.is_empty() {
@@ -1297,6 +1326,10 @@ impl RibManager {
         reason = "release must sweep every typed RIB family from one atomic family gate"
     )]
     fn recompute_released_selection_family(&mut self, family: (Afi, Safi)) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint =
+            || super::replacement_readiness_checkpoint_at(&readiness, "selection_inventory", false);
+        checkpoint();
         let overflowed = self
             .deferred_selection_keys
             .overflowed_families
@@ -1304,7 +1337,9 @@ impl RibManager {
         let mut prefixes: HashSet<_> = self
             .ribs
             .values()
+            .inspect(|_| checkpoint())
             .flat_map(crate::adj_rib_in::AdjRibIn::iter)
+            .inspect(|_| checkpoint())
             .filter(|route| super::helpers::prefix_family(&route.prefix) == family)
             .map(|route| route.prefix)
             .collect();
@@ -1312,6 +1347,7 @@ impl RibManager {
             prefixes.extend(
                 self.loc_rib
                     .iter()
+                    .inspect(|_| checkpoint())
                     .filter(|route| super::helpers::prefix_family(&route.prefix) == family)
                     .map(|route| route.prefix),
             );
@@ -1320,21 +1356,26 @@ impl RibManager {
             self.deferred_selection_keys
                 .unicast
                 .iter()
+                .inspect(|_| checkpoint())
                 .filter(|prefix| super::helpers::prefix_family(prefix) == family)
                 .copied(),
         );
-        self.deferred_selection_keys
-            .unicast
-            .retain(|prefix| super::helpers::prefix_family(prefix) != family);
+        self.deferred_selection_keys.unicast.retain(|prefix| {
+            checkpoint();
+            super::helpers::prefix_family(prefix) != family
+        });
         if !prefixes.is_empty() {
             let changed = self.recompute_best(&prefixes);
             self.distribute_changes(&changed, &prefixes);
+            super::retire_hash_set(&mut prefixes, &mut checkpoint);
         }
 
         let mut flowspec: HashSet<_> = self
             .ribs
             .values()
+            .inspect(|_| checkpoint())
             .flat_map(crate::adj_rib_in::AdjRibIn::iter_flowspec)
+            .inspect(|_| checkpoint())
             .filter(|route| (route.afi, Safi::FlowSpec) == family)
             .map(crate::route::FlowSpecRoute::selection_key)
             .collect();
@@ -1342,6 +1383,7 @@ impl RibManager {
             flowspec.extend(
                 self.loc_rib
                     .iter_flowspec()
+                    .inspect(|_| checkpoint())
                     .filter(|route| (route.afi, Safi::FlowSpec) == family)
                     .map(crate::route::FlowSpecRoute::selection_key),
             );
@@ -1350,40 +1392,54 @@ impl RibManager {
             self.deferred_selection_keys
                 .flowspec
                 .iter()
+                .inspect(|_| checkpoint())
                 .filter(|key| (key.afi, Safi::FlowSpec) == family)
                 .cloned(),
         );
-        self.deferred_selection_keys
-            .flowspec
-            .retain(|key| (key.afi, Safi::FlowSpec) != family);
+        self.deferred_selection_keys.flowspec.retain(|key| {
+            checkpoint();
+            (key.afi, Safi::FlowSpec) != family
+        });
         if !flowspec.is_empty() {
             self.recompute_and_distribute_flowspec(&flowspec);
+            super::retire_hash_set(&mut flowspec, &mut checkpoint);
         }
 
         if family == (Afi::L2Vpn, Safi::Evpn) {
             let mut evpn: HashSet<_> = self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .flat_map(crate::adj_rib_in::AdjRibIn::iter_evpn)
+                .inspect(|_| checkpoint())
                 .map(crate::route::EvpnRibRoute::key)
                 .collect();
             if overflowed {
                 evpn.extend(
                     self.loc_rib
                         .iter_evpn()
+                        .inspect(|_| checkpoint())
                         .map(crate::route::EvpnRibRoute::key),
                 );
             }
-            evpn.extend(self.deferred_selection_keys.evpn.drain());
+            evpn.extend(
+                self.deferred_selection_keys
+                    .evpn
+                    .drain()
+                    .inspect(|_| checkpoint()),
+            );
             if !evpn.is_empty() {
                 self.recompute_and_distribute_evpn(&evpn);
+                super::retire_hash_set(&mut evpn, &mut checkpoint);
             }
         }
 
         let mut vpn: HashSet<_> = self
             .ribs
             .values()
+            .inspect(|_| checkpoint())
             .flat_map(crate::adj_rib_in::AdjRibIn::iter_vpn)
+            .inspect(|_| checkpoint())
             .filter(|route| route.afi_safi() == family)
             .map(crate::route::VpnRibRoute::key)
             .collect();
@@ -1391,6 +1447,7 @@ impl RibManager {
             vpn.extend(
                 self.loc_rib
                     .iter_vpn()
+                    .inspect(|_| checkpoint())
                     .filter(|route| route.afi_safi() == family)
                     .map(crate::route::VpnRibRoute::key),
             );
@@ -1399,20 +1456,25 @@ impl RibManager {
             self.deferred_selection_keys
                 .vpn
                 .iter()
+                .inspect(|_| checkpoint())
                 .filter(|key| key.afi_safi() == family)
                 .cloned(),
         );
-        self.deferred_selection_keys
-            .vpn
-            .retain(|key| key.afi_safi() != family);
+        self.deferred_selection_keys.vpn.retain(|key| {
+            checkpoint();
+            key.afi_safi() != family
+        });
         if !vpn.is_empty() {
             self.recompute_vpn_keys(&vpn);
+            super::retire_hash_set(&mut vpn, &mut checkpoint);
         }
 
         let mut labeled: HashSet<_> = self
             .ribs
             .values()
+            .inspect(|_| checkpoint())
             .flat_map(crate::adj_rib_in::AdjRibIn::iter_labeled)
+            .inspect(|_| checkpoint())
             .filter(|route| route.afi_safi() == family)
             .map(crate::route::LabeledRibRoute::key)
             .collect();
@@ -1420,6 +1482,7 @@ impl RibManager {
             labeled.extend(
                 self.loc_rib
                     .iter_labeled()
+                    .inspect(|_| checkpoint())
                     .filter(|route| route.afi_safi() == family)
                     .map(crate::route::LabeledRibRoute::key),
             );
@@ -1428,20 +1491,25 @@ impl RibManager {
             self.deferred_selection_keys
                 .labeled
                 .iter()
+                .inspect(|_| checkpoint())
                 .filter(|key| key.afi_safi() == family)
                 .copied(),
         );
-        self.deferred_selection_keys
-            .labeled
-            .retain(|key| key.afi_safi() != family);
+        self.deferred_selection_keys.labeled.retain(|key| {
+            checkpoint();
+            key.afi_safi() != family
+        });
         if !labeled.is_empty() {
             self.recompute_labeled_keys(&labeled);
+            super::retire_hash_set(&mut labeled, &mut checkpoint);
         }
 
         let mut bgpls: HashSet<_> = self
             .ribs
             .values()
+            .inspect(|_| checkpoint())
             .flat_map(crate::adj_rib_in::AdjRibIn::iter_bgpls)
+            .inspect(|_| checkpoint())
             .filter(|route| route.family.to_afi_safi() == family)
             .map(crate::route::BgpLsRibRoute::key)
             .collect();
@@ -1449,6 +1517,7 @@ impl RibManager {
             bgpls.extend(
                 self.loc_rib
                     .iter_bgpls()
+                    .inspect(|_| checkpoint())
                     .filter(|route| route.family.to_afi_safi() == family)
                     .map(crate::route::BgpLsRibRoute::key),
             );
@@ -1457,32 +1526,54 @@ impl RibManager {
             self.deferred_selection_keys
                 .bgpls
                 .iter()
+                .inspect(|_| checkpoint())
                 .filter(|key| key.family.to_afi_safi() == family)
                 .cloned(),
         );
-        self.deferred_selection_keys
-            .bgpls
-            .retain(|key| key.family.to_afi_safi() != family);
+        self.deferred_selection_keys.bgpls.retain(|key| {
+            checkpoint();
+            key.family.to_afi_safi() != family
+        });
         if !bgpls.is_empty() {
             self.recompute_bgpls_keys(&bgpls);
+            super::retire_hash_set(&mut bgpls, &mut checkpoint);
         }
 
         if family == crate::route::RtcRibRouteKey::afi_safi() {
             let mut rtc: HashSet<_> = self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .flat_map(crate::adj_rib_in::AdjRibIn::iter_rtc)
+                .inspect(|_| checkpoint())
                 .map(crate::route::RtcRibRoute::key)
                 .collect();
             if overflowed {
-                rtc.extend(self.loc_rib.iter_rtc().map(crate::route::RtcRibRoute::key));
+                rtc.extend(
+                    self.loc_rib
+                        .iter_rtc()
+                        .inspect(|_| checkpoint())
+                        .map(crate::route::RtcRibRoute::key),
+                );
             }
-            rtc.extend(self.deferred_selection_keys.rtc.drain());
+            rtc.extend(
+                self.deferred_selection_keys
+                    .rtc
+                    .drain()
+                    .inspect(|_| checkpoint()),
+            );
             if !rtc.is_empty() {
                 self.recompute_rtc_keys(&rtc);
+                super::retire_hash_set(&mut rtc, &mut checkpoint);
             }
-            let rtc_peers: Vec<_> = self.peer_rt_membership.keys().copied().collect();
+            let rtc_peers: Vec<_> = self
+                .peer_rt_membership
+                .keys()
+                .inspect(|_| checkpoint())
+                .copied()
+                .collect();
             for peer in rtc_peers {
+                checkpoint();
                 self.rebuild_rtc_membership_and_restage_vpn(peer);
             }
         }

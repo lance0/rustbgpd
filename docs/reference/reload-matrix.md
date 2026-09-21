@@ -519,6 +519,17 @@ what's deferred.
 | `batch_size` | restart-required | Batch-commit size threshold. |
 | `batch_interval_ms` | restart-required | Batch-commit time threshold. |
 
+## `[flowspec]` (ADR-0135)
+
+The RIB's receive-side feasibility mode is fixed at startup. SIGHUP retains
+that running value while keeping the operator's edited desired configuration;
+subsequent diffs still report the restart requirement. Config transactions
+reject changes to this section.
+
+| Field | Class | Notes |
+|---|---|---|
+| `validation` | restart-required | `"off"` (default, including an omitted table) preserves existing behavior. `"rfc9117"` enables received IPv4/IPv6 FlowSpec cross-RIB feasibility checks. Both enabling and disabling require a restart. |
+
 ## `[inbound_admission]` (ADR-0120)
 
 The per-source accept-rate limiter is built once by the accept-path
