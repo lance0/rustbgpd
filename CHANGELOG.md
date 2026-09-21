@@ -68,6 +68,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recorded under the new `selection_release` seam of
   `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
   transition reason and seam.
+- `rbgp config effective` now stops with a `deadline exceeded` error and exit
+  code 1 when the daemon accepts the request but never completes the response,
+  instead of waiting indefinitely. It uses the same allowance `rbgp doctor`
+  already applies to this read: the server's 30-minute effective-config
+  operation plus 30 seconds of response transfer.
 
 ## [0.71.0] — 2026-09-20
 
