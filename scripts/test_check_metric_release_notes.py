@@ -25,8 +25,8 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
-        self.assertEqual(len(baseline), 217)
-        self.assertEqual(added, {"bgp_event_outbox_storage_failed"})
+        self.assertEqual(len(baseline), 218)
+        self.assertEqual(added, set())
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
@@ -134,14 +134,61 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
                 {},
             )
 
+    def test_empty_unreleased_target_without_family_changes_passes(self):
+        changelog = f"""# Changelog
+
+## [{check.UNRELEASED_SECTION}]
+
+## [0.71.0] - 2026-09-20
+
+- Export `bgp_carried_total`.
+"""
+        section = check.release_section(changelog, check.UNRELEASED_SECTION)
+        self.assertEqual(section.strip(), "")
+
+        added, removed = check.validate_release_notes(
+            {"bgp_stable"}, {"bgp_stable"}, section, {}
+        )
+
+        self.assertEqual(added, set())
+        self.assertEqual(removed, set())
+
+    def test_empty_unreleased_target_with_a_family_change_names_the_family(self):
+        changelog = f"""# Changelog
+
+## [{check.UNRELEASED_SECTION}]
+
+## [0.71.0] - 2026-09-20
+
+- Export `bgp_new_total`.
+"""
+        section = check.release_section(changelog, check.UNRELEASED_SECTION)
+        self.assertEqual(section.strip(), "")
+
+        with self.assertRaisesRegex(ValueError, "added=bgp_new_total"):
+            check.validate_release_notes(
+                {"bgp_stable"}, {"bgp_stable", "bgp_new_total"}, section, {}
+            )
+
+    def test_empty_versioned_target_section_still_fails_closed(self):
+        changelog = """# Changelog
+
+## [0.71.0] - 2026-09-20
+
+## [0.70.2] - 2026-09-18
+
+- Export `bgp_carried_total`.
+"""
+        with self.assertRaisesRegex(ValueError, r"section for 0\.71\.0 is empty"):
+            check.release_section(changelog, "0.71.0")
+
     def test_workspace_release_change_requires_explicit_target_review(self):
         check.validate_workspace_release("0.71.0")
         with self.assertRaisesRegex(
             ValueError,
-            "select the target changelog section explicitly and review whether the "
-            "released metric baseline must roll",
+            "roll the baseline to that release in the post-release commit",
         ):
-            check.validate_workspace_release("0.71.1")
+            check.validate_workspace_release("99.0.0")
 
     def test_exceptions_are_reasoned_narrow_and_nonredundant(self):
         with self.assertRaisesRegex(ValueError, "specific reasons"):
@@ -166,21 +213,21 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
     def test_baseline_metadata_ordering_and_names_fail_closed(self):
         cases = (
             (
-                '{"release":"v0.69.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.70.0","source_commit":"x","families":["bgp_a"]}',
                 "release must be",
             ),
             (
-                '{"release":"v0.70.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.71.0","source_commit":"x","families":["bgp_a"]}',
                 "commit must be",
             ),
             (
-                '{"release":"v0.70.0","source_commit":"'
+                '{"release":"v0.71.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["bgp_b","bgp_a"]}',
                 "sorted and unique",
             ),
             (
-                '{"release":"v0.70.0","source_commit":"'
+                '{"release":"v0.71.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["not a metric"]}',
                 "invalid family name",

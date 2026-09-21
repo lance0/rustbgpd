@@ -1,6 +1,6 @@
 {
-  "release": "v0.70.0",
-  "source_commit": "ee6215af61222a43c3a8019ee0352ecd5df77913",
+  "release": "v0.71.0",
+  "source_commit": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
   "families": [
     "bfd_session_flaps_total",
     "bfd_session_up",
@@ -29,6 +29,7 @@
     "bgp_event_outbox_open_failures_total",
     "bgp_event_outbox_queue_depth",
     "bgp_event_outbox_retention_evicted_total",
+    "bgp_event_outbox_storage_failed",
     "bgp_event_stream_lagged_total",
     "bgp_event_stream_subscribers",
     "bgp_evpn_nlri_discarded_by_type_total",
