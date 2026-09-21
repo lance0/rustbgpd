@@ -52,10 +52,11 @@ Doctor keeps successfully collected evidence when a read times out and marks
 the affected bundle section incomplete. Its effective-config export has a
 separate 30-minute-and-30-second allowance for the server's supported large
 configuration operation and response transfer. This is a per-call limit, not
-a 30-second limit on the whole doctor command. Long-running config diff,
-plan, and effective export, config mutations and streams, advertised diff's
-aggregate deadline, TUI refresh limits, live watches, MRT dump completion,
-and other mutations retain their existing behavior.
+a 30-second limit on the whole doctor command. `rbgp config effective` uses
+the same allowance. Long-running config diff and plan, config mutations and
+streams, advertised diff's aggregate deadline, TUI refresh limits, live
+watches, MRT dump completion, and other mutations retain their existing
+behavior.
 
 In `rbgp top`, select a peer and open its detail, then press `r` to open the
 on-demand route explorer. `v` cycles the global unicast Best table and the
