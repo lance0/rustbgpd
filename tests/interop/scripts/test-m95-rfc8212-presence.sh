@@ -117,6 +117,25 @@ count_routes_from() {
         | jq -r --arg p "$1" '[.routes[]? | select(.peerAddress == $p)] | length'
 }
 
+# Routes the RIB itself marks graceful-restart stale. A plain per-peer count
+# cannot tell a retained route from one a live session is still announcing.
+count_stale_routes_from() {
+    grpcurl_call "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null \
+        | jq -r --arg p "$1" \
+            '[.routes[]? | select(.peerAddress == $p and (.stale // false))] | length'
+}
+
+# grpcurl renders SessionState by its proto enum name. Recognise the prefix
+# before comparing, so a rendering this script does not know reads as "cannot
+# tell" rather than as "not Established".
+session_state_is_down() {
+    case "$1" in
+        SESSION_STATE_ESTABLISHED) return 1 ;;
+        SESSION_STATE_*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 rfc8212_import_status() {
     neighbor_state "$1" | jq -r '.rfc8212ImportPolicy // "UNSET"'
 }
@@ -409,18 +428,20 @@ assert_no_flap "$FRR_PEER" "$frr_marker" "$(session_marker "$FRR_PEER")" "phase 
 log "PHASE 4: killing FRR's bgpd so its routes are retained as GR stale"
 docker exec "$FRR" sh -c 'kill -9 $(pidof bgpd)' || true
 retained=0
+state="UNKNOWN"
+stale=0
 for i in $(seq 1 30); do
     state=$(neighbor_state "$FRR_PEER" | jq -r '.state // "UNKNOWN"')
-    routes=$(count_routes_from "$FRR_PEER")
-    if [ "$state" != "ESTABLISHED" ] && [ "$routes" -gt 0 ]; then
-        ok "FRR is down ($state) with $routes route(s) retained as stale (after ${i}s)"
+    stale=$(count_stale_routes_from "$FRR_PEER")
+    if session_state_is_down "$state" && [ "$stale" -gt 0 ]; then
+        ok "FRR is down ($state) with $stale route(s) retained as stale (after ${i}s)"
         retained=1
         break
     fi
     sleep 1
 done
 if [ "$retained" -ne 1 ]; then
-    fail "could not reach a down-with-retained-stale state; phase 4 cannot discriminate"
+    fail "could not reach a down-with-retained-stale state (last: $state, $stale stale route(s)); phase 4 cannot discriminate"
 else
     mark_log
     sighup_with "frr-missing"
