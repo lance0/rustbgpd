@@ -180,7 +180,9 @@ def check_stable_config_object_shape_regressions() -> None:
         fail("internal config-shape regression treated required ordering as semantic")
 
 
-def check_effective_default_assertion_block(test_region: str, test: str) -> None:
+def check_effective_default_assertion_block(
+    test_region: str, test: str, values: dict[str, str]
+) -> None:
     if not re.search(
         rf"""
         macro_rules!\s+{EFFECTIVE_DEFAULT_ASSERTION_MACRO}\s*\{{\s*
@@ -204,7 +206,14 @@ def check_effective_default_assertion_block(test_region: str, test: str) -> None
             f"effective-default validation test {test!r} must assert exactly the "
             "eleven scalar scoped full paths in sorted order"
         )
-    for path, actual, _ in assertions:
+    for path, actual, expected in assertions:
+        expected = re.sub(r"\s+", "", expected)
+        if expected != values[path]:
+            fail(
+                f"effective-default validation test {test!r} expects {expected} for "
+                f"{path!r} but the inventory pins {values[path]}; a contextual "
+                "default change is a compatibility decision, not a literal refresh"
+            )
         field = path.partition(".")[2]
         runtime_field = (
             "effective_dynamic_neighbor_limit"
@@ -282,11 +291,13 @@ def check_effective_defaults(
         "schema_representation_defaults",
         "validation_source",
         "validation_test",
+        "values",
     }
     if set(effective) != required_keys:
         fail(
             "config.effective_defaults must contain exactly paths, "
-            "schema_representation_defaults, validation_source, and validation_test"
+            "schema_representation_defaults, validation_source, validation_test, "
+            "and values"
         )
 
     paths = effective["paths"]
@@ -302,6 +313,16 @@ def check_effective_defaults(
         fail(
             "config.effective_defaults.schema_representation_defaults must match "
             "the exact three-path representation map"
+        )
+    values = effective["values"]
+    if (
+        not isinstance(values, dict)
+        or list(values) != list(EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS)
+        or not all(isinstance(value, str) and value for value in values.values())
+    ):
+        fail(
+            "config.effective_defaults.values must pin one expected literal for "
+            "each of the eleven scalar scoped paths, in sorted order"
         )
     for path in paths:
         definition, separator, field = path.partition(".")
@@ -338,10 +359,10 @@ def check_effective_defaults(
     test_region = named_rust_test_region(source, test)
     if test_region is None:
         fail(f"effective-default validation test {test!r} is not a live named test")
-    check_effective_default_assertion_block(test_region, test)
+    check_effective_default_assertion_block(test_region, test, values)
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
+            EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test, values
         ),
         "must assert exactly the eleven scalar scoped full paths",
         "missing effective-default runtime assertion block",
@@ -364,21 +385,34 @@ def check_effective_defaults(
     ):
         expect_checker_failure(
             lambda broken_macro=broken_macro: check_effective_default_assertion_block(
-                broken_macro, test
+                broken_macro, test, values
             ),
             "no runtime-vs-expected assertion macro",
             label,
         )
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            EFFECTIVE_FAMILY_ASSERTION_RE.sub("", test_region), test
+            re.sub(
+                r'("Neighbor\.hold_time"\s*,\s*hold_time\s*,\s*)\d+',
+                r"\g<1>120",
+                test_region,
+            ),
+            test,
+            values,
+        ),
+        "for 'Neighbor.hold_time' but the inventory pins 90",
+        "changed contextual default literal",
+    )
+    expect_checker_failure(
+        lambda: check_effective_default_assertion_block(
+            EFFECTIVE_FAMILY_ASSERTION_RE.sub("", test_region), test, values
         ),
         "must assert exactly the four typed family-resolution cases",
         "missing effective-family runtime rows",
     )
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            test_region.replace("$actual.as_slice()", "$expected", 1), test
+            test_region.replace("$actual.as_slice()", "$expected", 1), test, values
         ),
         "no typed runtime-vs-expected family assertion macro",
         "vacuous effective-family macro",

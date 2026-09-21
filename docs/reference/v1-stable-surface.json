@@ -116,7 +116,20 @@
         "Neighbor.min_hold_time": null
       },
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "v1_stable_effective_defaults_match_runtime_resolution"
+      "validation_test": "v1_stable_effective_defaults_match_runtime_resolution",
+      "values": {
+        "Global.cluster_id": "None",
+        "Global.dynamic_neighbor_limit": "(100,500)",
+        "Neighbor.disable_ipv4_unicast": "false",
+        "Neighbor.gr_peer_restart_time_max": "4095",
+        "Neighbor.gr_restart_time": "120",
+        "Neighbor.gr_stale_routes_time": "360",
+        "Neighbor.graceful_restart": "true",
+        "Neighbor.hold_time": "90",
+        "Neighbor.llgr_stale_time": "(0,0)",
+        "Neighbor.min_hold_time": "None",
+        "Neighbor.send_hold_time": "480"
+      }
     },
     "explicitly_unstable_roots": [
       {"path": "AddPathConfig.receive_max", "classification": "experimental"},

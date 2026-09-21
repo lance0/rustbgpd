@@ -62,6 +62,10 @@ group supplies one. The Python release checker pins
 the exact inventory, those three representation values, the daemon's shared
 dynamic-neighbor-limit accessor, and linkage to a live, non-ignored Rust test;
 the focused Cargo test executes that test and detects runtime resolver changes.
+The inventory also records the expected value of each scalar contextual default
+under `config.effective_defaults.values`, and the checker compares it with the
+literal that test asserts, so changing a resolver and its test together still
+requires an inventory edit and the compatibility review that goes with it.
 Nested protobuf evolution follows the compatibility rules below. The
 message-graph digest is a review tripwire, not an implicit promotion:
 experimental fields such as Paths-Limit are explicitly excluded in the
