@@ -76,7 +76,7 @@ async fn plan_exits_zero_noop_two_committable_three_rejected() {
         )
         .await;
         let document: serde_json::Value = serde_json::from_slice(&versioned.stdout).unwrap();
-        assert_eq!(document["format_version"], "1.0");
+        assert_eq!(document["format_version"], "1.1");
         versioned.stdout = serde_json::to_vec(&document["data"]).unwrap();
         assert_json_status(&versioned, code, label);
     }
@@ -250,7 +250,7 @@ async fn remaining_config_documents_preserve_plain_and_versioned_payloads() {
         assert!(versioned.stderr.is_empty(), "{command:?}: {versioned:?}");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&versioned.stdout).unwrap(),
-            serde_json::json!({"format": "rbgp-json", "format_version": "1.0", "data": payload})
+            serde_json::json!({"format": "rbgp-json", "format_version": "1.1", "data": payload})
         );
     }
 

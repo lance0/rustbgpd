@@ -1279,6 +1279,18 @@ fn print_blackhole_discards(
     Ok(())
 }
 
+fn fib_route_page_to_json(
+    resp: &ListFibRoutesResponse,
+    routes: Vec<JsonFibRouteStatus>,
+) -> JsonFibRoutePage {
+    JsonFibRoutePage {
+        sampling: fib_sampling_metadata(&resp.routes),
+        routes,
+        next_page_token: resp.next_page_token.clone(),
+        total_count: resp.total_count,
+    }
+}
+
 fn print_fib_routes(
     resp: &ListFibRoutesResponse,
     json: bool,
@@ -1288,12 +1300,7 @@ fn print_fib_routes(
         let routes: Vec<JsonFibRouteStatus> =
             resp.routes.iter().map(fib_route_status_to_json).collect();
         if include_page_meta {
-            let out = JsonFibRoutePage {
-                sampling: fib_sampling_metadata(&resp.routes),
-                routes,
-                next_page_token: resp.next_page_token.clone(),
-                total_count: resp.total_count,
-            };
+            let out = fib_route_page_to_json(resp, routes);
             output::print_json_pretty(&out)?;
         } else {
             output::print_json_pretty(&routes)?;
@@ -1513,6 +1520,7 @@ pub(crate) fn explain_to_json(
             .iter()
             .map(|candidate| JsonOrrExplainCandidate {
                 peer_address: candidate.peer_address.clone(),
+                path_id: candidate.path_id,
                 next_hop: candidate.next_hop.clone(),
                 cost: candidate.cost,
                 selected: candidate.selected,
@@ -2336,34 +2344,38 @@ fn rejected_routes_completeness_notice(resp: &ListRejectedRoutesResponse) -> Opt
     }
 }
 
+fn rejected_routes_to_json(resp: &ListRejectedRoutesResponse) -> JsonRejectedRoutes<'_> {
+    let rejected_routes = resp
+        .routes
+        .iter()
+        .map(|r| JsonRejectedRoute {
+            prefix: format!("{}/{}", r.prefix, r.prefix_length),
+            path_id: r.path_id,
+            reason: &r.reason,
+            reason_detail: &r.reason_detail,
+            next_hop: &r.next_hop,
+            as_path: &r.as_path,
+            communities: &r.communities,
+            communities_dropped: r.communities_dropped,
+            large_communities: &r.large_communities,
+            large_communities_dropped: r.large_communities_dropped,
+            rpki_validation: &r.rpki_validation,
+            aspa_validation: &r.aspa_validation,
+            rejected_at_unix_ns: r.rejected_at_unix_ns,
+        })
+        .collect();
+    JsonRejectedRoutes {
+        peer_address: &resp.peer_address,
+        retention_enabled: resp.retention_enabled,
+        capacity: resp.capacity,
+        evictions_since_reset: resp.evictions_since_reset,
+        rejected_routes,
+    }
+}
+
 fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Result<(), CliError> {
     if json {
-        let rejected_routes = resp
-            .routes
-            .iter()
-            .map(|r| JsonRejectedRoute {
-                prefix: format!("{}/{}", r.prefix, r.prefix_length),
-                path_id: r.path_id,
-                reason: &r.reason,
-                reason_detail: &r.reason_detail,
-                next_hop: &r.next_hop,
-                as_path: &r.as_path,
-                communities: &r.communities,
-                communities_dropped: r.communities_dropped,
-                large_communities: &r.large_communities,
-                large_communities_dropped: r.large_communities_dropped,
-                rpki_validation: &r.rpki_validation,
-                aspa_validation: &r.aspa_validation,
-                rejected_at_unix_ns: r.rejected_at_unix_ns,
-            })
-            .collect();
-        return output::print_json_pretty(&JsonRejectedRoutes {
-            peer_address: &resp.peer_address,
-            retention_enabled: resp.retention_enabled,
-            capacity: resp.capacity,
-            evictions_since_reset: resp.evictions_since_reset,
-            rejected_routes,
-        });
+        return output::print_json_pretty(&rejected_routes_to_json(resp));
     }
     if !resp.retention_enabled {
         outln!(
@@ -3682,51 +3694,95 @@ mod tests {
     }
 
     #[test]
-    fn explain_advertised_json_maps_orr_fields() {
-        let resp = crate::proto::ExplainAdvertisedRouteResponse {
+    fn explain_advertised_json_projection_covers_proto_fields() {
+        let mut resp = crate::proto::ExplainAdvertisedRouteResponse {
             decision: ExplainDecision::Advertise as i32,
-            peer_address: "10.0.0.3".to_string(),
-            prefix: "198.51.100.0".to_string(),
+            peer_address: "fe80::1%eth0".into(),
+            prefix: "203.0.113.0".into(),
             prefix_length: 24,
-            next_hop: "10.0.2.1".to_string(),
-            source: Some(crate::proto::RouteSourceIdentity {
-                peer_address: "192.0.2.9".to_string(),
-                path_id: 0,
+            next_hop: "192.0.2.1".into(),
+            path_id: 31,
+            route_peer_address: "192.0.2.2".into(),
+            route_type: "ebgp".into(),
+            reasons: vec![crate::proto::ExplainReason {
+                code: "permit".into(),
+                message: "matched export".into(),
+            }],
+            modifications: Some(crate::proto::ExplainModifications {
+                set_local_pref: Some(0),
+                set_med: Some(32),
+                set_next_hop: "192.0.2.3".into(),
+                communities_add: vec![rustbgpd_wire::COMMUNITY_NO_EXPORT],
+                communities_remove: vec![(65001 << 16) | 9],
+                extended_communities_add: vec![u64::MAX],
+                extended_communities_remove: vec![33],
+                large_communities_add: vec!["65001:1:2".into()],
+                large_communities_remove: vec!["65001:3:4".into()],
+                as_path_prepend_asn: Some(65002),
+                as_path_prepend_count: Some(3),
             }),
-            orr_vantage: "10.0.1.1".to_string(),
+            orr_vantage: "10.0.1.1".into(),
             orr_candidates: vec![
                 crate::proto::OrrExplainCandidate {
-                    peer_address: "192.0.2.2".to_string(),
-                    path_id: 0,
-                    next_hop: "10.0.2.1".to_string(),
-                    cost: Some(1),
+                    peer_address: "192.0.2.4".into(),
+                    path_id: 34,
+                    next_hop: "192.0.2.5".into(),
+                    cost: Some(u64::MAX),
                     selected: true,
                 },
                 crate::proto::OrrExplainCandidate {
-                    peer_address: "192.0.2.1".to_string(),
-                    path_id: 0,
-                    next_hop: "203.0.113.99".to_string(),
+                    peer_address: "192.0.2.4".into(),
+                    path_id: 35,
+                    next_hop: "192.0.2.5".into(),
                     cost: None,
                     selected: false,
                 },
             ],
-            ..Default::default()
+            gates: vec![crate::proto::ExportGateStep {
+                gate: "family".into(),
+                code: "negotiated".into(),
+                verdict: ExportGateVerdict::Pass as i32,
+                detail: "unicast enabled".into(),
+            }],
+            update_group_id: Some(u64::MAX),
+            already_advertised: true,
+            rd: "65001:36".into(),
+            source: Some(crate::proto::RouteSourceIdentity {
+                peer_address: "192.0.2.8".into(),
+                path_id: 0,
+            }),
         };
-
-        let value = serde_json::to_value(explain_to_json(&resp)).unwrap();
-        assert_eq!(value["orr_vantage"], "10.0.1.1");
-        assert_eq!(value["orr_candidates"][0]["peer_address"], "192.0.2.2");
-        assert_eq!(value["orr_candidates"][0]["cost"], 1);
-        assert_eq!(value["orr_candidates"][0]["selected"], true);
-        assert!(
-            value["orr_candidates"][1]["cost"].is_null(),
-            "unreachable cost serializes as null"
+        assert_eq!(
+            serde_json::to_value(explain_to_json(&resp)).unwrap(),
+            serde_json::json!({
+                "decision": "advertise", "peer_address": "fe80::1%eth0", "prefix": "203.0.113.0/24",
+                "next_hop": "192.0.2.1", "path_id": 31, "route_peer_address": "192.0.2.2", "route_type": "ebgp",
+                "reasons": [{"code": "permit", "message": "matched export"}],
+                "modifications": {
+                    "set_local_pref": 0, "set_med": 32, "set_next_hop": "192.0.2.3",
+                    "communities_add": ["NO_EXPORT"], "communities_remove": ["65001:9"],
+                    "extended_communities_add": [u64::MAX], "extended_communities_remove": [33],
+                    "large_communities_add": ["65001:1:2"], "large_communities_remove": ["65001:3:4"],
+                    "as_path_prepend_asn": 65002, "as_path_prepend_count": 3
+                },
+                "orr_vantage": "10.0.1.1", "orr_candidates": [
+                    {"peer_address": "192.0.2.4", "path_id": 34, "next_hop": "192.0.2.5", "cost": u64::MAX, "selected": true},
+                    {"peer_address": "192.0.2.4", "path_id": 35, "next_hop": "192.0.2.5", "cost": null, "selected": false}
+                ],
+                "gates": [{"gate": "family", "code": "negotiated", "verdict": "pass", "detail": "unicast enabled"}],
+                "update_group_id": u64::MAX, "already_advertised": true, "rd": "65001:36",
+                "source": {"peer_address": "192.0.2.8", "path_id": 0}
+            })
         );
-        assert_eq!(value["orr_candidates"][1]["selected"], false);
-        assert_eq!(value["source"]["path_id"], 0);
         assert_eq!(
             advertised_path_id_line(&resp).as_deref(),
-            Some("Outbound path ID: 0")
+            Some("Outbound path ID: 31")
+        );
+        // Inbound identity stays present even when Add-Path is not negotiated.
+        resp.orr_candidates[0].path_id = 0;
+        assert_eq!(
+            serde_json::to_value(explain_to_json(&resp)).unwrap()["orr_candidates"][0]["path_id"],
+            0
         );
     }
 
@@ -3745,6 +3801,15 @@ mod tests {
         assert!(value.get("rd").is_none());
         assert!(value.get("source").is_none());
         assert_eq!(advertised_path_id_line(&resp), None);
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "decision": "unspecified", "peer_address": "", "prefix": "/0", "reasons": [],
+                "modifications": {"communities_add": [], "communities_remove": [],
+                    "extended_communities_add": [], "extended_communities_remove": [],
+                    "large_communities_add": [], "large_communities_remove": []}
+            })
+        );
     }
 
     #[test]
@@ -3794,7 +3859,286 @@ mod tests {
     }
 
     #[test]
-    fn blackhole_json_shape_is_stable() {
+    fn bgpls_json_projection_covers_proto_fields() {
+        // afi_safi is intentionally rendered through the family fallback;
+        // raw bytes are lowercase hex and standard communities are labels.
+        let mut route = BgpLsRouteEntry {
+            afi_safi: AddressFamily::BgpLs as i32,
+            family: "bgp-ls-vpn".into(),
+            nlri_type: 99,
+            nlri_type_name: "future-type".into(),
+            route_distinguisher: vec![0, 255],
+            payload: vec![1, 171],
+            descriptor: vec![2, 205],
+            next_hop: "2001:db8::1".into(),
+            peer_address: "fe80::2%eth0".into(),
+            as_path: vec![65001, 65002],
+            communities: vec![rustbgpd_wire::COMMUNITY_NO_EXPORT, (65001 << 16) | 7],
+            extended_communities: vec![u64::MAX, 5],
+            stale: true,
+            llgr_stale: true,
+            path_id: 17,
+            bgp_ls_attribute: vec![3, 239],
+        };
+        let mut expected = serde_json::json!({
+            "family": "bgp-ls-vpn", "nlri_type": 99, "nlri_type_name": "future-type",
+            "route_distinguisher": "00ff", "payload": "01ab", "descriptor": "02cd",
+            "next_hop": "2001:db8::1", "peer_address": "fe80::2%eth0",
+            "as_path": [65001, 65002], "communities": ["NO_EXPORT", "65001:7"],
+            "extended_communities": [u64::MAX, 5], "stale": true, "llgr_stale": true,
+            "path_id": 17, "bgp_ls_attribute": "03ef"
+        });
+        assert_eq!(
+            serde_json::to_value(JsonBgpLsRouteRef(&route)).unwrap(),
+            expected
+        );
+        route.family.clear();
+        route.path_id = 0;
+        route.stale = false;
+        route.llgr_stale = false;
+        expected["family"] = "bgp_ls".into();
+        for key in ["path_id", "stale", "llgr_stale"] {
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        let response = crate::proto::ListBgpLsResponse {
+            routes: vec![route],
+        };
+        assert_eq!(
+            serde_json::to_value(JsonBgpLsRoutes(&response.routes)).unwrap(),
+            serde_json::json!([expected])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonBgpLsRoutes(&[])).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn vpn_json_projection_covers_proto_fields() {
+        let mut route = VpnRouteEntry {
+            afi_safi: "ipv6_mpls_vpn".into(),
+            route_distinguisher: vec![0, 1, 0xab, 0xff],
+            route_distinguisher_str: "65001:77".into(),
+            prefix: "2001:db8::/48".into(),
+            labels: vec![16000, 17000],
+            next_hop: "2001:db8::1".into(),
+            peer_address: "fe80::2%eth0".into(),
+            as_path: vec![65001, 65002],
+            communities: vec!["NO_EXPORT".into(), "65001:8".into()],
+            extended_communities: vec!["RT:65001:9".into(), "SoO:65002:10".into()],
+            stale: true,
+            llgr_stale: true,
+            path_id: 18,
+            // Detailed PrefixSidView projection has its own exhaustive test in
+            // output.rs; this wrapper must still retain the optional object.
+            prefix_sid: Some(Box::new(crate::proto::PrefixSidView {
+                raw_value: vec![0xde, 0xad],
+                flags: 192,
+                services: vec![],
+                decode_error: "malformed framing".into(),
+            })),
+        };
+        let mut expected = serde_json::json!({
+            "afi_safi": "ipv6_mpls_vpn", "route_distinguisher": "65001:77",
+            "route_distinguisher_bytes": "0001abff", "prefix": "2001:db8::/48",
+            "labels": [16000, 17000], "next_hop": "2001:db8::1", "peer_address": "fe80::2%eth0",
+            "as_path": [65001, 65002], "communities": ["NO_EXPORT", "65001:8"],
+            "extended_communities": ["RT:65001:9", "SoO:65002:10"],
+            "stale": true, "llgr_stale": true, "path_id": 18,
+            "prefix_sid": {"raw_value": "dead", "flags": 192, "services": [], "decode_error": "malformed framing"}
+        });
+        assert_eq!(
+            serde_json::to_value(JsonVpnRouteRef(&route)).unwrap(),
+            expected
+        );
+        route.prefix_sid = None;
+        route.path_id = 0;
+        route.stale = false;
+        route.llgr_stale = false;
+        for key in ["prefix_sid", "path_id", "stale", "llgr_stale"] {
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        let response = crate::proto::ListVpnRoutesResponse {
+            routes: vec![route],
+        };
+        assert_eq!(
+            serde_json::to_value(JsonVpnRoutes(&response.routes)).unwrap(),
+            serde_json::json!([expected])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonVpnRoutes(&[])).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn labeled_json_projection_covers_proto_fields() {
+        let mut route = LabeledRouteEntry {
+            afi_safi: "ipv4_labeled_unicast".into(),
+            prefix: "203.0.113.0/24".into(),
+            labels: vec![16001, 17001],
+            next_hop: "192.0.2.1".into(),
+            peer_address: "192.0.2.2".into(),
+            as_path: vec![65003, 65004],
+            communities: vec!["65003:1".into(), "NO_ADVERTISE".into()],
+            extended_communities: vec!["RT:65003:2".into()],
+            stale: true,
+            llgr_stale: true,
+            path_id: 19,
+        };
+        let mut expected = serde_json::json!({
+            "afi_safi": "ipv4_labeled_unicast", "prefix": "203.0.113.0/24",
+            "labels": [16001, 17001], "next_hop": "192.0.2.1", "peer_address": "192.0.2.2",
+            "as_path": [65003, 65004], "communities": ["65003:1", "NO_ADVERTISE"],
+            "extended_communities": ["RT:65003:2"], "stale": true, "llgr_stale": true, "path_id": 19
+        });
+        assert_eq!(
+            serde_json::to_value(JsonLabeledRouteRef(&route)).unwrap(),
+            expected
+        );
+        route.path_id = 0;
+        route.stale = false;
+        route.llgr_stale = false;
+        for key in ["path_id", "stale", "llgr_stale"] {
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        let response = crate::proto::ListLabeledRoutesResponse {
+            routes: vec![route],
+        };
+        assert_eq!(
+            serde_json::to_value(JsonLabeledRoutes(&response.routes)).unwrap(),
+            serde_json::json!([expected])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonLabeledRoutes(&[])).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn rtc_json_projection_covers_proto_fields() {
+        let mut route = RtcRouteEntry {
+            is_default: false,
+            origin_as: 65005,
+            route_target: "RT:65005:3".into(),
+            prefix_len: 96,
+            next_hop: "192.0.2.3".into(),
+            peer_address: "192.0.2.4".into(),
+            as_path: vec![65005, 65006],
+            communities: vec!["65005:4".into()],
+            stale: true,
+            llgr_stale: true,
+            path_id: 20,
+        };
+        let mut expected = serde_json::json!({
+            "is_default": false, "origin_as": 65005, "route_target": "RT:65005:3", "prefix_len": 96,
+            "next_hop": "192.0.2.3", "peer_address": "192.0.2.4", "as_path": [65005, 65006],
+            "communities": ["65005:4"], "stale": true, "llgr_stale": true, "path_id": 20
+        });
+        assert_eq!(
+            serde_json::to_value(JsonRtcRouteRef(&route)).unwrap(),
+            expected
+        );
+        route.is_default = true;
+        route.path_id = 0;
+        route.stale = false;
+        route.llgr_stale = false;
+        expected["is_default"] = true.into();
+        for key in ["path_id", "stale", "llgr_stale"] {
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        let response = crate::proto::ListRtcRoutesResponse {
+            routes: vec![route],
+        };
+        assert_eq!(
+            serde_json::to_value(JsonRtcRoutes(&response.routes)).unwrap(),
+            serde_json::json!([expected])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonRtcRoutes(&[])).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn rejected_json_projection_covers_proto_fields_and_omissions() {
+        let route = crate::proto::RejectedRoute {
+            prefix: "2001:db8::".into(),
+            prefix_length: 48,
+            path_id: 21,
+            // The existing curated schema expresses family through prefix;
+            // it intentionally has no separate afi_safi key.
+            afi_safi: AddressFamily::Ipv6Unicast as i32,
+            reason: "policy".into(),
+            reason_detail: "term denied".into(),
+            next_hop: "2001:db8::1".into(),
+            as_path: "65001 65002".into(),
+            communities: vec![u32::MAX, 7],
+            large_communities: vec!["65001:2:3".into()],
+            communities_dropped: 22,
+            large_communities_dropped: 23,
+            rpki_validation: "invalid".into(),
+            aspa_validation: "unknown".into(),
+            rejected_at_unix_ns: i64::MAX,
+        };
+        let mut response = ListRejectedRoutesResponse {
+            peer_address: "fe80::2%eth0".into(),
+            retention_enabled: true,
+            capacity: 24,
+            routes: vec![route],
+            evictions_since_reset: Some(u64::MAX),
+        };
+        assert_eq!(
+            serde_json::to_value(rejected_routes_to_json(&response)).unwrap(),
+            serde_json::json!({
+                "peer_address": "fe80::2%eth0", "retention_enabled": true, "capacity": 24,
+                "evictions_since_reset": u64::MAX, "rejected_routes": [{
+                    "prefix": "2001:db8::/48", "path_id": 21, "reason": "policy", "reason_detail": "term denied",
+                    "next_hop": "2001:db8::1", "as_path": "65001 65002", "communities": [u32::MAX, 7],
+                    "large_communities": ["65001:2:3"], "communities_dropped": 22, "large_communities_dropped": 23,
+                    "rpki_validation": "invalid", "aspa_validation": "unknown", "rejected_at_unix_ns": i64::MAX
+                }]
+            })
+        );
+        response.routes = vec![crate::proto::RejectedRoute {
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+            path_id: 0,
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            reason: "import".into(),
+            reason_detail: String::new(),
+            next_hop: String::new(),
+            as_path: String::new(),
+            communities: vec![],
+            large_communities: vec![],
+            communities_dropped: 0,
+            large_communities_dropped: 0,
+            rpki_validation: String::new(),
+            aspa_validation: String::new(),
+            rejected_at_unix_ns: -1,
+        }];
+        response.evictions_since_reset = None;
+        assert_eq!(
+            serde_json::to_value(rejected_routes_to_json(&response)).unwrap(),
+            serde_json::json!({
+                "peer_address": "fe80::2%eth0", "retention_enabled": true, "capacity": 24,
+                "evictions_since_reset": null,
+                "rejected_routes": [{"prefix": "203.0.113.0/24", "path_id": 0, "reason": "import", "rejected_at_unix_ns": -1}]
+            })
+        );
+        response.routes.clear();
+        response.retention_enabled = false;
+        assert_eq!(
+            serde_json::to_value(rejected_routes_to_json(&response)).unwrap(),
+            serde_json::json!({
+                "peer_address": "fe80::2%eth0", "retention_enabled": false, "capacity": 24,
+                "evictions_since_reset": null, "rejected_routes": []
+            })
+        );
+    }
+
+    #[test]
+    fn blackhole_json_projection_covers_proto_fields() {
         let discard = crate::proto::BlackholeDiscard {
             prefix: "203.0.113.66".to_string(),
             prefix_length: 32,
@@ -3804,10 +4148,13 @@ mod tests {
         };
 
         let value = serde_json::to_value(blackhole_discard_to_json(&discard)).unwrap();
-        assert_eq!(value["prefix"], "203.0.113.66/32");
-        assert_eq!(value["peer_address"], "192.0.2.1");
-        assert_eq!(value["state"], "rejected");
-        assert_eq!(value["reason"], "not_ebgp");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "prefix": "203.0.113.66/32", "peer_address": "192.0.2.1",
+                "state": "rejected", "reason": "not_ebgp"
+            })
+        );
 
         for reason in ["active_limit_exceeded", "install_rate_limited"] {
             let mut limited = discard.clone();
@@ -3880,7 +4227,7 @@ mod tests {
     }
 
     #[test]
-    fn fib_json_includes_sampling_metadata_when_present() {
+    fn fib_json_projection_covers_proto_fields_and_page() {
         let route = crate::proto::FibRouteStatus {
             table_name: "edge".to_string(),
             table_id: 1000,
@@ -3901,10 +4248,35 @@ mod tests {
         };
 
         let value = serde_json::to_value(fib_route_status_to_json(&route)).unwrap();
-        assert_eq!(value["sampling"]["sampled_rows"], 128);
-        assert_eq!(value["sampling"]["suppressed_rows"], 22);
-        assert_eq!(value["sampling"]["total_rows"], 150);
-        assert_eq!(value["sampling"]["complete"], false);
+        let sampling = serde_json::json!({
+            "table_name": "edge", "table_id": 1000, "metric": 200,
+            "reason": "route_limit_exceeded", "sampled_rows": 128, "suppressed_rows": 22,
+            "total_rows": 150, "max_routes": 1, "sample_limit": 128, "complete": false
+        });
+        let expected = serde_json::json!({
+            "table_name": "edge", "table_id": 1000, "metric": 200,
+            "prefix": "203.0.113.0/24", "next_hop": "192.0.2.1", "next_hops": ["192.0.2.1"],
+            "peer_address": "198.51.100.1", "state": "rejected", "reason": "route_limit_exceeded",
+            "sampling": sampling
+        });
+        assert_eq!(value, expected);
+        let response = ListFibRoutesResponse {
+            routes: vec![route],
+            next_page_token: "opaque-next".into(),
+            total_count: u64::MAX,
+        };
+        let routes = response
+            .routes
+            .iter()
+            .map(fib_route_status_to_json)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(fib_route_page_to_json(&response, routes)).unwrap(),
+            serde_json::json!({
+                "routes": [expected], "next_page_token": "opaque-next", "total_count": u64::MAX,
+                "sampling": [sampling]
+            })
+        );
     }
 
     #[test]
@@ -4146,7 +4518,7 @@ mod tests {
     }
 
     #[test]
-    fn explain_best_path_json_matches_legacy_owned_builder() {
+    fn explain_best_path_json_projection_matches_legacy_and_exact_shape() {
         let mut candidate_route = route_for_json(9, "invalid");
         candidate_route.best = false;
         let resp = ExplainBestPathResponse {
@@ -4183,21 +4555,44 @@ mod tests {
             serde_json::to_string_pretty(&legacy_explain_best_path_to_json(&resp)).unwrap();
 
         assert_eq!(direct, legacy);
+        // Route itself has exhaustive exact coverage above; this assertion
+        // independently pins every wrapper/candidate field and null branch.
+        let mut expected = serde_json::json!({
+            "prefix": "203.0.113.0/24", "peer_address": "192.0.2.99", "add_path_send_max": 4,
+            "best_route": serde_json::to_value(JsonRouteRef(resp.best_route.as_ref().unwrap())).unwrap(),
+            "best_reason": "higher_local_pref", "best_reason_detail": "local_pref 200 > 100",
+            "candidates": [
+                {"route": serde_json::to_value(JsonRouteRef(resp.candidates[0].route.as_ref().unwrap())).unwrap(),
+                 "vs_best_reason": "higher_local_pref", "vs_best_detail": "local_pref 100 < 200",
+                 "vs_best_ordering": "worse", "multipath": "none", "advertised_path_id": 2},
+                {"route": null, "vs_best_reason": "only_path", "vs_best_detail": "",
+                 "vs_best_ordering": "equal", "multipath": "eligible", "advertised_path_id": 0}
+            ]
+        });
+        assert_eq!(
+            serde_json::to_value(explain_best_path_to_json(&resp)).unwrap(),
+            expected
+        );
+        let mut scoped = resp;
+        scoped.orr_vantage = "10.0.0.1".into();
+        expected["orr_vantage"] = "10.0.0.1".into();
+        assert_eq!(
+            serde_json::to_value(explain_best_path_to_json(&scoped)).unwrap(),
+            expected
+        );
     }
 
     #[test]
-    fn fib_paginated_json_shape_includes_metadata() {
-        let out = JsonFibRoutePage {
+    fn fib_paginated_json_projection_includes_metadata() {
+        let response = ListFibRoutesResponse {
             routes: vec![],
-            next_page_token: "100".to_string(),
+            next_page_token: "100".into(),
             total_count: 250,
-            sampling: vec![],
         };
-
-        let value = serde_json::to_value(out).unwrap();
-        assert!(value["routes"].as_array().unwrap().is_empty());
-        assert_eq!(value["next_page_token"], "100");
-        assert_eq!(value["total_count"], 250);
+        assert_eq!(
+            serde_json::to_value(fib_route_page_to_json(&response, vec![])).unwrap(),
+            serde_json::json!({"routes": [], "next_page_token": "100", "total_count": 250})
+        );
     }
 
     #[test]
@@ -4723,10 +5118,13 @@ mod tests {
             complete: listing.complete,
         })
         .unwrap();
-        assert_eq!(value["returned_count"], 1);
-        assert_eq!(value["total_count"], 42);
-        assert_eq!(value["complete"], false);
-        assert_eq!(value["routes"][0]["prefix"], "10.0.0.0/24");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "returned_count": 1, "total_count": 42, "complete": false,
+                "routes": [serde_json::to_value(JsonRouteRef(&listing.routes[0])).unwrap()]
+            })
+        );
     }
 
     #[test]

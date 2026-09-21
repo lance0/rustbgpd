@@ -717,6 +717,19 @@ pub async fn delete_ip_prefix(
     output::print_result(json, "delete_evpn", "", "EVPN Type 5 route deleted")
 }
 
+fn clear_duplicate_mac_json(
+    vni: u32,
+    mac: &str,
+    resp: &crate::proto::ClearDuplicateMacQuarantineResponse,
+) -> serde_json::Value {
+    serde_json::json!({
+            "vni": vni,
+            "mac": mac,
+            "cleared": resp.cleared,
+            "message": resp.message,
+    })
+}
+
 /// Clear one RFC 7432 duplicate-MAC local-origin quarantine.
 pub async fn clear_duplicate_mac(
     connection: Connection,
@@ -734,18 +747,26 @@ pub async fn clear_duplicate_mac(
         .await?
         .into_inner();
     if json {
-        output::print_json_pretty(&serde_json::json!({
-                "vni": vni,
-                "mac": mac,
-                "cleared": resp.cleared,
-                "message": resp.message,
-        }))?;
+        output::print_json_pretty(&clear_duplicate_mac_json(vni, &mac, &resp))?;
     } else if resp.cleared {
         outln!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}")?;
     } else {
         outln!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}")?;
     }
     Ok(())
+}
+
+fn duplicate_mac_quarantines_json(
+    resp: &crate::proto::ListDuplicateMacQuarantinesResponse,
+) -> serde_json::Value {
+    serde_json::json!({
+        "quarantines": resp.quarantines.iter().map(|row| serde_json::json!({
+            "vni": row.vni,
+            "mac": row.mac,
+        })).collect::<Vec<_>>(),
+        "omitted": resp.omitted,
+        "complete": resp.complete,
+    })
 }
 
 /// List the bounded current duplicate-MAC local-origin quarantine snapshot.
@@ -762,14 +783,7 @@ pub async fn list_duplicate_mac_quarantines(
     .await?
     .into_inner();
     if json {
-        output::print_json_pretty(&serde_json::json!({
-            "quarantines": resp.quarantines.iter().map(|row| serde_json::json!({
-                "vni": row.vni,
-                "mac": row.mac,
-            })).collect::<Vec<_>>(),
-            "omitted": resp.omitted,
-            "complete": resp.complete,
-        }))?;
+        output::print_json_pretty(&duplicate_mac_quarantines_json(&resp))?;
     } else if resp.quarantines.is_empty() {
         outln!("No active EVPN duplicate-MAC quarantines")?;
     } else {
@@ -782,6 +796,20 @@ pub async fn list_duplicate_mac_quarantines(
         }
     }
     Ok(())
+}
+
+fn es_drain_json(
+    esi: &str,
+    resp: &crate::proto::SetEthernetSegmentDrainResponse,
+) -> serde_json::Value {
+    serde_json::json!({
+            "esi": esi,
+            "drained": resp.drained,
+            "changed": resp.changed,
+            "member_vni_count": resp.member_vni_count,
+            "reasons": resp.reasons,
+            "message": resp.message,
+    })
 }
 
 /// Drain or undrain one configured Ethernet Segment (ADR-0084).
@@ -811,14 +839,7 @@ pub async fn set_es_drain(
         .await?
         .into_inner();
     if json {
-        output::print_json_pretty(&serde_json::json!({
-                "esi": esi,
-                "drained": resp.drained,
-                "changed": resp.changed,
-                "member_vni_count": resp.member_vni_count,
-                "reasons": resp.reasons,
-                "message": resp.message,
-        }))?;
+        output::print_json_pretty(&es_drain_json(&esi, &resp))?;
     } else {
         outln!("{}", resp.message)?;
     }
@@ -1480,6 +1501,24 @@ fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
     parts.join(" ")
 }
 
+fn diagnose_json(
+    instance_count: usize,
+    originated_local_macs: u64,
+    type2_route_count: usize,
+    type3_route_count: usize,
+    key_metrics: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "instance_count": instance_count,
+        "originated_local_macs_count": originated_local_macs,
+        "type2_route_count": type2_route_count,
+        "type2_present": type2_route_count != 0,
+        "type3_route_count": type3_route_count,
+        "type3_present": type3_route_count != 0,
+        "key_metrics": key_metrics,
+    })
+}
+
 /// Read-only EVPN alpha health summary.
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
@@ -1530,15 +1569,13 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
         .sum();
 
     if json {
-        output::print_json_pretty(&serde_json::json!({
-                "instance_count": instances.len(),
-                "originated_local_macs_count": originated_local_macs,
-                "type2_route_count": type2_routes.len(),
-                "type2_present": !type2_routes.is_empty(),
-                "type3_route_count": type3_routes.len(),
-                "type3_present": !type3_routes.is_empty(),
-                "key_metrics": key_metrics,
-        }))?;
+        output::print_json_pretty(&diagnose_json(
+            instances.len(),
+            originated_local_macs,
+            type2_routes.len(),
+            type3_routes.len(),
+            &key_metrics,
+        ))?;
     } else {
         outln!("EVPN diagnose")?;
         outln!("Instances: {}", instances.len())?;
@@ -1626,6 +1663,495 @@ mod tests {
     use crate::test_support::spawn_mock_server;
 
     #[test]
+    fn evpn_diagnose_json_projection_preserves_derived_counts() {
+        assert_eq!(
+            super::diagnose_json(3, u64::MAX, 0, 2, &["metric 9".into()]),
+            serde_json::json!({
+                "instance_count":3,"originated_local_macs_count":u64::MAX,"type2_route_count":0,
+                "type2_present":false,"type3_route_count":2,"type3_present":true,"key_metrics":["metric 9"]
+            })
+        );
+    }
+
+    #[test]
+    fn evpn_selector_json_projection_covers_variants() {
+        use crate::proto::evpn_route_selector::Route;
+        use crate::proto::{
+            EvpnEadSelector, EvpnEsSelector, EvpnImetSelector, EvpnIpPrefixSelector,
+            EvpnMacIpSelector,
+        };
+        let cases = [
+            (
+                Route::EadPerEs(EvpnEadSelector {
+                    esi: "esi".into(),
+                    ethernet_tag: u32::MAX,
+                }),
+                serde_json::json!({"rd":"65000:1","ead_per_es":{"esi":"esi","ethernet_tag":u32::MAX}}),
+            ),
+            (
+                Route::EadPerEvi(EvpnEadSelector {
+                    esi: "esi".into(),
+                    ethernet_tag: 7,
+                }),
+                serde_json::json!({"rd":"65000:1","ead_per_evi":{"esi":"esi","ethernet_tag":7}}),
+            ),
+            (
+                Route::MacIp(EvpnMacIpSelector {
+                    ethernet_tag: 8,
+                    mac: "02:00:00:00:00:01".into(),
+                    ip: "".into(),
+                }),
+                serde_json::json!({"rd":"65000:1","mac_ip":{"ethernet_tag":8,"mac":"02:00:00:00:00:01","ip":""}}),
+            ),
+            (
+                Route::Imet(EvpnImetSelector {
+                    ethernet_tag: 9,
+                    originator_ip: "192.0.2.1".into(),
+                }),
+                serde_json::json!({"rd":"65000:1","imet":{"ethernet_tag":9,"originator_ip":"192.0.2.1"}}),
+            ),
+            (
+                Route::Es(EvpnEsSelector {
+                    esi: "esi".into(),
+                    originator_ip: "192.0.2.2".into(),
+                }),
+                serde_json::json!({"rd":"65000:1","es":{"esi":"esi","originator_ip":"192.0.2.2"}}),
+            ),
+            (
+                Route::IpPrefix(EvpnIpPrefixSelector {
+                    ethernet_tag: 10,
+                    prefix: "2001:db8::/32".into(),
+                }),
+                serde_json::json!({"rd":"65000:1","ip_prefix":{"ethernet_tag":10,"prefix":"2001:db8::/32"}}),
+            ),
+        ];
+        for (route, expected) in cases {
+            let key = crate::proto::EvpnRouteSelector {
+                rd: "65000:1".into(),
+                route: Some(route),
+            };
+            assert_eq!(super::selector_to_json(&key), expected);
+        }
+        assert_eq!(
+            super::selector_to_json(&crate::proto::EvpnRouteSelector {
+                rd: "65000:1".into(),
+                route: None
+            }),
+            serde_json::json!({"rd":"65000:1"})
+        );
+    }
+
+    #[test]
+    fn evpn_page_and_explain_json_projection_covers_envelopes() {
+        // Route payloads and modifications have their own exhaustive projection
+        // fixtures. Distinct rows here detect accidentally swapping their roles.
+        let route = |peer: &str| crate::proto::EvpnRouteEntry {
+            peer_address: peer.into(),
+            ..Default::default()
+        };
+        let row = |peer: &str| super::explain_route_to_json(&route(peer));
+        let mut page = crate::proto::ListPeerEvpnRoutesResponse {
+            routes: vec![route("first"), route("second")],
+            next_page_token: "opaque".into(),
+            total_count: u64::MAX,
+            page_version: Some(crate::proto::RoutePageVersion {
+                epoch: 17,
+                generation: 19,
+            }),
+        };
+        assert_eq!(
+            super::peer_page_to_json(&page, "fe80::2%eth0", true),
+            serde_json::json!({
+                "view":"received","neighbor":"fe80::2%eth0","routes":[row("first"),row("second")],
+                "next_page_token":"opaque","total_count":u64::MAX,"page_version":{"epoch":17,"generation":19}
+            })
+        );
+        page.routes.clear();
+        page.next_page_token.clear();
+        page.total_count = 0;
+        page.page_version = None;
+        assert_eq!(
+            super::peer_page_to_json(&page, "192.0.2.1", false),
+            serde_json::json!({
+                "view":"advertised","neighbor":"192.0.2.1","routes":[],"next_page_token":"","total_count":0,"page_version":null
+            })
+        );
+        let response = crate::proto::ExplainEvpnRouteResponse {
+            key: Some(crate::proto::EvpnRouteSelector {
+                rd: "65000:1".into(),
+                route: None,
+            }),
+            received_from: "received-from".into(),
+            received: Some(route("received")),
+            best: Some(route("best")),
+            selection_best: Some(route("selection")),
+            compared: Some(route("compared")),
+            candidate_count: u64::MAX,
+            selection_reason: Some(crate::proto::ExplainReason {
+                code: "best-code".into(),
+                message: "selection message".into(),
+            }),
+            selection_deferred: true,
+            export: Some(crate::proto::ExplainEvpnExport {
+                peer_address: "destination".into(),
+                decision: crate::proto::ExplainDecision::Deny as i32,
+                reasons: vec![crate::proto::ExplainReason {
+                    code: "deny-code".into(),
+                    message: "export message".into(),
+                }],
+                gates: vec![crate::proto::ExportGateStep {
+                    gate: "gate".into(),
+                    code: "gate-code".into(),
+                    verdict: crate::proto::ExportGateVerdict::Stop as i32,
+                    detail: "gate detail".into(),
+                }],
+                modifications: Some(crate::proto::ExplainModifications::default()),
+                staged: Some(route("staged")),
+                advertised: Some(route("advertised")),
+                already_advertised: true,
+                outbound_dirty: false,
+            }),
+        };
+        assert_eq!(
+            super::explain_to_json(&response),
+            serde_json::json!({
+                "key":{"rd":"65000:1"},"received_from":"received-from","received":row("received"),
+                "best":row("best"),"selection_best":row("selection"),"compared":row("compared"),
+                "candidate_count":u64::MAX,"selection_reason":{"code":"best-code","message":"selection message"},
+                "selection_deferred":true,"export":{"peer_address":"destination","decision":"deny",
+                    "reasons":[{"code":"deny-code","message":"export message"}],
+                    "gates":[{"gate":"gate","code":"gate-code","verdict":"stop","detail":"gate detail"}],
+                    "modifications":serde_json::to_value(crate::commands::rib::modifications_to_json(Some(&crate::proto::ExplainModifications::default()))).unwrap(),"staged":row("staged"),"advertised":row("advertised"),
+                    "already_advertised":true,"outbound_dirty":false}
+            })
+        );
+        assert_eq!(
+            super::explain_to_json(&crate::proto::ExplainEvpnRouteResponse::default()),
+            serde_json::json!({
+                "key":null,"received_from":"","received":null,"best":null,"selection_best":null,"compared":null,
+                "candidate_count":0,"selection_reason":null,"selection_deferred":false,"export":null
+            })
+        );
+    }
+
+    #[test]
+    fn evpn_runtime_json_projection_covers_all_fields() {
+        // Exhaustive fixtures fence new API fields; full expected documents
+        // fence renamed, dropped, or incorrectly sourced projected fields.
+        let response = crate::proto::EvpnRuntimeState {
+            generation: 101,
+            lifecycle: 999,
+            mutation_state: 999,
+            evpn_instances_count: 104,
+            evpn_ip_vrfs_count: 105,
+            ethernet_segments_count: 106,
+            ethernet_segment_member_vnis_count: 107,
+            message: "message-value".to_string(),
+        };
+        assert_eq!(
+            super::runtime_to_json(&response),
+            serde_json::json!({
+              "generation": 101,
+              "lifecycle": "unknown",
+              "mutation_state": "unknown",
+              "evpn_instances_count": 104,
+              "evpn_ip_vrfs_count": 105,
+              "ethernet_segments_count": 106,
+              "ethernet_segment_member_vnis_count": 107,
+              "message": "message-value"
+            })
+        );
+        let response = crate::proto::ManagedNetdevState {
+            class: 999,
+            name: "name-value".to_string(),
+            desired: false,
+            ownership_stamp: "ownership_stamp-value".to_string(),
+            state: 999,
+            reason: "reason-value".to_string(),
+            ifindex: Some(107),
+            observed_vlan_filtering: Some(true),
+            observed_stamps: vec!["observed_stamps-value".to_string()],
+            observed_vni: Some(110),
+            observed_local: Some("observed_local-value".to_string()),
+            observed_dstport: Some(112),
+            observed_learning_disabled: Some(false),
+            observed_collect_metadata: Some(true),
+            observed_vnifilter: Some(false),
+            observed_bridge: Some("observed_bridge-value".to_string()),
+            observed_table_id: Some(117),
+            observed_up: Some(true),
+            observed_master: Some("observed_master-value".to_string()),
+            observed_router_mac: Some("observed_router_mac-value".to_string()),
+            observed_vlan: Some(121),
+        };
+        let response = crate::proto::ListManagedNetdevsResponse {
+            netdevs: vec![response],
+        };
+        let response = &response.netdevs[0];
+        assert_eq!(
+            super::managed_netdev_to_json(response),
+            serde_json::json!({
+              "class": "unknown",
+              "name": "name-value",
+              "desired": false,
+              "ownership_stamp": "ownership_stamp-value",
+              "state": "unknown",
+              "reason": "reason-value",
+              "ifindex": 107,
+              "observed_vlan_filtering": true,
+              "observed_stamps": [
+                "observed_stamps-value"
+              ],
+              "observed_vni": 110,
+              "observed_local": "observed_local-value",
+              "observed_dstport": 112,
+              "observed_learning_disabled": false,
+              "observed_collect_metadata": true,
+              "observed_vnifilter": false,
+              "observed_bridge": "observed_bridge-value",
+              "observed_table_id": 117,
+              "observed_up": true,
+              "observed_master": "observed_master-value",
+              "observed_router_mac": "observed_router_mac-value",
+              "observed_vlan": 121
+            })
+        );
+        let response = crate::proto::ListEvpnNexthopsResponse {
+            groups: vec![crate::proto::EvpnFdbNexthopGroup {
+                vni: 101,
+                esi: "esi-value".to_string(),
+                ethernet_tag: "ethernet_tag-value".to_string(),
+                group_id: 104,
+                members: vec![crate::proto::EvpnFdbNexthopMember {
+                    gateway: "gateway-value".to_string(),
+                    nexthop_id: 102,
+                }],
+                ref_macs: vec!["ref_macs-value".to_string()],
+            }],
+            orphan_nexthops_count: 102,
+            pending_delete_count: 103,
+            drift_recovery_disabled: true,
+        };
+        assert_eq!(
+            super::fdb_nexthops_to_json(&response),
+            serde_json::json!({
+              "groups": [
+                {
+                  "vni": 101,
+                  "esi": "esi-value",
+                  "ethernet_tag": "ethernet_tag-value",
+                  "group_id": 104,
+                  "members": [
+                    {
+                      "gateway": "gateway-value",
+                      "nexthop_id": 102
+                    }
+                  ],
+                  "ref_macs": [
+                    "ref_macs-value"
+                  ]
+                }
+              ],
+              "orphan_nexthops_count": 102,
+              "pending_delete_count": 103,
+              "drift_recovery_disabled": true
+            })
+        );
+        let response = crate::proto::ListEthernetSegmentsResponse {
+            segments: vec![crate::proto::EthernetSegmentState {
+                esi: "esi-value".to_string(),
+                member_vnis: vec![102],
+                redundancy_mode: "redundancy_mode-value".to_string(),
+                df_algorithm: "df_algorithm-value".to_string(),
+                df_preference: 105,
+                df_dont_preempt: true,
+                originator_ip: "originator_ip-value".to_string(),
+                drained: true,
+                drain_reasons: vec!["drain_reasons-value".to_string()],
+                members: vec![crate::proto::EthernetSegmentMemberState {
+                    vni: 101,
+                    df_role: "df_role-value".to_string(),
+                    bum_forwarding_action: "bum_forwarding_action-value".to_string(),
+                    bridge: "bridge-value".to_string(),
+                    same_esi_bias_eligible: false,
+                }],
+                ac_gate_state: "ac_gate_state-value".to_string(),
+                ac_gate_interface: "ac_gate_interface-value".to_string(),
+                fdb_nexthop_groups_count: 113,
+                fdb_nexthop_ref_macs_count: 114,
+            }],
+        };
+        assert_eq!(
+            super::ethernet_segments_to_json(&response),
+            serde_json::json!({
+              "segments": [
+                {
+                  "esi": "esi-value",
+                  "member_vnis": [
+                    102
+                  ],
+                  "redundancy_mode": "redundancy_mode-value",
+                  "df_algorithm": "df_algorithm-value",
+                  "df_preference": 105,
+                  "df_dont_preempt": true,
+                  "originator_ip": "originator_ip-value",
+                  "drained": true,
+                  "drain_reasons": [
+                    "drain_reasons-value"
+                  ],
+                  "members": [
+                    {
+                      "vni": 101,
+                      "df_role": "df_role-value",
+                      "bum_forwarding_action": "bum_forwarding_action-value",
+                      "bridge": "bridge-value",
+                      "same_esi_bias_eligible": false
+                    }
+                  ],
+                  "ac_gate_state": "ac_gate_state-value",
+                  "ac_gate_interface": "ac_gate_interface-value",
+                  "fdb_nexthop_groups_count": 113,
+                  "fdb_nexthop_ref_macs_count": 114
+                }
+              ]
+            })
+        );
+        let response = crate::proto::IpVrfState {
+            name: "name-value".to_string(),
+            vni: 102,
+            rd: "rd-value".to_string(),
+            route_targets: vec!["route_targets-value".to_string()],
+            local_vtep_ip: "local_vtep_ip-value".to_string(),
+            router_mac: "router_mac-value".to_string(),
+            vrf_device: "vrf_device-value".to_string(),
+            l3vxlan_device: "l3vxlan_device-value".to_string(),
+            table_id: 109,
+            readiness_state: 999,
+            vrf_ifindex: 111,
+            l3vxlan_ifindex: 112,
+            not_ready_reasons: vec!["not_ready_reasons-value".to_string()],
+            originated_routes_count: 114,
+            installed_routes_count: 115,
+            remote_prefix_drop_counts: vec![crate::proto::IpVrfRemotePrefixDropCount {
+                reason: "reason-value".to_string(),
+                count: 102,
+            }],
+        };
+        let response = crate::proto::ListIpVrfsResponse {
+            ip_vrfs: vec![response],
+        };
+        let response = &response.ip_vrfs[0];
+        assert_eq!(
+            super::ip_vrf_to_json(response),
+            serde_json::json!({
+              "name": "name-value",
+              "vni": 102,
+              "rd": "rd-value",
+              "route_targets": [
+                "route_targets-value"
+              ],
+              "local_vtep_ip": "local_vtep_ip-value",
+              "router_mac": "router_mac-value",
+              "vrf_device": "vrf_device-value",
+              "l3vxlan_device": "l3vxlan_device-value",
+              "table_id": 109,
+              "vrf_ifindex": 111,
+              "l3vxlan_ifindex": 112,
+              "not_ready_reasons": [
+                "not_ready_reasons-value"
+              ],
+              "originated_routes_count": 114,
+              "installed_routes_count": 115,
+              "remote_prefix_drop_counts": [
+                {
+                  "reason": "reason-value",
+                  "count": 102
+                }
+              ],
+              "readiness": "unknown"
+            })
+        );
+        let response = crate::proto::EvpnInstanceState {
+            vni: 101,
+            rd: "rd-value".to_string(),
+            route_targets: vec!["route_targets-value".to_string()],
+            local_vtep_ip: "local_vtep_ip-value".to_string(),
+            bridge: "bridge-value".to_string(),
+            advertise_svi_mac: true,
+            originated_local_macs_count: 107,
+            readiness_state: 999,
+            not_ready_reason: "not_ready_reason-value".to_string(),
+            bridge_vlan: Some(110),
+        };
+        let response = crate::proto::ListEvpnInstancesResponse {
+            instances: vec![response],
+        };
+        let response = &response.instances[0];
+        assert_eq!(
+            super::evpn_instance_to_json(response),
+            serde_json::json!({
+              "vni": 101,
+              "rd": "rd-value",
+              "route_targets": [
+                "route_targets-value"
+              ],
+              "local_vtep_ip": "local_vtep_ip-value",
+              "bridge": "bridge-value",
+              "advertise_svi_mac": true,
+              "originated_local_macs_count": 107,
+              "not_ready_reason": "not_ready_reason-value",
+              "bridge_vlan": 110,
+              "readiness": "unknown"
+            })
+        );
+    }
+
+    #[test]
+    fn evpn_mutation_and_quarantine_json_projection_covers_responses() {
+        let clear = crate::proto::ClearDuplicateMacQuarantineResponse {
+            cleared: false,
+            message: "already clear".into(),
+        };
+        assert_eq!(
+            super::clear_duplicate_mac_json(100, "02:00:00:00:00:01", &clear),
+            serde_json::json!({"vni":100,"mac":"02:00:00:00:00:01","cleared":false,"message":"already clear"})
+        );
+        let drain = crate::proto::SetEthernetSegmentDrainResponse {
+            drained: true,
+            changed: false,
+            member_vni_count: 3,
+            message: "link remains down".into(),
+            reasons: vec!["link".into()],
+        };
+        assert_eq!(
+            super::es_drain_json("03:00:00:00:00:00:00:00:00:01", &drain),
+            serde_json::json!({"esi":"03:00:00:00:00:00:00:00:00:01", "drained":true,
+                "changed":false,"member_vni_count":3,"message":"link remains down","reasons":["link"]})
+        );
+        let mut response = crate::proto::ListDuplicateMacQuarantinesResponse {
+            quarantines: vec![crate::proto::DuplicateMacQuarantine {
+                vni: 100,
+                mac: "02:00:00:00:00:01".into(),
+            }],
+            omitted: u64::MAX,
+            complete: false,
+        };
+        assert_eq!(
+            super::duplicate_mac_quarantines_json(&response),
+            serde_json::json!({
+                "quarantines":[{"vni":100,"mac":"02:00:00:00:00:01"}],"omitted":u64::MAX,"complete":false
+            })
+        );
+        response.quarantines.clear();
+        response.omitted = 0;
+        response.complete = true;
+        assert_eq!(
+            super::duplicate_mac_quarantines_json(&response),
+            serde_json::json!({"quarantines":[],"omitted":0,"complete":true})
+        );
+    }
+
+    #[test]
     fn route_json_covers_proto_fields() {
         use prost::Message;
         let prefix_sid = crate::proto::PrefixSidView::decode(
@@ -1658,6 +2184,10 @@ mod tests {
             },
             crate::proto::EvpnRouteEntry::default(),
         ];
+        let response = crate::proto::ListEvpnResponse {
+            routes: routes.into(),
+        };
+        let routes = response.routes;
         let rows = super::routes_to_json(&routes);
         assert_eq!(
             rows[0],

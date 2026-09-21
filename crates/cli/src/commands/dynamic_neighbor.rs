@@ -24,6 +24,15 @@ struct JsonDynamicRange {
     description: String,
 }
 
+fn json_dynamic_range(r: &DynamicNeighborRange) -> JsonDynamicRange {
+    JsonDynamicRange {
+        prefix: r.prefix.clone(),
+        peer_group: r.peer_group.clone(),
+        remote_asn: r.remote_asn,
+        description: r.description.clone(),
+    }
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -35,16 +44,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     .into_inner();
 
     if json {
-        let out: Vec<JsonDynamicRange> = resp
-            .ranges
-            .iter()
-            .map(|r| JsonDynamicRange {
-                prefix: r.prefix.clone(),
-                peer_group: r.peer_group.clone(),
-                remote_asn: r.remote_asn,
-                description: r.description.clone(),
-            })
-            .collect();
+        let out: Vec<JsonDynamicRange> = resp.ranges.iter().map(json_dynamic_range).collect();
         output::print_json_pretty(&out)?;
     } else if resp.ranges.is_empty() {
         outln!("No dynamic neighbor ranges configured")?;
@@ -122,6 +122,26 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn dynamic_neighbor_json_projection_covers_range() {
+        let range = DynamicNeighborRange {
+            prefix: "2001:db8::/32".into(),
+            peer_group: "customers".into(),
+            remote_asn: u32::MAX,
+            description: "unicode π".into(),
+        };
+        let response = crate::proto::ListDynamicNeighborsResponse {
+            ranges: vec![range],
+        };
+        assert_eq!(
+            serde_json::to_value(json_dynamic_range(&response.ranges[0])).unwrap(),
+            serde_json::json!({
+                "prefix": "2001:db8::/32", "peer_group": "customers", "remote_asn": u32::MAX,
+                "description": "unicode π"
+            })
+        );
+    }
 
     #[tokio::test]
     async fn list_renders_empty() {

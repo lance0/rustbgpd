@@ -289,7 +289,7 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
     ]);
     assert!(output.status.success(), "{output:?}");
     let versioned: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(versioned["format_version"], "1.0");
+    assert_eq!(versioned["format_version"], "1.1");
     assert_eq!(versioned["data"], serde_json::json!(expected));
 
     *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {

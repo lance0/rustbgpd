@@ -92,6 +92,15 @@ pub(crate) fn rpki_cache_end_of_data_readiness(
     Some(readiness)
 }
 
+fn json_health(resp: &crate::proto::HealthResponse) -> JsonHealth {
+    JsonHealth {
+        healthy: resp.healthy,
+        uptime_seconds: resp.uptime_seconds,
+        active_peers: resp.active_peers,
+        total_routes: resp.total_routes,
+    }
+}
+
 pub async fn health(connection: Connection, json: bool, liveness: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -113,12 +122,7 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
         .into_inner();
 
     if json {
-        let out = JsonHealth {
-            healthy: resp.healthy,
-            uptime_seconds: resp.uptime_seconds,
-            active_peers: resp.active_peers,
-            total_routes: resp.total_routes,
-        };
+        let out = json_health(&resp);
         output::print_json_pretty(&out)?;
     } else {
         outln!("Status:  {}", output::colored_health(resp.healthy))?;
@@ -177,6 +181,24 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::{spawn_mock_server, spawn_mock_uds_server};
+
+    #[test]
+    fn health_json_projection_covers_curated_response() {
+        let state = crate::proto::HealthResponse {
+            healthy: false,
+            uptime_seconds: u64::MAX,
+            active_peers: 17,
+            total_routes: 19,
+            // Version provenance belongs to doctor, not this readiness summary.
+            daemon_version: "test-version".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(json_health(&state)).unwrap(),
+            serde_json::json!({
+                "healthy": false, "uptime_seconds": u64::MAX, "active_peers": 17, "total_routes": 19
+            })
+        );
+    }
 
     #[tokio::test]
     async fn health_calls_rpc_on_token_protected_server() {

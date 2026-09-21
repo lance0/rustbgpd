@@ -344,7 +344,30 @@ async fn versioned_json_wraps_existing_documents() {
     for command in [
         &["global"][..],
         &["neighbor"],
+        &["neighbor", "192.0.2.1"],
+        &["peer-group", "list"],
+        &["peer-group", "get", "customers"],
         &["health"],
+        &["health", "--liveness"],
+        &["neighbor-set", "list"],
+        &["neighbor-set", "get", "customers"],
+        &["dynamic-neighbor", "list"],
+        &["fib-table", "list"],
+        &["topology", "nodes"],
+        &["topology", "links"],
+        &["orr"],
+        &["bfd"],
+        &["evpn", "runtime"],
+        &["evpn", "instances"],
+        &["evpn", "managed-netdevs"],
+        &["evpn", "nexthops"],
+        &["evpn", "vrfs"],
+        &["evpn", "duplicate-mac-quarantines"],
+        &["evpn", "es", "list"],
+        &["evpn", "diagnose"],
+        &["policy", "list"],
+        &["policy", "get", "customers"],
+        &["policy", "chain", "show"],
         &["flowspec"],
         &["policy", "stats"],
         &["config", "status"],
@@ -367,7 +390,7 @@ async fn versioned_json_wraps_existing_documents() {
         assert_eq!(
             document,
             serde_json::json!({
-                "format": "rbgp-json", "format_version": "1.0", "data": payload
+                "format": "rbgp-json", "format_version": "1.1", "data": payload
             }),
             "{args:?}"
         );
