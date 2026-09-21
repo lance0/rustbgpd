@@ -1852,9 +1852,20 @@ fn collision_failback_logical_byte_cap_sweeps_full_unicast_union_before_release_
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "all typed stores share one release while readiness records exact unicast count changes and other lanes remain fenced"
+)]
 fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
-    let (_tx, rx) = mpsc::channel(8);
-    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    use std::sync::{Arc, Mutex};
+    let (tx, rx) = mpsc::channel(8);
+    let (query_tx, query_rx) = mpsc::channel(1);
+    let (readiness_tx, readiness_rx) = mpsc::channel(1);
+    let (summary_tx, summary_rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new())
+        .with_readiness_queries(readiness_rx)
+        .with_summary_queries(summary_rx);
+    manager.flush_poll_budget = Duration::ZERO;
     let route_peer = Ipv4Addr::new(10, 0, 0, 1);
 
     let unicast = make_route_with_lp(
@@ -1867,6 +1878,15 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
         manager
             .loc_rib
             .recompute(unicast_key, std::iter::once(&unicast))
+    );
+
+    let mut second_unicast = unicast.clone();
+    second_unicast.prefix =
+        rustbgpd_wire::Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24));
+    assert!(
+        manager
+            .loc_rib
+            .recompute(second_unicast.prefix, std::iter::once(&second_unicast))
     );
 
     let flowspec = make_flowspec_route(route_peer);
@@ -1913,8 +1933,102 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
     ];
     for family in families {
         manager.mark_deferred_selection_overflow_for_test(family);
-        manager.recompute_released_selection_family_for_test(family);
     }
+    let (reply, general) = oneshot::channel();
+    query_tx
+        .try_send(RibUpdate::QueryLocRibCount { reply })
+        .unwrap();
+    let general = Arc::new(Mutex::new(general));
+    let (reply, summary) = oneshot::channel();
+    summary_tx
+        .try_send(crate::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .unwrap();
+    let summary = Arc::new(Mutex::new(summary));
+    let (reply, mutation) = oneshot::channel();
+    tx.try_send(RibUpdate::QueryLocRibCount { reply }).unwrap();
+    let mutation = Arc::new(Mutex::new(mutation));
+    let pending = Arc::new(Mutex::new(
+        None::<(
+            &'static str,
+            oneshot::Receiver<Result<usize, crate::RibReadinessError>>,
+        )>,
+    ));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    manager.replacement_readiness_test_hook = Some(Arc::new({
+        let pending = Arc::clone(&pending);
+        let observed = Arc::clone(&observed);
+        let general = Arc::clone(&general);
+        let mutation = Arc::clone(&mutation);
+        let summary = Arc::clone(&summary);
+        move |stage| {
+            assert!(matches!(
+                summary.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                general.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                mutation.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            if let Some((previous, mut response)) = pending.lock().unwrap().take() {
+                observed.lock().unwrap().push((
+                    previous,
+                    response
+                        .try_recv()
+                        .expect("preceding checkpoint must serve readiness")
+                        .unwrap(),
+                ));
+            }
+            let (reply, response) = oneshot::channel();
+            readiness_tx
+                .try_send(crate::RibReadinessQuery::LocRibCount {
+                    reply,
+                    enqueued: std::time::Instant::now(),
+                })
+                .unwrap();
+            *pending.lock().unwrap() = Some((stage, response));
+        }
+    }));
+    manager.release_selection_families(&families, "test all-family overflow release");
+    manager.replacement_readiness_test_hook = None;
+    let (stage, mut response) = pending.lock().unwrap().take().unwrap();
+    observed
+        .lock()
+        .unwrap()
+        .push((stage, response.try_recv().unwrap().unwrap()));
+    let observed = observed.lock().unwrap();
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|(stage, _)| *stage == "selection_recompute")
+            .map(|(_, count)| *count)
+            .collect::<Vec<_>>(),
+        vec![1, 0],
+        "readiness follows each complete unicast withdrawal, never the frozen entry count"
+    );
+    for stage in [
+        "selection_inventory",
+        "selection_flowspec",
+        "selection_evpn",
+        "selection_vpn",
+        "selection_labeled",
+        "selection_bgpls",
+        "selection_rtc",
+    ] {
+        assert!(
+            observed.iter().any(|(seen, _)| *seen == stage),
+            "missing interior readiness stage {stage}"
+        );
+    }
+    manager.drain_queries(1);
+    assert_eq!(general.lock().unwrap().try_recv().unwrap(), 0);
+    assert!(matches!(
+        mutation.lock().unwrap().try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
 
     assert!(manager.loc_rib.get(&unicast_key).is_none());
     assert!(manager.loc_rib.get_flowspec(&flowspec_key).is_none());
