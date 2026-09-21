@@ -167,7 +167,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.21.1"
+rustbgpd-wire = "0.21.2"
 bytes = "1"
 ```
 
@@ -227,8 +227,8 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.21.1"
-rustbgpd-fsm = "0.8.1"
+rustbgpd-wire = "0.21.2"
+rustbgpd-fsm = "0.8.2"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -293,7 +293,7 @@ verified published versions in §7.
 # Cargo.toml
 [dependencies]
 rustbgpd-rpki = "0.3.1"
-rustbgpd-wire = "0.21.1"
+rustbgpd-wire = "0.21.2"
 ```
 
 ```rust
@@ -609,8 +609,8 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.21.1` | `0.21.2` |
-| `rustbgpd-fsm` | `0.8.1` | `0.8.2` |
+| `rustbgpd-wire` | `0.21.2` | `0.21.2` |
+| `rustbgpd-fsm` | `0.8.2` | `0.8.2` |
 | `rustbgpd-rpki` | `0.3.1` | `0.3.1` |
 <!-- published-crate-versions:end -->
 
