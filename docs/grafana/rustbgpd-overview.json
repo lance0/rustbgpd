@@ -2695,8 +2695,8 @@
     {
       "id": 58,
       "type": "timeseries",
-      "title": "Export rejections / malformed UPDATEs / configured discards",
-      "description": "Exact-export rejections, malformed UPDATE dispositions, and operator-configured inbound attribute discards are route-safety signals partitioned by bounded labels.",
+      "title": "Export rejections / malformed UPDATEs / inbound attribute discards",
+      "description": "Exact-export rejections, malformed UPDATE dispositions, and inbound attribute discards (the operator-configured list and the RFC 7606 external-neighbor ORIGINATOR_ID/CLUSTER_LIST rule) are route-safety signals partitioned by bounded labels.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 153 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
