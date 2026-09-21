@@ -31,6 +31,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route reflector with a client peer group, a dynamic client range, a
   non-client peer to the second reflector, Add-Path send, and GR/LLGR
   retention. It passes `rustbgpd --check --strict` as shipped.
+- The confirm-window automatic rollback now reports when it is overdue. It
+  still waits for the runtime-config coordinator without giving up its single
+  acquisition, and while waiting the transaction stays `pending`, no rollback
+  failure is recorded and the revert journal is untouched.
+  **Operator-visible:** ten minutes past the deadline the daemon logs
+  `confirmed config transaction auto-revert is overdue: waiting for the
+  runtime-config coordinator` (repeated every ten minutes), and `rbgp config
+  status` / `GetConfigTransactionStatus` `human_text` says the automatic
+  rollback timed out at the deadline and is waiting for the coordinator until
+  the rollback runs or the transaction is confirmed, aborted, or re-armed.
 
 ### Fixed
 
