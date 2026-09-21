@@ -523,7 +523,6 @@ containerlab destroy -t tests/interop/m18-extnexthop-frr.clab.yml
 If the release touches LLGR capability, negotiation, retained-route lifecycle,
 or outbound rewriting (`crates/wire/src/capability.rs`,
 `crates/fsm/src/config.rs`, `crates/fsm/src/negotiation.rs`,
-`crates/rib/src/adj_rib_in.rs`,
 `crates/rib/src/manager/graceful_restart.rs`,
 `crates/rib/src/manager/peer_lifecycle.rs`,
 `crates/rib/src/manager/route_refresh.rs`, or
