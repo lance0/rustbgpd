@@ -34,9 +34,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- ORIGINATOR_ID and CLUSTER_LIST received from an external (eBGP) neighbor are
-  now discarded as RFC 7606 §7.9 and §7.10 require, whether or not they are
-  well formed. Previously only malformed ones were removed, so a well-formed
+- A well-formed ORIGINATOR_ID or CLUSTER_LIST received from an external (eBGP)
+  neighbor is now discarded, as RFC 7606 §7.9 and §7.10 require. Previously
+  only the length and Partial-flag error cases were removed, so a well-formed
   attribute from an eBGP peer was kept in the stored route attributes in the
   RIB, took part in best-path selection in every address family, and was
   evaluated by the RFC 4456 reflection-loop check. Internal (iBGP) neighbors
@@ -51,7 +51,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_path_attribute_discarded_total{type_code="9"}` or `{type_code="10"}`,
   so that counter is no longer limited to `discard_path_attributes`; an
   attribute covered by both counts once. Pre-policy BMP still mirrors the
-  UPDATE as received.
+  UPDATE as received. Unchanged: an ORIGINATOR_ID or CLUSTER_LIST with the
+  wrong Optional/Transitive flag class is treat-as-withdraw from any neighbor
+  (RFC 7606 §3 (c)), so that UPDATE's routes are withdrawn, not kept without
+  the attribute.
 
 - Aborting a commit-confirmed config transaction (`rbgp config abort`, gNMI
   commit cancel) and the confirm-timeout auto-revert no longer fail when a BGP

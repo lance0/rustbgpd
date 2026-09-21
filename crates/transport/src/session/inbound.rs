@@ -466,8 +466,11 @@ impl<'a> PolicyAttrSummary<'a> {
         }
     }
 }
-/// RFC 7606 §7.9/§7.10: `ORIGINATOR_ID` and `CLUSTER_LIST` received from an
-/// external neighbor are discarded whether or not they are well formed.
+/// RFC 7606 §7.9/§7.10: a well-formed `ORIGINATOR_ID` or `CLUSTER_LIST`
+/// received from an external neighbor is discarded. The decoder has already
+/// removed the length and Partial-only error cases (attribute discard); a wrong
+/// Optional/Transitive flag class is treat-as-withdraw (§3 (c)) and never
+/// reaches this filter.
 fn external_neighbor_discard(is_ebgp: bool, type_code: u8) -> bool {
     use rustbgpd_wire::constants::attr_type::{CLUSTER_LIST, ORIGINATOR_ID};
     is_ebgp && matches!(type_code, ORIGINATOR_ID | CLUSTER_LIST)
@@ -1863,8 +1866,11 @@ impl PeerSession {
         // a locally configured LOCAL_PREF via `materialize_attrs` below.
         //
         // RFC 7606 §7.9/§7.10: ORIGINATOR_ID and CLUSTER_LIST received from an
-        // external neighbor SHALL be discarded (attribute discard), well-formed
-        // or not. Both feed best-path selection, so they are removed here, in
+        // external neighbor SHALL be discarded (attribute discard). The decoder
+        // only removes the length and Partial-only error cases, so a
+        // well-formed one survives to this point; a wrong Optional/Transitive
+        // flag class already returned above as treat-as-withdraw (§3 (c)).
+        // Both feed best-path selection, so they are removed here, in
         // the one attribute set every family path below is built from
         // (`RouteAttrBundle`), and counted with the configured discards. An
         // attribute that is also in `discard_path_attributes` counts once.

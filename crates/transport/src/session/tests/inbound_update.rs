@@ -622,7 +622,8 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
 
 // ---------------------------------------------------------------------------
 // RFC 7606 §7.9 / §7.10: ORIGINATOR_ID and CLUSTER_LIST from an external
-// neighbor are discarded, well formed or not.
+// neighbor are discarded. These tests cover the well-formed case, which the
+// decoder does not remove.
 // ---------------------------------------------------------------------------
 
 const FORGED_ORIGINATOR: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
