@@ -124,6 +124,13 @@ const BMP_CLIENT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 /// open/write/sync/rename sequence hits the same filesystem: a hung mount
 /// must not stall daemon exit.
 const GR_MARKER_IO_DEADLINE: Duration = Duration::from_secs(5);
+/// Bound on each shutdown wait for runtime-config work that no settlement
+/// owner holds: a coordinator permit taken outside the watchdog (a read), and
+/// the join of a SIGHUP task once the coordinator is quiet. An owned mutation
+/// is never subject to it; only the settlement watchdog ends that wait. What
+/// is left completes in one actor round trip, so the bound matches the
+/// five-second actor drains below rather than any mutation budget.
+const RUNTIME_CONFIG_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WARM_CHECKPOINT_REVISION: AtomicU64 = AtomicU64::new(0);
 
@@ -2856,6 +2863,70 @@ fn main() -> ExitCode {
 
 fn shutdown_daemon_runtime(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_background();
+}
+
+/// How one coordinated-shutdown wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum ShutdownWait<T> {
+    Completed(T),
+    DeadlineExpired,
+    SecondSignal,
+}
+
+impl<T> ShutdownWait<T> {
+    /// Why shutdown stopped waiting, or `None` when the stage completed.
+    const fn abandoned(&self) -> Option<&'static str> {
+        match self {
+            Self::Completed(_) => None,
+            Self::DeadlineExpired => Some("deadline_expired"),
+            Self::SecondSignal => Some("second_signal"),
+        }
+    }
+}
+
+/// Await one shutdown stage until it completes, its deadline expires, or a
+/// further termination signal cancels `stop_waiting`. A stage that is already
+/// complete wins over a cancelled token, so skipped waits still cost nothing.
+async fn shutdown_wait<T>(
+    deadline: Option<Duration>,
+    stop_waiting: &tokio_util::sync::CancellationToken,
+    stage: impl Future<Output = T>,
+) -> ShutdownWait<T> {
+    let bounded = async {
+        match deadline {
+            Some(deadline) => tokio::time::timeout(deadline, stage).await.ok(),
+            None => Some(stage.await),
+        }
+    };
+    tokio::select! {
+        biased;
+        outcome = bounded => outcome.map_or(ShutdownWait::DeadlineExpired, ShutdownWait::Completed),
+        () = stop_waiting.cancelled() => ShutdownWait::SecondSignal,
+    }
+}
+
+/// Cancel the returned token on the next SIGINT or SIGTERM. Armed once
+/// coordinated shutdown has begun, so that signal means "stop waiting": every
+/// wait without its own deadline is skipped, while bounded cleanup and an
+/// owned runtime-config settlement still run to their own limits.
+fn stop_waiting_on_signal(
+    mut sigint: tokio::signal::unix::Signal,
+    mut sigterm: tokio::signal::unix::Signal,
+) -> tokio_util::sync::CancellationToken {
+    let stop_waiting = tokio_util::sync::CancellationToken::new();
+    let cancel = stop_waiting.clone();
+    tokio::spawn(async move {
+        let signal = tokio::select! {
+            _ = sigint.recv() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        };
+        warn!(
+            signal,
+            "termination signal received during coordinated shutdown; skipping waits that have no deadline (an owned runtime-config settlement is still awaited)"
+        );
+        cancel.cancel();
+    });
+    stop_waiting
 }
 
 /// Number of panic reports retained in `<runtime_state_dir>/crash/`;
@@ -6032,6 +6103,8 @@ async fn run<T>(
     sd_notify.stopping();
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
+    // The first signal asked for a graceful stop; a further one stops waiting.
+    let stop_waiting = stop_waiting_on_signal(sigint, sigterm);
     if let Some(handle) = rpki_supervisor.take() {
         if rpki_failure_triggered {
             let report = await_rpki_failure_report(handle, rpki_failure_notice).await;
@@ -6043,19 +6116,36 @@ async fn run<T>(
             let _ = handle.await;
         }
     }
-    let settlement_wait = runtime_config_settlement.clone();
-    tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle_or_fail_stop())
-        .await
-        .expect("runtime-config settlement wait task must not panic");
-    runtime_config_lock.wait_until_drained().await;
-    if let Some(handle) = reload_in_flight.take() {
-        let outcome = handle.await;
-        metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
-        match outcome {
-            Ok(Ok(authority)) => config = authority.runtime,
-            Ok(Err(error)) => warn!(error = %error, "SIGHUP rejected during shutdown drain"),
-            Err(error) => error!(error = %error, "SIGHUP task failed during shutdown drain"),
+    let runtime_config_drain = drain_runtime_config(
+        &runtime_config_settlement,
+        &runtime_config_lock,
+        reload_in_flight.take(),
+        RUNTIME_CONFIG_DRAIN_DEADLINE,
+        &stop_waiting,
+    )
+    .await;
+    if let Some(reason) = runtime_config_drain.coordinator.abandoned() {
+        error!(
+            reason,
+            deadline_secs = RUNTIME_CONFIG_DRAIN_DEADLINE.as_secs(),
+            "runtime config coordinator permit is still held outside settlement ownership; continuing shutdown without the coordinator fence"
+        );
+    }
+    match runtime_config_drain.reload {
+        Some(ShutdownWait::Completed(outcome)) => {
+            metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+            match outcome {
+                Ok(Ok(authority)) => config = authority.runtime,
+                Ok(Err(error)) => warn!(error = %error, "SIGHUP rejected during shutdown drain"),
+                Err(error) => error!(error = %error, "SIGHUP task failed during shutdown drain"),
+            }
         }
+        Some(abandoned) => error!(
+            reason = abandoned.abandoned(),
+            deadline_secs = RUNTIME_CONFIG_DRAIN_DEADLINE.as_secs(),
+            "SIGHUP reload task is still running with no settlement owner; continuing shutdown without joining it"
+        ),
+        None => {}
     }
 
     // Drop the profiler now while all data structures are still alive,
@@ -6065,7 +6155,12 @@ async fn run<T>(
     let runtime_config_deadline = tokio::time::Instant::now() + WARM_CHECKPOINT_DEADLINE;
     let mut restart_time_secs = max_gr_restart_time_secs(&config);
     let mut checkpoint_generation = None;
-    let mut checkpoint_failure = None;
+    // The drained coordinator is the warm-checkpoint fence.
+    let mut checkpoint_failure = runtime_config_drain
+        .coordinator
+        .abandoned()
+        .filter(|_| warm_checkpoint_on_shutdown)
+        .map(|_| "runtime config coordinator did not drain".to_string());
     let mut evpn_apply_fence = None;
 
     if warm_checkpoint_on_shutdown && !initial_peer_boot_failed {
@@ -6308,22 +6403,36 @@ async fn run<T>(
     // so peers cleanly remove us from their ingress-replication
     // lists. Same ordering rationale as the Type 2 drain — must land
     // before peer sessions tear down.
-    let mut imet_controller = evpn_imet_controller.lock().await;
-    if !imet_controller.is_empty() {
-        info!(
-            count = imet_controller.len(),
-            "withdrawing EVPN Type 3 IMET routes"
-        );
-        imet_controller.withdraw_all(&rib_tx).await;
+    let imet_withdrawal = shutdown_wait(None, &stop_waiting, async {
+        let mut imet_controller = evpn_imet_controller.lock().await;
+        if !imet_controller.is_empty() {
+            info!(
+                count = imet_controller.len(),
+                "withdrawing EVPN Type 3 IMET routes"
+            );
+            imet_controller.withdraw_all(&rib_tx).await;
+        }
+    })
+    .await;
+    if let Some(reason) = imet_withdrawal.abandoned() {
+        warn!(reason, "stopped waiting for EVPN Type 3 IMET withdrawal");
     }
-    drop(imet_controller);
 
-    let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
-
-    // 2. Wait for PeerManager to finish draining all peers (unless the
-    // supervision arm already observed its exit and consumed the handle).
-    if !peer_mgr_exited && let Err(e) = peer_mgr_handle.await {
-        error!(error = %e, "peer manager task panicked");
+    // 2. Tell PeerManager to shut down and wait for it to finish draining all
+    // peers (unless the supervision arm already observed its exit and consumed
+    // the handle).
+    let peer_manager_drain = shutdown_wait(None, &stop_waiting, async {
+        let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
+        if !peer_mgr_exited && let Err(e) = peer_mgr_handle.await {
+            error!(error = %e, "peer manager task panicked");
+        }
+    })
+    .await;
+    if let Some(reason) = peer_manager_drain.abandoned() {
+        warn!(
+            reason,
+            "stopped waiting for the peer manager; peers may not receive a Cease"
+        );
     }
 
     // 2.4 Drain daemon-owned BLACKHOLE discard routes. This is local
@@ -6367,12 +6476,23 @@ async fn run<T>(
         // BMP Termination message last.
         let _ = bmp_runtime.reconnect_shutdown_tx.send(true);
 
-        if let Err(e) = bmp_runtime
-            .control_tx
-            .send(rustbgpd_bmp::BmpControlEvent::Shutdown)
-            .await
+        match shutdown_wait(
+            None,
+            &stop_waiting,
+            bmp_runtime
+                .control_tx
+                .send(rustbgpd_bmp::BmpControlEvent::Shutdown),
+        )
+        .await
         {
-            warn!(error = %e, "failed to send BMP shutdown control event");
+            ShutdownWait::Completed(Ok(())) => {}
+            ShutdownWait::Completed(Err(e)) => {
+                warn!(error = %e, "failed to send BMP shutdown control event");
+            }
+            abandoned => warn!(
+                reason = abandoned.abandoned(),
+                "stopped waiting to enqueue the BMP shutdown control event"
+            ),
         }
 
         match tokio::time::timeout(Duration::from_secs(2), &mut bmp_runtime.manager_handle).await {
@@ -6405,8 +6525,12 @@ async fn run<T>(
     // a wedged SQLite must not stall daemon exit. Holding EHM alive
     // across the producer + gRPC drain lets final subscribers observe
     // every accepted event whose commit is confirmed before that bound.
-    if let Some(stage) = rib_event_stage {
-        stage.shutdown().await;
+    if let Some(stage) = rib_event_stage
+        && let Some(reason) = shutdown_wait(None, &stop_waiting, stage.shutdown())
+            .await
+            .abandoned()
+    {
+        warn!(reason, "stopped waiting for the RIB event conversion stage");
     }
     if let Some(manager) = event_history_manager {
         info!("flushing event history outbox");
@@ -6415,6 +6539,58 @@ async fn run<T>(
 
     info!("rustbgpd exiting");
     component_failed
+}
+
+/// Result of quiescing runtime-config work at coordinated shutdown.
+struct RuntimeConfigDrain<R> {
+    coordinator: ShutdownWait<()>,
+    reload: Option<ShutdownWait<Result<R, tokio::task::JoinError>>>,
+}
+
+/// Wait for the closed coordinator to go quiet, then join an in-flight SIGHUP.
+///
+/// An owned mutation is waited for without any deadline of this function's:
+/// only the settlement watchdog may end that wait, by settlement or fail-stop.
+/// `deadline` and `stop_waiting` apply solely while no owner is registered,
+/// when the permit can only be held outside the watchdog. An owner that
+/// registers before the abandon check sends the loop back to the watchdog
+/// wait instead of being abandoned.
+///
+/// The loop alone does not cover a task that took the permit before the
+/// coordinator closed and registers after that check. Every registration
+/// site closes the gap from its side: it re-reads the shutdown gate right
+/// after registering and, once `begin_shutdown()` has run, settles without
+/// running its body. The gate flag and the owner cell are both sequentially
+/// consistent, so this function sees the owner or the owner sees shutdown.
+/// `begin_shutdown()` must therefore precede this call.
+async fn drain_runtime_config<R>(
+    runtime_config_settlement: &RuntimeConfigSettlementWatchdog,
+    runtime_config_lock: &RuntimeConfigCoordinator,
+    reload_in_flight: Option<tokio::task::JoinHandle<R>>,
+    deadline: Duration,
+    stop_waiting: &tokio_util::sync::CancellationToken,
+) -> RuntimeConfigDrain<R> {
+    let coordinator = loop {
+        let settlement_wait = runtime_config_settlement.clone();
+        tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle_or_fail_stop())
+            .await
+            .expect("runtime-config settlement wait task must not panic");
+        let drained = shutdown_wait(Some(deadline), stop_waiting, async {
+            runtime_config_lock.wait_until_drained().await;
+        })
+        .await;
+        if drained.abandoned().is_none() || !runtime_config_settlement.has_owner() {
+            break drained;
+        }
+    };
+    let reload = match reload_in_flight {
+        Some(handle) => Some(shutdown_wait(Some(deadline), stop_waiting, handle).await),
+        None => None,
+    };
+    RuntimeConfigDrain {
+        coordinator,
+        reload,
+    }
 }
 
 #[cfg(test)]
@@ -7015,6 +7191,244 @@ mod tests {
                 "task_failed",
             ])
         );
+    }
+
+    /// Real-time ceiling that turns a hung drain into a fast failure.
+    const DRAIN_TEST_GUARD: Duration = Duration::from_secs(5);
+    /// Test-scale stand-in for `RUNTIME_CONFIG_DRAIN_DEADLINE`. The settlement
+    /// wait blocks a real thread, so these tests run on the real clock.
+    const DRAIN_TEST_DEADLINE: Duration = Duration::from_millis(50);
+
+    /// A closed coordinator whose permit is held, outside settlement
+    /// ownership, by a task that never releases it.
+    async fn coordinator_held_outside_settlement() -> RuntimeConfigCoordinator {
+        let coordinator = RuntimeConfigCoordinator::new();
+        let permit = coordinator.acquire().await.unwrap();
+        tokio::spawn(async move {
+            let _permit = permit;
+            std::future::pending::<()>().await;
+        });
+        coordinator.close();
+        coordinator
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_stops_waiting_for_a_permit_no_owner_holds() {
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = coordinator_held_outside_settlement().await;
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config::<()>(
+                &settlement,
+                &coordinator,
+                None,
+                DRAIN_TEST_DEADLINE,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("shutdown drain hung on a coordinator permit no owner holds");
+        assert_eq!(drain.coordinator, ShutdownWait::DeadlineExpired);
+        assert_eq!(drain.coordinator.abandoned(), Some("deadline_expired"));
+        assert!(drain.reload.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_stops_waiting_for_a_reload_task_that_never_finishes() {
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        coordinator.close();
+        let reload = tokio::spawn(std::future::pending::<()>());
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config(
+                &settlement,
+                &coordinator,
+                Some(reload),
+                DRAIN_TEST_DEADLINE,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("shutdown drain hung on a reload task that never finishes");
+        assert_eq!(drain.coordinator, ShutdownWait::Completed(()));
+        assert!(matches!(drain.reload, Some(ShutdownWait::DeadlineExpired)));
+    }
+
+    #[tokio::test]
+    async fn second_signal_ends_a_held_shutdown_drain_immediately() {
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = coordinator_held_outside_settlement().await;
+        let reload = tokio::spawn(std::future::pending::<()>());
+        let stop_waiting = tokio_util::sync::CancellationToken::new();
+        let second_signal = stop_waiting.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            second_signal.cancel();
+        });
+        // A deadline far beyond the guard: only the signal can end these waits.
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config(
+                &settlement,
+                &coordinator,
+                Some(reload),
+                Duration::from_secs(3600),
+                &stop_waiting,
+            ),
+        )
+        .await
+        .expect("a second signal did not end the held shutdown drain");
+        assert_eq!(drain.coordinator, ShutdownWait::SecondSignal);
+        assert!(matches!(drain.reload, Some(ShutdownWait::SecondSignal)));
+
+        // A stage that is already complete is not reported as skipped.
+        assert_eq!(
+            shutdown_wait(None, &stop_waiting, std::future::ready(7)).await,
+            ShutdownWait::Completed(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_returns_to_the_watchdog_for_an_owner_registered_mid_drain() {
+        // The acquire-to-registration gap: the permit is held with no owner
+        // when the drain passes its idle check, and the owner registers while
+        // the bounded permit wait is already running. An owner registered
+        // before the idle check would be held by that wait alone and would
+        // never reach the guard under test.
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        let permit = coordinator.acquire().await.unwrap();
+        coordinator.close();
+        let stop_waiting = tokio_util::sync::CancellationToken::new();
+        let drain = tokio::spawn({
+            let (settlement, coordinator) = (settlement.clone(), coordinator.clone());
+            let stop_waiting = stop_waiting.clone();
+            async move {
+                drain_runtime_config::<()>(
+                    &settlement,
+                    &coordinator,
+                    None,
+                    Duration::from_secs(3600),
+                    &stop_waiting,
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!drain.is_finished(), "drain ended with the permit held");
+        let (operation, executor_guard) = settlement.register_owned(
+            RuntimeConfigOperationKind::PolicySet,
+            coordinator.clone(),
+            permit,
+            DaemonGate::new(),
+            None,
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        // A second signal ends the permit wait at once; the owner must send
+        // the drain back to the watchdog wait instead of out of the function.
+        stop_waiting.cancel();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let abandoned_while_owned = drain.is_finished();
+        // Settle before asserting: an owner dropped unsettled would fail-stop
+        // this test process.
+        assert!(operation.try_settle());
+        drop(executor_guard);
+        let drain = tokio::time::timeout(DRAIN_TEST_GUARD, drain)
+            .await
+            .expect("shutdown drain did not finish after the owner settled")
+            .unwrap();
+        assert!(
+            !abandoned_while_owned,
+            "shutdown stopped waiting for an owned runtime-config operation"
+        );
+        assert_eq!(drain.coordinator, ShutdownWait::Completed(()));
+    }
+
+    #[tokio::test]
+    async fn an_owner_registering_after_the_drain_was_abandoned_never_mutates() {
+        // The abandon branch can race a task that took the permit before the
+        // coordinator closed and has not registered yet. Model that task as an
+        // `execute_owned` caller that receives the permit only after the drain
+        // has given up on it: the drain saw a held permit with no owner, and
+        // the registration happens with shutdown already begun.
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        let daemon_gate = DaemonGate::new();
+        let permit = coordinator.acquire().await.unwrap();
+        let body_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_owner = tokio::spawn({
+            let (settlement, coordinator) = (settlement.clone(), coordinator.clone());
+            let daemon_gate = daemon_gate.clone();
+            let body_ran = Arc::clone(&body_ran);
+            async move {
+                settlement
+                    .execute_owned(
+                        RuntimeConfigOperationKind::PolicySet,
+                        coordinator,
+                        daemon_gate,
+                        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        move |_operation| async move {
+                            body_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::AcknowledgedAuthority(())
+                        },
+                    )
+                    .await
+            }
+        });
+
+        daemon_gate.begin_shutdown();
+        let stop_waiting = tokio_util::sync::CancellationToken::new();
+        stop_waiting.cancel();
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config::<()>(
+                &settlement,
+                &coordinator,
+                None,
+                Duration::from_secs(3600),
+                &stop_waiting,
+            ),
+        )
+        .await
+        .expect("the drain did not give up on a permit no owner holds");
+        assert_eq!(drain.coordinator, ShutdownWait::SecondSignal);
+
+        // Only now does the late task get the permit and register.
+        drop(permit);
+        let status = tokio::time::timeout(DRAIN_TEST_GUARD, late_owner)
+            .await
+            .expect("the late owner did not finish")
+            .unwrap()
+            .expect_err("an owner registered after shutdown began must be rejected");
+        assert!(
+            !body_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a mutation started after shutdown stopped waiting for its permit"
+        );
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "runtime config coordinator is closed");
+        assert!(!settlement.has_owner());
+        tokio::time::timeout(DRAIN_TEST_GUARD, coordinator.wait_until_drained())
+            .await
+            .expect("the late owner kept the coordinator permit");
+    }
+
+    #[tokio::test]
+    async fn a_signal_during_coordinated_shutdown_stops_waiting() {
+        use tokio::signal::unix::{SignalKind, signal};
+        // SIGUSR1/SIGUSR2 stand in for SIGINT/SIGTERM so the raise cannot
+        // reach another test; the listener only sees two signal streams.
+        let stop_waiting = stop_waiting_on_signal(
+            signal(SignalKind::user_defined1()).unwrap(),
+            signal(SignalKind::user_defined2()).unwrap(),
+        );
+        tokio::task::yield_now().await;
+        assert!(!stop_waiting.is_cancelled());
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGUSR2).unwrap();
+        tokio::time::timeout(DRAIN_TEST_GUARD, stop_waiting.cancelled())
+            .await
+            .expect("a termination signal during shutdown did not stop the waits");
     }
 
     #[test]

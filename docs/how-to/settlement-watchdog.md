@@ -101,6 +101,19 @@ publish the diagnostic, then exits 70. That path does not advance to BGP Cease.
 A clean settlement instead disarms the fatal boundary and lets coordinated
 teardown continue.
 
+Only an owner gets that wait. If the coordinator permit is still held once no
+owner is registered, the holder is outside the watchdog (a read such as
+`ListFibTables` waiting on its actor), and shutdown gives it five seconds
+before logging an error, skipping the warm checkpoint, and continuing. No
+mutation can start behind that abandoned wait: an operation that obtains the
+permit only after shutdown has begun is refused as `UNAVAILABLE` (`runtime
+config coordinator is closed`; a SIGHUP reload is rejected with no effect)
+before it runs, and an owner that is already registered sends shutdown back to
+the watchdog wait instead of being abandoned. A second SIGINT or SIGTERM ends
+the five-second wait early and skips the later waits that have no deadline,
+but it does not shorten an owner's settlement either: a stop during an owned
+mutation still takes up to the watchdog deadline.
+
 After clean settlement, the explicit pre-Cease stages have these sequential
 ceilings:
 

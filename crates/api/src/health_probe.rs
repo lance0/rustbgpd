@@ -51,8 +51,12 @@ impl DaemonGate {
 
     /// Enter coordinated shutdown: readiness goes red and admission
     /// paths stop accepting new work.
+    ///
+    /// Sequentially consistent on both sides: a runtime-config owner
+    /// publishes itself and then loads this flag, while shutdown stores it
+    /// and then loads the owner. A relaxed pair would let both loads miss.
     pub fn begin_shutdown(&self) {
-        self.inner.shutting_down.store(true, Ordering::Relaxed);
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.mark_not_ready("daemon is shutting down");
     }
 
@@ -65,7 +69,7 @@ impl DaemonGate {
     /// Whether coordinated shutdown has begun.
     #[must_use]
     pub fn is_shutting_down(&self) -> bool {
-        self.inner.shutting_down.load(Ordering::Relaxed)
+        self.inner.shutting_down.load(Ordering::SeqCst)
     }
 }
 

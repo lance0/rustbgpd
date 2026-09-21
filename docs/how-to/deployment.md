@@ -573,6 +573,9 @@ Notes on the sandbox:
   `systemctl start rustbgpd`. An explicit `systemctl stop` suppresses restart,
   and `TimeoutStopSec=32min` gives an already-owned mutation longer than its
   30-minute watchdog plus five-second terminal grace to settle or fail-stop.
+  Nothing else in the stop path needs that long: waits outside settlement
+  ownership are bounded in seconds, and a second SIGTERM or SIGINT skips the
+  ones that have no deadline, so `TimeoutStopSec` does not need to change.
   `rbgp doctor` reports listener failures through its `bgp.listener` check.
 
 ### Installation

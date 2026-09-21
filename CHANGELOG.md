@@ -68,6 +68,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now restores the recorded pre-commit snapshot without a token check; a
   caller's own Plan→Apply token still goes stale on a session change and must
   be re-planned.
+- Coordinated shutdown can no longer wait forever on runtime-config work that
+  nothing owns. A coordinator permit held outside settlement ownership (a read
+  stalled on an unresponsive actor) and the join of a SIGHUP task with no owner
+  are each bounded at five seconds; previously either could keep the daemon
+  from exiting until the service manager sent `SIGKILL`.
+  **Operator-visible:** `SIGTERM`/`SIGINT` now always reach teardown unless an
+  owned runtime-config mutation is still settling, which keeps its 30-minute
+  watchdog and exit 70 exactly as before. When the five-second bound expires
+  the daemon logs an error naming what it stopped waiting for, skips the
+  optional warm checkpoint, and continues; the exit status does not change.
+  A second `SIGTERM` or `SIGINT` during shutdown now means "stop waiting": it
+  skips the waits that have no deadline (the unowned permit, the EVPN IMET
+  sweep, the peer-manager drain, the BMP shutdown enqueue, and the RIB event
+  stage) while bounded kernel, BFD, and event-history cleanup still runs. It
+  does not cut short an owned mutation. A runtime-config mutation or SIGHUP
+  reload that obtains the coordinator only after shutdown has begun is refused
+  (`UNAVAILABLE`, `runtime config coordinator is closed`) before it changes
+  anything, so nothing starts mutating behind a wait shutdown gave up on.
+  `TimeoutStopSec=32min` in the shipped unit is unchanged.
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers

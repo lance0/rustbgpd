@@ -1343,11 +1343,26 @@ impl RuntimeConfigSettlementWatchdog {
                 kind,
                 coordinator,
                 coordinator_permit,
-                daemon_gate,
+                daemon_gate.clone(),
                 None,
                 None,
                 response_attached,
             );
+            // A permit taken just before the coordinator closed can register
+            // after coordinated shutdown stopped waiting for it. Shutdown
+            // stores the gate flag and later loads the owner; this task
+            // publishes the owner and then loads the flag. Both cells are
+            // sequentially consistent, so at least one side sees the other:
+            // either shutdown finds the owner and waits for it, or this load
+            // finds shutdown and the body never runs. The caller then sees
+            // exactly what losing the race with `close()` would have returned.
+            if daemon_gate.is_shutting_down() {
+                if !operation.try_settle() {
+                    std::future::pending::<()>().await;
+                }
+                drop(executor_guard);
+                return Err(crate::server::RuntimeConfigCoordinatorClosed.into());
+            }
             let outcome = body(operation.clone()).await;
             match outcome {
                 OwnedRuntimeConfigOutcome::CleanNoEffect(result) => {
@@ -1393,6 +1408,16 @@ impl RuntimeConfigSettlementWatchdog {
                 .wait(idle)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+
+    /// Whether a registered owner currently holds settlement ownership.
+    ///
+    /// Coordinated shutdown uses this to tell a coordinator permit held by an
+    /// owner, whose wait only the watchdog may end, from one held outside the
+    /// watchdog, which shutdown may stop waiting for.
+    #[must_use]
+    pub fn has_owner(&self) -> bool {
+        self.registry.current.load().is_some()
     }
 
     /// Block until every clean registration settles, bounded by the current
@@ -2932,6 +2957,41 @@ mod tests {
             operation.terminal(),
             RuntimeConfigSettlementTerminal::Settled
         );
+    }
+
+    #[tokio::test]
+    async fn shared_executor_rejects_an_owner_that_registers_after_shutdown_began() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let coordinator = RuntimeConfigCoordinator::new();
+        let gate = DaemonGate::new();
+        gate.begin_shutdown();
+        let body_ran = Arc::new(AtomicBool::new(false));
+        let result = watchdog
+            .execute_owned(
+                RuntimeConfigOperationKind::PolicySet,
+                coordinator.clone(),
+                gate,
+                Arc::new(AtomicBool::new(true)),
+                {
+                    let body_ran = Arc::clone(&body_ran);
+                    move |_operation| async move {
+                        body_ran.store(true, Ordering::SeqCst);
+                        OwnedRuntimeConfigOutcome::<(), tonic::Status>::AcknowledgedAuthority(())
+                    }
+                },
+            )
+            .await;
+        assert!(
+            !body_ran.load(Ordering::SeqCst),
+            "an owner registered after shutdown began must not run its body"
+        );
+        let status = result.expect_err("a late owner must be rejected");
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "runtime config coordinator is closed");
+        assert!(!watchdog.has_owner(), "the late owner must settle at once");
+        tokio::time::timeout(Duration::from_secs(1), coordinator.wait_until_drained())
+            .await
+            .expect("the late owner must release the coordinator permit");
     }
 
     #[tokio::test]
