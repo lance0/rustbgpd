@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import socket
 import struct
 import threading
@@ -46,6 +47,7 @@ EXPECTED = {
     "10.105.0.2": ("bird", 65002),
     "10.105.0.3": ("openbgpd", 65003),
     "10.105.0.5": ("frr", 65005),
+    "10.105.0.6": ("rustbgpd_current", 65006),
 }
 EXPECTED_BAD_HEX = {
     "med": "a0040400000064",
@@ -76,6 +78,27 @@ EXPECTED_OUTCOMES = {
     ("frr", "mp_reach"): "reset",
     ("frr", "mp_unreach"): "reset",
 }
+# The rows above are a frozen released-image receipt. The tree under test has
+# its own receiver and its own rows, derived from RFC 4271 section 4.3 and the
+# per-attribute RFC 7606 dispositions for an external neighbor. They are
+# verified separately so neither matrix can be edited to satisfy the other.
+CURRENT_EXPECTED_OUTCOMES = {
+    ("rustbgpd_current", "med"): "treat_as_withdraw",
+    ("rustbgpd_current", "originator_id"): "attribute_discard",
+    ("rustbgpd_current", "cluster_list"): "attribute_discard",
+    ("rustbgpd_current", "mp_reach"): "reset",
+    ("rustbgpd_current", "mp_unreach"): "reset",
+}
+# Exact per-case increments of the source peer's malformed-UPDATE counters:
+# the disposition series, and the type_code/reason/disposition cause series.
+CURRENT_EXPECTED_METRICS = {
+    "med": {"treat_as_withdraw": 1, "4/attribute_flags/treat_as_withdraw": 1},
+    "originator_id": {"attribute_discard": 1, "9/attribute_flags/attribute_discard": 1},
+    "cluster_list": {"attribute_discard": 1, "10/attribute_flags/attribute_discard": 1},
+    "mp_reach": {"session_reset": 1, "14/attribute_flags/session_reset": 1},
+    "mp_unreach": {"session_reset": 1, "15/attribute_flags/session_reset": 1},
+}
+METRIC_LINE = re.compile(r"^(bgp_update_malformed(?:_causes)?_total)\{([^}]*)\}\s+(\S+)$")
 
 event_lock = threading.Lock()
 session_condition = threading.Condition()
@@ -527,7 +550,7 @@ def controller() -> None:
     try:
         live_sessions()
         READY.write_text("ready\n", encoding="utf-8")
-        emit("fixture", "ready", peers=sorted(EXPECTED.values()), sessions=8)
+        emit("fixture", "ready", peers=sorted(EXPECTED.values()), sessions=2 * len(EXPECTED))
         for case in CASES:
             prepare = Path(f"/tmp/m100-{case}-prepare")
             malformed = Path(f"/tmp/m100-{case}-malformed")
@@ -575,16 +598,45 @@ def parse_json_lines(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def assert_expected_outcomes(rows: list[dict[str, Any]]) -> None:
-    if len(rows) != len(EXPECTED_OUTCOMES):
-        raise RuntimeError(f"expected 20 outcome rows, got {len(rows)}")
+def malformed_counters(text: str) -> dict[str, int]:
+    counters: dict[str, int] = {}
+    for line in text.splitlines():
+        match = METRIC_LINE.match(line)
+        if match is None:
+            continue
+        labels = dict(re.findall(r'(\w+)="([^"]*)"', match.group(2)))
+        if labels.get("peer") != RAW_ADDR:
+            continue
+        if match.group(1) == "bgp_update_malformed_total":
+            key = labels["disposition"]
+        else:
+            key = "/".join((labels["type_code"], labels["reason"], labels["disposition"]))
+        counters[key] = int(float(match.group(3)))
+    return counters
+
+
+def metric_delta(before: str, after: str) -> dict[str, int]:
+    start = malformed_counters(before)
+    end = malformed_counters(after)
+    if not start or not end:
+        raise RuntimeError("metrics scrape lacks the source peer's malformed-UPDATE series")
+    delta = {key: end[key] - start.get(key, 0) for key in sorted(end)}
+    return {key: value for key, value in delta.items() if value != 0}
+
+
+def assert_expected_outcomes(
+    rows: list[dict[str, Any]], expected: dict[tuple[str, str], str] | None = None
+) -> None:
+    expected = EXPECTED_OUTCOMES if expected is None else expected
+    if len(rows) != len(expected):
+        raise RuntimeError(f"expected {len(expected)} outcome rows, got {len(rows)}")
     actual: dict[tuple[str, str], str] = {}
     for row in rows:
         key = (str(row.get("receiver")), str(row.get("case")))
         if key in actual:
             raise RuntimeError(f"duplicate outcome row {key[0]}/{key[1]}")
         actual[key] = str(row.get("outcome"))
-    if actual != EXPECTED_OUTCOMES:
+    if actual != expected:
         raise RuntimeError(f"observed outcome matrix drifted: {actual}")
 
 
@@ -606,7 +658,7 @@ def candidate_from_snapshot(receiver: str, text: str, case: str) -> bool:
         value = json.loads(text)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"{receiver} returned invalid JSON") from error
-    if receiver == "rustbgpd":
+    if receiver in {"rustbgpd", "rustbgpd_current"}:
         if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
             raise RuntimeError("rustbgpd route status is not an array of objects")
         matches = [item for item in value if item.get("prefix") == CANDIDATE]
@@ -676,14 +728,23 @@ def observer_state(
     return state[CANDIDATE], state[SURVIVOR]
 
 
-def verify_results(outcomes_path: Path, events_path: Path) -> int:
-    rows = parse_json_lines(outcomes_path)
-    events = parse_json_lines(events_path)
-    assert_expected_outcomes(rows)
+def verify_matrix(
+    expected: dict[tuple[str, str], str],
+    rows: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    expected_metrics: dict[str, dict[str, int]] | None = None,
+) -> None:
+    assert_expected_outcomes(rows, expected)
     by_key = {(row["receiver"], row["case"]): row for row in rows}
     indexed_events = list(enumerate(events))
-    for key, expected_outcome in EXPECTED_OUTCOMES.items():
+    for key, expected_outcome in expected.items():
         row = by_key[key]
+        observed_metrics = row.get("malformed_metrics")
+        if expected_metrics is not None and observed_metrics != expected_metrics[key[1]]:
+            raise RuntimeError(
+                f"{key[0]}/{key[1]} malformed-UPDATE metric delta drifted: "
+                f"expected {expected_metrics[key[1]]}, got {observed_metrics}"
+            )
         before = int(row["epoch_before"])
         after = int(row["epoch_after"])
         notification = row["notification"]
@@ -739,7 +800,7 @@ def verify_results(outcomes_path: Path, events_path: Path) -> int:
                 raise RuntimeError(f"{key[0]}/{key[1]} changed epoch or recorded a notification")
             if not row["survivor_present"]:
                 raise RuntimeError(f"{key[0]}/{key[1]} lost the survivor")
-            expected_candidate = expected_outcome == "accepted"
+            expected_candidate = expected_outcome in {"accepted", "attribute_discard"}
             if bool(row["candidate_present"]) != expected_candidate:
                 raise RuntimeError(f"{key[0]}/{key[1]} candidate state drifted")
             disruptive_events = [
@@ -788,6 +849,7 @@ def verify_results(outcomes_path: Path, events_path: Path) -> int:
         )
         expected_final = {
             "accepted": (True, True),
+            "attribute_discard": (True, True),
             "treat_as_withdraw": (False, True),
             "same_session_withdrawal": (False, True),
             "reset": (False, False),
@@ -807,6 +869,11 @@ def verify_results(outcomes_path: Path, events_path: Path) -> int:
             if forbidden_code in baseline_attributes:
                 raise RuntimeError(f"{key[0]}/{key[1]} unexpectedly crossed the observer boundary")
 
+
+def verify_results(outcomes_path: Path, events_path: Path) -> int:
+    rows = parse_json_lines(outcomes_path)
+    events = parse_json_lines(events_path)
+    verify_matrix(EXPECTED_OUTCOMES, rows, events)
     bird_med = [
         event
         for event in events
@@ -839,6 +906,17 @@ def verify_results(outcomes_path: Path, events_path: Path) -> int:
     return 0
 
 
+def verify_current_results(outcomes_path: Path, events_path: Path) -> int:
+    events = parse_json_lines(events_path)
+    verify_matrix(
+        CURRENT_EXPECTED_OUTCOMES, parse_json_lines(outcomes_path), events, CURRENT_EXPECTED_METRICS
+    )
+    if any(event.get("event") in {"fatal", "reader_error"} for event in events):
+        raise RuntimeError("raw fixture recorded an internal error")
+    print("M100 current-daemon 5-cell contract verified")
+    return 0
+
+
 def self_test() -> int:
     actual = {case: malformed_update(case)[1] for case in CASES}
     if actual != EXPECTED_BAD_HEX:
@@ -867,8 +945,40 @@ def self_test() -> int:
         pass
     else:
         raise RuntimeError("inverted outcome negative test was accepted")
+    current_rows = [
+        {"receiver": receiver, "case": case, "outcome": outcome}
+        for (receiver, case), outcome in CURRENT_EXPECTED_OUTCOMES.items()
+    ]
+    assert_expected_outcomes(current_rows, CURRENT_EXPECTED_OUTCOMES)
+    current_rows[0]["outcome"] = "accepted"
+    try:
+        assert_expected_outcomes(current_rows, CURRENT_EXPECTED_OUTCOMES)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("accepted current-daemon MED negative test was accepted")
+    if set(CURRENT_EXPECTED_METRICS) != set(CASES):
+        raise RuntimeError("current-daemon metric expectations do not cover every case")
+    scrape = (
+        'bgp_update_malformed_total{disposition="treat_as_withdraw",peer="%s"} %d\n'
+        'bgp_update_malformed_causes_total{disposition="treat_as_withdraw",peer="%s",'
+        'reason="attribute_flags",type_code="4"} %d\n'
+        'bgp_update_malformed_total{disposition="treat_as_withdraw",peer="192.0.2.1"} 7\n'
+    )
+    before = scrape % (RAW_ADDR, 0, RAW_ADDR, 0)
+    if metric_delta(before, scrape % (RAW_ADDR, 1, RAW_ADDR, 1)) != CURRENT_EXPECTED_METRICS["med"]:
+        raise RuntimeError("metric delta self-test failed")
+    if metric_delta(before, before) != {}:
+        raise RuntimeError("unchanged metrics produced a delta")
+    try:
+        metric_delta(before, "")
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError("empty metrics scrape negative test was accepted")
     malformed_snapshots = {
         "rustbgpd": "{}",
+        "rustbgpd_current": "{}",
         "bird": "Network not found",
         "openbgpd": '{"unexpected":true}',
         "frr": '{"unexpected":true}',
@@ -896,6 +1006,15 @@ def main() -> int:
         )
     if len(os.sys.argv) == 4 and os.sys.argv[1] == "--verify-results":
         return verify_results(Path(os.sys.argv[2]), Path(os.sys.argv[3]))
+    if len(os.sys.argv) == 4 and os.sys.argv[1] == "--verify-current-results":
+        return verify_current_results(Path(os.sys.argv[2]), Path(os.sys.argv[3]))
+    if len(os.sys.argv) == 4 and os.sys.argv[1] == "--metric-delta":
+        delta = metric_delta(
+            Path(os.sys.argv[2]).read_text(encoding="utf-8"),
+            Path(os.sys.argv[3]).read_text(encoding="utf-8"),
+        )
+        print(json.dumps(delta, sort_keys=True, separators=(",", ":")))
+        return 0
     if os.sys.argv[1:]:
         raise RuntimeError(f"unsupported arguments: {os.sys.argv[1:]}")
     paths = [EVENTS, READY, STOP]

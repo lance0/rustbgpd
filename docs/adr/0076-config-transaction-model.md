@@ -199,7 +199,8 @@ section executors behind that public contract.
   rollback reporting. This also means abort or auto-revert can fail if the
   current runtime snapshot no longer matches the post-commit snapshot token; the
   pending mutation fence is what keeps ordinary runtime config writes from
-  creating that mismatch. A failed abort or auto-revert keeps the transaction
+  creating that mismatch. *The token check on rollback is superseded by the
+  2026-09-21 amendment below.* A failed abort or auto-revert keeps the transaction
   pending with a failed lifecycle status (`ABORT_FAILED`/`AUTO_REVERT_FAILED`):
   the mutation fence stays closed and the revert journal is retained, because
   the daemon could not restore the pre-transaction state and a later-accepted
@@ -292,3 +293,31 @@ V3 later superseded v2 pending authority. Since v0.65, production reads/writes
 only v3. Retired authority refuses untouched with rustbgpd v0.64.0 recovery guidance.
 The live window and v3 boot revert remain unchanged; v1/v2 prose above records
 the historical migration path.
+
+## Amendment (2026-09-21): commit-confirmed rollback carries no snapshot token
+
+The consequence above — abort or auto-revert replays the post-commit snapshot
+token, and the mutation fence keeps it from going stale — held while the token
+hashed the config alone. Update-group impact planning later bound the token to
+the live update-group snapshot as well, so that a caller's impact plan cannot
+be applied against membership it did not see. That snapshot lists Established
+peers and their negotiated classification, which the fence does not and must
+not freeze: a session flap, a dynamic peer arriving or expiring, or an operator
+disabling a neighbor all move it. With the replayed token, any of those inside
+the confirm window turned abort and the timeout auto-revert into
+`FAILED_PRECONDITION` and left the transaction pending behind a closed fence.
+
+Rollback of a pending confirmed transaction now plans the recorded prior
+snapshot with no expected token. The token is a change detector for a caller
+whose view may be stale; this rollback has no such view. It runs under the
+runtime-config coordinator, and every writer of the runtime config — neighbor,
+dynamic-range, policy, peer-group and FIB-table RPCs, gNMI Set, another
+transaction, history rollback, and SIGHUP — checks the pending fence under that
+same coordinator, so the config cannot differ from what the transaction
+committed. Were it ever to differ, restoring the recorded snapshot is still the
+contract, and it is what the boot revert from the retained journal does; a
+config-identity check could only trade a live restore for the same restore
+after a restart. Validation, persistence, rollback-on-failure, and the
+`ABORT_FAILED`/`AUTO_REVERT_FAILED` handling are unchanged, and the
+caller-facing Plan, Apply, and `RollbackConfigTransaction` token checks are
+unchanged.

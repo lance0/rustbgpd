@@ -5141,6 +5141,229 @@ remote_asn = 65010
     ack_task.abort();
 }
 
+/// A pending confirmed transaction behind the real peer manager and the real
+/// RIB, so every runtime snapshot token is the production keyed hash over the
+/// config and the live update-group membership rather than a fake's string.
+struct RealTokenConfirmWindow {
+    controller: ConfigTransactionController,
+    peer_tx: mpsc::Sender<PeerManagerCommand>,
+    previous_toml: String,
+    _rib_tx: mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    _outbound_rx: mpsc::Receiver<rustbgpd_rib::OutboundRouteUpdate>,
+}
+
+impl RealTokenConfirmWindow {
+    /// The rollback restored the pre-transaction config and released the
+    /// pending-transaction mutation fence.
+    async fn assert_restored_and_unfenced(
+        &self,
+        terminal: proto::ConfigTransactionConfirmationStatus,
+    ) {
+        let status = self.controller.status().await.expect("status must succeed");
+        assert_eq!(
+            proto::ConfigTransactionConfirmationStatus::try_from(
+                status.confirmation.unwrap().status
+            ),
+            Ok(terminal)
+        );
+        let runtime = crate::reload::runtime_config_snapshot(&self.peer_tx)
+            .await
+            .expect("real peer manager must return its runtime config");
+        assert_snapshot_matches_config(
+            &crate::config::persisted_config_document(&runtime).unwrap(),
+            &self.previous_toml,
+        );
+        self.controller
+            .reject_if_pending("test mutation")
+            .await
+            .expect("a completed rollback must reopen the mutation fence");
+    }
+}
+
+/// `PeerUp` for the confirm-window harness's one Established eBGP session.
+fn flap_window_peer_up(
+    peer: std::net::IpAddr,
+    outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
+) -> rustbgpd_rib::RibUpdate {
+    use rustbgpd_wire::{Afi, Safi};
+
+    rustbgpd_rib::RibUpdate::PeerUp {
+        peer,
+        session_id: 1,
+        peer_asn: 65002,
+        peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: Vec::new(),
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    }
+}
+
+/// Apply a confirmed transaction with a real caller token, then drop the one
+/// Established session inside the confirm window so the live update-group
+/// snapshot no longer matches the one the post-commit token was derived from.
+async fn real_token_confirm_window_after_session_drop(
+    confirm_timeout_seconds: u32,
+) -> RealTokenConfirmWindow {
+    // One transaction family: the peer group already exists, the candidate
+    // only adds the dynamic range.
+    let previous_toml = base_toml("[peer_groups.ix-members]\n");
+    let candidate_toml = dynamic_candidate_toml();
+    let current = Config::load_toml_with_diagnostics(&previous_toml, "flap window current")
+        .expect("current config must parse");
+    let (rib_tx, rib_rx) = mpsc::channel(128);
+    let (_query_tx, query_rx) = mpsc::channel(1);
+    tokio::spawn(
+        rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new()).run(),
+    );
+    let (peer_tx, peer_rx) = mpsc::channel(64);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let peer_manager = crate::peer_manager::PeerManager::new_with_config(
+        peer_rx,
+        internal_rx,
+        current.global.asn,
+        current.global.router_id.parse().unwrap(),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx.clone(),
+        None,
+        None,
+        current,
+    );
+    tokio::spawn(peer_manager.run());
+
+    let peer: std::net::IpAddr = "10.0.0.2".parse().unwrap();
+    let (outbound_tx, outbound_rx) = mpsc::channel(16);
+    rib_tx
+        .send(flap_window_peer_up(peer, outbound_tx))
+        .await
+        .expect("real RIB must accept PeerUp");
+    assert_eq!(
+        query_real_update_group_snapshot(&rib_tx).await.peers.len(),
+        1
+    );
+
+    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new(), true)
+        .await
+        .expect("real plan must succeed");
+    assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
+    assert!(!planned.runtime_snapshot_token.is_empty());
+
+    let (config_tx, config_rx) = mpsc::channel(8);
+    tokio::spawn(ack_config_transaction_commits(config_rx));
+    let controller = ConfigTransactionController::new(
+        deps_value(None, peer_tx.clone(), Some(config_tx), Vec::new()),
+        BgpMetrics::new(),
+    )
+    .with_preloaded_planner(internal_tx);
+    let applied = controller
+        .clone()
+        .apply(proto::ApplyConfigTransactionRequest {
+            expected_runtime_snapshot_token: planned.runtime_snapshot_token.clone(),
+            ..confirmed_dynamic_request(candidate_toml.clone(), "deploy-1", confirm_timeout_seconds)
+        })
+        .await
+        .expect("confirmed apply with the real planned token must succeed");
+    assert_eq!(
+        applied.status,
+        proto::ConfigTransactionPlanStatus::Committable as i32
+    );
+    assert!(!applied.runtime_snapshot_token.is_empty());
+    assert_ne!(
+        applied.runtime_snapshot_token,
+        planned.runtime_snapshot_token
+    );
+
+    rib_tx
+        .send(rustbgpd_rib::RibUpdate::PeerDown {
+            peer,
+            session_id: 1,
+        })
+        .await
+        .expect("real RIB must accept PeerDown");
+    assert!(
+        query_real_update_group_snapshot(&rib_tx)
+            .await
+            .peers
+            .is_empty()
+    );
+
+    // The caller-facing optimistic check is unchanged: the post-commit token
+    // a client holds went stale when the session dropped.
+    let stale = plan_candidate(
+        &peer_tx,
+        candidate_toml,
+        applied.runtime_snapshot_token.clone(),
+        true,
+    )
+    .await
+    .expect_err("a caller's token from before the session drop must be stale");
+    assert!(
+        matches!(&stale, ConfigTransactionApplyError::FailedPrecondition(message)
+            if message.contains("runtime config snapshot changed")),
+        "unexpected stale-token error: {stale:?}"
+    );
+
+    RealTokenConfirmWindow {
+        controller,
+        peer_tx,
+        previous_toml,
+        _rib_tx: rib_tx,
+        _outbound_rx: outbound_rx,
+    }
+}
+
+#[tokio::test]
+async fn confirmed_abort_survives_session_drop_inside_confirm_window() {
+    let window = real_token_confirm_window_after_session_drop(60).await;
+    let response = window
+        .controller
+        .clone()
+        .abort(proto::AbortConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        })
+        .await
+        .expect("a session drop must not make abort fail");
+    assert!(!response.runtime_snapshot_token.is_empty());
+    window
+        .assert_restored_and_unfenced(proto::ConfigTransactionConfirmationStatus::Aborted)
+        .await;
+}
+
+#[tokio::test]
+async fn gnmi_commit_cancel_survives_session_drop_inside_confirm_window() {
+    let window = real_token_confirm_window_after_session_drop(60).await;
+    window
+        .controller
+        .clone()
+        .apply_gnmi_set(gnmi_set_commit_cancel("deploy-1"))
+        .await
+        .expect("a session drop must not make gNMI commit cancel fail");
+    window
+        .assert_restored_and_unfenced(proto::ConfigTransactionConfirmationStatus::Aborted)
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirm_timeout_auto_revert_survives_session_drop_inside_confirm_window() {
+    let window = real_token_confirm_window_after_session_drop(1).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    window
+        .assert_restored_and_unfenced(proto::ConfigTransactionConfirmationStatus::AutoReverted)
+        .await;
+    assert_config_transaction_lifecycle_metric(&window.controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(&window.controller, "auto_revert", "failure", 0.0);
+}
+
 #[tokio::test]
 async fn apply_commits_catalog_snapshot_after_persist_ack() {
     let previous_toml = base_toml("");
@@ -8950,7 +9173,7 @@ async fn preloaded_plan_waits_for_public_barrier_and_carries_same_arc() {
     let planned_snapshot = snapshot.clone();
     let task = tokio::spawn(async move {
         controller
-            .plan_preloaded_snapshot(planned_snapshot, "expected-token".to_string())
+            .plan_preloaded_snapshot(planned_snapshot, Some("expected-token".to_string()))
             .await
     });
 

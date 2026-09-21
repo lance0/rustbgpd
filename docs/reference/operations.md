@@ -310,7 +310,14 @@ re-apply the pre-commit snapshot. The transaction then stays pending and the
 mutation fence stays closed (the revert journal is retained, so a mutation
 accepted on top of the inconsistency would be clobbered by a boot revert);
 resolve it by retrying the abort, confirming the candidate, or restarting the
-daemon to boot-revert. A confirmed apply that itself fails without proof of a
+daemon to boot-revert. Session churn is not one of the causes: abort and timer
+rollback restore the recorded pre-commit snapshot without checking a runtime
+snapshot token, so peers flapping, dynamic peers arriving or expiring, or an
+operator disabling a neighbor inside the window cannot make the rollback fail.
+(A caller's own Plan→Apply token does go stale on those events; re-plan.) A
+rollback failure therefore points at the apply path itself — persistence
+unavailable, or the prior snapshot no longer committable — and the abort error
+and the daemon log carry the reason. A confirmed apply that itself fails without proof of a
 terminal outcome (lost persistence acknowledgement, post-persist finalization
 failure, or compound rollback failure) likewise retains the journal and blocks
 all config mutations until a restart boot-reverts.
