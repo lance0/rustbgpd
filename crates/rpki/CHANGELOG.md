@@ -5,6 +5,9 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.3.2 - Unreleased
 
+- Publish the first accepted empty VRP and ASPA tables so operator queries
+  distinguish authoritative empty data from unavailable data. Identical
+  replays remain suppressed; disconnects before any acceptance remain unavailable.
 - Add `AspaTable::providers`, a borrowed sorted merged-provider lookup that
   distinguishes an absent customer from a present empty set and preserves AS0.
 - Add `aspa_verify::validation_context` to derive the local-role first-AS

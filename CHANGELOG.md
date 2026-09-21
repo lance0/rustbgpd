@@ -20,6 +20,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authoritative empty data; verification reuses the ingress verifier and
   reports the first proven invalid customer/provider pair when available.
 
+### Fixed
+
+- Publish the first accepted empty VRP and ASPA tables to validation consumers,
+  allowing RPKI operator queries to report authoritative empty data correctly.
+  Identical replays remain suppressed, and pre-accept disconnects do not
+  fabricate available data.
+
 ## [0.71.0] — 2026-09-20
 
 ### Added
