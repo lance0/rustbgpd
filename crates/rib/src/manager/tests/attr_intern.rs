@@ -829,6 +829,120 @@ fn diverse_unicast_route(index: usize, med: u32) -> Route {
     route
 }
 
+fn diverse_injected_route(index: usize, med: u32) -> Route {
+    let mut route = diverse_unicast_route(index, med);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route
+}
+
+fn diverse_injected_fixture(metrics: BgpMetrics) -> (RibManager, mpsc::Sender<RibUpdate>) {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics);
+    for index in 0..=ATTR_INTERN_GC_DISPLACED_LIMIT {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_inject_route(
+            diverse_injected_route(index, u32::try_from(index).unwrap()),
+            reply,
+        );
+        response.try_recv().unwrap().unwrap();
+    }
+    (manager, tx)
+}
+
+#[tokio::test(start_paused = true)]
+async fn injected_attr_gc_bounds_replacements_without_delaying_visibility() {
+    let (mut manager, _tx) = diverse_injected_fixture(BgpMetrics::new());
+    let live_sets = ATTR_INTERN_GC_DISPLACED_LIMIT + 1;
+    for index in 1..=ATTR_INTERN_GC_DISPLACED_LIMIT {
+        let route = diverse_injected_route(0, 100_000 + u32::try_from(index).unwrap());
+        let expected = Arc::clone(&route.attributes);
+        let prefix = route.prefix;
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_inject_route(route, reply);
+        response.try_recv().unwrap().unwrap();
+        assert_eq!(
+            manager.ribs[&LOCAL_PEER]
+                .get(&prefix, 0)
+                .unwrap()
+                .attributes,
+            expected
+        );
+        assert_eq!(manager.loc_rib.get(&prefix).unwrap().attributes, expected);
+        if index < ATTR_INTERN_GC_DISPLACED_LIMIT {
+            assert_eq!(manager.attr_intern.len(), live_sets + index);
+            assert_eq!(manager.attr_intern_gc_displaced, index);
+        }
+    }
+    assert_eq!(manager.attr_intern.len(), live_sets);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert!(manager.attr_intern_gc_deadline.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn injected_attr_gc_reclaims_replacements_on_idle_deadline() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, tx) = diverse_injected_fixture(metrics.clone());
+    let live_sets = ATTR_INTERN_GC_DISPLACED_LIMIT + 1;
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_inject_route(diverse_injected_route(0, 100_000), reply);
+    response.try_recv().unwrap().unwrap();
+    assert_eq!(manager.attr_intern.len(), live_sets + 1);
+    let actor = tokio::spawn(manager.run());
+    tokio::task::yield_now().await;
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    let observed = gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]);
+    assert!((observed - f64::from(u32::try_from(live_sets).unwrap())).abs() < f64::EPSILON);
+    drop(tx);
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn injected_attr_gc_withdrawal_is_immediate_but_collection_is_bounded() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, tx) = diverse_injected_fixture(metrics.clone());
+    for index in 0..=ATTR_INTERN_GC_DISPLACED_LIMIT {
+        let prefix = diverse_injected_route(index, 0).prefix;
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_withdraw_injected(prefix, 0, reply);
+        response.try_recv().unwrap().unwrap();
+        assert!(manager.ribs[&LOCAL_PEER].get(&prefix, 0).is_none());
+        assert!(manager.loc_rib.get(&prefix).is_none());
+        if index == 0 {
+            assert_eq!(
+                manager.attr_intern.len(),
+                ATTR_INTERN_GC_DISPLACED_LIMIT + 1
+            );
+            assert_eq!(manager.attr_intern_gc_displaced, 1);
+        }
+        if index == ATTR_INTERN_GC_DISPLACED_LIMIT - 1 {
+            assert_eq!(manager.attr_intern.len(), 1);
+            assert_eq!(manager.attr_intern_gc_displaced, 0);
+        }
+    }
+    assert_eq!(manager.attr_intern.len(), 1);
+    assert_eq!(manager.attr_intern_gc_displaced, 1);
+    let deadline = manager.attr_intern_gc_deadline;
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_withdraw_injected(diverse_injected_route(0, 0).prefix, 0, reply);
+    assert!(matches!(
+        response.try_recv().unwrap(),
+        Err(crate::RibCommandError::NotFound(_))
+    ));
+    assert_eq!(manager.attr_intern_gc_displaced, 1);
+    assert_eq!(manager.attr_intern_gc_deadline, deadline);
+    let actor = tokio::spawn(manager.run());
+    tokio::task::yield_now().await;
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert!(
+        gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]).abs() < f64::EPSILON
+    );
+    drop(tx);
+    actor.await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn unicast_attr_gc_bounds_displaced_sets_and_preserves_current_routes() {
     let (mut manager, _tx, peer) = diverse_unicast_fixture(BgpMetrics::new());

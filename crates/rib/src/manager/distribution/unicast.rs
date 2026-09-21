@@ -1592,9 +1592,7 @@ impl RibManager {
         affected.insert(prefix);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
-        if replaced {
-            self.attr_intern.gc();
-        }
+        self.defer_unicast_attr_gc(usize::from(replaced));
         self.sync_attr_intern_gauge();
 
         let _ = reply.send(Ok(()));
@@ -1618,7 +1616,8 @@ impl RibManager {
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
-            self.gc_attr_intern();
+            self.defer_unicast_attr_gc(1);
+            self.sync_attr_intern_gauge();
             let _ = reply.send(Ok(()));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
