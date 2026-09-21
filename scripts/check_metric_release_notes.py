@@ -13,11 +13,12 @@ from types import ModuleType
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_RELEASE = "v0.70.0"
-BASELINE_COMMIT = "ee6215af61222a43c3a8019ee0352ecd5df77913"
+UNRELEASED_SECTION = "Unreleased"
+BASELINE_RELEASE = "v0.71.0"
+BASELINE_COMMIT = "4f8b1712274d2d52b07bc014446eced2ed53f2b5"
 WORKSPACE_RELEASE = "0.71.0"
-TARGET_CHANGELOG_SECTION = "0.71.0"
-BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.70.0.json"
+TARGET_CHANGELOG_SECTION = UNRELEASED_SECTION
+BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.71.0.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 CARGO_MANIFEST = ROOT / "Cargo.toml"
 METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
@@ -93,14 +94,15 @@ def workspace_version(manifest: bytes) -> str:
 def validate_workspace_release(version: str) -> None:
     if version != WORKSPACE_RELEASE:
         raise ValueError(
-            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; select the "
-            "target changelog section explicitly and review whether the released metric "
-            "baseline must roll"
+            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; point the "
+            "target section at the new release now, then roll the baseline to that release "
+            "in the post-release commit, because the baseline must always be the previous "
+            "release for this check to mean 'documented by the release that shipped it'"
         )
 
 
 def release_section(changelog: str, version: str) -> str:
-    """Return exactly one versioned changelog section, excluding adjacent releases."""
+    """Return exactly one changelog section, excluding adjacent releases."""
     header = re.compile(rf"^## \[{re.escape(version)}\](?:[^\n]*)$", re.MULTILINE)
     matches = list(header.finditer(changelog))
     if len(matches) != 1:
@@ -111,7 +113,11 @@ def release_section(changelog: str, version: str) -> str:
     following = re.search(r"^## \[[^\]\n]+\](?:[^\n]*)$", changelog[start:], re.MULTILINE)
     end = len(changelog) if following is None else start + following.start()
     section = changelog[start:end]
-    if not section.strip():
+    # An empty Unreleased section is a normal state right after a release, and it
+    # stays safe: with no family changes nothing needs documenting, and with family
+    # changes every one of them lands in `missing` and is named. A versioned section
+    # that is empty is a real error, because release.yml publishes it as the body.
+    if not section.strip() and version != UNRELEASED_SECTION:
         raise ValueError(f"CHANGELOG section for {version} is empty")
     return section
 
