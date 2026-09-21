@@ -561,7 +561,14 @@ impl RibManager {
     }
 
     pub(super) fn invalidate_flowspec_dependencies(&mut self, changed: &HashSet<Prefix>) {
-        if self.flowspec_validation.local_as.is_none() || changed.is_empty() {
+        let state = &self.flowspec_validation;
+        // No retained destination means nothing can depend on a unicast change;
+        // skip the per-prefix ancestor and descendant probes entirely.
+        if state.local_as.is_none()
+            || changed.is_empty()
+            || (state.destinations.family_len(Afi::Ipv4) == 0
+                && state.destinations.family_len(Afi::Ipv6) == 0)
+        {
             return;
         }
         self.with_selection_readiness(|manager| manager.queue_flowspec_dependencies(changed));
@@ -1390,6 +1397,43 @@ mod tests {
         assert_eq!(rows[0].validation, FlowSpecValidationStatus::Disabled);
         assert!(!rows[0].pending);
         assert!(manager.flowspec_validation.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flowspec_validation_without_rules_skips_dependency_probing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_tx, rx) = mpsc::channel(8);
+        let (_readiness_tx, readiness_rx) = mpsc::channel(8);
+        let mut manager = RibManager::new(rx, mpsc::channel(1).1, None, None, BgpMetrics::new())
+            .with_flowspec_validation(65000)
+            .with_readiness_queries(readiness_rx);
+        let probes = Arc::new(AtomicUsize::new(0));
+        manager.replacement_readiness_test_hook = Some(Arc::new({
+            let probes = Arc::clone(&probes);
+            move |stage| {
+                if stage == "flowspec_dependency_inventory" {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+        let revision = manager.flowspec_validation.unicast_revision;
+        let changed: HashSet<Prefix> = (0..64)
+            .map(|offset| {
+                Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::from(0x0a00_0000_u32 + offset),
+                    32,
+                ))
+            })
+            .collect();
+        manager.invalidate_flowspec_dependencies(&changed);
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            0,
+            "no retained rule means no per-prefix dependency probing"
+        );
+        assert!(manager.flowspec_validation.change_queue.is_empty());
+        assert_eq!(manager.flowspec_validation.unicast_revision, revision);
     }
 
     #[test]
