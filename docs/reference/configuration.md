@@ -1601,9 +1601,9 @@ removed by RFC 7606 do not count as configured discards.
 
 Independently of this list, ORIGINATOR_ID (9) and CLUSTER_LIST (10) received
 from any external neighbor are always discarded, as RFC 7606 §7.9 and §7.10
-require. That removal takes effect before the route-reflector-loop check, needs
-no configuration, and is counted in the same
-`bgp_path_attribute_discarded_total` series.
+require. That removal needs no configuration, the route-reflector-loop check
+does not act on those attributes for an external neighbor, and each removal is
+counted in the same `bgp_path_attribute_discarded_total` series.
 
 ```toml
 # IPv4 peer with dual-stack
