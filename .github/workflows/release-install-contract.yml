@@ -110,6 +110,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cpio rpm2cpio
           curl -sSfL -o /tmp/nfpm.tgz \
+            --connect-timeout 10 --max-time 120 \
+            --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
             https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
           echo "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  /tmp/nfpm.tgz" | sha256sum -c
           tar -C /tmp -xzf /tmp/nfpm.tgz nfpm

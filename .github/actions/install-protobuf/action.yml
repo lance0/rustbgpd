@@ -21,6 +21,8 @@ runs:
         archive="${install_root}/protoc.zip"
 
         curl -sSfL \
+          --connect-timeout 10 --max-time 120 \
+          --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
           -o "$archive" \
           "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
         printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
