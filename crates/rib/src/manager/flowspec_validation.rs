@@ -280,7 +280,10 @@ impl ValidationState {
         }
         let retired = self.candidates.get_mut(key).is_some_and(|rows| {
             let before = rows.len();
-            rows.retain(|identity, _| retained.contains(identity));
+            rows.retain(|identity, _| {
+                checkpoint();
+                retained.contains(identity)
+            });
             rows.len() != before
         });
         if retired {
@@ -518,10 +521,14 @@ impl RibManager {
     }
 
     pub(super) fn sync_flowspec_validation(&mut self, affected: &HashSet<FlowSpecKey>) {
+        if self.flowspec_validation.local_as.is_none() {
+            return;
+        }
         let readiness = self.replacement_readiness.clone();
         let checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "flowspec_inventory", false);
         for key in affected {
+            checkpoint();
             self.flowspec_validation
                 .sync_rule(key, &self.ribs, &self.loc_rib, &checkpoint);
         }
