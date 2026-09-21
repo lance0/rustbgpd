@@ -38,7 +38,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing deferred attribute collection bound: 4,096 displaced routes or
   a one-second actor deadline for large intern tables. Route visibility,
   per-prefix distribution and successful RPC acknowledgement semantics are
-  unchanged; small tables retain immediate collection.
+  unchanged. Controller paths keep the same immediate-collection rule as
+  sessions: small tables and a withdrawal that empties the injected table
+  still collect immediately.
 - Publish the first accepted empty VRP and ASPA tables to validation consumers,
   allowing RPKI operator queries to report authoritative empty data correctly.
   Identical replays remain suppressed, and pre-accept disconnects do not
