@@ -8,6 +8,8 @@ RUN test "${TARGETARCH}" = amd64 \
     && apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl iproute2 \
     && curl -fsSLo /tmp/gobgp.tar.gz \
+        --connect-timeout 10 --max-time 120 \
+        --retry 5 --retry-all-errors --retry-delay 5 \
         "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz" \
     && echo "${GOBGP_SHA256}  /tmp/gobgp.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/gobgp.tar.gz -C /usr/local/bin gobgp gobgpd \
