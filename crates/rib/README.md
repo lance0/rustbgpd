@@ -36,7 +36,10 @@ actor retains exclusive ownership and preserves family gate, ledger, and EoR
 ordering. Unlike outbound-only replacement, unicast selection changes Loc-RIB;
 readiness refreshes its exact count after each complete prefix mutation.
 General and summary reads and queued mutations remain fenced until release
-finishes. These checkpoints bound repeated work between probes; they are not a
+finishes. A release that runs longer than 30 seconds fails readiness closed
+under its own `RIB selection-deferral release stalled` reason, with readiness
+waits recorded under the `selection_release` seam, until the release finishes.
+These checkpoints bound repeated work between probes; they are not a
 universal wall-clock guarantee for arbitrary route or peer counts. Individual
 best-path computations, collection allocation/sorting, and ORR topology/SPF
 work remain synchronous; checkpoints do not preempt those operations.

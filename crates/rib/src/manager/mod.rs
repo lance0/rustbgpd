@@ -1150,11 +1150,24 @@ fn replacement_readiness_checkpoint(
             None => break,
         };
         let RibReadinessQuery::LocRibCount { reply, enqueued } = query;
+        // Selection release shares the owner and its healthy bound, but an
+        // operator reading `/readyz` must learn which mechanism is running.
+        let (seam, stalled) = if readiness.selection_release {
+            (
+                "selection_release",
+                RibReadinessError::SelectionReleaseStalled,
+            )
+        } else {
+            (
+                "policy_transition_fence",
+                RibReadinessError::PolicyTransitionStalled,
+            )
+        };
         readiness
             .metrics
-            .observe_rib_readiness_query_wait("policy_transition_fence", enqueued.elapsed());
+            .observe_rib_readiness_query_wait(seam, enqueued.elapsed());
         let result = if readiness.started.elapsed() >= MAX_HEALTHY_POLICY_TRANSITION_AGE {
-            Err(RibReadinessError::PolicyTransitionStalled)
+            Err(stalled)
         } else {
             Ok(readiness.count)
         };

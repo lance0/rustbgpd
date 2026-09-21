@@ -47,6 +47,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collision-failback staging, including all released route families. Readiness
   reports the current unicast Loc-RIB count while general reads and mutations
   remain queued; family convergence and table-before-EoR ordering are preserved.
+  A release longer than 30 seconds fails readiness closed under its own
+  `RIB selection-deferral release stalled` reason, and its readiness waits are
+  recorded under the new `selection_release` seam of
+  `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
+  transition reason and seam.
 
 ## [0.71.0] — 2026-09-20
 
