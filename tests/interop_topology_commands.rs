@@ -140,6 +140,66 @@ eval "$ASSERTION"
 }
 
 #[test]
+fn m95_down_gate_requires_a_recognised_non_established_state_and_stale_routes() {
+    let source = fs::read_to_string(interop_path("scripts/test-m95-rfc8212-presence.sh")).unwrap();
+    let start = source.find("session_state_is_down() {").unwrap();
+    let end = start + source[start..].find("\n}\n").unwrap() + 3;
+    let (_, tail) = source.split_once("\nretained=0\n").unwrap();
+    let (gate, _) = tail.split_once("\ndone\n").unwrap();
+    // The gate must go through the enum-aware predicate and the stale-only
+    // count; a bare string compare or a plain per-peer count is the defect.
+    assert!(gate.contains(r#"stale=$(count_stale_routes_from "$FRR_PEER")"#));
+    assert!(gate.contains(r#"if session_state_is_down "$state" && [ "$stale" -gt 0 ]; then"#));
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"
+set -euo pipefail
+eval "$HELPER"
+FRR_PEER=192.0.2.1
+neighbor_state() { printf '%s\n' "$payload"; }
+count_stale_routes_from() { printf '%s\n' "$stale_routes"; }
+# A live session still announces its routes, so the plain count stays positive.
+count_routes_from() { echo 3; }
+ok() { :; }; sleep() { :; }; seq() { echo 1; }
+gate_result() {
+    payload=$1 stale_routes=$2
+    retained=0
+    eval "$GATE"$'\ndone'
+    echo "$retained"
+}
+expect() {
+    local got
+    got=$(gate_result "$2" "$3")
+    [[ "$got" == "$1" ]] || { echo "want $1, got $got: $2 stale=$3" >&2; exit 1; }
+}
+expect 1 '{"state":"SESSION_STATE_IDLE"}' 3
+expect 1 '{"state":"SESSION_STATE_ACTIVE"}' 3
+# A value this script does not know still proves the proto-name rendering and
+# is not Established, so it reads as down.
+expect 1 '{"state":"SESSION_STATE_NOT_A_KNOWN_VALUE"}' 3
+expect 0 '{"state":"SESSION_STATE_ESTABLISHED"}' 3
+expect 0 '{"state":"SESSION_STATE_ESTABLISHED"}' 0
+expect 0 '{}' 3
+expect 0 '{"state":""}' 3
+expect 0 '{"state":"ESTABLISHED"}' 3
+expect 0 '{"state":"Idle"}' 3
+# Down, but nothing retained as stale: the phase cannot discriminate.
+expect 0 '{"state":"SESSION_STATE_IDLE"}' 0
+"#,
+        ])
+        .env("HELPER", &source[start..end])
+        .env("GATE", gate)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn route_server_accepted_absence_requires_successful_snapshot() {
     for script in [
         "scripts/test-m104-arouteserver-current-rs-differential.sh",
