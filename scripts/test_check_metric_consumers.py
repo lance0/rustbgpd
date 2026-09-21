@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -686,9 +687,9 @@ groups:
         """Check one expression against only the vocabularies it selects on."""
         families = {
             CHECK.normalize_metric(token, self.inventory)
-            for token, _ in CHECK.SELECTOR.findall(expression)
+            for token in re.findall(r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{", expression)
         }
-        labels = {label for label, _, _ in CHECK.LABEL_MATCHER.findall(expression)}
+        labels = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|!)", expression))
         vocabularies = {
             key: values
             for key, values in self.vocabularies.items()
@@ -783,6 +784,77 @@ groups:
                 self.assertEqual(checked, 0)
                 self.assertEqual(len(skipped), 1)
                 self.assertIn(pattern, skipped[0])
+
+    def test_braces_inside_a_quoted_value_do_not_hide_a_selector(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        # (a) a quantifier is a complex regex: skipped and counted, never dropped.
+        checked, skipped = self.check_selector(f'{family}{{outcome=~"known_[0-9]{{1,2}}"}}')
+        self.assertEqual(checked, 0)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn('outcome=~"known_[0-9]{1,2}"', skipped[0])
+        # (b), (c) an exact value is checked whole, whichever brace it contains.
+        for value in ("bogus}x", "x{y", "a{b}c"):
+            with self.subTest(value=value), self.assertRaises(ValueError) as raised:
+                self.check_selector(f'{family}{{outcome="{value}"}}')
+            self.assertIn(
+                f'{family}{{outcome="{value}"}} names value "{value}" the daemon cannot emit',
+                str(raised.exception),
+            )
+        # (d) an open label keeps being ignored, and the closed label beside it
+        # is still checked.
+        self.assertEqual(
+            self.check_selector(
+                f'{family}{{peer=~"${{peer:regex}}",job="a}}b{{c",outcome="task_failed"}}'
+            ),
+            (1, []),
+        )
+        with self.assertRaisesRegex(ValueError, 'names value "partial" the daemon'):
+            self.check_selector(f'{family}{{peer=~"${{peer:regex}}",outcome="partial"}}')
+
+    def test_selector_wrapped_across_lines_is_checked_at_its_own_line(self):
+        key = ("bgp_policy_eval_errors_total", "kind")
+        text = (
+            "description: >-\n"
+            '  bgp_policy_eval_errors_total{direction="import",\n'
+            '  kind="%s"} on edge1 increased'
+        )
+        arguments = ({key: self.vocabularies[key]}, self.inventory, frozenset({"t.yml"}))
+        self.assertEqual(
+            CHECK.check_label_values({"t.yml": [(10, text % "overflow")]}, *arguments),
+            (1, []),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r't\.yml \(line 11\): bgp_policy_eval_errors_total\{kind="bogus"\} names value',
+        ):
+            CHECK.check_label_values({"t.yml": [(10, text % "bogus")]}, *arguments)
+        # The shipped rule tests wrap exactly this selector in an expected annotation.
+        wrapped = [
+            text for _, text in self.label_consumers[sorted(self.lenient)[0]]
+            if 'bgp_policy_eval_errors_total{direction="import",\n' in text
+        ]
+        self.assertEqual(len(wrapped), 1)
+
+    def test_template_variable_on_a_closed_label_is_skipped_and_counted(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        for matcher in ('="$outcome"', '="${outcome:regex}"', '=~"${outcome:pipe}"'):
+            with self.subTest(matcher=matcher):
+                checked, skipped = self.check_selector(f"{family}{{outcome{matcher}}}")
+                self.assertEqual(checked, 0)
+                self.assertEqual(len(skipped), 1)
+                self.assertIn(f"outcome{matcher}", skipped[0])
+
+    def test_selector_the_checker_cannot_read_fails_instead_of_passing(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        for body in ("outcome='bogus'", "outcome=`bogus`", 'outcome="bogus', "outcome=bogus"):
+            with self.subTest(body=body), self.assertRaisesRegex(
+                ValueError, "selector the checker cannot read"
+            ):
+                self.check_selector(f"rate({family}{{{body}}}[5m])")
+        self.assertEqual(
+            self.check_selector(f'{family}{{}} + {family}{{ outcome = "complete" , }}'),
+            (1, []),
+        )
 
     def test_histogram_bound_selectors_match_the_emitted_spelling(self):
         family = "bgp_rib_policy_transition_actor_poll_duration_seconds"

@@ -255,9 +255,13 @@ RULE_METRIC_PREFIX = re.compile(
     r"^(?:bfd|bgp|bmp|evpn|gnmi|jemalloc|mrt|process)_"
 )
 EXTERNAL_RULE_INPUTS = frozenset({"up"})
-SELECTOR = re.compile(r"(?<![$\w:])([A-Za-z_:][A-Za-z0-9_:]*)\s*\{([^{}]*)\}")
+# A selector body is delimited by braces outside quoted values: a brace inside a
+# value (a regex quantifier, a Grafana `${var:format}`) must not end or hide it.
+PROMQL_STRING = r'"(?:\\.|[^"\\])*"'
+SELECTOR_START = re.compile(r"(?<![$\w:])([A-Za-z_:][A-Za-z0-9_:]*)\s*\{")
+SELECTOR_BODY = re.compile(rf'((?:[^{{}}"]|{PROMQL_STRING})*)\}}')
 LABEL_MATCHER = re.compile(
-    r'([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"((?:\\.|[^"\\])*)"'
+    rf"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*({PROMQL_STRING})\s*(?:,|$)"
 )
 LITERAL_ALTERNATION = re.compile(r"[A-Za-z0-9_-]+(?:\|[A-Za-z0-9_-]+)*")
 RUST_STRING = re.compile(r"__RUST_STRING_(\d+)__")
@@ -1186,14 +1190,16 @@ def closed_label_vocabularies(
 
 
 def check_label_values(
-    consumers: dict[str, list[tuple[str, str]]],
+    consumers: dict[str, list[tuple[str | int, str]]],
     vocabularies: dict[tuple[str, str], set[str]],
     inventory: dict[str, str],
     lenient: frozenset[str] = frozenset(),
 ) -> tuple[int, list[str]]:
     """Require closed-label selector values to be ones the daemon can emit.
 
-    ``consumers`` maps a shipped file to its ``(context, PromQL text)`` pairs.
+    ``consumers`` maps a shipped file to its ``(context, PromQL text)`` pairs; an
+    integer context is the text's first line, and selectors are then located by
+    their own line.
     Files in ``lenient`` carry synthetic series on every label, so only their
     mapped labels are checked; elsewhere an unmapped closed label is an error.
     Returns the number of values checked and the selectors skipped as too
@@ -1205,18 +1211,39 @@ def check_label_values(
     checked = 0
     for name, expressions in consumers.items():
         for context, expression in expressions:
-            for token, matchers in SELECTOR.findall(expression):
+            for start in SELECTOR_START.finditer(expression):
+                token = start.group(1)
                 family = normalize_metric(token, inventory)
                 if family is None:
                     continue
-                for label, operator, value in LABEL_MATCHER.findall(matchers):
+                if isinstance(context, int):
+                    line = context + expression.count("\n", 0, start.start())
+                    place = f"{name} (line {line})"
+                else:
+                    place = f"{name} ({context})"
+                body = SELECTOR_BODY.match(expression, start.end())
+                matchers = LABEL_MATCHER.findall(body.group(1)) if body else []
+                # Anything the two patterns do not account for (another quoting
+                # style, an unterminated value) would otherwise pass unchecked.
+                if body is None or LABEL_MATCHER.sub("", body.group(1)).strip():
+                    failures.append(
+                        f"{place}: {token}{{ opens a selector the checker "
+                        "cannot read"
+                    )
+                    continue
+                for label, operator, quoted in matchers:
+                    value = quoted[1:-1]
                     key = (family, label)
-                    where = f"{name} ({context}): {token}{{{label}{operator}\"{value}\"}}"
+                    where = f"{place}: {token}{{{label}{operator}\"{value}\"}}"
                     if key not in vocabularies:
                         if label not in OPEN_LABELS and name not in lenient:
                             failures.append(f"{where} selects a label with no closed label source")
                         continue
                     used.add(key)
+                    if "$" in value:
+                        # A Grafana variable is filled in when the panel renders.
+                        skipped.append(where)
+                        continue
                     if operator in ("=", "!="):
                         values = [value] if value else []
                     elif LITERAL_ALTERNATION.fullmatch(value):
@@ -1238,7 +1265,7 @@ def check_label_values(
     return checked, skipped
 
 
-def label_value_consumers() -> dict[str, list[tuple[str, str]]]:
+def label_value_consumers() -> dict[str, list[tuple[str | int, str]]]:
     """Collect PromQL text from the shipped rules, their tests, and dashboards."""
     consumers = {
         str(ALERT_RULES.relative_to(ROOT)): [
@@ -1252,10 +1279,15 @@ def label_value_consumers() -> dict[str, list[tuple[str, str]]]:
                 ALERT_RULES.read_text(encoding="utf-8")
             )
         ],
+        # One text, addressed by line: expected annotations wrap a selector
+        # across lines, which a line-at-a-time reading cannot see.
         str(ALERT_RULE_TESTS.relative_to(ROOT)): [
-            (f"line {line_number}", strip_yaml_inline_comment(line))
-            for line_number, line in enumerate(
-                ALERT_RULE_TESTS.read_text(encoding="utf-8").splitlines(), 1
+            (
+                1,
+                "\n".join(
+                    strip_yaml_inline_comment(line)
+                    for line in ALERT_RULE_TESTS.read_text(encoding="utf-8").splitlines()
+                ),
             )
         ],
     }
