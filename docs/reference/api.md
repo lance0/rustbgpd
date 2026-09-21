@@ -2731,8 +2731,11 @@ returns `200 ready` when PeerManager and RIB respond within 200 ms total, or
 reply, or times out. During an actor-owned export-policy transition the
 dedicated read-only RIB lane stays healthy for bounded progress, then returns
 `503 not ready: RIB export-policy transition stalled` if ownership reaches 30
-seconds; commit or cleaned-up fallback restores readiness immediately. It does
-not require peers or routes to exist.
+seconds; commit or cleaned-up fallback restores readiness immediately. A
+selection-deferral release shares that bound and returns
+`503 not ready: RIB selection-deferral release stalled` once it runs for 30
+seconds; readiness returns when the release finishes. It does not require
+peers or routes to exist.
 
 Authoritative export-policy replacement and rollback service this same RIB
 readiness lane between construction, per-peer work, and cleanup steps. These

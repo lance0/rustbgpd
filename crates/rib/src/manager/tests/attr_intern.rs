@@ -898,11 +898,10 @@ async fn injected_attr_gc_reclaims_replacements_on_idle_deadline() {
     actor.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
-async fn injected_attr_gc_withdrawal_is_immediate_but_collection_is_bounded() {
-    let metrics = BgpMetrics::new();
-    let (mut manager, tx) = diverse_injected_fixture(metrics.clone());
-    for index in 0..=ATTR_INTERN_GC_DISPLACED_LIMIT {
+/// Withdraw injected routes `0..count`, checking visibility and the bounded
+/// collection points along the way.
+fn withdraw_injected(manager: &mut RibManager, count: usize) {
+    for index in 0..count {
         let prefix = diverse_injected_route(index, 0).prefix;
         let (reply, mut response) = oneshot::channel();
         manager.handle_withdraw_injected(prefix, 0, reply);
@@ -910,6 +909,7 @@ async fn injected_attr_gc_withdrawal_is_immediate_but_collection_is_bounded() {
         assert!(manager.ribs[&LOCAL_PEER].get(&prefix, 0).is_none());
         assert!(manager.loc_rib.get(&prefix).is_none());
         if index == 0 {
+            // The first withdrawal is visible at once but its attributes wait.
             assert_eq!(
                 manager.attr_intern.len(),
                 ATTR_INTERN_GC_DISPLACED_LIMIT + 1
@@ -917,21 +917,55 @@ async fn injected_attr_gc_withdrawal_is_immediate_but_collection_is_bounded() {
             assert_eq!(manager.attr_intern_gc_displaced, 1);
         }
         if index == ATTR_INTERN_GC_DISPLACED_LIMIT - 1 {
+            // The displaced-count bound collects with one route still live.
             assert_eq!(manager.attr_intern.len(), 1);
             assert_eq!(manager.attr_intern_gc_displaced, 0);
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn injected_attr_gc_withdrawal_leaving_routes_stays_bounded() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, tx) = diverse_injected_fixture(metrics.clone());
+    withdraw_injected(&mut manager, ATTR_INTERN_GC_DISPLACED_LIMIT);
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 1);
     assert_eq!(manager.attr_intern.len(), 1);
-    assert_eq!(manager.attr_intern_gc_displaced, 1);
-    let deadline = manager.attr_intern_gc_deadline;
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    let actor = tokio::spawn(manager.run());
+    tokio::task::yield_now().await;
+    tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert!(
+        (gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]) - 1.0).abs()
+            < f64::EPSILON
+    );
+    drop(tx);
+    actor.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn injected_attr_gc_final_withdrawal_collects_immediately() {
+    let metrics = BgpMetrics::new();
+    let (mut manager, tx) = diverse_injected_fixture(metrics.clone());
+    withdraw_injected(&mut manager, ATTR_INTERN_GC_DISPLACED_LIMIT + 1);
+    // The withdrawal that empties the table follows the session rule: no
+    // retained attribute, no pending displaced count, no armed deadline.
+    assert_eq!(manager.ribs[&LOCAL_PEER].len(), 0);
+    assert_eq!(manager.attr_intern.len(), 0);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert_eq!(manager.attr_intern_gc_deadline, None);
+    assert!(
+        gauge_metric_value(&metrics, "bgp_rib_attr_intern_global_size", &[]).abs() < f64::EPSILON
+    );
     let (reply, mut response) = oneshot::channel();
     manager.handle_withdraw_injected(diverse_injected_route(0, 0).prefix, 0, reply);
     assert!(matches!(
         response.try_recv().unwrap(),
         Err(crate::RibCommandError::NotFound(_))
     ));
-    assert_eq!(manager.attr_intern_gc_displaced, 1);
-    assert_eq!(manager.attr_intern_gc_deadline, deadline);
+    assert_eq!(manager.attr_intern_gc_displaced, 0);
+    assert_eq!(manager.attr_intern_gc_deadline, None);
     let actor = tokio::spawn(manager.run());
     tokio::task::yield_now().await;
     tokio::time::advance(ATTR_INTERN_GC_INTERVAL).await;

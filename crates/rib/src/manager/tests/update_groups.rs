@@ -8056,10 +8056,15 @@ fn readiness_wait_records_elapsed_time_at_both_serving_seams() {
         .into_iter()
         .find(|family| family.name() == "bgp_rib_readiness_query_wait_seconds")
         .unwrap();
-    assert_eq!(family.metric.len(), 2);
+    assert_eq!(family.metric.len(), 3);
     for metric in &family.metric {
         let histogram = metric.get_histogram();
-        assert_eq!(histogram.sample_count(), 1);
+        let seam = metric.get_label()[0].value();
+        if seam == "selection_release" {
+            assert_eq!(histogram.sample_count(), 0, "no selection release ran");
+            continue;
+        }
+        assert_eq!(histogram.sample_count(), 1, "{seam} served one query");
         assert!(histogram.sample_sum() >= 0.250);
         assert_eq!(
             histogram
@@ -8141,6 +8146,49 @@ fn replacement_readiness_nested_rollback_keeps_original_age_and_restores_receive
         BTreeMap::from([
             ("actor_loop".to_owned(), 1),
             ("policy_transition_fence".to_owned(), 2),
+            ("selection_release".to_owned(), 0),
+        ])
+    );
+}
+
+#[test]
+fn selection_release_past_bound_reports_its_own_reason_and_seam() {
+    let (_tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let (tx, rx) = mpsc::channel(8);
+    manager.readiness_rx = Some(rx);
+    let mut inside_bound = None;
+    manager.with_selection_readiness(|manager| {
+        let mut response = queue_replacement_readiness(&tx);
+        manager.replacement_checkpoint(true);
+        inside_bound = Some(response.try_recv().unwrap());
+        // Age the release past the shared healthy bound without sleeping; a
+        // mass release measured at 700 peers takes longer than the bound.
+        manager
+            .replacement_readiness
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .started -= super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE;
+        let mut response = queue_replacement_readiness(&tx);
+        manager.replacement_checkpoint(true);
+        assert_eq!(
+            response.try_recv().unwrap(),
+            Err(crate::update::RibReadinessError::SelectionReleaseStalled),
+            "a long selection release must not be reported as an export-policy transition"
+        );
+    });
+    assert_eq!(inside_bound, Some(Ok(0)));
+    assert!(manager.replacement_readiness.is_none());
+    assert!(manager.readiness_rx.is_some());
+    assert_eq!(
+        histogram_sample_counts_by_label(&metrics, "bgp_rib_readiness_query_wait_seconds", "seam"),
+        BTreeMap::from([
+            ("actor_loop".to_owned(), 0),
+            ("policy_transition_fence".to_owned(), 0),
+            ("selection_release".to_owned(), 2),
         ])
     );
 }

@@ -241,6 +241,9 @@ impl CoreReadinessProbe {
                         RibReadinessError::PolicyTransitionStalled => {
                             CoreReadinessError::RibPolicyTransitionStalled
                         }
+                        RibReadinessError::SelectionReleaseStalled => {
+                            CoreReadinessError::RibSelectionReleaseStalled
+                        }
                     })
             } else {
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -291,6 +294,8 @@ pub enum CoreReadinessError {
     RibDroppedReply,
     /// The RIB actor's policy-transition ownership fence exceeded 30 seconds.
     RibPolicyTransitionStalled,
+    /// The RIB actor's selection-deferral release exceeded 30 seconds.
+    RibSelectionReleaseStalled,
     /// The daemon recorded a fatal availability fault ([`DaemonGate`]):
     /// BGP listener bind failure or coordinated shutdown in progress.
     DaemonUnavailable(&'static str),
@@ -311,6 +316,9 @@ impl fmt::Display for CoreReadinessError {
             }
             Self::RibDroppedReply => f.write_str("RIB manager dropped reply"),
             Self::RibPolicyTransitionStalled => f.write_str("RIB export-policy transition stalled"),
+            Self::RibSelectionReleaseStalled => {
+                f.write_str("RIB selection-deferral release stalled")
+            }
             Self::DaemonUnavailable(reason) => f.write_str(reason),
         }
     }
@@ -417,6 +425,10 @@ mod tests {
         assert_eq!(
             CoreReadinessError::RibPolicyTransitionStalled.to_string(),
             "RIB export-policy transition stalled"
+        );
+        assert_eq!(
+            CoreReadinessError::RibSelectionReleaseStalled.to_string(),
+            "RIB selection-deferral release stalled"
         );
     }
 
@@ -566,6 +578,32 @@ mod tests {
         let error = result.expect_err("stalled transition must fail core readiness");
         assert_eq!(error, CoreReadinessError::RibPolicyTransitionStalled);
         assert_eq!(error.to_string(), "RIB export-policy transition stalled");
+        assert!(
+            rib_query_rx.try_recv().is_err(),
+            "ordinary RIB query lane must remain untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_maps_stalled_selection_release_to_its_own_readiness_error() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
+        let (rib_readiness_tx, mut rib_readiness_rx) = mpsc::channel(1);
+        let probe =
+            CoreReadinessProbe::new(peer_tx, rib_query_tx).with_rib_readiness(rib_readiness_tx);
+
+        let (result, ()) = tokio::join!(probe.snapshot(), async {
+            reply_to_peer_manager(&mut peer_rx, Vec::new()).await;
+            let RibReadinessQuery::LocRibCount { reply, .. } =
+                rib_readiness_rx.recv().await.expect("RIB readiness query");
+            reply
+                .send(Err(RibReadinessError::SelectionReleaseStalled))
+                .unwrap();
+        });
+
+        let error = result.expect_err("stalled selection release must fail core readiness");
+        assert_eq!(error, CoreReadinessError::RibSelectionReleaseStalled);
+        assert_eq!(error.to_string(), "RIB selection-deferral release stalled");
         assert!(
             rib_query_rx.try_recv().is_err(),
             "ordinary RIB query lane must remain untouched"

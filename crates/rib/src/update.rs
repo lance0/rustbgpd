@@ -20,6 +20,10 @@ pub enum RibReadinessError {
     /// An actor-owned export-policy transition exceeded its maximum healthy
     /// ownership age, so ordinary RIB work may be wedged behind its fence.
     PolicyTransitionStalled,
+    /// An actor-owned selection-deferral release exceeded the same maximum
+    /// healthy ownership age while recomputing and distributing released
+    /// families, so ordinary RIB work may be wedged behind that release.
+    SelectionReleaseStalled,
 }
 
 /// Type-narrow readiness queries serviced independently of the general RIB

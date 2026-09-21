@@ -38,7 +38,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   existing deferred attribute collection bound: 4,096 displaced routes or
   a one-second actor deadline for large intern tables. Route visibility,
   per-prefix distribution and successful RPC acknowledgement semantics are
-  unchanged; small tables retain immediate collection.
+  unchanged. Controller paths keep the same immediate-collection rule as
+  sessions: small tables and a withdrawal that empties the injected table
+  still collect immediately.
 - Publish the first accepted empty VRP and ASPA tables to validation consumers,
   allowing RPKI operator queries to report authoritative empty data correctly.
   Identical replays remain suppressed, and pre-accept disconnects do not
@@ -47,6 +49,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collision-failback staging, including all released route families. Readiness
   reports the current unicast Loc-RIB count while general reads and mutations
   remain queued; family convergence and table-before-EoR ordering are preserved.
+  A release longer than 30 seconds fails readiness closed under its own
+  `RIB selection-deferral release stalled` reason, and its readiness waits are
+  recorded under the new `selection_release` seam of
+  `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
+  transition reason and seam.
 
 ## [0.71.0] — 2026-09-20
 

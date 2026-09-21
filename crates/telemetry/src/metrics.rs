@@ -281,7 +281,8 @@ const RIB_ACTOR_WORK_UNITS: [&str; 5] = [
 ];
 
 /// Closed labels for the actor seam that served a readiness query.
-const RIB_READINESS_QUERY_SEAMS: [&str; 2] = ["actor_loop", "policy_transition_fence"];
+const RIB_READINESS_QUERY_SEAMS: [&str; 3] =
+    ["actor_loop", "policy_transition_fence", "selection_release"];
 
 /// Closed labels for the current or latest completed command's operator-read policy marker.
 const PEER_MANAGER_OPERATOR_QUERY_SEAMS: [&str; 5] = [
@@ -1557,7 +1558,7 @@ impl BgpMetrics {
         let rib_readiness_query_wait_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_readiness_query_wait_seconds",
-                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
+                "Wall-clock delay from admission to the dedicated RIB readiness lane until actor service, partitioned by the serving seam: `actor_loop` includes ordinary drains and in-pass ingest servicing; `policy_transition_fence` is the synchronous replacement checkpoint; `selection_release` is the synchronous selection-deferral release checkpoint. Observed even if the caller has timed out, but not if canceled before admission or never served. Excludes admission wait, prior peer-manager work, and reply delivery.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["seam"],
@@ -5404,8 +5405,8 @@ impl BgpMetrics {
 
     /// Observe how long one readiness query waited between enqueue and service.
     ///
-    /// `seam` is one of the bounded `actor_loop` or `policy_transition_fence`
-    /// values naming the drain that served the query.
+    /// `seam` is one of the bounded `actor_loop`, `policy_transition_fence`
+    /// or `selection_release` values naming the drain that served the query.
     pub fn observe_rib_readiness_query_wait(&self, seam: &str, duration: std::time::Duration) {
         self.0
             .rib_readiness_query_wait_seconds
@@ -7816,6 +7817,7 @@ mod tests {
             gathered_histogram_series(&m, "bgp_rib_readiness_query_wait_seconds", "seam");
         assert_eq!(observed["actor_loop"].0, 1);
         assert_eq!(observed["policy_transition_fence"].0, 0);
+        assert_eq!(observed["selection_release"].0, 0);
     }
 
     #[test]

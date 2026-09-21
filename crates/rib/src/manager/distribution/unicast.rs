@@ -1610,13 +1610,20 @@ impl RibManager {
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
         if rib.withdraw(&prefix, path_id) {
             debug!(%prefix, "withdrawn injected route");
+            let rib_len = rib.len();
             self.metrics
-                .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
+                .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib_len));
             let mut affected = HashSet::new();
             affected.insert(prefix);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
-            self.defer_unicast_attr_gc(1);
+            // Same rule as a session withdrawal: the final source withdrawal
+            // collects immediately; anything else stays bounded and deferred.
+            if rib_len == 0 {
+                self.gc_attr_intern();
+            } else {
+                self.defer_unicast_attr_gc(1);
+            }
             self.sync_attr_intern_gauge();
             let _ = reply.send(Ok(()));
         } else {
