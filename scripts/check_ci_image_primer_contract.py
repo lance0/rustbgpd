@@ -809,9 +809,7 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not setup and job_name == "m100":
-                expected_needs = "    needs: [grpcurl_archive, bird2192_archive]"
-            elif not setup and job_name in ("m83", "m85", "m104"):
+            if not setup and job_name in ("m83", "m85", "m100", "m104"):
                 expected_needs = (
                     "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
                 )
@@ -947,7 +945,7 @@ def check(root: Path) -> list[str]:
                         errors.append(
                             f"{name}:{job_name}: bird artifact/build seam missing {seam}"
                         )
-                expected_build_push = 1 if setup or job_name == "m100" else 2
+                expected_build_push = 1 if setup else 2
                 if job.count(BUILD_PUSH) != expected_build_push:
                     errors.append(
                         f"{name}:{job_name}: build-push-action inventory drifted"
@@ -1049,24 +1047,14 @@ def check(root: Path) -> list[str]:
                     errors.append(
                         f"{name}:{job_name}: must consume one grpcurl artifact"
                     )
-                if job_name == "m100":
-                    for seam in (
-                        "prime_dev_image",
-                        "rustbgpd:dev",
-                        "scope=rustbgpd-dev",
-                        "target: dev",
-                    ):
-                        if seam in job:
-                            errors.append(f"{name}:{job_name}: release lane permits {seam}")
-                else:
-                    for seam in (
-                        IMPORT,
-                        "load: true",
-                        "tags: rustbgpd:dev",
-                        "target: dev",
-                    ):
-                        if seam not in job:
-                            errors.append(f"{name}:{job_name}: consumer missing {seam}")
+                for seam in (
+                    IMPORT,
+                    "load: true",
+                    "tags: rustbgpd:dev",
+                    "target: dev",
+                ):
+                    if seam not in job:
+                        errors.append(f"{name}:{job_name}: consumer missing {seam}")
                 if "cache-to:" in job and job_name not in bird_contracts:
                     errors.append(f"{name}:{job_name}: consumer exports a cache")
                 expected_gnmic = 1 if job_name in ("m54", "m56") else 0
@@ -1140,7 +1128,11 @@ def check(root: Path) -> list[str]:
     m100 = _jobs(texts["interop.yml"]).get("m100", "")
     m100_required = {
         GRPCURL_ACTION: 1,
-        "needs: [grpcurl_archive, bird2192_archive]": 1,
+        "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+        "name: Build rustbgpd:dev": 1,
+        "tags: rustbgpd:dev": 1,
+        "target: dev": 1,
+        IMPORT: 1,
         BIRD3_ACTION: 1,
         'version: "2.19.2"': 1,
         f"sha256: {BIRD2192_SHA256}": 1,
@@ -1169,15 +1161,12 @@ def check(root: Path) -> list[str]:
         "retention-days: 14": 1,
     }
     if any(m100.count(seam) != count for seam, count in m100_required.items()):
-        errors.append("interop.yml:m100: exact released-daemon receiver matrix drifted")
+        errors.append("interop.yml:m100: exact Partial-flag receiver job drifted")
     for forbidden in (
         "ghcr.io/lance0/rustbgpd:0.67.0",
         "openbgpd/openbgpd:9.2",
         "quay.io/frrouting/frr:10.3.1",
         "bird:2.19.2",
-        "prime_dev_image",
-        "rustbgpd:dev",
-        "scope=rustbgpd-dev",
         "continue-on-error:",
         'max_attempts: "2"',
     ):

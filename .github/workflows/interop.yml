@@ -2137,7 +2137,7 @@ jobs:
           max_attempts: "1"
 
   m100:
-    needs: [grpcurl_archive, bird2192_archive]
+    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
     name: M100 — released-daemon Partial-flag receiver differential
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2152,6 +2152,16 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      # The current-daemon receiver beside the frozen released-image receiver.
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
 
       - name: Stage verified BIRD 2.19.2 archive
         uses: ./.github/actions/stage-bird3-artifact

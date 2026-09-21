@@ -2011,8 +2011,13 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         unique_blocks = (
             (
                 "  m100:\n"
-                "    needs: [grpcurl_archive, bird2192_archive]\n",
-                "  m100:\n    needs: [grpcurl_archive]\n",
+                "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n",
+                "  m100:\n    needs: [grpcurl_archive, bird2192_archive]\n",
+            ),
+            (
+                "      # The current-daemon receiver beside the frozen released-image receiver.\n"
+                "      - name: Build rustbgpd:dev\n",
+                "",
             ),
             (
                 "      - name: Build bird:v2.19.2-m100\n"
@@ -2083,13 +2088,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         )
         self.assertEqual(4, (ROOT / relative).read_text().count(stage))
         self.mutate(relative, stage, occurrence=2)
-
-        job_name = "    name: M100 — released-daemon Partial-flag receiver differential\n"
-        self.mutate(
-            relative,
-            job_name,
-            job_name + "    # rustbgpd:dev must not enter this released-image lane\n",
-        )
 
     def test_m101_bird332_real_wire_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"

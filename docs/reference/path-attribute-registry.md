@@ -154,8 +154,10 @@ attribute bounds, missing route reconstruction, and duplicate or missing rows.
 
 ### Current-main receiver policy after M100
 
-M100 remains a version-scoped rustbgpd 0.67.0 observation. Current main now
-enforces the RFC 4271 requirement that Partial be clear on every recognized
+The rustbgpd 0.67.0 column of M100 remains a version-scoped observation and is
+not updated. M100 also runs a `rustbgpd_current` receiver built from the tree,
+which receives the same bytes and must produce the eBGP column below. Current
+main enforces the RFC 4271 requirement that Partial be clear on every recognized
 optional non-transitive attribute. The receiver action follows the existing
 per-attribute RFC 7606 disposition instead of adding a compatibility mode:
 
