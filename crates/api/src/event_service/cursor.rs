@@ -13,8 +13,9 @@
 //!    signal must be computed against the actual stored MIN, not
 //!    a cached atomic, to stay race-free against retention.
 //! 5. Spawns a drain task that:
-//!    - Emits a leading `StreamLagEvent` if the requested cursor
-//!      is older than the retained floor.
+//!    - Emits a `StreamLagEvent` whenever the replay cursor is older
+//!      than the retained floor: leading for a stale request cursor,
+//!      mid-replay when retention overtakes a replay in progress.
 //!    - Forwards each committed event, post-filters on the
 //!      dimensions the cursor's `SubscribeFilter` doesn't cover
 //!      (multi-category, `event_types`, `afi_safi`, `prefix_length`),
@@ -318,21 +319,35 @@ fn envelope_prefix_length_matches(prefix: Option<&String>, want: u32) -> bool {
         .is_ok_and(|got| got == want)
 }
 
-/// Build the leading `BgpEvent` carrying a `StreamLagEvent` that
-/// signals "the client cursor was older than the retained floor."
+/// Build the `BgpEvent` carrying a `StreamLagEvent` that signals "the
+/// replay cursor was older than the retained floor": the leading gap
+/// for a stale `from_event_id`, or (`mid_replay`) a later one for rows
+/// retention evicted ahead of a replay already in progress.
 ///
 /// The category on the lag event is `Unspecified` because the gap
 /// spans the global committed stream — not any particular source
 /// category. `missed_count` is computed against the global stream
 /// too, not the filtered subset, so collectors do not interpret
 /// `missed_count` as "events of the requested type missed".
-pub(crate) fn build_cursor_gap_event(requested_from: u64, oldest_retained: u64) -> proto::BgpEvent {
+pub(crate) fn build_cursor_gap_event(
+    requested_from: u64,
+    oldest_retained: u64,
+    mid_replay: bool,
+) -> proto::BgpEvent {
     let missed_count = oldest_retained.saturating_sub(requested_from.saturating_add(1));
-    let reason = format!(
-        "cursor older than retained history; \
-         requested_from_event_id={requested_from} \
-         oldest_retained_event_id={oldest_retained}"
-    );
+    let reason = if mid_replay {
+        format!(
+            "retention evicted events during replay; \
+             replayed_through_event_id={requested_from} \
+             next_available_event_id={oldest_retained}"
+        )
+    } else {
+        format!(
+            "cursor older than retained history; \
+             requested_from_event_id={requested_from} \
+             oldest_retained_event_id={oldest_retained}"
+        )
+    };
     proto::BgpEvent {
         timestamp: String::new(),
         category: proto::EventCategory::Unspecified as i32,
@@ -471,10 +486,10 @@ async fn run_drain(
 ) {
     // Forward committed events. Retention-gap detection happens
     // inside EHM's replay task and arrives here as
-    // `EventSubscriptionItem::RetentionGap(missed)`; submitting the
-    // floor read + first chunk read as one storage op makes the gap
-    // signal race-free against retention. Live broadcast lag arrives
-    // as `EventSubscriptionItem::Lagged(missed)`.
+    // `EventSubscriptionItem::RetentionGap`; submitting the floor
+    // read + each chunk read as one storage op makes the gap signal
+    // race-free against retention, including mid-replay. Live
+    // broadcast lag arrives as `EventSubscriptionItem::Lagged(missed)`.
     loop {
         let item = tokio::select! {
             biased;
@@ -511,11 +526,17 @@ async fn run_drain(
                 event
             }
             EventSubscriptionItem::Lagged(missed) => build_live_lag_event(missed),
-            EventSubscriptionItem::RetentionGap(missed) => {
-                let from = cursor.unwrap_or(0);
-                let oldest_retained = from.saturating_add(missed.saturating_add(1));
+            EventSubscriptionItem::RetentionGap {
+                after_event_id,
+                missed,
+            } => {
+                let oldest_retained = after_event_id.saturating_add(missed.saturating_add(1));
                 metrics.record_event_outbox_cursor_gap();
-                build_cursor_gap_event(from, oldest_retained)
+                build_cursor_gap_event(
+                    after_event_id,
+                    oldest_retained,
+                    cursor != Some(after_event_id),
+                )
             }
         };
         if !send_with_loss(Ok(event), &out_tx, &mut loss_rx).await {

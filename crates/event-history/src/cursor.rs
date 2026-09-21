@@ -161,14 +161,20 @@ pub enum EventSubscriptionItem {
     /// stream. The producing path is EHM's broadcast; gRPC translates
     /// this to a `StreamLagEvent` payload.
     Lagged(u64),
-    /// The caller's `from_event_id` is below the live retention floor
-    /// as observed atomically with the first replay chunk. Carries the
-    /// missed count over the global committed stream:
-    /// `floor - (from_event_id + 1)`, using saturating arithmetic for
-    /// edge cursors. Emitted exactly once, as the stream-leading item,
-    /// when a gap is detected; gRPC translates it to a leading
-    /// `StreamLagEvent` and increments `bgp_event_outbox_cursor_gap_total`.
-    RetentionGap(u64),
+    /// The replay cursor is below the live retention floor, as observed
+    /// atomically with a replay chunk. `missed` counts the global
+    /// committed stream, not the filtered subset: the ids in
+    /// `(after_event_id, after_event_id + missed]` were evicted before
+    /// replay reached them. Emitted immediately before that chunk's rows:
+    /// as the stream-leading item when the caller's `from_event_id` is
+    /// already below the floor (`after_event_id == from_event_id`), and
+    /// again mid-replay whenever retention overtakes the cursor between
+    /// chunks. gRPC translates each one to a `StreamLagEvent` and
+    /// increments `bgp_event_outbox_cursor_gap_total`.
+    RetentionGap {
+        after_event_id: u64,
+        missed: u64,
+    },
 }
 
 /// Handle returned by [`EventHistoryManager::subscribe_from_event`].
@@ -286,7 +292,6 @@ async fn run_subscription(
         // the receiving side as a defensive boundary around storage.
         let chunk_size = req.output_capacity.max(64);
         let mut next_from = from_id;
-        let mut first_chunk = true;
         loop {
             let query_filter = QueryFilter {
                 category: req.filter.category,
@@ -294,51 +299,41 @@ async fn run_subscription(
                 prefix: req.filter.prefix.clone(),
                 rd: req.filter.rd.clone(),
             };
-            // FIRST chunk uses `query_with_floor` so the live
+            // EVERY chunk uses `query_with_floor` so the live
             // `MIN(event_id)` and the row read happen in one
             // storage-thread iteration. Submitting a separate
             // `OldestEventId` then `Query` would let `Retain` slip
             // between them — that race is what ADR-0072 PR5's review
-            // surfaced. Subsequent chunks use the cheaper plain
-            // `Query`; the floor only matters for the leading-gap
-            // signal, and once the first chunk has run any further
-            // retention is reported via the live broadcast lag path,
-            // not as a cursor gap.
-            let rows = if first_chunk {
-                first_chunk = false;
-                let outcome = match storage
-                    .query_with_floor(next_from, high_watermark, chunk_size, query_filter)
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        warn!(error = %e, "replay first-chunk query failed; aborting subscription");
-                        let _ = out_tx.send(EventSubscriptionItem::Error(e)).await;
-                        return;
-                    }
-                };
-                if let Some(missed) = retention_gap_missed_count(from_id, outcome.floor)
-                    && !emit_retention_gap(&out_tx, missed).await
-                {
+            // surfaced. The floor is re-read per chunk because
+            // retention can evict rows ahead of `next_from` while the
+            // consumer drains the previous chunk. Nothing else reports
+            // that loss: the live lag path only covers the broadcast
+            // ring, and the live phase drops ids at or below the
+            // watermark.
+            let outcome = match storage
+                .query_with_floor(next_from, high_watermark, chunk_size, query_filter)
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    warn!(error = %e, "replay chunk query failed; aborting subscription");
+                    let _ = out_tx.send(EventSubscriptionItem::Error(e)).await;
                     return;
                 }
-                outcome.rows
-            } else {
-                match storage
-                    .query(next_from, high_watermark, chunk_size, query_filter)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!(error = %e, "replay chunk query failed; aborting subscription");
-                        let _ = out_tx.send(EventSubscriptionItem::Error(e)).await;
-                        return;
-                    }
-                }
             };
-            if rows.is_empty() {
-                break;
+            if let Some(missed) =
+                retention_gap_missed_count(next_from, outcome.floor, high_watermark)
+                && !emit_retention_gap(&out_tx, next_from, missed).await
+            {
+                return;
             }
+            let rows = outcome.rows;
+            // A short chunk exhausted `(next_from, high_watermark]`:
+            // every id in the range is now delivered, filtered out, or
+            // covered by a gap signal. Stopping here (rather than on a
+            // later empty chunk) keeps a filtered replay from reporting
+            // rows it already scanned as a gap.
+            let exhausted = rows.len() < chunk_size;
             let last_id = rows.last().map_or(high_watermark, |r| r.event_id);
             for row in rows {
                 let committed = committed_from_persisted(row);
@@ -349,7 +344,7 @@ async fn run_subscription(
                     return;
                 }
             }
-            if last_id >= high_watermark {
+            if exhausted || last_id >= high_watermark {
                 break;
             }
             next_from = last_id;
@@ -426,9 +421,21 @@ fn committed_from_persisted(row: PersistedEvent) -> CommittedEvent {
     }
 }
 
-fn retention_gap_missed_count(from_id: u64, floor: Option<u64>) -> Option<u64> {
+/// Committed ids in `(from_id, high_watermark]` that retention evicted
+/// before this chunk's read. `floor` is the live `MIN(event_id)`; an
+/// empty table (`None`) means everything up to the watermark is gone.
+/// Ids above the watermark belong to the live phase, so the count is
+/// capped there.
+fn retention_gap_missed_count(
+    from_id: u64,
+    floor: Option<u64>,
+    high_watermark: u64,
+) -> Option<u64> {
     let next_id = from_id.saturating_add(1);
-    floor.and_then(|floor| (next_id < floor).then(|| floor.saturating_sub(next_id)))
+    let first_available = high_watermark
+        .saturating_add(1)
+        .min(floor.unwrap_or(u64::MAX));
+    (next_id < first_available).then(|| first_available - next_id)
 }
 
 async fn emit_event(
@@ -454,9 +461,16 @@ async fn emit_lag(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> 
     }
 }
 
-async fn emit_retention_gap(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> bool {
+async fn emit_retention_gap(
+    out_tx: &mpsc::Sender<EventSubscriptionItem>,
+    after_event_id: u64,
+    missed: u64,
+) -> bool {
     if out_tx
-        .send(EventSubscriptionItem::RetentionGap(missed))
+        .send(EventSubscriptionItem::RetentionGap {
+            after_event_id,
+            missed,
+        })
         .await
         .is_ok()
     {
@@ -479,13 +493,16 @@ mod tests {
             crate::storage::TestQueryFailure::LaterReply,
         ] {
             let (_live_tx, live_rx) = broadcast::channel(1);
-            let (out_tx, mut out_rx) = mpsc::channel(2);
+            // Room for one full 64-row chunk plus the terminal error:
+            // `run_subscription` is awaited before anything is received.
+            let (out_tx, mut out_rx) = mpsc::channel(65);
             run_subscription(
                 SubscribeRequest {
                     from_event_id: Some(0),
+                    output_capacity: 64,
                     ..SubscribeRequest::default()
                 },
-                2,
+                1_000,
                 crate::storage::StoreHandle::test_query_failure(failure),
                 live_rx,
                 out_tx,
@@ -494,10 +511,12 @@ mod tests {
             .await;
 
             if failure == crate::storage::TestQueryFailure::LaterReply {
-                assert!(matches!(
-                    out_rx.recv().await,
-                    Some(EventSubscriptionItem::Event(_))
-                ));
+                for _ in 0..64 {
+                    assert!(matches!(
+                        out_rx.recv().await,
+                        Some(EventSubscriptionItem::Event(_))
+                    ));
+                }
             }
             assert!(matches!(
                 out_rx.recv().await,
@@ -557,9 +576,25 @@ mod tests {
 
     #[test]
     fn retention_gap_count_uses_saturating_cursor_edge() {
-        assert_eq!(retention_gap_missed_count(5, Some(9)), Some(3));
-        assert_eq!(retention_gap_missed_count(8, Some(9)), None);
-        assert_eq!(retention_gap_missed_count(u64::MAX, Some(u64::MAX)), None);
+        assert_eq!(retention_gap_missed_count(5, Some(9), 20), Some(3));
+        assert_eq!(retention_gap_missed_count(8, Some(9), 20), None);
+        assert_eq!(
+            retention_gap_missed_count(u64::MAX, Some(u64::MAX), u64::MAX),
+            None
+        );
+    }
+
+    #[test]
+    fn retention_gap_count_stops_at_the_watermark() {
+        // Floor beyond the watermark: ids above 20 arrive live, so only
+        // 6..=20 are missed.
+        assert_eq!(retention_gap_missed_count(5, Some(31), 20), Some(15));
+        // Empty table: everything up to the watermark was evicted.
+        assert_eq!(retention_gap_missed_count(5, None, 20), Some(15));
+        // Nothing committed yet, or a cursor at/beyond the watermark.
+        assert_eq!(retention_gap_missed_count(0, None, 0), None);
+        assert_eq!(retention_gap_missed_count(20, None, 20), None);
+        assert_eq!(retention_gap_missed_count(25, Some(31), 20), None);
     }
 
     #[test]

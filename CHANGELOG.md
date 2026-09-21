@@ -68,6 +68,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recorded under the new `selection_release` seam of
   `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
   transition reason and seam.
+- `SubscribeFromEvent` durable replay no longer skips events silently when
+  `[event_history]` retention evicts them while the replay is still in
+  progress. Every replay chunk now reads the retention floor together with its
+  rows, so each id in the replay range is either delivered or counted by a gap
+  event. **Operator-visible:** a subscriber can now receive the cursor-gap
+  `BGP_EVENT_TYPE_STREAM_LAGGED` event mid-replay, not only as the first
+  response; its `missed_count` covers exactly the evicted ids (global committed
+  stream), and its reason reads `retention evicted events during replay`.
+  `bgp_event_outbox_cursor_gap_total` counts each such event. A cursor whose
+  whole replay range was already evicted, leaving the store empty, now gets the
+  leading gap event too, and no gap count includes ids above the replay
+  watermark, which still arrive from the live stream.
 
 ## [0.71.0] — 2026-09-20
 

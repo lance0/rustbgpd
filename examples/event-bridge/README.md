@@ -18,7 +18,8 @@ operator's preferred sink. The patterns to preserve are:
    durability.** This skeleton's stdout flush is a stand-in for
    that confirmation; a real sink uses its own ack mechanism.
 3. **Treat `StreamLagEvent` as a gap signal, not a stream end.**
-   When the daemon emits one as the leading frame, your collector
+   When the daemon emits one — as the leading frame, or mid-replay
+   when retention overtakes a slow replay — your collector
    has lost events older than the daemon's retention floor. Alert
    on the `bgp_event_outbox_cursor_gap_total` daemon metric.
 4. **Use `timestamp`, not `event_id`, for causal joins across

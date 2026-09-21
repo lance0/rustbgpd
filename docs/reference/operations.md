@@ -1702,7 +1702,7 @@ any `WatchEvents` subscriber is alive.
 | `bgp_event_outbox_open_failures_total` | DB-open failures across the process lifetime. Typically 0 or 1; non-zero means EHM went into recovery or pass-through at startup. |
 | `bgp_event_outbox_degraded` | `1` once the outbox has seen durability-impacting loss, a committed-event delivery skip, or DB open/recovery/quarantine failure since start. Expected shutdown `reason=closed` drops are excluded. The signal does not auto-clear in v1; restart clears the latch. |
 | `bgp_event_outbox_storage_failed` | `1` once the event-history storage thread stopped (exited or panicked) while the daemon was running. The outbox then refuses producer events and durable cursor subscriptions, and `bgp_event_outbox_degraded` is also `1`. Restart the daemon to recover; the signal does not auto-clear. |
-| `bgp_event_outbox_cursor_gap_total` | `SubscribeFromEvent` requests whose leading frame was a `StreamLagEvent` (the requested cursor was older than the retention floor). Operator signal that `[event_history].max_events` / `max_bytes` is undersized for the collector reconnect SLA. |
+| `bgp_event_outbox_cursor_gap_total` | Cursor-gap `StreamLagEvent` frames sent on `SubscribeFromEvent` streams: the leading frame when the requested cursor was older than the retention floor, plus one for each time retention evicted events ahead of a replay still in progress. Operator signal that `[event_history].max_events` / `max_bytes` is undersized for the collector reconnect SLA. |
 
 **`FAILED_PRECONDITION` on `SubscribeFromEvent`** means one of:
 
@@ -1760,8 +1760,12 @@ reference skeleton. The pattern is:
 2. Forward `BgpEvent` records to your sink.
 3. Advance the persisted `last_seen_event_id` **only after** the
    sink confirms durable receipt.
-4. Treat a leading `StreamLagEvent` as a gap signal, not a stream
+4. Treat a `StreamLagEvent` as a gap signal, not a stream
    end — your collector lost events older than the retention floor.
+   It is the leading frame when the cursor was already too old, and it
+   can also arrive mid-replay if retention evicts events ahead of a
+   slow replay; `missed_count` covers exactly the ids skipped at that
+   point.
 5. Use `BgpEvent.timestamp`, not `event_id`, for causal joins
    across event categories. The durable `event_id` is
    order-of-arrival at the EHM actor, not order-of-occurrence at
