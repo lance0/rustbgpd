@@ -233,298 +233,78 @@ fn assert_route_server_prefix_set(
     );
 }
 
+/// Current-parser acceptance for every archived v1 fixture directory: each
+/// exercise registered in the stable-surface inventory, plus everything under
+/// the fixtures root (a staged next-release fixture, any additional role).
 #[test]
-fn v1_stable_v0_50_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.50.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.50.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.50.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.50.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.50.0 route-server config no longer validates: {err}"));
-}
+fn v1_stable_archived_fixtures_parse() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let inventory = fs::read_to_string(repository.join("docs/reference/v1-stable-surface.json"))
+        .expect("v1 stable-surface inventory must be readable");
+    let inventory: serde_json::Value =
+        serde_json::from_str(&inventory).expect("v1 stable-surface inventory must be JSON");
+    let registered: std::collections::BTreeSet<PathBuf> = inventory["upgrade_exercises"]
+        .as_array()
+        .expect("inventory upgrade_exercises must be an array")
+        .iter()
+        .map(|exercise| {
+            repository.join(
+                exercise["fixture_directory"]
+                    .as_str()
+                    .expect("upgrade exercise fixture_directory must be a string"),
+            )
+        })
+        .collect();
 
-#[test]
-fn v1_stable_v0_51_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.51.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.51.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.51.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.51.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.51.0 route-server config no longer validates: {err}"));
-}
+    let subdirectories = |directory: &Path| -> Vec<PathBuf> {
+        fs::read_dir(directory)
+            .unwrap_or_else(|err| panic!("cannot list {}: {err}", directory.display()))
+            .map(|entry| entry.expect("directory entry must be readable").path())
+            .filter(|path| path.is_dir())
+            .collect()
+    };
+    let archived: std::collections::BTreeSet<PathBuf> =
+        subdirectories(&repository.join("tests/fixtures/v1-stable"))
+            .iter()
+            .flat_map(|tag| subdirectories(tag))
+            .collect();
+    assert!(
+        !archived.is_empty(),
+        "no archived v1 fixture directories found under the fixtures root"
+    );
 
-#[test]
-fn v1_stable_v0_60_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.60.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.60.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.60.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.60.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.60.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_61_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.61.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.61.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.61.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.61.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.61.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_62_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.62.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.62.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.62.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.62.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.62.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_63_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.63.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.63.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.63.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.63.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.63.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_64_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.64.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.64.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.64.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.64.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.64.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_65_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.65.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.65.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.65.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.65.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.65.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_66_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.66.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.66.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.66.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.66.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.66.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_67_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.67.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.67.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.67.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.67.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.67.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_68_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.68.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.68.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.68.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.68.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.68.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_69_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.69.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.69.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.69.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.69.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.69.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_70_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.70.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.70.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.70.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.70.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.70.0 route-server config no longer validates: {err}"));
-}
-
-#[test]
-fn v1_stable_v0_71_route_server_fixture_parses() {
-    let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1-stable/v0.71.0/route-server");
-    let config_path = fixture.join("config.toml");
-    let source = fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read immutable v0.71.0 route-server fixture {}: {err}",
-            config_path.display()
-        );
-    });
-    let mut config: Config = toml::from_str(&source)
-        .unwrap_or_else(|err| panic!("v0.71.0 route-server config no longer parses: {err}"));
-    config
-        .load_rpol_files(Some(&fixture))
-        .unwrap_or_else(|err| panic!("v0.71.0 route-server rpol no longer loads: {err}"));
-    config
-        .validate()
-        .unwrap_or_else(|err| panic!("v0.71.0 route-server config no longer validates: {err}"));
+    let mut failures: Vec<String> = registered
+        .difference(&archived)
+        .map(|directory| {
+            format!(
+                "{}: registered in the inventory but absent from the fixtures root",
+                directory.display()
+            )
+        })
+        .collect();
+    for directory in &archived {
+        let accepted = fs::read_to_string(directory.join("config.toml"))
+            .map_err(|err| format!("config.toml is unreadable: {err}"))
+            .and_then(|source| {
+                toml::from_str::<Config>(&source).map_err(|err| format!("no longer parses: {err}"))
+            })
+            .and_then(|mut config| {
+                config
+                    .load_rpol_files(Some(directory))
+                    .map_err(|err| format!("rpol no longer loads: {err}"))?;
+                config
+                    .validate()
+                    .map_err(|err| format!("no longer validates: {err}"))
+            });
+        if let Err(reason) = accepted {
+            failures.push(format!("{}: {reason}", directory.display()));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "archived v1 fixtures rejected by the current parser:\n{}",
+        failures.join("\n")
+    );
 }
 
 const V1_EFFECTIVE_DEFAULTS_TOML: &str = r#"

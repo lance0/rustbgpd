@@ -11,6 +11,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 if sys.version_info < (3, 11):
@@ -61,6 +62,16 @@ EXPECTED_EFFECTIVE_FAMILY_CASES = (
     '&[(Afi::Ipv6,Safi::Unicast)]',
     '"neighbor_overrides_group",overridden.transport_config.peer.families,'
     '&[(Afi::Ipv4,Safi::Unicast)]',
+)
+FIXTURES_ROOT = "tests/fixtures/v1-stable"
+STABLE_FIXTURE_ROLES = ("route-server", "route-reflector")
+FIXTURE_VALIDATION_LINKAGE = (
+    (f'"{INVENTORY_PATH.relative_to(ROOT)}"', "read the stable-surface inventory"),
+    ('["fixture_directory"]', "take each exercise's fixture_directory"),
+    (f'"{FIXTURES_ROOT}"', "walk the archived fixtures root"),
+    ("toml::from_str", "parse config.toml with the current parser"),
+    (".load_rpol_files(", "load the fixture's rpol files"),
+    (".validate()", "validate the loaded config"),
 )
 EFFECTIVE_DEFAULT_ASSERTION_MACRO = "assert_v1_effective_default"
 EFFECTIVE_DEFAULT_ASSERTION_RE = re.compile(
@@ -169,7 +180,9 @@ def check_stable_config_object_shape_regressions() -> None:
         fail("internal config-shape regression treated required ordering as semantic")
 
 
-def check_effective_default_assertion_block(test_region: str, test: str) -> None:
+def check_effective_default_assertion_block(
+    test_region: str, test: str, values: dict[str, str]
+) -> None:
     if not re.search(
         rf"""
         macro_rules!\s+{EFFECTIVE_DEFAULT_ASSERTION_MACRO}\s*\{{\s*
@@ -193,7 +206,14 @@ def check_effective_default_assertion_block(test_region: str, test: str) -> None
             f"effective-default validation test {test!r} must assert exactly the "
             "eleven scalar scoped full paths in sorted order"
         )
-    for path, actual, _ in assertions:
+    for path, actual, expected in assertions:
+        expected = re.sub(r"\s+", "", expected)
+        if expected != values[path]:
+            fail(
+                f"effective-default validation test {test!r} expects {expected} for "
+                f"{path!r} but the inventory pins {values[path]}; a contextual "
+                "default change is a compatibility decision, not a literal refresh"
+            )
         field = path.partition(".")[2]
         runtime_field = (
             "effective_dynamic_neighbor_limit"
@@ -271,11 +291,13 @@ def check_effective_defaults(
         "schema_representation_defaults",
         "validation_source",
         "validation_test",
+        "values",
     }
     if set(effective) != required_keys:
         fail(
             "config.effective_defaults must contain exactly paths, "
-            "schema_representation_defaults, validation_source, and validation_test"
+            "schema_representation_defaults, validation_source, validation_test, "
+            "and values"
         )
 
     paths = effective["paths"]
@@ -291,6 +313,16 @@ def check_effective_defaults(
         fail(
             "config.effective_defaults.schema_representation_defaults must match "
             "the exact three-path representation map"
+        )
+    values = effective["values"]
+    if (
+        not isinstance(values, dict)
+        or list(values) != list(EXPECTED_EFFECTIVE_DEFAULT_ASSERTION_PATHS)
+        or not all(isinstance(value, str) and value for value in values.values())
+    ):
+        fail(
+            "config.effective_defaults.values must pin one expected literal for "
+            "each of the eleven scalar scoped paths, in sorted order"
         )
     for path in paths:
         definition, separator, field = path.partition(".")
@@ -327,10 +359,10 @@ def check_effective_defaults(
     test_region = named_rust_test_region(source, test)
     if test_region is None:
         fail(f"effective-default validation test {test!r} is not a live named test")
-    check_effective_default_assertion_block(test_region, test)
+    check_effective_default_assertion_block(test_region, test, values)
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test
+            EFFECTIVE_DEFAULT_ASSERTION_RE.sub("", test_region), test, values
         ),
         "must assert exactly the eleven scalar scoped full paths",
         "missing effective-default runtime assertion block",
@@ -353,21 +385,34 @@ def check_effective_defaults(
     ):
         expect_checker_failure(
             lambda broken_macro=broken_macro: check_effective_default_assertion_block(
-                broken_macro, test
+                broken_macro, test, values
             ),
             "no runtime-vs-expected assertion macro",
             label,
         )
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            EFFECTIVE_FAMILY_ASSERTION_RE.sub("", test_region), test
+            re.sub(
+                r'("Neighbor\.hold_time"\s*,\s*hold_time\s*,\s*)\d+',
+                r"\g<1>120",
+                test_region,
+            ),
+            test,
+            values,
+        ),
+        "for 'Neighbor.hold_time' but the inventory pins 90",
+        "changed contextual default literal",
+    )
+    expect_checker_failure(
+        lambda: check_effective_default_assertion_block(
+            EFFECTIVE_FAMILY_ASSERTION_RE.sub("", test_region), test, values
         ),
         "must assert exactly the four typed family-resolution cases",
         "missing effective-family runtime rows",
     )
     expect_checker_failure(
         lambda: check_effective_default_assertion_block(
-            test_region.replace("$actual.as_slice()", "$expected", 1), test
+            test_region.replace("$actual.as_slice()", "$expected", 1), test, values
         ),
         "no typed runtime-vs-expected family assertion macro",
         "vacuous effective-family macro",
@@ -894,6 +939,134 @@ def check_release_line_selftests() -> None:
         )
 
 
+def fixture_files(fixture_directory: Path) -> list[str]:
+    actual_files = []
+    for path in fixture_directory.rglob("*"):
+        relative_path = str(path.relative_to(fixture_directory))
+        if path.is_symlink():
+            fail(f"upgrade fixture {relative_path!r} must not be a symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            fail(f"upgrade fixture {relative_path!r} must be a regular file")
+        actual_files.append(relative_path)
+    return sorted(actual_files)
+
+
+def check_archived_fixture_directories(
+    fixtures_root: Path, exercised: set[str], tagged=tagged_file
+) -> None:
+    """Anchor every `<tag>/<role>/` directory no exercise names to its tag.
+
+    A staged next-release fixture, and any role other than the exercised one,
+    must equal `<tag>:examples/<role>/` byte for byte. A tag that carries a
+    stable role's example owes that role's fixture directory.
+    """
+    for tag_directory in sorted(fixtures_root.iterdir()):
+        tag = tag_directory.name
+        if tag_directory.is_symlink() or not tag_directory.is_dir():
+            fail(f"archived fixture entry {FIXTURES_ROOT}/{tag} must be a tag directory")
+        parse_release_tag(tag)
+        require_git_tag(tag)
+        for role_directory in sorted(tag_directory.iterdir()):
+            role = role_directory.name
+            archived = f"{FIXTURES_ROOT}/{tag}/{role}"
+            if role_directory.is_symlink() or not role_directory.is_dir():
+                fail(f"archived fixture entry {archived} must be a role directory")
+            if archived in exercised:
+                continue
+            file_names = fixture_files(role_directory)
+            if "config.toml" not in file_names:
+                fail(f"archived fixture directory {archived} must contain config.toml")
+            for name in file_names:
+                if (role_directory / name).read_bytes() != tagged(
+                    tag, f"examples/{role}/{name}"
+                ):
+                    fail(
+                        f"archived fixture {archived}/{name} does not match "
+                        f"{tag}:examples/{role}/{name}"
+                    )
+        for role in STABLE_FIXTURE_ROLES:
+            if (
+                tagged(tag, f"examples/{role}/config.toml") is not None
+                and not (tag_directory / role).is_dir()
+            ):
+                fail(
+                    f"{tag} carries examples/{role}/config.toml but "
+                    f"{FIXTURES_ROOT}/{tag}/{role} is not archived"
+                )
+
+
+def check_archived_fixture_directory_selftests() -> None:
+    """Synthetic tree and tag lookup: independent of what is staged on disk."""
+    tag = f"v{'.'.join(map(str, V1_UPGRADE_HISTORY_ORIGIN))}"
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        for role in STABLE_FIXTURE_ROLES:
+            (root / tag / role).mkdir(parents=True)
+            (root / tag / role / "config.toml").write_bytes(b"tagged")
+
+        def carried(_tag: str, path: str) -> bytes | None:
+            return b"tagged" if path.endswith("/config.toml") else None
+
+        check_archived_fixture_directories(root, set(), carried)
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(
+                root, set(), lambda _tag, path: carried(_tag, path) and b"drifted"
+            ),
+            f"{tag}/route-reflector/config.toml does not match",
+            "unexercised fixture bytes drifted from the tag",
+        )
+        (root / tag / "route-server" / "stray.rpol").write_bytes(b"untagged")
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(root, set(), carried),
+            f"{tag}/route-server/stray.rpol does not match",
+            "unexercised fixture file the tag never carried",
+        )
+        (root / tag / "route-server" / "stray.rpol").unlink()
+        (root / tag / "route-reflector" / "config.toml").unlink()
+        (root / tag / "route-reflector").rmdir()
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(root, set(), carried),
+            f"{tag} carries examples/route-reflector/config.toml but",
+            "tag carries a stable role example with no archived fixture",
+        )
+        check_archived_fixture_directories(
+            root,
+            set(),
+            lambda _tag, path: None if "route-reflector" in path else carried(_tag, path),
+        )
+
+
+def check_fixture_validation_linkage(test_region: str, test: str) -> None:
+    for needle, duty in FIXTURE_VALIDATION_LINKAGE:
+        if needle not in test_region:
+            fail(f"upgrade validation test {test!r} does not {duty}")
+
+
+def check_fixture_validation_test(source_name: str, qualified_test: str) -> None:
+    """One live test must parse every registered and every on-disk fixture."""
+    source_path = ROOT / safe_relative_path(source_name, "upgrade validation source")
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read upgrade validation source {source_name}: {error}")
+    test_region = named_rust_test_region(source, qualified_test.rsplit("::", 1)[-1])
+    if test_region is None:
+        fail(
+            f"upgrade validation test {qualified_test!r} disappeared from {source_name}"
+        )
+    check_fixture_validation_linkage(test_region, qualified_test)
+    for needle, duty in FIXTURE_VALIDATION_LINKAGE:
+        expect_checker_failure(
+            lambda needle=needle: check_fixture_validation_linkage(
+                test_region.replace(needle, ""), qualified_test
+            ),
+            f"does not {duty}",
+            f"fixture validation test that does not {duty}",
+        )
+
+
 def check_upgrade_exercises(inventory: dict) -> None:
     baseline, baseline_version = workspace_release()
     if inventory.get("baseline_release") != baseline:
@@ -905,9 +1078,7 @@ def check_upgrade_exercises(inventory: dict) -> None:
     if not exercises:
         fail("at least one consecutive-release upgrade exercise is required")
     transitions: list[ReleaseTransition] = []
-    validation_tests = [exercise["validation_test"] for exercise in exercises]
-    if len(validation_tests) != len(set(validation_tests)):
-        fail("upgrade exercises must use unique validation_test ids")
+    validation_tests: set[tuple[str, str]] = set()
     for exercise in exercises:
         from_version = parse_release_tag(exercise["from_release"])
         to_version = parse_release_tag(exercise["to_release"])
@@ -935,17 +1106,7 @@ def check_upgrade_exercises(inventory: dict) -> None:
         require_sorted_unique(file_names, "upgrade_exercise.files")
         if "config.toml" not in file_names:
             fail("upgrade exercise must archive config.toml")
-        actual_files = []
-        for path in fixture_directory.rglob("*"):
-            relative_path = str(path.relative_to(fixture_directory))
-            if path.is_symlink():
-                fail(f"upgrade fixture {relative_path!r} must not be a symlink")
-            if path.is_dir():
-                continue
-            if not path.is_file():
-                fail(f"upgrade fixture {relative_path!r} must be a regular file")
-            actual_files.append(relative_path)
-        actual_files.sort()
+        actual_files = fixture_files(fixture_directory)
         if actual_files != file_names:
             fail(
                 f"upgrade fixture directory must contain exactly the inventoried files: "
@@ -986,25 +1147,16 @@ def check_upgrade_exercises(inventory: dict) -> None:
                 "consecutive-release migration exercise before updating the digest"
             )
 
-        validation_source = ROOT / safe_relative_path(
-            exercise["validation_source"], "upgrade validation source"
-        )
-        try:
-            validation_text = validation_source.read_text()
-        except OSError as error:
-            fail(f"cannot read upgrade validation source {exercise['validation_source']}: {error}")
-        validation_test = exercise["validation_test"].rsplit("::", 1)[-1]
-        test_region = named_rust_test_region(validation_text, validation_test)
-        if test_region is None:
-            fail(
-                f"upgrade validation test {exercise['validation_test']!r} disappeared from "
-                f"{exercise['validation_source']}"
-            )
-        if exercise["fixture_directory"] not in test_region:
-            fail(
-                f"upgrade validation test {exercise['validation_test']!r} does not reference "
-                f"the immutable fixture directory"
-            )
+        validation_tests.add((exercise["validation_source"], exercise["validation_test"]))
+
+    for validation_source, validation_test in sorted(validation_tests):
+        check_fixture_validation_test(validation_source, validation_test)
+
+    check_archived_fixture_directories(
+        ROOT / FIXTURES_ROOT,
+        {exercise["fixture_directory"] for exercise in exercises},
+    )
+    check_archived_fixture_directory_selftests()
 
     if error := release_line_chain_error(transitions, baseline_version):
         fail(error)

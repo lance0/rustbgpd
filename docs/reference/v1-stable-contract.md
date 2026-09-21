@@ -62,6 +62,10 @@ group supplies one. The Python release checker pins
 the exact inventory, those three representation values, the daemon's shared
 dynamic-neighbor-limit accessor, and linkage to a live, non-ignored Rust test;
 the focused Cargo test executes that test and detects runtime resolver changes.
+The inventory also records the expected value of each scalar contextual default
+under `config.effective_defaults.values`, and the checker compares it with the
+literal that test asserts, so changing a resolver and its test together still
+requires an inventory edit and the compatibility review that goes with it.
 Nested protobuf evolution follows the compatibility rules below. The
 message-graph digest is a review tripwire, not an implicit promotion:
 experimental fields such as Paths-Limit are explicitly excluded in the
@@ -219,8 +223,10 @@ commit-confirmed rollback must use the transaction path.
 The first pinned exercise archives the complete v0.50.0 route-server example
 (`config.toml` plus its referenced `hygiene.rpol`) under
 `tests/fixtures/v1-stable/v0.50.0/`. The checker verifies every immutable byte
-digest against the v0.50.0 git tag, and a dedicated current-parser test loads,
-compiles, and validates that archived fixture under v0.51.0/current code. A
+digest against the v0.50.0 git tag, and one current-parser test
+(`v1_stable_archived_fixtures_parse`) loads, compiles, and validates every
+archived fixture directory under current code: each directory an exercise
+registers, plus everything else under `tests/fixtures/v1-stable/`. A
 version-bump PR therefore does not require the not-yet-created target tag;
 historical exercises require both release tags. The
 inventory records the source/target releases, file and semantic TOML digests,
@@ -240,9 +246,19 @@ anchor. An unannotated gap remains an error, and the annotation is rejected on
 an exercise that is actually between consecutive release lines.
 
 The accepted source/target pairs and archived fixture paths are listed in
-[`v1-stable-surface.json`](v1-stable-surface.json). Run the fixture parser tests
-below as a set. Staging a future source fixture alone does not advance the
-accepted release chain; the workspace version and inventory move together.
+[`v1-stable-surface.json`](v1-stable-surface.json). The fixture parser test
+below covers them as a set. Staging a future source fixture alone does not
+advance the accepted release chain; the workspace version and inventory move
+together. A staged directory is not editable text in the meantime: the checker
+compares every archived directory that no exercise names yet with the same
+path at its release tag, byte for byte.
+
+Fixture directories are archived per stable role, as
+`tests/fixtures/v1-stable/<tag>/<role>/`, from the first tag that carries that
+role's example: `examples/route-server/` from `v0.50.0`, and
+`examples/route-reflector/` from the first release that ships it. Earlier tags
+owe nothing for a role they never carried; afterwards the checker requires the
+role's directory beside every archived tag and the same parser test accepts it.
 
 ## Release gate
 
@@ -251,7 +267,7 @@ Run:
 ```bash
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
-cargo test -p rustbgpd route_server_fixture_parses
+cargo test -p rustbgpd --bin rustbgpd v1_stable_archived_fixtures_parse
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 

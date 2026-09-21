@@ -27,6 +27,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authoritative empty data; verification reuses the ingress verifier and
   reports the first proven invalid customer/provider pair when available.
 
+- `examples/route-reflector/config.toml`: a starter for an IPv4/IPv6 unicast
+  route reflector with a client peer group, a dynamic client range, a
+  non-client peer to the second reflector, Add-Path send, and GR/LLGR
+  retention. It passes `rustbgpd --check --strict` as shipped.
+
 ### Fixed
 
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that

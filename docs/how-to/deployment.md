@@ -1493,6 +1493,7 @@ shapes. Pick the closest match, copy, edit:
 |---|---|---|
 | Minimal | [`examples/minimal/config.toml`](../../examples/minimal/config.toml) | Single eBGP peer; dev-friendly, state in `/tmp`. |
 | IX route server | [`examples/route-server/config.toml`](../../examples/route-server/config.toml) | RPKI, Add-Path, dual-stack, per-member policy chains. |
+| Route reflector | [`examples/route-reflector/config.toml`](../../examples/route-reflector/config.toml) | IPv4/IPv6 unicast reflector: client peer group, dynamic client range, non-client peer, Add-Path send, GR/LLGR. |
 | MANRS IXP Action 1 | [`examples/manrs-action1/config.toml`](../../examples/manrs-action1/config.toml) | Route server with RPKI-invalid rejection and IRR-derived member filtering; walkthrough in [`cookbook/manrs-ixp-action1.md`](../cookbook/manrs-ixp-action1.md). |
 | Fabric edge / Linux FIB | [`examples/linux-edge-fib/config.toml`](../../examples/linux-edge-fib/config.toml) | FIB integration on configured unicast tables; ECMP, weighted multipath. |
 | EVPN VTEP leaf | [`examples/evpn-vtep-leaf/config.toml`](../../examples/evpn-vtep-leaf/config.toml) | Bidirectional VTEP: kernel FDB → Type 2 origination. |
