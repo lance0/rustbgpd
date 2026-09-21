@@ -328,8 +328,9 @@ reload, or a runtime-config read) to finish. It never gives up that wait: the
 status stays `pending`, and once the rollback is ten minutes past its deadline
 the daemon logs a warning (repeated every ten minutes) and `rbgp config status`
 says the automatic rollback is waiting for the coordinator, with the deadline it
-missed. The rollback runs as soon as the owner releases; abort or confirm the
-transaction to resolve it sooner.
+missed. The rollback runs as soon as the owner releases and needs no operator
+action; a confirm or abort issued meanwhile queues behind it for the same owner
+and may time out with "coordinator busy".
 
 Commit-confirmed also survives a daemon restart or crash inside the confirm
 window. Before the candidate commits, the v3 writer publishes three objects in

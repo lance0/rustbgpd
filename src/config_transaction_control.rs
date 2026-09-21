@@ -1489,8 +1489,10 @@ impl ConfigTransactionController {
                 // still pending and the rollback has not been attempted.
                 let human_text = format!(
                     "Confirmed config transaction timed out at unix {}; its automatic rollback \
-                     is waiting for the runtime-config coordinator and runs once the current \
-                     owner finishes. Abort or confirm it to resolve it sooner.",
+                     is waiting for the runtime-config coordinator and runs as soon as the \
+                     current owner finishes, with no action required. A confirm or abort \
+                     issued now waits behind it for the same owner and may time out as \
+                     coordinator busy.",
                     pending.deadline_unix_seconds
                 );
                 return Ok(proto::ConfigTransactionStatusResponse {

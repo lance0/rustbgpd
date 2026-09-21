@@ -2715,8 +2715,9 @@ async fn overdue_auto_revert_wait_is_reported_without_failing_and_reverts_once_f
     assert_eq!(confirmation.confirm_id, "deploy-1");
     let expected = format!(
         "Confirmed config transaction timed out at unix {}; its automatic rollback is waiting \
-         for the runtime-config coordinator and runs once the current owner finishes. Abort or \
-         confirm it to resolve it sooner.",
+         for the runtime-config coordinator and runs as soon as the current owner finishes, \
+         with no action required. A confirm or abort issued now waits behind it for the same \
+         owner and may time out as coordinator busy.",
         confirmation.deadline_unix_seconds
     );
     assert_eq!(confirmation.human_text, expected);
