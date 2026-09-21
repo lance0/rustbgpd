@@ -32,6 +32,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   non-client peer to the second reflector, Add-Path send, and GR/LLGR
   retention. It passes `rustbgpd --check --strict` as shipped.
 
+### Changed
+
+- The v1 stable-surface inventory now pins the RFC 8212 posture pair: root
+  `config_epoch` (with its `ConfigEpoch` type) joins the stable `Config`
+  fields and `[global] ebgp_requires_policy` joins the stable `Global`
+  fields, replacing their `outside_v1` classification. The contextual default
+  is part of the promise: an omitted boolean resolves to `false` without an
+  epoch or at epoch 1 and to `true` at epoch 2, and an explicit value keeps
+  its stated meaning. The inventory's new `config.contextual_posture` entry
+  names the existing matrix, legacy-advisory, and schema-representation tests,
+  and the release checker requires each to stay live and to keep asserting
+  its cells. This widens the compatibility promise only; runtime resolution,
+  the `rustbgpd --check --strict` readiness advisory for legacy omission, raw
+  presence, canonicalization, and the restart-required boundary are
+  unchanged, and the rest of `[global]` is not promoted.
+
 ### Fixed
 
 - A well-formed ORIGINATOR_ID or CLUSTER_LIST received from an external (eBGP)
