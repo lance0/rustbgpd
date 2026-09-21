@@ -392,16 +392,16 @@ TARGETS = {
     ("Max-prefix remaining headroom", "A"): (
         'bgp_max_prefix_headroom{instance=~"$instance",peer=~"$peer"}'
     ),
-    ("Export rejections / malformed UPDATEs / configured discards", "A"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "A"): (
         "sum by (instance, peer, family, reason) "
         "(rate(bgp_exact_export_rejections_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval])) > 0'
     ),
-    ("Export rejections / malformed UPDATEs / configured discards", "B"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "B"): (
         "sum by (instance, peer, disposition) (rate(bgp_update_malformed_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval])) > 0'
     ),
-    ("Export rejections / malformed UPDATEs / configured discards", "C"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "C"): (
         "sum by (instance, peer, type_code) (rate(bgp_path_attribute_discarded_total"
         '{instance=~"$instance",peer=~"$peer"}[$__rate_interval])) > 0'
     ),
@@ -485,13 +485,13 @@ TARGETS = {
 REQUIRED_LEGENDS = {
     ("Peer administrative / session truth", "A"): "admin {{peer}} {{interface}}",
     ("Peer administrative / session truth", "B"): "session {{peer}} {{interface}}",
-    ("Export rejections / malformed UPDATEs / configured discards", "A"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "A"): (
         "exact {{instance}} {{peer}} {{family}} {{reason}}"
     ),
-    ("Export rejections / malformed UPDATEs / configured discards", "B"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "B"): (
         "malformed {{instance}} {{peer}} {{disposition}}"
     ),
-    ("Export rejections / malformed UPDATEs / configured discards", "C"): (
+    ("Export rejections / malformed UPDATEs / inbound attribute discards", "C"): (
         "discard {{instance}} {{peer}} type {{type_code}}"
     ),
     ("Selection-deferral state", "A"): "{{instance}} {{afi_safi}} active",
@@ -524,7 +524,7 @@ REQUIRED_LEGENDS = {
 }
 
 ROUTE_SAFETY_PANELS = {
-    "Export rejections / malformed UPDATEs / configured discards": 0,
+    "Export rejections / malformed UPDATEs / inbound attribute discards": 0,
     "Selection-deferral state": 8,
     "Selection-deferral exceptional events": 16,
 }

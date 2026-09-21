@@ -168,6 +168,14 @@ The existing `bgp_path_attribute_discarded_total` contract counts the
 route-server-only configured numeric filter. Its meaning must not silently
 expand.
 
+**Amendment (2026-09-21): external-neighbor removals of types 9 and 10.**
+The counter now also counts a well-formed ORIGINATOR_ID (type 9) or
+CLUSTER_LIST (type 10) removed from an external neighbor's UPDATE under
+RFC 7606 sections 7.9 and 7.10; their malformed cases stay in the
+malformed-UPDATE counters. That expansion is deliberate and is documented in the operations
+reference, the counter's help text, and the changelog. The requirement above
+stands for Prefix-SID work, which must not reuse this counter silently.
+
 An implementation should add
 `bgp_prefix_sid_boundary_discards_total{peer,direction}`, where `direction`
 is the closed set `inbound|outbound`. It increments once for each logical
