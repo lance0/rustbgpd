@@ -158,7 +158,7 @@ states that the whole decision is Superseded.
 | [0132](0132-operator-read-path.md) | Operator reads during configuration transactions | Accepted | 2026-09-12 | Active |
 | [0133](0133-installed-import-counter-reads.md) | Installed import-counter reads | Accepted | 2026-09-13 | Active |
 | [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors, RPKI cache endpoints, and MRT dumps | Proposed | 2026-09-15 | Unstated |
-| [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Proposed | 2026-09-20 | Unstated |
+| [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
 
 ## Supporting records
 

@@ -1,6 +1,6 @@
 # ADR-0135: Opt-In FlowSpec Cross-RIB Feasibility Validation
 
-**Status:** Proposed (implementation and integration validation are pending)
+**Status:** Accepted
 **Date:** 2026-09-20
 **Supersedes:** The deferred feasibility-validation decision in
 [ADR-0035](0035-flowspec.md); its other decisions remain in force.
@@ -167,7 +167,7 @@ at bounded visit intervals, and before sending. Abandoned reads do not return
 partial success and do not cancel mandatory background revalidation. Preserve
 existing daemon read deadlines and actor scheduling policy.
 
-## Validation required before acceptance
+## Validation
 
 - Evaluator tests cover originator identities across transport families,
   reflected paths, empty versus absent paths, AS_SET rejection, eBGP first-AS
@@ -181,11 +181,26 @@ existing daemon read deadlines and actor scheduling policy.
   canceled diagnostics. Off-mode behavior remains unchanged.
 - Configuration tests cover the default, validation of values, diff reporting,
   restart-required classification, and preservation of the running value.
-- Extend the existing FlowSpec interop harness with a received rule and a
-  covering route from one source session. Withdraw and restore only the
-  unicast route. Confirm retained diagnostics and withdrawal/reannouncement at
-  the pinned observer, without session flaps. Preserve the existing default-off
-  injection case. Scope the receipt to the families actually exercised.
+- The existing FlowSpec interop harness exercises a received rule and a
+  covering route from one source session. It withdraws and restores only the
+  unicast route and checks retained diagnostics and withdrawal/reannouncement
+  at the pinned observer without session flaps. The existing default-off
+  injection case remains covered. The receipt names the exercised family.
+
+### Integration evidence
+
+On 2026-09-20, the M22 harness passed all 17 checks at source `aa32ba129`
+(daemon version `0.71.0`, FRR `10.7.1`). The original default-off local-injection
+phase passed, followed by an explicit restart into validation mode. A received
+IPv4 rule then moved from feasible to retained `no_covering_unicast` and back
+to feasible through unicast-only withdrawal and restoration. The FRR observer
+withdrew and restored the rule; session counters stayed unchanged during churn,
+and the source did not reinject FlowSpec. The intentional phase-boundary restart
+is excluded from that no-flap claim.
+
+IPv6 semantics have evaluator and actor coverage; this live receipt covers IPv4
+only. It establishes control-plane behavior in this small topology, not scale,
+forwarding, or a wall-clock revalidation guarantee.
 
 ## Consequences
 
