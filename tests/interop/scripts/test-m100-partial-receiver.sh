@@ -21,6 +21,10 @@ SURVIVOR=198.51.101.0/24
 ARTIFACT_DIR="${M100_ARTIFACT_DIR:-/tmp/m100-partial-receiver-artifacts}"
 CASES=(med originator_id cluster_list mp_reach mp_unreach)
 RECEIVERS=(rustbgpd bird openbgpd frr)
+# The tree under test, beside the frozen released receiver. Its rows go to
+# their own file and are judged by their own expected-outcome matrix.
+CURRENT="clab-${TOPO}-rustbgpd-current"
+CURRENT_RECEIVERS=(rustbgpd_current)
 
 m100_on_exit() {
     local status=$?
@@ -33,6 +37,8 @@ m100_on_exit() {
             >"$ARTIFACT_DIR/raw-peer.partial.log" 2>/dev/null || true
         docker exec "$RUSTBGPD" cat /tmp/m100-rustbgpd.log \
             >"$ARTIFACT_DIR/rustbgpd.partial.log" 2>/dev/null || true
+        docker exec "$CURRENT" cat /tmp/m100-rustbgpd.log \
+            >"$ARTIFACT_DIR/rustbgpd-current.partial.log" 2>/dev/null || true
         docker exec "$BIRD" cat /tmp/m100-bird.log \
             >"$ARTIFACT_DIR/bird.partial.log" 2>/dev/null || true
         docker exec "$OPENBGPD" cat /tmp/m100-openbgpd.log \
@@ -97,6 +103,9 @@ preflight_receivers() {
     check "rustbgpd image is exact v0.67.0" configured_image_is_local "$RUSTBGPD" "$rust_image"
     check "rustbgpd runtime is exact v0.67.0" test \
         "$(docker exec "$RUSTBGPD" rustbgpd --version 2>&1)" = "rustbgpd 0.67.0"
+    check "current-daemon receiver image is the local build" \
+        configured_image_is_local "$CURRENT" rustbgpd:dev
+    docker exec "$CURRENT" rustbgpd --version >"$ARTIFACT_DIR/rustbgpd-current.version.txt" 2>&1
     check "BIRD image is exact" configured_image_is_local "$BIRD" bird:v2.19.2-m100
     check "BIRD runtime is exact 2.19.2" test \
         "$(docker exec "$BIRD" bird --version 2>&1)" = "BIRD version 2.19.2"
@@ -114,6 +123,8 @@ preflight_receivers() {
 
     check "rustbgpd accepts the M100 receiver config" \
         docker exec "$RUSTBGPD" rustbgpd --check --strict /etc/rustbgpd/config.toml
+    check "current-daemon rustbgpd accepts the M100 receiver config" \
+        docker exec "$CURRENT" rustbgpd --check --strict /etc/rustbgpd/config.toml
     check "BIRD accepts the M100 receiver config" \
         docker exec "$BIRD" bird -p -c /etc/bird/bird.conf
     check "OpenBGPD accepts the M100 receiver config" \
@@ -124,6 +135,8 @@ preflight_receivers() {
 
 start_daemons() {
     docker exec -d "$RUSTBGPD" sh -c \
+        '/usr/local/bin/start-rustbgpd.sh >/tmp/m100-rustbgpd.log 2>&1'
+    docker exec -d "$CURRENT" sh -c \
         '/usr/local/bin/start-rustbgpd.sh >/tmp/m100-rustbgpd.log 2>&1'
     docker exec -d "$BIRD" sh -c \
         'bird -d -c /etc/bird/bird.conf >/tmp/m100-bird.log 2>&1'
@@ -152,6 +165,19 @@ rustbgpd_has() {
 rustbgpd_absent() {
     rs_ctl rib received "$RAW_ADDR" -a ipv4 -j \
         | jq -e --arg prefix "$1" 'all(.[]?; .prefix != $prefix)' >/dev/null
+}
+
+current_ctl() {
+    docker exec "$CURRENT" rbgp -s http://127.0.0.1:50051 "$@" 2>/dev/null
+}
+
+rustbgpd_current_has() {
+    current_ctl rib received "$RAW_ADDR" -a ipv4 -j \
+        | jq -e --arg prefix "$1" 'any(.[]?; .prefix == $prefix)' >/dev/null
+}
+
+rustbgpd_current_established() {
+    current_ctl neighbor "$RAW_ADDR" -j | rbgp_neighbor_json_established
 }
 
 bird_has() {
@@ -207,20 +233,21 @@ frr_established() {
 
 all_have() {
     local prefix=${1:?} receiver
-    for receiver in "${RECEIVERS[@]}"; do
+    for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         "${receiver}_has" "$prefix" || return 1
     done
 }
 
 all_established() {
     local receiver
-    for receiver in "${RECEIVERS[@]}"; do
+    for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         "${receiver}_established" || return 1
     done
 }
 
 all_processes_running() {
     process_running "$RUSTBGPD" rustbgpd \
+        && process_running "$CURRENT" rustbgpd \
         && process_running "$BIRD" bird \
         && process_running "$OPENBGPD" bgpd \
         && process_running "$FRR" bgpd
@@ -249,6 +276,10 @@ snapshot_receiver() {
         rustbgpd)
             output="$directory/${phase}-rustbgpd.json"
             rs_ctl rib received "$RAW_ADDR" -a ipv4 -j >"$output" || status=$?
+            ;;
+        rustbgpd_current)
+            output="$directory/${phase}-rustbgpd_current.json"
+            current_ctl rib received "$RAW_ADDR" -a ipv4 -j >"$output" || status=$?
             ;;
         bird)
             output="$directory/${phase}-bird.txt"
@@ -306,34 +337,66 @@ classify_receiver() {
         '{receiver:$receiver,case:$case,outcome:$outcome,epoch_before:$epoch_before,epoch_after:$epoch_after,candidate_present:$candidate,survivor_present:$survivor,notification:$notification}'
 }
 
+# Save the current receiver's malformed-UPDATE counters for one case phase.
+scrape_current_metrics() {
+    local output=${1:?}
+    prom_scrape "$CURRENT" | grep '^bgp_update_malformed' >"$output"
+}
+
+# A kept candidate is `attribute_discard` rather than `accepted` only when the
+# daemon itself counted that disposition for this case.
+current_row() {
+    local row=${1:?} case_name=${2:?}
+    local directory="$ARTIFACT_DIR/observations/$case_name" delta
+    scrape_current_metrics "$directory/malformed-rustbgpd_current.metrics.txt" \
+        || die "rustbgpd_current/$case_name metrics scrape failed"
+    delta=$(python3 "$SCRIPT_DIR/m100_partial_raw_peer.py" --metric-delta \
+        "$directory/baseline-rustbgpd_current.metrics.txt" \
+        "$directory/malformed-rustbgpd_current.metrics.txt") \
+        || die "rustbgpd_current/$case_name metric delta failed"
+    jq -c --argjson delta "$delta" '
+        .malformed_metrics = $delta
+        | if .outcome == "accepted" and ($delta.attribute_discard // 0) > 0
+          then .outcome = "attribute_discard" else . end' <<<"$row"
+}
+
 mkdir -p "$ARTIFACT_DIR/observations"
 : >"$ARTIFACT_DIR/outcomes.jsonl"
+: >"$ARTIFACT_DIR/outcomes-current.jsonl"
 check "release-image network namespace configured" configure_rust_network
 preflight_receivers
 
 docker exec -d "$RAW" sh -c 'python3 /m100_partial_raw_peer.py >/tmp/m100-raw.log 2>&1'
 wait_until "raw listener" docker exec "$RAW" test -s /tmp/m100-events.jsonl
 start_daemons
-wait_until "all four raw sessions" docker exec "$RAW" test -s /tmp/m100-ready
-check "all four receiver sessions established" all_established
+wait_until "all raw sessions" docker exec "$RAW" test -s /tmp/m100-ready
+check "all receiver sessions established" all_established
 
 for case_name in "${CASES[@]}"; do
     docker exec "$RAW" touch "/tmp/m100-${case_name}-prepare"
     wait_until "$case_name baseline send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-prepare.sent"
     wait_until "$case_name candidate at all receivers" all_have "$CANDIDATE"
     wait_until "$case_name survivor at all receivers" all_have "$SURVIVOR"
-    for receiver in "${RECEIVERS[@]}"; do
+    for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         snapshot_receiver "$receiver" "$case_name" baseline true
     done
+    scrape_current_metrics \
+        "$ARTIFACT_DIR/observations/$case_name/baseline-rustbgpd_current.metrics.txt" \
+        || die "rustbgpd_current/$case_name baseline metrics scrape failed"
 
     docker exec "$RAW" touch "/tmp/m100-${case_name}-malformed"
     wait_until "$case_name malformed send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-malformed.sent"
     sleep 4
-    for receiver in "${RECEIVERS[@]}"; do
+    for receiver in "${RECEIVERS[@]}" "${CURRENT_RECEIVERS[@]}"; do
         before_epoch=$(last_event_epoch "$receiver" send "$case_name")
         [ "$before_epoch" -gt 0 ] || die "$receiver/$case_name has no malformed send epoch"
         row=$(classify_receiver "$receiver" "$case_name" "$before_epoch")
-        printf '%s\n' "$row" >>"$ARTIFACT_DIR/outcomes.jsonl"
+        if [ "$receiver" = rustbgpd_current ]; then
+            row=$(current_row "$row" "$case_name")
+            printf '%s\n' "$row" >>"$ARTIFACT_DIR/outcomes-current.jsonl"
+        else
+            printf '%s\n' "$row" >>"$ARTIFACT_DIR/outcomes.jsonl"
+        fi
         candidate_present=$(jq -r '.candidate_present' <<<"$row")
         snapshot_status=0
         snapshot_receiver "$receiver" "$case_name" malformed "$candidate_present" \
@@ -358,6 +421,9 @@ check "M100 produced exactly 20 unique cells" jq -se \
 check "every M100 row has an explicit outcome" jq -se \
     'all(.[]; (.outcome | IN("accepted","treat_as_withdraw","same_session_withdrawal","reset")))' \
     "$ARTIFACT_DIR/outcomes.jsonl"
+check "M100 current-daemon receiver produced exactly 5 unique cells" jq -se \
+    'length == 5 and ([.[] | (.receiver + "/" + .case)] | unique | length) == 5' \
+    "$ARTIFACT_DIR/outcomes-current.jsonl"
 
 docker exec "$RAW" touch /tmp/m100-stop
 sleep 1
@@ -366,7 +432,11 @@ docker exec "$RAW" cat /tmp/m100-raw.log >"$ARTIFACT_DIR/raw-peer.log"
 check "M100 exact observed matrix and evidence" python3 \
     "$SCRIPT_DIR/m100_partial_raw_peer.py" --verify-results \
     "$ARTIFACT_DIR/outcomes.jsonl" "$ARTIFACT_DIR/events.jsonl"
+docker exec "$CURRENT" cat /tmp/m100-rustbgpd.log >"$ARTIFACT_DIR/rustbgpd-current.log"
+check "M100 current-daemon observed matrix and evidence" python3 \
+    "$SCRIPT_DIR/m100_partial_raw_peer.py" --verify-current-results \
+    "$ARTIFACT_DIR/outcomes-current.jsonl" "$ARTIFACT_DIR/events.jsonl"
 
 printf 'M100 artifacts: %s\n' "$ARTIFACT_DIR"
-jq -s . "$ARTIFACT_DIR/outcomes.jsonl"
+jq -s . "$ARTIFACT_DIR/outcomes.jsonl" "$ARTIFACT_DIR/outcomes-current.jsonl"
 printf 'M100 live discovery complete\n'

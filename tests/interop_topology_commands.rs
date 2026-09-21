@@ -359,6 +359,8 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
             "rustbgpd",
             "ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da",
         ),
+        // The tree under test runs beside the frozen released receiver.
+        ("rustbgpd-current", "rustbgpd:dev"),
         ("bird", "bird:v2.19.2-m100"),
         (
             "openbgpd",
@@ -381,6 +383,7 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
         .expect("read M100 topology");
     for fixture in [
         "configs/rustbgpd-m100-receiver.toml",
+        "configs/rustbgpd-m100-current-receiver.toml",
         "configs/bird-m100-receiver.conf",
         "configs/bgpd-m100-receiver.conf",
         "configs/frr-bgpd-m100-receiver.conf",
@@ -415,6 +418,11 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
         r#"("frr", "cluster_list"): "treat_as_withdraw""#,
         r#"("frr", "mp_reach"): "reset""#,
         r#"("frr", "mp_unreach"): "reset""#,
+        r#"("rustbgpd_current", "med"): "treat_as_withdraw""#,
+        r#"("rustbgpd_current", "originator_id"): "attribute_discard""#,
+        r#"("rustbgpd_current", "cluster_list"): "attribute_discard""#,
+        r#"("rustbgpd_current", "mp_reach"): "reset""#,
+        r#"("rustbgpd_current", "mp_unreach"): "reset""#,
     ] {
         assert!(peer.contains(expected), "M100 matrix lost `{expected}`");
     }
@@ -429,6 +437,8 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
         "inverted outcome negative test was accepted",
         "malformed snapshot negative test was accepted",
         "M100 exact 20-cell contract verified",
+        "accepted current-daemon MED negative test was accepted",
+        "M100 current-daemon 5-cell contract verified",
     ] {
         assert!(peer.contains(exact), "M100 oracle lost `{exact}`");
     }
@@ -438,6 +448,10 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
     for required in [
         "CASES=(med originator_id cluster_list mp_reach mp_unreach)",
         "RECEIVERS=(rustbgpd bird openbgpd frr)",
+        "CURRENT_RECEIVERS=(rustbgpd_current)",
+        "M100 current-daemon receiver produced exactly 5 unique cells",
+        "--verify-current-results",
+        "M100 current-daemon observed matrix and evidence",
         "M100 produced exactly 20 unique cells",
         "--verify-results",
         "M100 exact observed matrix and evidence",

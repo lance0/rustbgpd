@@ -12,6 +12,17 @@ address = "0.0.0.0:50051"
 token_file = "/run/rustbgpd/grpc-test-only-operator.token"
 principal = "rustbgpd://operator/test-only"
 
+# Each FRR peer is an independent inbound max-prefix cell. Exporting nothing
+# keeps one peer's prefixes from reaching (and being echoed back by) another.
+[policy]
+export_chain = ["export-nothing"]
+
+[policy.definitions.export-nothing]
+[[policy.definitions.export-nothing.statements]]
+prefix = "0.0.0.0/0"
+le = 32
+action = "deny"
+
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
@@ -19,6 +30,24 @@ description = "frr-m26-cease"
 hold_time = 90
 # Harness starts FRR at this exact bound, then injects a third prefix.
 max_prefixes = 2
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr-m26-block"
+hold_time = 90
+# Harness starts FRR under this bound, fills it, then injects two more.
+max_prefixes_ipv4 = 3
+max_prefix_action = "block"
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65004
+description = "frr-m26-warning"
+hold_time = 90
+# Harness starts FRR under this bound, then injects three more.
+max_prefixes_ipv4 = 3
+max_prefix_action = "warning"
 
 [security.grpc]
 enforcement = "tier"

@@ -64,7 +64,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](interop.md).
 | M22 | FlowSpec inject + distribute + withdraw | FRR 10.7.1 |
 | M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
 | M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.7.1 ×3 |
-| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR) | FRR 10.7.1 |
+| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR); `block` recovery by one ROUTE-REFRESH replay with no session reset; `warning` | FRR 10.7.1 ×3 |
 | M27 / M59 | ASPA via RTR v2: validation states, best-path preference, role-aware downstream verification | FRR + RTR v2 mock |
 | M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.7.1 |
 | M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.7.1 |
