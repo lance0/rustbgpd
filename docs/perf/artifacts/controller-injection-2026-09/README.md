@@ -13,6 +13,7 @@ retain the daemon's message counters and global attribute-intern table size.
   reconciliation, metrics and driver-output files. Only configuration directory
   paths are normalized. High-volume daemon logs are represented by original
   hashes and severity counts rather than duplicating hundreds of megabytes.
+  Successful mutation authorization audits are counted separately from other WARNs.
 - [Provenance](provenance.json) separates baseline and corrected binary hashes;
   [the runtime patch](runtime.patch) identifies the measured production change.
 - [Host metadata](host.json) and [contention samples](contention.json.gz) retain CPU

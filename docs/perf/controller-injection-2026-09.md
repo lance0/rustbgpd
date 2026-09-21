@@ -8,8 +8,8 @@ attribute collection avoids a global-table sweep for every replacement or deleti
 ## Workload and measurement boundaries
 
 The baseline used release source `4f8b1712274d2d52b07bc014446eced2ed53f2b5`,
-one receive-only BGP client and a typed Python gRPC client with one outstanding unary
-request. Fresh daemons received 100, 10,000 or 100,000 IPv4 `/24` routes. Each cell
+one receive-only BGP client and a typed Python gRPC client over a Unix-domain
+socket, with one outstanding unary request. Fresh daemons received 100, 10,000 or 100,000 IPv4 `/24` routes. Each cell
 inserted the whole table, replaced every route's community, then deleted the table.
 Shared-attribute cells used one community per generation; distinct cells used a
 different community per prefix. The measured intern-table gauges confirmed one
@@ -28,6 +28,11 @@ recorded; their affinity was not changed. These are **nonexclusive-host** result
 not isolated latency measurements. Daemon CPU time comes from `/proc/PID/stat` at
 the host's 10 ms accounting resolution; the 100-route cells establish correctness
 rather than reliable CPU timing.
+
+Stock successful operator-mutation auditing remained enabled: each 100,000-route
+cell emitted 300,000 WARN-level `gRPC authorization audit decision` records with
+`result="handler_ok"`. Both sides include this logging cost. The retained summaries
+classify these successful audits separately; there were no other WARNs or ERRORs.
 
 ## Baseline
 
