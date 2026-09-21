@@ -1,0 +1,35 @@
+{
+  "baseline": {
+    "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+    "source_clean": true,
+    "binary_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+    "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=<isolated-target> cargo build --locked --release --bin rustbgpd",
+    "build_exit": 0,
+    "build_seconds": 376,
+    "receiver_sha256": "8921bd8e51e87ece8952cf171258ac91c9af9861085bd262acdba678a65a191c"
+  },
+  "corrected": {
+    "base": "fde0cf10ca220278b586ccb7a2ff64af9ec12f3e",
+    "runtime_patch_sha256": "9d76dc275b12fda360603bb817d81d8cee1841023d72161ec5ab1cda712bb3ed",
+    "binary_sha256": "88cd9abcf0e85c824a2d97d023c3bf46de863ecd97cfe19a5fb159ed13c3367e",
+    "measured_driver_sha256": "48e1952b424e3a6a943ffa48c7ef48a6873878da2cc72cc64f496844314958db",
+    "source_clean": false,
+    "scope": "Uncommitted reviewed runtime patch plus tests/docs; production delta captured separately.",
+    "toolchain": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=<isolated-target> bash scripts/build-lock.sh cargo build --locked --release --bin rustbgpd",
+    "build_exit": 0
+  },
+  "measured_driver_sha256": "48e1952b424e3a6a943ffa48c7ef48a6873878da2cc72cc64f496844314958db",
+  "public_driver_sha256": "60529e8664dada9082468b8ab7c66502f758942a79af741c3eb9efbb99aa0acd",
+  "public_driver_normalization": "Working-directory checkout discovery, unused import removal, explicit captures of awaited predicates. Measured baseline and corrected runs used the same original driver bytes.",
+  "proto_sha256": "09f31ddd66ac3de6ff0bb3b6e86e2c7031e88ab3d1338ef4d2737383eb7a3f0e",
+  "receiver_sha256": "8921bd8e51e87ece8952cf171258ac91c9af9861085bd262acdba678a65a191c",
+  "python_grpc_version": "1.83.1",
+  "rust_toolchain": "1.98.1",
+  "preparation_failures": [
+    "Original whole-host quiet preflight timed out before daemon start.",
+    "First pinned preparation rejected writable temporary-directory ancestor before RPC.",
+    "Second pinned preparation omitted documented UDS default authority before mutation. Both corrected in temporary driver; all raw attempts retained."
+  ]
+}

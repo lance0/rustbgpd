@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Controller-injected unicast replacements and withdrawals now share the
+  existing deferred attribute collection bound: 4,096 displaced routes or
+  a one-second actor deadline for large intern tables. Route visibility,
+  per-prefix distribution and successful RPC acknowledgement semantics are
+  unchanged; small tables retain immediate collection.
+
 ## [0.71.0] — 2026-09-20
 
 ### Added

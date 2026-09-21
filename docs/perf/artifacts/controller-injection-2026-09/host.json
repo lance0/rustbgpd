@@ -1,0 +1,13 @@
+{
+  "cpu_model": "AMD Ryzen Threadripper 7970X",
+  "physical_cores": 32,
+  "logical_cpus": 64,
+  "kernel": "7.0.0-30-generic",
+  "daemon_cpu_affinity": "4-11",
+  "driver_cpu_affinity": "12-13",
+  "cpu_accounting_ticks_per_second": 100,
+  "background_affinity_modified": false,
+  "exclusive_host": false,
+  "memory_available_observed_before_build": "108 GiB",
+  "background": "SGLang inference service plus recorded documentation/IDE check processes; no competing workspace tests or live BGP lab"
+}

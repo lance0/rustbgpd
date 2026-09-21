@@ -1,0 +1,685 @@
+{
+  "scope": "Single pinned daemon and one passive client; unary concurrency1; nonexclusive host; all cells pass with exact route conservation.",
+  "cells": [
+    {
+      "label": "baseline-100-distinct",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 100,
+      "peers": 1,
+      "distinct": true,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:56:47Z",
+          "rpc_seconds": 0.020052109844982624,
+          "daemon_cpu_seconds": 0.01,
+          "wire_complete_seconds": 0.020125138806179166,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 100,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.01,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.02144553791731596,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 100,
+          "updates_after": 102
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:56:47Z",
+          "rpc_seconds": 0.01909565692767501,
+          "daemon_cpu_seconds": 0.01,
+          "wire_complete_seconds": 0.019162727054208517,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 100,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.01,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.020389104029163718,
+          "intern_before": 100,
+          "updates_before": 102,
+          "intern_after": 100,
+          "updates_after": 202
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:56:47Z",
+          "rpc_seconds": 0.01671625184826553,
+          "daemon_cpu_seconds": 0.02,
+          "wire_complete_seconds": 0.01677082385867834,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 0,
+              "withdrawals": 100
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.02,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.01776775694452226,
+          "intern_before": 100,
+          "updates_before": 202,
+          "intern_after": 0,
+          "updates_after": 302
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "baseline-100-shared",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 100,
+      "peers": 1,
+      "distinct": false,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:56:46Z",
+          "rpc_seconds": 0.01973287109285593,
+          "daemon_cpu_seconds": 0.01,
+          "wire_complete_seconds": 0.01980766304768622,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 100,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.01,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.021113400114700198,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 1,
+          "updates_after": 102
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:56:46Z",
+          "rpc_seconds": 0.018148487899452448,
+          "daemon_cpu_seconds": 0.01,
+          "wire_complete_seconds": 0.018216650001704693,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 100,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.01,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.01940494985319674,
+          "intern_before": 1,
+          "updates_before": 102,
+          "intern_after": 1,
+          "updates_after": 202
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:56:46Z",
+          "rpc_seconds": 0.016406228067353368,
+          "daemon_cpu_seconds": 0.009999999999999998,
+          "wire_complete_seconds": 0.016467028995975852,
+          "wire_deltas": [
+            {
+              "updates": 100,
+              "announcements": 0,
+              "withdrawals": 100
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.009999999999999998,
+          "completed_rpcs": 100,
+          "elapsed_seconds": 0.01735863508656621,
+          "intern_before": 1,
+          "updates_before": 202,
+          "intern_after": 0,
+          "updates_after": 302
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "baseline-10000-distinct",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 10000,
+      "peers": 1,
+      "distinct": true,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:56:54Z",
+          "rpc_seconds": 1.6503475769422948,
+          "daemon_cpu_seconds": 0.77,
+          "wire_complete_seconds": 1.6573300471063703,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 10000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.78,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.6799931791611016,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 10000,
+          "updates_after": 10002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:56:56Z",
+          "rpc_seconds": 1.5718622400891036,
+          "daemon_cpu_seconds": 0.8999999999999999,
+          "wire_complete_seconds": 1.578218962997198,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 10000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.8999999999999999,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.5998876439407468,
+          "intern_before": 10000,
+          "updates_before": 10002,
+          "intern_after": 10000,
+          "updates_after": 20002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:56:57Z",
+          "rpc_seconds": 1.4049797360785306,
+          "daemon_cpu_seconds": 0.7700000000000002,
+          "wire_complete_seconds": 1.4050875080283731,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 0,
+              "withdrawals": 10000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.7700000000000002,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.4061452019959688,
+          "intern_before": 10000,
+          "updates_before": 20002,
+          "intern_after": 0,
+          "updates_after": 30002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "baseline-10000-shared",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 10000,
+      "peers": 1,
+      "distinct": false,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:56:48Z",
+          "rpc_seconds": 1.7193436678498983,
+          "daemon_cpu_seconds": 0.84,
+          "wire_complete_seconds": 1.7257636149879545,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 10000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.85,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.7464182779658586,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 1,
+          "updates_after": 10002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:56:50Z",
+          "rpc_seconds": 1.4661711850203574,
+          "daemon_cpu_seconds": 0.82,
+          "wire_complete_seconds": 1.472073667915538,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 10000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.83,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.491613059071824,
+          "intern_before": 1,
+          "updates_before": 10002,
+          "intern_after": 1,
+          "updates_after": 20002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:56:51Z",
+          "rpc_seconds": 1.3387167679611593,
+          "daemon_cpu_seconds": 0.7600000000000002,
+          "wire_complete_seconds": 1.3388234679587185,
+          "wire_deltas": [
+            {
+              "updates": 10000,
+              "announcements": 0,
+              "withdrawals": 10000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 0.7600000000000002,
+          "completed_rpcs": 10000,
+          "elapsed_seconds": 1.3399540421087295,
+          "intern_before": 1,
+          "updates_before": 20002,
+          "intern_after": 0,
+          "updates_after": 30002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "baseline-100000-distinct",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 100000,
+      "peers": 1,
+      "distinct": true,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:59:11Z",
+          "rpc_seconds": 15.326503828866407,
+          "daemon_cpu_seconds": 8.43,
+          "wire_complete_seconds": 15.372856319881976,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.5,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.576107738772407,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 100000,
+          "updates_after": 100002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:59:27Z",
+          "rpc_seconds": 30.48447597399354,
+          "daemon_cpu_seconds": 23.41,
+          "wire_complete_seconds": 30.58043525996618,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 23.49,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 30.781835036119446,
+          "intern_before": 100000,
+          "updates_before": 100002,
+          "intern_after": 100000,
+          "updates_after": 200002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:59:58Z",
+          "rpc_seconds": 22.646516429027542,
+          "daemon_cpu_seconds": 15.960000000000004,
+          "wire_complete_seconds": 22.697291155112907,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 0,
+              "withdrawals": 100000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 15.970000000000002,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 22.698625133140013,
+          "intern_before": 100000,
+          "updates_before": 200002,
+          "intern_after": 0,
+          "updates_after": 300002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "baseline-100000-shared",
+      "source": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+      "daemon_sha256": "8a2ef4fdfae84942b14f086e7dd72ad5d4453ca3ff96dbaa39b8db7b7df646e9",
+      "count": 100000,
+      "peers": 1,
+      "distinct": false,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-20T23:58:26Z",
+          "rpc_seconds": 15.264160359976813,
+          "daemon_cpu_seconds": 8.44,
+          "wire_complete_seconds": 15.309983717976138,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.51,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.494012048933655,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 1,
+          "updates_after": 100002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-20T23:58:42Z",
+          "rpc_seconds": 14.8319248680491,
+          "daemon_cpu_seconds": 7.9300000000000015,
+          "wire_complete_seconds": 14.928589161019772,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 7.99,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.112354306969792,
+          "intern_before": 1,
+          "updates_before": 100002,
+          "intern_after": 1,
+          "updates_after": 200002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-20T23:58:57Z",
+          "rpc_seconds": 13.453451512148604,
+          "daemon_cpu_seconds": 7.420000000000002,
+          "wire_complete_seconds": 13.453634395962581,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 0,
+              "withdrawals": 100000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 7.420000000000002,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 13.454789196141064,
+          "intern_before": 1,
+          "updates_before": 200002,
+          "intern_after": 0,
+          "updates_after": 300002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "corrected-100000-distinct",
+      "source": "fde0cf10ca220278b586ccb7a2ff64af9ec12f3e",
+      "daemon_sha256": "88cd9abcf0e85c824a2d97d023c3bf46de863ecd97cfe19a5fb159ed13c3367e",
+      "count": 100000,
+      "peers": 1,
+      "distinct": true,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-21T00:13:55Z",
+          "rpc_seconds": 15.515834685182199,
+          "daemon_cpu_seconds": 8.53,
+          "wire_complete_seconds": 15.561510986182839,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.61,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.75772594800219,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 100000,
+          "updates_after": 100002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-21T00:14:11Z",
+          "rpc_seconds": 15.441401737043634,
+          "daemon_cpu_seconds": 8.330000000000002,
+          "wire_complete_seconds": 15.539419106207788,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.41,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.736685972195119,
+          "intern_before": 100000,
+          "updates_before": 100002,
+          "intern_after": 101696,
+          "updates_after": 200002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-21T00:14:27Z",
+          "rpc_seconds": 13.441832527052611,
+          "daemon_cpu_seconds": 7.030000000000001,
+          "wire_complete_seconds": 13.442010894883424,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 0,
+              "withdrawals": 100000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 7.030000000000001,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 13.443029741989449,
+          "intern_before": 101696,
+          "updates_before": 200002,
+          "intern_after": 3392,
+          "updates_after": 300002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    },
+    {
+      "label": "corrected-100000-shared",
+      "source": "fde0cf10ca220278b586ccb7a2ff64af9ec12f3e",
+      "daemon_sha256": "88cd9abcf0e85c824a2d97d023c3bf46de863ecd97cfe19a5fb159ed13c3367e",
+      "count": 100000,
+      "peers": 1,
+      "distinct": false,
+      "unary_concurrency": 1,
+      "phase_cap_seconds": 180,
+      "phases": [
+        {
+          "name": "insert",
+          "start_utc": "2026-09-21T00:13:09Z",
+          "rpc_seconds": 15.449597972910851,
+          "daemon_cpu_seconds": 8.52,
+          "wire_complete_seconds": 15.496498650871217,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.58,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.684779059840366,
+          "intern_before": 0,
+          "updates_before": 2,
+          "intern_after": 1,
+          "updates_after": 100002
+        },
+        {
+          "name": "replace",
+          "start_utc": "2026-09-21T00:13:25Z",
+          "rpc_seconds": 15.302093616919592,
+          "daemon_cpu_seconds": 8.31,
+          "wire_complete_seconds": 15.400751763023436,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 100000,
+              "withdrawals": 0
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 8.37,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 15.58528311806731,
+          "intern_before": 1,
+          "updates_before": 100002,
+          "intern_after": 1,
+          "updates_after": 200002
+        },
+        {
+          "name": "delete",
+          "start_utc": "2026-09-21T00:13:41Z",
+          "rpc_seconds": 13.669710266171023,
+          "daemon_cpu_seconds": 7.699999999999999,
+          "wire_complete_seconds": 13.669882214162499,
+          "wire_deltas": [
+            {
+              "updates": 100000,
+              "announcements": 0,
+              "withdrawals": 100000
+            }
+          ],
+          "pass": true,
+          "daemon_cpu_seconds_at_finally": 7.699999999999999,
+          "completed_rpcs": 100000,
+          "elapsed_seconds": 13.671034611063078,
+          "intern_before": 1,
+          "updates_before": 200002,
+          "intern_after": 0,
+          "updates_after": 300002
+        }
+      ],
+      "driver_affinity": [
+        12,
+        13
+      ],
+      "daemon_cpus": "4-11",
+      "pass": true,
+      "daemon_exit": 0
+    }
+  ]
+}
