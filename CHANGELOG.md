@@ -34,6 +34,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- ORIGINATOR_ID and CLUSTER_LIST received from an external (eBGP) neighbor are
+  now discarded as RFC 7606 §7.9 and §7.10 require, whether or not they are
+  well formed. Previously only malformed ones were removed, so a well-formed
+  attribute from an eBGP peer reached import policy context, the RIB, and
+  best-path selection in every address family, and was evaluated by the
+  RFC 4456 reflection-loop check. Internal (iBGP) neighbors are unchanged.
+  **Operator-visible:** best-path selection between external peers can change
+  where a peer was sending these attributes, because a received ORIGINATOR_ID
+  no longer replaces that peer's BGP Identifier in the identifier tie-break and
+  a received CLUSTER_LIST no longer lengthens its path in the cluster-list
+  tie-break. Such a peer's routes are also no longer dropped as reflection
+  loops when the attributes carry the local router ID or cluster ID.
+  Each removal increments
+  `bgp_path_attribute_discarded_total{type_code="9"}` or `{type_code="10"}`,
+  so that counter is no longer limited to `discard_path_attributes`; an
+  attribute covered by both counts once. Pre-policy BMP still mirrors the
+  UPDATE as received.
+
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers

@@ -466,6 +466,12 @@ impl<'a> PolicyAttrSummary<'a> {
         }
     }
 }
+/// RFC 7606 §7.9/§7.10: `ORIGINATOR_ID` and `CLUSTER_LIST` received from an
+/// external neighbor are discarded whether or not they are well formed.
+fn external_neighbor_discard(is_ebgp: bool, type_code: u8) -> bool {
+    use rustbgpd_wire::constants::attr_type::{CLUSTER_LIST, ORIGINATOR_ID};
+    is_ebgp && matches!(type_code, ORIGINATOR_ID | CLUSTER_LIST)
+}
 /// The canonical per-family attribute sets for one inbound UPDATE, each
 /// behind an `Arc` so the accepted-route loops can SHARE them instead of
 /// deep-cloning the attribute vector per NLRI.
@@ -1805,15 +1811,25 @@ impl PeerSession {
         // ORIGINATOR_ID must be checked even when we are not operating as an
         // RR ourselves: a non-RR speaker can still receive reflected routes
         // from some other RR in the AS.
-        let originator_loop = parsed.attributes.iter().any(|a| {
-            matches!(a, PathAttribute::OriginatorId(id) if *id == self.config.peer.local_router_id)
-        });
-        let cluster_loop = self.config.cluster_id.is_some_and(|cluster_id| {
-            parsed
-                .attributes
-                .iter()
-                .any(|a| matches!(a, PathAttribute::ClusterList(ids) if ids.contains(&cluster_id)))
-        });
+        //
+        // Internal neighbors only. RFC 7606 §7.9/§7.10 discard both
+        // attributes when they arrive from an external neighbor (the
+        // normalization below), so they must not decide anything first:
+        // otherwise an external peer's route is dropped as a reflection loop
+        // merely because it carries our router ID or cluster ID. The check is
+        // gated rather than moved after the normalization because for an
+        // internal neighbor it deliberately sees the wire attributes even when
+        // the operator's `discard_path_attributes` lists them.
+        let originator_loop = !is_ebgp
+            && parsed.attributes.iter().any(|a| {
+                matches!(a, PathAttribute::OriginatorId(id) if *id == self.config.peer.local_router_id)
+            });
+        let cluster_loop = !is_ebgp
+            && self.config.cluster_id.is_some_and(|cluster_id| {
+                parsed.attributes.iter().any(
+                    |a| matches!(a, PathAttribute::ClusterList(ids) if ids.contains(&cluster_id)),
+                )
+            });
         if originator_loop || cluster_loop {
             let reason = if originator_loop {
                 RrLoopReason::OriginatorId
@@ -1846,6 +1862,13 @@ impl PeerSession {
         // every family-specific stored-route path. Import policy may still add
         // a locally configured LOCAL_PREF via `materialize_attrs` below.
         //
+        // RFC 7606 §7.9/§7.10: ORIGINATOR_ID and CLUSTER_LIST received from an
+        // external neighbor SHALL be discarded (attribute discard), well-formed
+        // or not. Both feed best-path selection, so they are removed here, in
+        // the one attribute set every family path below is built from
+        // (`RouteAttrBundle`), and counted with the configured discards. An
+        // attribute that is also in `discard_path_attributes` counts once.
+        //
         // The pre-policy BMP tap deliberately retains the original wire
         // attribute: `process_read_buffer` emits its byte-exact raw UPDATE
         // before calling `process_update`, matching RFC 7854's unprocessed
@@ -1859,15 +1882,16 @@ impl PeerSession {
                     a,
                     PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
                 ) || is_ebgp && matches!(a, PathAttribute::LocalPref(_));
-                let configured_out = self
-                    .config
-                    .discard_path_attributes
-                    .binary_search(&a.type_code())
-                    .is_ok();
-                if configured_out {
+                let discarded = external_neighbor_discard(is_ebgp, a.type_code())
+                    || self
+                        .config
+                        .discard_path_attributes
+                        .binary_search(&a.type_code())
+                        .is_ok();
+                if discarded {
                     *discarded_type_codes.entry(a.type_code()).or_default() += 1;
                 }
-                !(normalized_out || configured_out)
+                !(normalized_out || discarded)
             })
             .cloned()
             .collect();
@@ -1881,7 +1905,8 @@ impl PeerSession {
                 peer = %self.peer_label,
                 type_code,
                 removed_occurrences,
-                "discarded configured inbound path attribute"
+                external_neighbor_rule = external_neighbor_discard(is_ebgp, type_code),
+                "discarded inbound path attribute"
             );
         }
         // Canonical per-family attribute sets, each behind an `Arc` so the

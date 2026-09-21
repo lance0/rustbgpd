@@ -1599,6 +1599,12 @@ Type code 0 and route-safety/framing attributes 1, 2, 3, 6, 7, 14, 15, 17,
 requires effective `route_server_client = true`. Malformed attributes already
 removed by RFC 7606 do not count as configured discards.
 
+Independently of this list, ORIGINATOR_ID (9) and CLUSTER_LIST (10) received
+from any external neighbor are always discarded, as RFC 7606 §7.9 and §7.10
+require. That removal takes effect before the route-reflector-loop check, needs
+no configuration, and is counted in the same
+`bgp_path_attribute_discarded_total` series.
+
 ```toml
 # IPv4 peer with dual-stack
 [[neighbors]]
