@@ -16,58 +16,6 @@ impl RibManager {
     #[expect(
         clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
-        reason = "BGP-LS staging mirrors EVPN distribution context for RR/export parity"
-    )]
-    pub(in crate::manager) fn stage_bgpls_routes(
-        loc_rib: &LocRib,
-        rib_out: &AdjRibOut,
-        peer_is_rr_client: &HashMap<IpAddr, bool>,
-        keys: &HashSet<crate::route::BgpLsRouteKey>,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
-        target_is_ebgp: bool,
-        interpret_rfc1997: bool,
-        target_is_rr_client: bool,
-        cluster_id: Option<Ipv4Addr>,
-        sendable: Option<&Vec<(Afi, Safi)>>,
-        llgr: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&PolicyChain>,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
-        bgpls_announce: &mut Vec<crate::route::BgpLsRibRoute>,
-        bgpls_withdraw: &mut Vec<crate::route::BgpLsRouteKey>,
-        force: bool,
-    ) {
-        Self::stage_bgpls_routes_with_checkpoint(
-            loc_rib,
-            rib_out,
-            peer_is_rr_client,
-            keys,
-            target_peer,
-            target_peer_asn,
-            target_peer_group,
-            target_is_ebgp,
-            interpret_rfc1997,
-            target_is_rr_client,
-            cluster_id,
-            sendable,
-            llgr,
-            export_pol,
-            metrics,
-            policy_stats,
-            target_peer_label,
-            bgpls_announce,
-            bgpls_withdraw,
-            force,
-            &mut || {},
-        );
-    }
-
-    #[expect(
-        clippy::fn_params_excessive_bools,
-        clippy::too_many_arguments,
         clippy::too_many_lines,
         reason = "BGP-LS staging mirrors EVPN distribution context for RR/export parity"
     )]
@@ -268,13 +216,23 @@ impl RibManager {
     ///
     /// BGP-LS remains opaque: the selected route is reflected as received with
     /// ordinary BGP attribute handling, and no LSDB/TLV semantics are parsed.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
+    )]
     pub(in crate::manager) fn recompute_and_distribute_bgpls(
         &mut self,
         affected: &HashSet<crate::route::BgpLsRouteKey>,
     ) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(&readiness, "selection_bgpls", false);
+        };
+        checkpoint();
         self.record_deferred_bgpls(affected);
-        let affected: HashSet<_> = affected
+        let mut affected: HashSet<_> = affected
             .iter()
+            .inspect(|_| checkpoint())
             .filter(|key| !self.selection_deferred(key.family.to_afi_safi()))
             .cloned()
             .collect();
@@ -284,21 +242,33 @@ impl RibManager {
 
         let mut changed_keys: HashSet<crate::route::BgpLsRouteKey> = HashSet::new();
         for key in &affected {
-            let candidates = self.ribs.values().filter_map(|rib| rib.get_bgpls(key));
+            checkpoint();
+            let candidates = self
+                .ribs
+                .values()
+                .inspect(|_| checkpoint())
+                .filter_map(|rib| rib.get_bgpls(key));
             if self.loc_rib.recompute_bgpls(key.clone(), candidates) {
                 changed_keys.insert(key.clone());
             }
         }
 
         if changed_keys.is_empty() {
+            super::super::retire_hash_set(&mut affected, &mut checkpoint);
             return;
         }
 
         self.metrics
             .set_loc_rib_prefixes("bgpls", gauge_val(self.loc_rib.bgpls_len()));
 
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
         for peer in peers {
+            checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
@@ -333,7 +303,7 @@ impl RibManager {
 
             let mut bgpls_announce = Vec::new();
             let mut bgpls_withdraw = Vec::new();
-            Self::stage_bgpls_routes(
+            Self::stage_bgpls_routes_with_checkpoint(
                 &self.loc_rib,
                 rib_out,
                 &self.peer_is_rr_client,
@@ -354,6 +324,7 @@ impl RibManager {
                 &mut bgpls_announce,
                 &mut bgpls_withdraw,
                 false,
+                &mut checkpoint,
             );
 
             if (!bgpls_announce.is_empty() || !bgpls_withdraw.is_empty())
@@ -370,5 +341,7 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+        super::super::retire_hash_set(&mut affected, &mut checkpoint);
     }
 }
