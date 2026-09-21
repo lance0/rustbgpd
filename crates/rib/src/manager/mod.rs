@@ -1063,6 +1063,8 @@ struct ReplacementReadiness {
     rx: Option<mpsc::Receiver<RibReadinessQuery>>,
     metrics: BgpMetrics,
     count: usize,
+    /// Only selection release changes Loc-RIB while this owner is held.
+    selection_release: bool,
     started: tokio::time::Instant,
     last_service: std::time::Instant,
     budget: std::time::Duration,
@@ -1106,7 +1108,7 @@ fn replacement_readiness_checkpoint_at(
     replacement_readiness_checkpoint(readiness, force);
 }
 
-/// Call only on the actor while its synchronous replacement fence is held.
+/// Call only on the actor while its synchronous readiness owner is held.
 /// The shared handle exposes readiness and frozen values; canonical RIB
 /// state remains exclusively owned by the actor.
 #[expect(
@@ -1890,6 +1892,22 @@ impl RibManager {
         age: std::time::Duration,
         work: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        self.with_readiness_owner(age, false, work)
+    }
+
+    /// Selection retains exclusive actor ownership and its existing gate/EoR
+    /// order. Only its dedicated readiness lane can observe completed unicast
+    /// mutations; replacement owners continue to use their frozen count.
+    fn with_selection_readiness<T>(&mut self, work: impl FnOnce(&mut Self) -> T) -> T {
+        with_executor_handoff(|| self.with_readiness_owner(std::time::Duration::ZERO, true, work))
+    }
+
+    fn with_readiness_owner<T>(
+        &mut self,
+        age: std::time::Duration,
+        selection_release: bool,
+        work: impl FnOnce(&mut Self) -> T,
+    ) -> T {
         if self.replacement_readiness.is_some() {
             return work(self);
         }
@@ -1903,6 +1921,7 @@ impl RibManager {
             rx: self.readiness_rx.take(),
             metrics: self.metrics.clone(),
             count: self.loc_rib.len(),
+            selection_release,
             started,
             last_service: std::time::Instant::now(),
             budget: self.flush_poll_budget.min(FLUSH_POLL_BUDGET),
@@ -1951,6 +1970,21 @@ impl RibManager {
                 });
         }
         result
+    }
+
+    /// Call only after a complete prefix mutation, before any checkpoint can
+    /// answer from the new selection. Never alter a frozen replacement owner.
+    fn selection_readiness_checkpoint(&self) {
+        if let Some(context) = &self.replacement_readiness {
+            let mut context = context
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !context.selection_release {
+                return;
+            }
+            context.count = self.loc_rib.len();
+        }
+        self.replacement_checkpoint_at("selection_recompute", false);
     }
 
     fn replacement_checkpoint_at(&self, stage: &'static str, force: bool) {
@@ -4068,6 +4102,7 @@ impl RibManager {
         let mut entries: Vec<rustbgpd_wire::RtcNlri> = Vec::new();
         if let Some(rib) = self.ribs.get(&peer) {
             for route in rib.iter_rtc() {
+                self.replacement_checkpoint_at("selection_rtc_membership", false);
                 if route.nlri.is_default() {
                     has_default = true;
                 } else {

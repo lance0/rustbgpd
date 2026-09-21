@@ -30,6 +30,17 @@ Nested export retains the existing owner’s frozen-summary contract, age, and
 stalled-transition verdict. This covers both
 initial registration and negotiated Add-Path limit replay.
 
+Selection-deferral release and collision-failback staging also service readiness
+through inventory, selection, outbound staging, and temporary-key cleanup. The
+actor retains exclusive ownership and preserves family gate, ledger, and EoR
+ordering. Unlike outbound-only replacement, unicast selection changes Loc-RIB;
+readiness refreshes its exact count after each complete prefix mutation.
+General and summary reads and queued mutations remain fenced until release
+finishes. These checkpoints bound repeated work between probes; they are not a
+universal wall-clock guarantee for arbitrary route or peer counts. Individual
+best-path computations, collection allocation/sorting, and ORR topology/SPF
+work remain synchronous; checkpoints do not preempt those operations.
+
 Capture completes before summary service starts, and exact-export rejection
 counts can require route-overlay scans. This mechanism does not by itself prove
 a latency bound at every scale. Peer-manager/session fields in the same RPC are

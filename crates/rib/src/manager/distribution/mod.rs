@@ -5368,6 +5368,10 @@ impl RibManager {
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
     pub(super) fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || {
+            super::replacement_readiness_checkpoint_at(&readiness, "selection_candidates", false);
+        };
         self.record_deferred_unicast(affected);
         let mut changed = HashSet::new();
         for prefix in affected {
@@ -5387,9 +5391,10 @@ impl RibManager {
                     smallvec::SmallVec::new();
                 let ribs = &self.ribs;
                 self.unicast_prefix_peers.prune_to_live(prefix, |peer| {
+                    checkpoint();
                     let before = candidates.len();
                     if let Some(rib) = ribs.get(&peer) {
-                        candidates.extend(rib.iter_prefix(prefix));
+                        candidates.extend(rib.iter_prefix(prefix).inspect(|_| checkpoint()));
                     }
                     candidates.len() > before
                 });
@@ -5450,6 +5455,7 @@ impl RibManager {
                 changed.insert(*prefix);
                 self.publish_best_change_events(*prefix, previous_best);
             }
+            self.selection_readiness_checkpoint();
         }
         self.metrics
             .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));

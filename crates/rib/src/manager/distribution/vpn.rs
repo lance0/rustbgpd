@@ -802,15 +802,21 @@ impl RibManager {
         affected: &HashSet<VpnRibRouteKey>,
     ) {
         let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(&readiness, "selection_vpn", false);
+        };
+        checkpoint();
         self.record_deferred_vpn(affected);
-        let affected_nlri: HashSet<VpnRouteKey> = affected
+        let mut affected_nlri: HashSet<VpnRouteKey> = affected
             .iter()
+            .inspect(|_| checkpoint())
             .filter(|key| !self.selection_deferred(key.afi_safi()))
             .map(|key| key.nlri_key)
             .collect();
 
         let mut changed_keys: HashSet<VpnRouteKey> = HashSet::new();
         for key in &affected_nlri {
+            checkpoint();
             // RFC 9069 Loc-RIB tap: keep the previous best's NLRI so a
             // disappeared best can be withdrawn with its full RD +
             // prefix identity. Cloned only when the tap is installed.
@@ -821,7 +827,9 @@ impl RibManager {
             let candidates: Vec<&VpnRibRoute> = self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .flat_map(|rib| rib.iter_vpn_for_nlri(key))
+                .inspect(|_| checkpoint())
                 .collect();
             if self.loc_rib.recompute_vpn(*key, candidates.into_iter()) {
                 changed_keys.insert(*key);
@@ -866,12 +874,14 @@ impl RibManager {
         // Add-Path-send peers need the same widening: a non-best candidate
         // change can alter the staged top-N set.
         let any_widened_peer = self.outbound_peers.keys().any(|peer| {
+            checkpoint();
             self.peer_orr_vantage
                 .get(peer)
                 .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
                 || self.peer_vpn_add_path_send(*peer)
         });
         if changed_keys.is_empty() && !any_widened_peer {
+            super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
             return;
         }
 
@@ -888,8 +898,14 @@ impl RibManager {
         // as before.
         let vpn_group_stage = self.stage_vpn_update_groups(&changed_keys);
 
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
         for peer in peers {
+            checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
@@ -932,6 +948,7 @@ impl RibManager {
                 let group_prior = stage
                     .deltas
                     .iter()
+                    .inspect(|_| checkpoint())
                     .filter_map(|delta| {
                         let key = crate::route::VpnRibRouteKey {
                             nlri_key: delta.key,
@@ -969,6 +986,7 @@ impl RibManager {
                             stage
                                 .deltas
                                 .iter()
+                                .inspect(|_| checkpoint())
                                 .filter(|d| d.new.is_none())
                                 .map(|d| d.key),
                         );
@@ -1099,5 +1117,7 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+        super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }
 }

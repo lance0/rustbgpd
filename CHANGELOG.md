@@ -18,6 +18,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;
   the separate `rbgp-rib` streaming format remains at 1.0. Exhaustive projection
   fixtures now guard the remaining curated RPC JSON views against field loss.
+- Keep live RIB readiness responsive during selection-deferral release and
+  collision-failback staging, including all released route families. Readiness
+  reports the current unicast Loc-RIB count while general reads and mutations
+  remain queued; family convergence and table-before-EoR ordering are preserved.
 
 ## [0.71.0] — 2026-09-20
 
