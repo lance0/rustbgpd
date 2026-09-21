@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -37,6 +38,10 @@ class MetricConsumerContractTests(unittest.TestCase):
             cls.documents, cls.inventory
         )
         cls.doc_refs = CHECK.normative_document_references(cls.public_doc_refs)
+        cls.rust = CHECK.production_rust_sources()
+        cls.vocabularies = CHECK.closed_label_vocabularies(cls.rust, cls.inventory)
+        cls.label_consumers = CHECK.label_value_consumers()
+        cls.lenient = frozenset({"examples/prometheus/rustbgpd-alerts_test.yml"})
 
     @staticmethod
     def before_tests(source, addition):
@@ -676,6 +681,393 @@ groups:
                 ValueError, message
             ):
                 CHECK.validate_coverage(inventory, {"bgp_ready"}, allowlist)
+
+
+    def check_selector(self, expression, name="rules.yml", lenient=frozenset()):
+        """Check one expression against only the vocabularies it selects on."""
+        families = {
+            CHECK.normalize_metric(token, self.inventory)
+            for token in re.findall(r"([A-Za-z_:][A-Za-z0-9_:]*)\s*\{", expression)
+        }
+        labels = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|!)", expression))
+        vocabularies = {
+            key: values
+            for key, values in self.vocabularies.items()
+            if key[0] in families and key[1] in labels
+        }
+        return CHECK.check_label_values(
+            {name: [("line 1", expression)]}, vocabularies, self.inventory, lenient
+        )
+
+    def test_live_label_selectors_name_values_the_daemon_emits(self):
+        self.assertEqual(
+            self.vocabularies[("bgp_sighup_reload_outcomes_total", "outcome")],
+            {
+                "complete",
+                "known_partial",
+                "rejected_no_effect",
+                "ignored_in_flight",
+                "task_failed",
+            },
+        )
+        checked, skipped = CHECK.check_label_values(
+            self.label_consumers, self.vocabularies, self.inventory, self.lenient
+        )
+        self.assertGreater(checked, 0)
+        self.assertEqual(skipped, [])
+
+    def test_daemon_renaming_a_selected_label_value_is_rejected(self):
+        rust = dict(self.rust)
+        self.assertEqual(rust[CHECK.TELEMETRY].count('"known_partial"'), 1)
+        rust[CHECK.TELEMETRY] = rust[CHECK.TELEMETRY].replace(
+            '"known_partial"', '"partial"'
+        )
+        vocabularies = CHECK.closed_label_vocabularies(rust, self.inventory)
+        with self.assertRaises(ValueError) as raised:
+            CHECK.check_label_values(
+                self.label_consumers, vocabularies, self.inventory, self.lenient
+            )
+        message = str(raised.exception)
+        self.assertRegex(
+            message,
+            r"examples/prometheus/rustbgpd-alerts\.yml \(line \d+\): "
+            r'bgp_sighup_reload_outcomes_total\{outcome="known_partial"\} '
+            r'names value "known_partial" the daemon cannot emit',
+        )
+        # The synthetic promtool series is what kept the rule tests green.
+        self.assertIn("examples/prometheus/rustbgpd-alerts_test.yml (line ", message)
+        self.assertNotIn("task_failed", message)
+
+    def test_present_value_and_open_labels_pass(self):
+        checked, skipped = self.check_selector(
+            'increase(bgp_sighup_reload_outcomes_total{instance=~"$instance",'
+            'job="anything",peer!="192.0.2.1",outcome="task_failed"}[10m]) > 0'
+        )
+        self.assertEqual((checked, skipped), (1, []))
+        # Foreign families and the absent-label matcher carry no daemon value.
+        self.assertEqual(
+            self.check_selector('up{job="rustbgpd"} == 0'), (0, [])
+        )
+
+    def test_unknown_exact_and_negative_values_are_rejected(self):
+        for matcher in ('outcome="partial"', 'outcome!="partial"'):
+            with self.subTest(matcher=matcher), self.assertRaisesRegex(
+                ValueError,
+                r'rules\.yml \(line 1\): bgp_sighup_reload_outcomes_total\{outcome!?="partial"\} '
+                r'names value "partial" the daemon cannot emit',
+            ):
+                self.check_selector(f"bgp_sighup_reload_outcomes_total{{{matcher}}}")
+
+    def test_regex_alternation_checks_each_literal(self):
+        family = "bgp_blackhole_discard_rejected_total"
+        self.assertEqual(
+            self.check_selector(
+                f'{family}{{reason=~"active_limit_exceeded|install_rate_limited"}}'
+            ),
+            (2, []),
+        )
+        for operator in ("=~", "!~"):
+            with self.subTest(operator=operator), self.assertRaisesRegex(
+                ValueError, 'names value "rate_limited" the daemon cannot emit'
+            ) as raised:
+                self.check_selector(
+                    f'{family}{{reason{operator}"active_limit_exceeded|rate_limited"}}'
+                )
+            self.assertNotIn('"active_limit_exceeded" the daemon', str(raised.exception))
+
+    def test_complex_regex_and_template_variables_are_skipped_not_failed(self):
+        for pattern in ("known_.*", "$outcome", "(known|task)_failed"):
+            with self.subTest(pattern=pattern):
+                checked, skipped = self.check_selector(
+                    f'bgp_sighup_reload_outcomes_total{{outcome=~"{pattern}"}}'
+                )
+                self.assertEqual(checked, 0)
+                self.assertEqual(len(skipped), 1)
+                self.assertIn(pattern, skipped[0])
+
+    def test_braces_inside_a_quoted_value_do_not_hide_a_selector(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        # (a) a quantifier is a complex regex: skipped and counted, never dropped.
+        checked, skipped = self.check_selector(f'{family}{{outcome=~"known_[0-9]{{1,2}}"}}')
+        self.assertEqual(checked, 0)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn('outcome=~"known_[0-9]{1,2}"', skipped[0])
+        # (b), (c) an exact value is checked whole, whichever brace it contains.
+        for value in ("bogus}x", "x{y", "a{b}c"):
+            with self.subTest(value=value), self.assertRaises(ValueError) as raised:
+                self.check_selector(f'{family}{{outcome="{value}"}}')
+            self.assertIn(
+                f'{family}{{outcome="{value}"}} names value "{value}" the daemon cannot emit',
+                str(raised.exception),
+            )
+        # (d) an open label keeps being ignored, and the closed label beside it
+        # is still checked.
+        self.assertEqual(
+            self.check_selector(
+                f'{family}{{peer=~"${{peer:regex}}",job="a}}b{{c",outcome="task_failed"}}'
+            ),
+            (1, []),
+        )
+        with self.assertRaisesRegex(ValueError, 'names value "partial" the daemon'):
+            self.check_selector(f'{family}{{peer=~"${{peer:regex}}",outcome="partial"}}')
+
+    def test_selector_wrapped_across_lines_is_checked_at_its_own_line(self):
+        key = ("bgp_policy_eval_errors_total", "kind")
+        text = (
+            "description: >-\n"
+            '  bgp_policy_eval_errors_total{direction="import",\n'
+            '  kind="%s"} on edge1 increased'
+        )
+        arguments = ({key: self.vocabularies[key]}, self.inventory, frozenset({"t.yml"}))
+        self.assertEqual(
+            CHECK.check_label_values({"t.yml": [(10, text % "overflow")]}, *arguments),
+            (1, []),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r't\.yml \(line 11\): bgp_policy_eval_errors_total\{kind="bogus"\} names value',
+        ):
+            CHECK.check_label_values({"t.yml": [(10, text % "bogus")]}, *arguments)
+        # The shipped rule tests wrap exactly this selector in an expected annotation.
+        wrapped = [
+            text for _, text in self.label_consumers[sorted(self.lenient)[0]]
+            if 'bgp_policy_eval_errors_total{direction="import",\n' in text
+        ]
+        self.assertEqual(len(wrapped), 1)
+
+    def test_empty_exact_value_on_a_closed_label_is_checked(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        # A family's label set is fixed, so `=""` selects nothing unless the
+        # daemon emits the empty string for that label.
+        with self.assertRaisesRegex(
+            ValueError,
+            rf'{family}\{{outcome=""\}} names value "" the daemon cannot emit',
+        ):
+            self.check_selector(f'{family}{{outcome=""}}')
+        # `!=""` is a presence test, not a value: ignored and not counted.
+        self.assertEqual(self.check_selector(f'{family}{{outcome!=""}}'), (0, []))
+        self.assertEqual(
+            self.check_selector(f'{family}{{outcome!="",outcome="complete"}}'), (1, [])
+        )
+        # Open labels really are emitted empty, and stay ignored: a listed open
+        # label anywhere, and the rule tests' `interface=""` series.
+        self.assertEqual(
+            self.check_selector(f'{family}{{peer="",outcome="complete"}}'), (1, [])
+        )
+        self.assertEqual(
+            self.check_selector('bgp_peer_session_established{interface=""}', "t.yml",
+                                frozenset({"t.yml"})),
+            (0, []),
+        )
+        # A vocabulary that does carry the empty string accepts it.
+        key = (family, "outcome")
+        self.assertEqual(
+            CHECK.check_label_values(
+                {"rules.yml": [("line 1", f'{family}{{outcome=""}}')]},
+                {key: self.vocabularies[key] | {""}},
+                self.inventory,
+            ),
+            (1, []),
+        )
+        self.assertEqual(
+            CHECK.function_literals(
+                'fn label(unset: bool) -> &str { if unset { "" } else { "set" } }',
+                None, "label", "fn label",
+            ),
+            {"", "set"},
+        )
+        self.assertEqual(
+            CHECK.call_argument_literals({"a.rs": 'fn f() { m.set(peer, ""); }'}, "set", 1),
+            {""},
+        )
+
+    def test_template_variable_on_a_closed_label_is_skipped_and_counted(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        for matcher in ('="$outcome"', '="${outcome:regex}"', '=~"${outcome:pipe}"'):
+            with self.subTest(matcher=matcher):
+                checked, skipped = self.check_selector(f"{family}{{outcome{matcher}}}")
+                self.assertEqual(checked, 0)
+                self.assertEqual(len(skipped), 1)
+                self.assertIn(f"outcome{matcher}", skipped[0])
+
+    def test_selector_the_checker_cannot_read_fails_instead_of_passing(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        for body in ("outcome='bogus'", "outcome=`bogus`", 'outcome="bogus', "outcome=bogus"):
+            with self.subTest(body=body), self.assertRaisesRegex(
+                ValueError, "selector the checker cannot read"
+            ):
+                self.check_selector(f"rate({family}{{{body}}}[5m])")
+        self.assertEqual(
+            self.check_selector(f'{family}{{}} + {family}{{ outcome = "complete" , }}'),
+            (1, []),
+        )
+
+    def test_histogram_bound_selectors_match_the_emitted_spelling(self):
+        family = "bgp_rib_policy_transition_actor_poll_duration_seconds"
+        self.assertEqual(
+            self.vocabularies[(family, "le")],
+            {
+                "0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.2", "0.5",
+                "1", "2.5", "5", "10", "30", "+Inf",
+            },
+        )
+        for bound in ("0.2", "0.01", "1", "30", "+Inf"):
+            with self.subTest(bound=bound):
+                self.assertEqual(
+                    self.check_selector(f'{family}_bucket{{le="{bound}"}}'), (1, [])
+                )
+        # PromQL equality is an exact string match on the emitted label, so a
+        # numerically equal spelling selects nothing.
+        for bound in ("0.200", "0.010", "1.0", "30.0", "Inf", "0.3"):
+            with self.subTest(bound=bound), self.assertRaisesRegex(
+                ValueError, f'names value "{bound}" the daemon cannot emit'
+            ):
+                self.check_selector(f'{family}_bucket{{le="{bound}"}}')
+
+    def test_histogram_bound_rendering_normalizes_only_the_source_literal(self):
+        for literal, emitted in (
+            ("0.200", "0.2"), ("1.0", "1"), ("0.005", "0.005"), ("30.0", "30"),
+            ("2.5", "2.5"), ("1_000.0", "1000"), ("10", "10"), ("1e3", "1000"),
+        ):
+            with self.subTest(literal=literal):
+                self.assertEqual(CHECK.emitted_bucket_label(literal), emitted)
+        for literal in ("0.00001", "1e20", "-1.0", "f64::INFINITY"):
+            with self.subTest(literal=literal), self.assertRaisesRegex(
+                ValueError, "cannot render histogram bound"
+            ):
+                CHECK.emitted_bucket_label(literal)
+
+    def test_label_assembly_body_yields_only_the_mapped_label_values(self):
+        family = "bgp_runtime_config_settlement_active"
+        fence_reasons = {
+            "none", "budget_expired", "executor_lost", "known_divergence",
+            "publication_ambiguous", "acknowledgement_lost",
+        }
+        self.assertEqual(self.vocabularies[(family, "fence_reason")], fence_reasons)
+        self.assertEqual(
+            self.vocabularies[(family, "response_attached")], {"attached", "detached"}
+        )
+        for label, values in (
+            ("fence_reason", fence_reasons),
+            ("response_attached", {"attached", "detached"}),
+        ):
+            for value in sorted(values):
+                with self.subTest(label=label, value=value):
+                    self.assertEqual(
+                        self.check_selector(f'{family}{{{label}="{value}"}}'), (1, [])
+                    )
+        for matcher in ('fence_reason="attached"', 'response_attached="none"'):
+            with self.subTest(matcher=matcher), self.assertRaisesRegex(
+                ValueError, "the daemon cannot emit"
+            ):
+                self.check_selector(f"{family}{{{matcher}}}")
+
+    def test_blackhole_rejection_reasons_exclude_the_installable_default(self):
+        family = "bgp_blackhole_discard_rejected_total"
+        reasons = {
+            "not_ebgp", "broad_prefix", "active_limit_exceeded", "install_rate_limited",
+        }
+        self.assertEqual(self.vocabularies[(family, "reason")], reasons)
+        for reason in sorted(reasons):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    self.check_selector(f'{family}{{reason="{reason}"}}'), (1, [])
+                )
+        # `eligible` labels installable candidates, which never reach the counter.
+        with self.assertRaisesRegex(
+            ValueError, 'names value "eligible" the daemon cannot emit'
+        ):
+            self.check_selector(f'{family}{{reason="eligible"}}')
+
+    def test_narrowed_function_sources_fail_when_the_body_changes(self):
+        rust = dict(self.rust)
+        rust[CHECK.BLACKHOLE] = rust[CHECK.BLACKHOLE].replace(
+            'reason = "broad_prefix";', 'reason = "covering_prefix";'
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"derive_desired in src/blackhole\.rs literals changed: "
+            r"gained \['covering_prefix'\], lost \['broad_prefix'\]",
+        ):
+            CHECK.closed_label_vocabularies(rust, self.inventory)
+
+        rust = dict(self.rust)
+        self.assertEqual(rust[CHECK.SETTLEMENT].count("self.phase.as_str(),"), 1)
+        rust[CHECK.SETTLEMENT] = rust[CHECK.SETTLEMENT].replace(
+            "self.phase.as_str(),", "", 1
+        )
+        with self.assertRaisesRegex(
+            ValueError, "labels .* has 3 elements for the 4 labels in METRIC_LABELS"
+        ):
+            CHECK.closed_label_vocabularies(rust, self.inventory)
+
+    def test_unclassified_label_fails_only_in_shipped_selectors(self):
+        expression = 'bgp_update_malformed_total{disposition="session_reset",reason="x"}'
+        with self.assertRaisesRegex(
+            ValueError, r'\{reason="x"\} selects a label with no closed label source'
+        ):
+            self.check_selector(expression)
+        self.assertEqual(
+            self.check_selector(expression, "tests.yml", frozenset({"tests.yml"})),
+            (1, []),
+        )
+
+    def test_closed_label_source_without_selector_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, r"without a shipped selector: \['evpn_df_role\{role\}'\]"
+        ):
+            CHECK.check_label_values(
+                {"rules.yml": [("line 1", "bgp_ready")]},
+                {("evpn_df_role", "role"): {"df", "nondf"}},
+                self.inventory,
+            )
+
+    def test_call_site_literals_ignore_other_arguments_and_variables(self):
+        sources = {
+            "a.rs": "fn f() { self.metrics\n.set_rib_prefixes(&peer.to_string(), "
+            '"all", gauge(a, "x")); m.set_rib_prefixes(peer, family, 0); '
+            'm.set_rib_prefixes_later(peer, "later", 0); }',
+            "b.rs": 'fn g() { m.other(peer, "other", 0); }',
+        }
+        self.assertEqual(
+            CHECK.call_argument_literals(sources, "set_rib_prefixes", 1), {"all"}
+        )
+        sources["a.rs"] += " const QUOTE: char = '\"';"
+        with self.assertRaisesRegex(ValueError, "a.rs: quote character literal"):
+            CHECK.call_argument_literals(sources, "set_rib_prefixes", 1)
+
+    def test_closed_label_source_rows_are_verified_against_the_source(self):
+        original = CHECK.CLOSED_LABEL_SOURCES
+        cases = (
+            ((("bgp_missing_total",), "x", ()), "does not emit"),
+            (
+                (("bgp_rib_prefixes",), "afi_safi", (("call", "set_loc_rib_prefixes", 0),)),
+                "set_loc_rib_prefixes does not write bgp_rib_prefixes",
+            ),
+            (
+                (("evpn_df_role",), "role", (("fn", "src/moved.rs", None, "set"),)),
+                "src/moved.rs is not a production source",
+            ),
+            (
+                (("evpn_df_role",), "role", (("fn", CHECK.TELEMETRY, None, "set_missing"),)),
+                "expected one fn set_missing",
+            ),
+            (
+                (
+                    ("bgp_peer_manager_operator_query_wait_seconds",),
+                    "le",
+                    (("buckets", CHECK.TELEMETRY, "RIB_ACTOR_DURATION_BUCKETS"),),
+                ),
+                "RIB_ACTOR_DURATION_BUCKETS does not bound",
+            ),
+        )
+        try:
+            for row, message in cases:
+                CHECK.CLOSED_LABEL_SOURCES = (row,)
+                with self.subTest(row=row), self.assertRaisesRegex(ValueError, message):
+                    CHECK.closed_label_vocabularies(self.rust, self.inventory)
+        finally:
+            CHECK.CLOSED_LABEL_SOURCES = original
 
 
 if __name__ == "__main__":
