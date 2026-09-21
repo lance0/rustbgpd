@@ -776,6 +776,25 @@ parked. Diagnose that state with `bgp_runtime_config_settlement_active`,
 Coordinated shutdown closes new SIGHUP and runtime-mutation admission first.
 It does not abort an already-owned reload: the daemon waits for its typed
 settlement before taking the warm checkpoint or tearing down required actors.
+That wait belongs to the settlement watchdog alone. A coordinator permit that
+no settlement owner holds (a read that is still waiting on an actor) and the
+join of a SIGHUP task with no owner each get five seconds; on expiry the daemon
+logs `runtime config coordinator permit is still held outside settlement
+ownership` or `SIGHUP reload task is still running with no settlement owner`
+at ERROR, skips the optional warm checkpoint because its coordinator fence is
+missing, and continues teardown. The exit status is unchanged.
+
+A further SIGINT or SIGTERM after coordinated shutdown has begun means "stop
+waiting". The daemon logs `termination signal received during coordinated
+shutdown` at WARN and skips every remaining wait that has no deadline of its
+own: the unowned coordinator permit and SIGHUP join above, the EVPN IMET
+withdrawal sweep, the peer-manager drain (peers may then see the session drop
+without a Cease), the BMP shutdown enqueue, and the RIB event conversion
+stage. Cleanup that carries its own deadline still runs, so kernel routes, FDB
+entries, and BFD sessions are still withdrawn. The signal never shortens an
+owned runtime-config settlement: abandoning a mutation mid-flight is the one
+thing only the [settlement watchdog](../how-to/settlement-watchdog.md) may
+decide, and `SIGKILL` remains the way to force that.
 
 **Restart-required surfaces** (logged at reload, surfaced under
 "Restart-required" in `--diff`): `[global]` ASN/router-id/cluster-id,
@@ -2291,6 +2310,9 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
+| `termination signal received during coordinated shutdown` | WARN | A further SIGINT/SIGTERM arrived after shutdown began; waits without a deadline are skipped |
+| `runtime config coordinator permit is still held outside settlement ownership` | ERROR | Shutdown stopped waiting for an unowned coordinator permit (`reason` is `deadline_expired` or `second_signal`) and continues without the warm checkpoint |
+| `SIGHUP reload task is still running with no settlement owner` | ERROR | Shutdown stopped waiting to join the reload task and continues |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |

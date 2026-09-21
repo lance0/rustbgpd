@@ -298,7 +298,9 @@ is never dropped. The common path follows
 [ADR-0020](../adr/0020-global-control-services-coordinated-shutdown.md):
 
 1. Close mutation admission and wait for any owned runtime-config operation to
-   settle or reach its recovery boundary.
+   settle or reach its recovery boundary. A coordinator permit held outside
+   settlement ownership gets five seconds instead, and a further SIGINT or
+   SIGTERM skips the later waits that have no deadline of their own.
 2. Attempt the optional warm checkpoint and restart-marker publication, then
    fence EVPN runtime applies out of teardown.
 3. Ask the local-MAC, SVI-MAC, L3, and segment originators to drain, waiting up

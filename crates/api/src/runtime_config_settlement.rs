@@ -1395,6 +1395,16 @@ impl RuntimeConfigSettlementWatchdog {
         }
     }
 
+    /// Whether a registered owner currently holds settlement ownership.
+    ///
+    /// Coordinated shutdown uses this to tell a coordinator permit held by an
+    /// owner, whose wait only the watchdog may end, from one held outside the
+    /// watchdog, which shutdown may stop waiting for.
+    #[must_use]
+    pub fn has_owner(&self) -> bool {
+        self.registry.current.load().is_some()
+    }
+
     /// Block until every clean registration settles, bounded by the current
     /// operation's registered deadline and pre-armed fatal boundary.
     ///
