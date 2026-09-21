@@ -231,6 +231,13 @@ assert_eq() {
     fi
 }
 
+warning_event_count() {
+    grpcurl_call \
+        -d "{\"neighbor_address\": \"$1\", \"event_types\": [\"BGP_EVENT_TYPE_MAX_PREFIX_WARNING\"]}" \
+        "$GRPC_ADDR" rustbgpd.v1.EventService/ListSessionEvents 2>/dev/null \
+        | jq -r '.events // [] | length' 2>/dev/null || echo error
+}
+
 inbound_limit_row() {
     grpc_neighbor_state_for "$1" | jq -r '.inboundPrefixLimits[]?
         | select(.scope == "ipv4_unicast")
@@ -558,10 +565,20 @@ test_warning_action_reports_and_keeps_accepting() {
         fail "warning action withheld something: [$(received_prefixes "$WARN_PEER")]"
     fi
     assert_eq "One warning for one crossing" "1" "$(metric_series "$warning_total")"
-    assert_eq "One max-prefix warning session event" "1" "$(grpcurl_call \
-        -d "{\"neighbor_address\": \"$WARN_PEER\", \"event_types\": [\"BGP_EVENT_TYPE_MAX_PREFIX_WARNING\"]}" \
-        "$GRPC_ADDR" rustbgpd.v1.EventService/ListSessionEvents 2>/dev/null \
-        | jq -r '.events // [] | length' 2>/dev/null || echo error)"
+    # The session task counts the warning before it delivers routes, but the
+    # session event is published by the peer manager from a notification, so
+    # the received view does not prove the event is already in the history.
+    local events
+    for _ in $(seq 1 60); do
+        events=$(warning_event_count "$WARN_PEER")
+        case "$events" in
+            "" | error | 0) sleep 1 ;;
+            *) break ;;
+        esac
+    done
+    # Let a duplicate event show itself.
+    sleep 5
+    assert_eq "One max-prefix warning session event" "1" "$(warning_event_count "$WARN_PEER")"
     assert_eq "warning never opens a blocking episode" "0" "$(metric_series "$blocking")"
     assert_eq "warning never counts a blocking episode" "absent" "$(metric_series "$blocked_total")"
     assert_eq "warning requests no replay" "0" "$(metric_series "$refresh_sent")"
