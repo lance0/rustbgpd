@@ -56,10 +56,7 @@ impl From<&FibTableConfig> for JsonFibTable {
 
 fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
     if json {
-        let out = JsonFibTableList {
-            runtime_available: resp.runtime_available,
-            tables: resp.tables.iter().map(JsonFibTable::from).collect(),
-        };
+        let out = json_fib_tables(resp);
         output::print_json_pretty(&out)?;
         return Ok(());
     }
@@ -99,6 +96,13 @@ fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
         )?;
     }
     Ok(())
+}
+
+fn json_fib_tables(resp: &crate::proto::ListFibTablesResponse) -> JsonFibTableList {
+    JsonFibTableList {
+        runtime_available: resp.runtime_available,
+        tables: resp.tables.iter().map(JsonFibTable::from).collect(),
+    }
 }
 
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -186,6 +190,49 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn fib_table_json_projection_covers_response_and_null_limits() {
+        let table = FibTableConfig {
+            name: "edge".into(),
+            table_id: 1000,
+            metric: 200,
+            families: vec!["ipv6_unicast".into(), "ipv4_unicast".into()],
+            allowed_peer_groups: vec!["customers".into()],
+            allowed_neighbors: vec!["fe80::1%eth0".into()],
+            max_routes: Some(u32::MAX),
+            maximum_paths: Some(8),
+            maximum_paths_ebgp: Some(4),
+            maximum_paths_ibgp: Some(2),
+        };
+        let mut response = ListFibTablesResponse {
+            runtime_available: false,
+            tables: vec![table],
+        };
+        assert_eq!(
+            serde_json::to_value(json_fib_tables(&response)).unwrap(),
+            serde_json::json!({
+                "runtime_available": false, "tables": [{"name":"edge", "table_id":1000, "metric":200,
+                    "families":["ipv6_unicast","ipv4_unicast"], "allowed_peer_groups":["customers"],
+                    "allowed_neighbors":["fe80::1%eth0"], "max_routes":u32::MAX, "maximum_paths":8,
+                    "maximum_paths_ebgp":4, "maximum_paths_ibgp":2}]
+            })
+        );
+        response.tables[0] = FibTableConfig::default();
+        assert_eq!(
+            serde_json::to_value(json_fib_tables(&response)).unwrap(),
+            serde_json::json!({
+                "runtime_available":false, "tables":[{"name":"", "table_id":0, "metric":0,
+                    "families":[], "allowed_peer_groups":[], "allowed_neighbors":[], "max_routes":null,
+                    "maximum_paths":null, "maximum_paths_ebgp":null, "maximum_paths_ibgp":null}]
+            })
+        );
+        response.tables.clear();
+        assert_eq!(
+            serde_json::to_value(json_fib_tables(&response)).unwrap(),
+            serde_json::json!({"runtime_available":false, "tables":[]})
+        );
+    }
 
     #[tokio::test]
     async fn list_renders_tables() {

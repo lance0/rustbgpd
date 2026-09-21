@@ -771,6 +771,64 @@ pub struct TestOptions<'a> {
     pub show_changes: u32,
 }
 
+#[derive(Serialize)]
+struct JsonTermHits<'a> {
+    term: &'a str,
+    hits: u64,
+}
+#[derive(Serialize)]
+struct JsonDiff<'a> {
+    prefix: String,
+    peer: &'a str,
+    changes: &'a [String],
+}
+#[derive(Serialize)]
+struct JsonTest<'a> {
+    file: &'a str,
+    policy: &'a str,
+    direction: &'a str,
+    compiled: bool,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    diagnostics: &'a str,
+    routes_evaluated: u64,
+    accepted: u64,
+    rejected: u64,
+    modified: u64,
+    term_hits: Vec<JsonTermHits<'a>>,
+    diffs: Vec<JsonDiff<'a>>,
+}
+
+fn test_to_json<'a>(resp: &'a proto::TestPolicyResponse, opts: &TestOptions<'a>) -> JsonTest<'a> {
+    JsonTest {
+        file: opts.file,
+        policy: opts.policy,
+        direction: opts.direction,
+        compiled: resp.compiled,
+        diagnostics: &resp.diagnostics,
+        routes_evaluated: resp.routes_evaluated,
+        accepted: resp.accepted,
+        rejected: resp.rejected,
+        modified: resp.modified,
+        term_hits: resp
+            .term_hits
+            .iter()
+            .map(|t| JsonTermHits {
+                term: &t.term,
+                hits: t.hits,
+            })
+            .collect(),
+        diffs: resp
+            .diffs
+            .iter()
+            .map(|d| JsonDiff {
+                prefix: format!("{}/{}", d.prefix, d.prefix_length),
+                peer: &d.peer,
+                changes: &d.changes,
+            })
+            .collect(),
+    }
+}
+
 /// `rbgp policy test` — send the local `.rpol` source to the daemon
 /// for a read-only dry run over a live-RIB snapshot.
 pub async fn test(
@@ -812,60 +870,7 @@ pub async fn test(
     .into_inner();
 
     if json {
-        #[derive(Serialize)]
-        struct JsonTermHits<'a> {
-            term: &'a str,
-            hits: u64,
-        }
-        #[derive(Serialize)]
-        struct JsonDiff<'a> {
-            prefix: String,
-            peer: &'a str,
-            changes: &'a [String],
-        }
-        #[derive(Serialize)]
-        struct JsonTest<'a> {
-            file: &'a str,
-            policy: &'a str,
-            direction: &'a str,
-            compiled: bool,
-            #[serde(skip_serializing_if = "str::is_empty")]
-            diagnostics: &'a str,
-            routes_evaluated: u64,
-            accepted: u64,
-            rejected: u64,
-            modified: u64,
-            term_hits: Vec<JsonTermHits<'a>>,
-            diffs: Vec<JsonDiff<'a>>,
-        }
-        output::print_json_pretty(&JsonTest {
-            file: opts.file,
-            policy: opts.policy,
-            direction: opts.direction,
-            compiled: resp.compiled,
-            diagnostics: &resp.diagnostics,
-            routes_evaluated: resp.routes_evaluated,
-            accepted: resp.accepted,
-            rejected: resp.rejected,
-            modified: resp.modified,
-            term_hits: resp
-                .term_hits
-                .iter()
-                .map(|t| JsonTermHits {
-                    term: &t.term,
-                    hits: t.hits,
-                })
-                .collect(),
-            diffs: resp
-                .diffs
-                .iter()
-                .map(|d| JsonDiff {
-                    prefix: format!("{}/{}", d.prefix, d.prefix_length),
-                    peer: &d.peer,
-                    changes: &d.changes,
-                })
-                .collect(),
-        })?;
+        output::print_json_pretty(&test_to_json(&resp, &opts))?;
         if !resp.compiled {
             std::process::exit(1);
         }
@@ -1112,6 +1117,25 @@ pub async fn stats(
     Ok(())
 }
 
+fn policies_to_json(resp: &proto::ListPoliciesResponse) -> Vec<JsonPolicySummary> {
+    resp.policies
+        .iter()
+        .map(|p| JsonPolicySummary {
+            name: p.name.clone(),
+            default_action: p
+                .definition
+                .as_ref()
+                .map(|d| d.default_action.clone())
+                .unwrap_or_default(),
+            statement_count: p
+                .definition
+                .as_ref()
+                .map(|d| d.statements.len())
+                .unwrap_or(0),
+        })
+        .collect()
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1120,24 +1144,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
         .into_inner();
 
     if json {
-        let out: Vec<JsonPolicySummary> = resp
-            .policies
-            .iter()
-            .map(|p| JsonPolicySummary {
-                name: p.name.clone(),
-                default_action: p
-                    .definition
-                    .as_ref()
-                    .map(|d| d.default_action.clone())
-                    .unwrap_or_default(),
-                statement_count: p
-                    .definition
-                    .as_ref()
-                    .map(|d| d.statements.len())
-                    .unwrap_or(0),
-            })
-            .collect();
-        output::print_json_pretty(&out)?;
+        output::print_json_pretty(&policies_to_json(&resp))?;
     } else if resp.policies.is_empty() {
         outln!("No policies configured")?;
     } else {
@@ -1152,6 +1159,15 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn policy_to_json(resp: proto::GetPolicyResponse) -> JsonPolicyDetail {
+    let def = resp.definition.unwrap_or_default();
+    JsonPolicyDetail {
+        name: resp.name,
+        default_action: def.default_action,
+        statements: def.statements.into_iter().map(Into::into).collect(),
+    }
+}
+
 pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1164,15 +1180,10 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
     .await?
     .into_inner();
 
-    let def = resp.definition.unwrap_or_default();
     if json {
-        let detail = JsonPolicyDetail {
-            name: resp.name.clone(),
-            default_action: def.default_action.clone(),
-            statements: def.statements.into_iter().map(Into::into).collect(),
-        };
-        output::print_json_pretty(&detail)?;
+        output::print_json_pretty(&policy_to_json(resp))?;
     } else {
+        let def = resp.definition.unwrap_or_default();
         outln!("Name:           {}", resp.name)?;
         outln!("Default Action: {}", def.default_action)?;
         outln!("Statements:     {}", def.statements.len())?;
@@ -1443,14 +1454,7 @@ pub async fn explain_import(
         .find_map(|m| unanswerable_error(m.outcome, neighbor));
 
     if json {
-        let out = JsonImportExplain {
-            peer_address: operator_peer_address(Some(neighbor), &resp.peer_address).to_string(),
-            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
-            afi_safi: address_family_label(resp.afi_safi).to_string(),
-            current_policy_generation: resp.current_policy_generation,
-            matches: resp.matches.iter().map(match_to_json).collect(),
-        };
-        output::print_json_pretty(&out)?;
+        output::print_json_pretty(&import_explain_to_json(&resp, neighbor))?;
         // The JSON body already carries the distinct outcome; the
         // error exit still signals "not an evaluated answer".
         return match unanswerable {
@@ -1505,6 +1509,19 @@ pub async fn explain_import(
         }
     }
     Ok(())
+}
+
+fn import_explain_to_json(
+    resp: &proto::ExplainImportPolicyResponse,
+    neighbor: &str,
+) -> JsonImportExplain {
+    JsonImportExplain {
+        peer_address: operator_peer_address(Some(neighbor), &resp.peer_address).to_string(),
+        prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+        afi_safi: address_family_label(resp.afi_safi).to_string(),
+        current_policy_generation: resp.current_policy_generation,
+        matches: resp.matches.iter().map(match_to_json).collect(),
+    }
 }
 
 fn decision_attribution_line(m: &proto::ImportExplainMatch) -> String {
@@ -1673,6 +1690,22 @@ fn modifications_summary(m: &proto::ExplainModifications) -> String {
     parts.join(" ")
 }
 
+fn global_chains_to_json(resp: proto::GlobalPolicyChains) -> JsonChains {
+    JsonChains {
+        neighbor: None,
+        import_policy_names: resp.import_policy_names,
+        export_policy_names: resp.export_policy_names,
+    }
+}
+
+fn neighbor_chains_to_json(resp: proto::NeighborPolicyChains, neighbor: &str) -> JsonChains {
+    JsonChains {
+        neighbor: Some(operator_peer_address(Some(neighbor), &resp.address).to_string()),
+        import_policy_names: resp.import_policy_names,
+        export_policy_names: resp.export_policy_names,
+    }
+}
+
 pub async fn chain_show(
     connection: Connection,
     neighbor: Option<&str>,
@@ -1681,7 +1714,7 @@ pub async fn chain_show(
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
 
-    let (import, export, address) = match neighbor {
+    let out = match neighbor {
         Some(addr) => {
             let resp = read_rpc(
                 "GetNeighborPolicyChains",
@@ -1691,11 +1724,7 @@ pub async fn chain_show(
             )
             .await?
             .into_inner();
-            (
-                resp.import_policy_names,
-                resp.export_policy_names,
-                Some(operator_peer_address(Some(addr), &resp.address).to_string()),
-            )
+            neighbor_chains_to_json(resp, addr)
         }
         None => {
             let resp = read_rpc(
@@ -1704,34 +1733,29 @@ pub async fn chain_show(
             )
             .await?
             .into_inner();
-            (resp.import_policy_names, resp.export_policy_names, None)
+            global_chains_to_json(resp)
         }
     };
 
     if json {
-        let out = JsonChains {
-            neighbor: address,
-            import_policy_names: import,
-            export_policy_names: export,
-        };
         output::print_json_pretty(&out)?;
     } else {
         let scope = neighbor.unwrap_or("global");
         outln!("Scope:        {scope}")?;
         outln!(
             "Import Chain: {}",
-            if import.is_empty() {
+            if out.import_policy_names.is_empty() {
                 "(none)".to_string()
             } else {
-                import.join(" -> ")
+                out.import_policy_names.join(" -> ")
             }
         )?;
         outln!(
             "Export Chain: {}",
-            if export.is_empty() {
+            if out.export_policy_names.is_empty() {
                 "(none)".to_string()
             } else {
-                export.join(" -> ")
+                out.export_policy_names.join(" -> ")
             }
         )?;
     }
@@ -1946,6 +1970,409 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use std::io::Write;
+
+    fn complete_policy_statement() -> proto::PolicyStatement {
+        // No default update: new generated fields require a projection decision.
+        proto::PolicyStatement {
+            action: "permit".into(),
+            prefix: Some("2001:db8::/32".into()),
+            ge: Some(48),
+            le: Some(64),
+            match_community: vec!["65001:7".into(), "BLACKHOLE".into()],
+            match_as_path: Some("^65001_".into()),
+            match_as_path_length_ge: Some(2),
+            match_as_path_length_le: Some(9),
+            match_rpki_validation: Some("valid".into()),
+            match_aspa_validation: Some("invalid".into()),
+            match_neighbor_set: Some("customers".into()),
+            match_route_type: Some("external".into()),
+            match_evpn_route_type: Some(5),
+            match_local_pref_ge: Some(100),
+            match_local_pref_le: Some(200),
+            match_med_ge: Some(300),
+            match_med_le: Some(400),
+            match_next_hop: Some("2001:db8::1".into()),
+            set_local_pref: Some(u32::MAX),
+            set_med: Some(0),
+            set_next_hop: Some("2001:db8::2".into()),
+            set_community_add: vec!["65002:8".into(), "65002:9".into()],
+            set_community_remove: vec!["65003:10".into()],
+            set_as_path_prepend: Some(proto::AsPathPrepend {
+                asn: u32::MAX,
+                count: 3,
+            }),
+        }
+    }
+
+    #[test]
+    fn policy_list_and_get_json_cover_proto_fields() {
+        let empty = proto::PolicyStatement {
+            action: "deny".into(),
+            prefix: None,
+            ge: None,
+            le: None,
+            match_community: vec![],
+            match_as_path: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: None,
+            set_community_add: vec![],
+            set_community_remove: vec![],
+            set_as_path_prepend: None,
+        };
+        let mut response = proto::ListPoliciesResponse {
+            policies: vec![
+                proto::NamedPolicy {
+                    name: "edge-in".into(),
+                    definition: Some(proto::PolicyDefinition {
+                        default_action: "deny".into(),
+                        statements: vec![complete_policy_statement(), empty],
+                    }),
+                },
+                proto::NamedPolicy {
+                    name: "missing".into(),
+                    definition: None,
+                },
+            ],
+        };
+        // List deliberately summarizes statements; get carries their full shape.
+        assert_eq!(
+            serde_json::to_value(policies_to_json(&response)).unwrap(),
+            serde_json::json!([
+                {"name": "edge-in", "default_action": "deny", "statement_count": 2},
+                {"name": "missing", "default_action": "", "statement_count": 0}
+            ])
+        );
+        let get_response = proto::GetPolicyResponse {
+            name: "edge-in".into(),
+            definition: response.policies.remove(0).definition,
+        };
+        assert_eq!(
+            serde_json::to_value(policy_to_json(get_response)).unwrap(),
+            serde_json::json!({
+                "name": "edge-in", "default_action": "deny", "statements": [{
+                    "action": "permit", "prefix": "2001:db8::/32", "ge": 48, "le": 64,
+                    "match_community": ["65001:7", "BLACKHOLE"], "match_as_path": "^65001_",
+                    "match_as_path_length_ge": 2, "match_as_path_length_le": 9,
+                    "match_rpki_validation": "valid", "match_aspa_validation": "invalid",
+                    "match_neighbor_set": "customers", "match_route_type": "external",
+                    "match_evpn_route_type": 5, "match_local_pref_ge": 100,
+                    "match_local_pref_le": 200, "match_med_ge": 300, "match_med_le": 400,
+                    "match_next_hop": "2001:db8::1", "set_local_pref": u32::MAX,
+                    "set_med": 0, "set_next_hop": "2001:db8::2",
+                    "set_community_add": ["65002:8", "65002:9"],
+                    "set_community_remove": ["65003:10"],
+                    "set_as_path_prepend": {"asn": u32::MAX, "count": 3}
+                }, {"action": "deny"}]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(policy_to_json(proto::GetPolicyResponse {
+                name: "missing".into(),
+                definition: None,
+            }))
+            .unwrap(),
+            serde_json::json!({"name": "missing", "default_action": "", "statements": []})
+        );
+        response.policies.clear();
+        assert_eq!(
+            serde_json::to_value(policies_to_json(&response)).unwrap(),
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn policy_test_json_covers_proto_fields() {
+        let opts = TestOptions {
+            file: "edge.rpol",
+            policy: "edge-in(200)",
+            direction: "import",
+            peer: Some("192.0.2.9"),
+            family: Some("ipv6_unicast"),
+            limit: 17,
+            show_changes: 2,
+        };
+        let mut response = proto::TestPolicyResponse {
+            compiled: true,
+            diagnostics: "retained diagnostic".into(),
+            routes_evaluated: u64::MAX,
+            accepted: 101,
+            rejected: 23,
+            modified: 7,
+            term_hits: vec![
+                proto::TestPolicyTermHits {
+                    term: "accept-customer".into(),
+                    hits: u64::MAX,
+                },
+                proto::TestPolicyTermHits {
+                    term: "deny-rest".into(),
+                    hits: 23,
+                },
+            ],
+            diffs: vec![proto::TestPolicyDiff {
+                prefix: "2001:db8::".into(),
+                prefix_length: 48,
+                peer: "192.0.2.9".into(),
+                changes: vec![
+                    "local_pref 100 -> 200".into(),
+                    "communities + 65001:7".into(),
+                ],
+            }],
+        };
+        // Request filters/bounds are not response fields; only file/policy/direction
+        // annotate the RPC's counters and diffs in this curated document.
+        assert_eq!(
+            serde_json::to_value(test_to_json(&response, &opts)).unwrap(),
+            serde_json::json!({
+                "file": "edge.rpol", "policy": "edge-in(200)", "direction": "import",
+                "compiled": true, "diagnostics": "retained diagnostic", "routes_evaluated": u64::MAX,
+                "accepted": 101, "rejected": 23, "modified": 7,
+                "term_hits": [{"term": "accept-customer", "hits": u64::MAX}, {"term": "deny-rest", "hits": 23}],
+                "diffs": [{"prefix": "2001:db8::/48", "peer": "192.0.2.9",
+                    "changes": ["local_pref 100 -> 200", "communities + 65001:7"]}]
+            })
+        );
+        response.compiled = false;
+        response.diagnostics.clear();
+        response.routes_evaluated = 0;
+        response.accepted = 0;
+        response.rejected = 0;
+        response.modified = 0;
+        response.term_hits.clear();
+        response.diffs.clear();
+        assert_eq!(
+            serde_json::to_value(test_to_json(&response, &opts)).unwrap(),
+            serde_json::json!({
+                "file": "edge.rpol", "policy": "edge-in(200)", "direction": "import",
+                "compiled": false, "routes_evaluated": 0, "accepted": 0, "rejected": 0,
+                "modified": 0, "term_hits": [], "diffs": []
+            })
+        );
+    }
+
+    #[test]
+    fn import_explain_json_covers_proto_fields() {
+        let mut response = proto::ExplainImportPolicyResponse {
+            peer_address: "fe80::9".into(),
+            prefix: "2001:db8::".into(),
+            prefix_length: 48,
+            afi_safi: proto::AddressFamily::Ipv6Unicast as i32,
+            current_policy_generation: u64::MAX,
+            matches: vec![proto::ImportExplainMatch {
+                outcome: proto::ImportExplainOutcome::Permit as i32,
+                // Per-match identity repeats the response envelope in normal RPC
+                // replies and is deliberately omitted by this curated projection.
+                peer_address: "192.0.2.99".into(),
+                prefix: "198.51.100.0".into(),
+                prefix_length: 24,
+                afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
+                path_id: u32::MAX,
+                matched_policy: "edge-in".into(),
+                rpki_validation: "valid".into(),
+                aspa_validation: "unknown".into(),
+                evaluated_at_unix_ns: i64::MAX,
+                policy_generation: u64::MAX - 1,
+                modifications: Some(proto::ExplainModifications {
+                    set_local_pref: Some(u32::MAX),
+                    set_med: Some(0),
+                    set_next_hop: "2001:db8::2".into(),
+                    communities_add: vec![u32::MAX, 0],
+                    communities_remove: vec![7],
+                    extended_communities_add: vec![u64::MAX, 0],
+                    extended_communities_remove: vec![9],
+                    large_communities_add: vec!["65001:1:2".into()],
+                    large_communities_remove: vec!["65002:3:4".into()],
+                    as_path_prepend_asn: Some(u32::MAX - 1),
+                    as_path_prepend_count: Some(3),
+                }),
+                statements: vec![proto::ImportExplainStatementStep {
+                    policy_index: 2,
+                    policy_name: "edge-in".into(),
+                    default_action: false,
+                    statement_index: 5,
+                    action: "permit".into(),
+                    matched_conditions: vec!["prefix 2001:db8::/32".into(), "rpki valid".into()],
+                    modifications: vec!["med 100 -> 0".into()],
+                    term: "accept-customer".into(),
+                    term_traces: vec!["condition matched".into(), "action permit".into()],
+                }],
+            }],
+        };
+        let expected_match = serde_json::json!({
+            "outcome": "permit", "path_id": u32::MAX, "matched_policy": "edge-in",
+            "rpki_validation": "valid", "aspa_validation": "unknown",
+            "evaluated_at_unix_ns": i64::MAX, "policy_generation": u64::MAX - 1,
+            "modifications": {
+                "set_local_pref": u32::MAX, "set_med": 0, "set_next_hop": "2001:db8::2",
+                "communities_add": [u32::MAX, 0], "communities_remove": [7],
+                "extended_communities_add": [u64::MAX, 0], "extended_communities_remove": [9],
+                "large_communities_add": ["65001:1:2"], "large_communities_remove": ["65002:3:4"],
+                "as_path_prepend_asn": u32::MAX - 1, "as_path_prepend_count": 3
+            },
+            "statements": [{"policy_index": 2, "policy_name": "edge-in", "default_action": false,
+                "statement_index": 5, "action": "permit",
+                "matched_conditions": ["prefix 2001:db8::/32", "rpki valid"],
+                "modifications": ["med 100 -> 0"], "term": "accept-customer",
+                "term_traces": ["condition matched", "action permit"]}]
+        });
+        assert_eq!(
+            serde_json::to_value(import_explain_to_json(&response, "fe80::9%eth0")).unwrap(),
+            serde_json::json!({"peer_address": "fe80::9%eth0", "prefix": "2001:db8::/48",
+                "afi_safi": "ipv6-unicast", "current_policy_generation": u64::MAX,
+                "matches": [expected_match.clone()]})
+        );
+        for (outcome, label) in [
+            (proto::ImportExplainOutcome::Deny, "deny"),
+            (proto::ImportExplainOutcome::Withdrawn, "withdrawn"),
+            (proto::ImportExplainOutcome::Stale, "stale"),
+        ] {
+            response.matches[0].outcome = outcome as i32;
+            let mut expected = expected_match.clone();
+            expected["outcome"] = label.into();
+            assert_eq!(
+                serde_json::to_value(match_to_json(&response.matches[0])).unwrap(),
+                expected
+            );
+        }
+        response.matches[0].statements.clear();
+        for (outcome, label) in [
+            (
+                proto::ImportExplainOutcome::Unspecified as i32,
+                "unspecified",
+            ),
+            (proto::ImportExplainOutcome::NotSeen as i32, "not_seen"),
+            (proto::ImportExplainOutcome::Evicted as i32, "evicted"),
+            (
+                proto::ImportExplainOutcome::CacheDisabled as i32,
+                "cache_disabled",
+            ),
+            (proto::ImportExplainOutcome::NoSession as i32, "no_session"),
+            (999, "unspecified"),
+        ] {
+            response.matches[0].outcome = outcome;
+            // Even populated proto decision fields must not imply a recorded
+            // decision for these outcomes. Null is part of the existing shape.
+            assert_eq!(
+                serde_json::to_value(match_to_json(&response.matches[0])).unwrap(),
+                serde_json::json!({"outcome": label, "path_id": u32::MAX,
+                    "matched_policy": null, "rpki_validation": null, "aspa_validation": null,
+                    "modifications": null, "evaluated_at_unix_ns": null,
+                    "policy_generation": null, "statements": []})
+            );
+        }
+        response.matches[0].outcome = proto::ImportExplainOutcome::Permit as i32;
+        response.matches[0].matched_policy.clear();
+        response.matches[0].rpki_validation.clear();
+        response.matches[0].aspa_validation.clear();
+        response.matches[0].modifications = None;
+        response.matches[0].evaluated_at_unix_ns = i64::MIN;
+        response.matches[0].policy_generation = 0;
+        assert_eq!(
+            serde_json::to_value(match_to_json(&response.matches[0])).unwrap(),
+            serde_json::json!({"outcome": "permit", "path_id": u32::MAX,
+                "matched_policy": null, "rpki_validation": null, "aspa_validation": null,
+                "modifications": null, "evaluated_at_unix_ns": i64::MIN,
+                "policy_generation": 0, "statements": []})
+        );
+        response.matches.clear();
+        response.afi_safi = 999;
+        assert_eq!(
+            serde_json::to_value(import_explain_to_json(&response, "fe80::10%eth1")).unwrap(),
+            serde_json::json!({"peer_address": "fe80::9", "prefix": "2001:db8::/48",
+                "afi_safi": "unspecified", "current_policy_generation": u64::MAX, "matches": []})
+        );
+
+        let fallthrough = proto::ImportExplainStatementStep {
+            policy_index: 0,
+            policy_name: String::new(),
+            default_action: true,
+            statement_index: 17,
+            action: "deny".into(),
+            matched_conditions: vec![],
+            modifications: vec![],
+            term: String::new(),
+            term_traces: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(statement_to_json(&fallthrough)).unwrap(),
+            serde_json::json!({
+                "policy_index": 0, "policy_name": null, "default_action": true, "statement_index": null,
+                "action": "deny", "matched_conditions": [], "modifications": [], "term": null, "term_traces": []
+            })
+        );
+        let empty_modifications = proto::ExplainModifications {
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: String::new(),
+            communities_add: vec![],
+            communities_remove: vec![],
+            extended_communities_add: vec![],
+            extended_communities_remove: vec![],
+            large_communities_add: vec![],
+            large_communities_remove: vec![],
+            as_path_prepend_asn: None,
+            as_path_prepend_count: None,
+        };
+        assert_eq!(
+            serde_json::to_value(modifications_to_json(&empty_modifications)).unwrap(),
+            serde_json::json!({"set_local_pref": null, "set_med": null, "set_next_hop": null,
+                "communities_add": [], "communities_remove": [], "extended_communities_add": [],
+                "extended_communities_remove": [], "large_communities_add": [], "large_communities_remove": [],
+                "as_path_prepend_asn": null, "as_path_prepend_count": null})
+        );
+    }
+
+    #[test]
+    fn policy_chain_json_covers_proto_fields() {
+        let global = proto::GlobalPolicyChains {
+            import_policy_names: vec!["customer-in".into(), "hygiene".into()],
+            export_policy_names: vec!["customer-out".into(), "customer-out".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(global_chains_to_json(global)).unwrap(),
+            serde_json::json!({
+                "import_policy_names": ["customer-in", "hygiene"],
+                "export_policy_names": ["customer-out", "customer-out"]
+            })
+        );
+        let mut neighbor = proto::NeighborPolicyChains {
+            address: "fe80::2".into(),
+            import_policy_names: vec!["peer-in".into()],
+            export_policy_names: vec!["peer-out".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(neighbor_chains_to_json(neighbor.clone(), "fe80::2%eth0"))
+                .unwrap(),
+            serde_json::json!({"neighbor": "fe80::2%eth0", "import_policy_names": ["peer-in"],
+                "export_policy_names": ["peer-out"]})
+        );
+        neighbor.import_policy_names.clear();
+        neighbor.export_policy_names.clear();
+        assert_eq!(
+            serde_json::to_value(neighbor_chains_to_json(neighbor, "fe80::3%eth1")).unwrap(),
+            serde_json::json!({"neighbor": "fe80::2", "import_policy_names": [], "export_policy_names": []})
+        );
+        assert_eq!(
+            serde_json::to_value(global_chains_to_json(proto::GlobalPolicyChains {
+                import_policy_names: vec![],
+                export_policy_names: vec![],
+            }))
+            .unwrap(),
+            serde_json::json!({"import_policy_names": [], "export_policy_names": []})
+        );
+    }
 
     fn write_rpol(content: &str) -> tempfile::NamedTempFile {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();

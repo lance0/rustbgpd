@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Advertised-route explain JSON now includes each ORR candidate's inbound
+  `path_id`, distinguishing Add-Path candidates that share a peer and next hop.
+  The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;
+  the separate `rbgp-rib` streaming format remains at 1.0. Exhaustive projection
+  fixtures now guard the remaining curated RPC JSON views against field loss.
+
 ## [0.71.0] — 2026-09-20
 
 ### Added

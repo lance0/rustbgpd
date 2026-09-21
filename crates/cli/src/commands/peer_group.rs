@@ -123,6 +123,19 @@ fn json_peer_group_detail(
     }
 }
 
+fn json_peer_group_summary(pg: &crate::proto::NamedPeerGroup) -> JsonPeerGroupSummary {
+    let def = pg.definition.as_ref();
+    JsonPeerGroupSummary {
+        name: pg.name.clone(),
+        families: def.map(|d| d.families.clone()).unwrap_or_default(),
+        has_md5_password: def.and_then(|d| d.has_md5_password).unwrap_or(false),
+        add_path_send: def.and_then(|d| d.add_path_send).unwrap_or(false),
+        add_path_send_max: def.and_then(|d| d.add_path_send_max).unwrap_or(0),
+        import_chain_len: def.map(|d| d.import_policy_chain.len()).unwrap_or(0),
+        export_chain_len: def.map(|d| d.export_policy_chain.len()).unwrap_or(0),
+    }
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -137,18 +150,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
         let out: Vec<JsonPeerGroupSummary> = resp
             .peer_groups
             .iter()
-            .map(|pg| {
-                let def = pg.definition.as_ref();
-                JsonPeerGroupSummary {
-                    name: pg.name.clone(),
-                    families: def.map(|d| d.families.clone()).unwrap_or_default(),
-                    has_md5_password: def.and_then(|d| d.has_md5_password).unwrap_or(false),
-                    add_path_send: def.and_then(|d| d.add_path_send).unwrap_or(false),
-                    add_path_send_max: def.and_then(|d| d.add_path_send_max).unwrap_or(0),
-                    import_chain_len: def.map(|d| d.import_policy_chain.len()).unwrap_or(0),
-                    export_chain_len: def.map(|d| d.export_policy_chain.len()).unwrap_or(0),
-                }
-            })
+            .map(json_peer_group_summary)
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.peer_groups.is_empty() {
@@ -381,6 +383,99 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use std::io::Write;
+
+    // Exhaustive generated-message literals intentionally avoid Default so new
+    // API fields require an explicit curated-output decision.
+    fn peer_group_projection_fixture() -> crate::proto::PeerGroupDefinition {
+        crate::proto::PeerGroupDefinition {
+            hold_time: Some(101),
+            max_prefixes: Some(102),
+            max_prefix_restart_seconds: Some(126),
+            md5_password: Some("must-not-be-printed".to_string()),
+            ttl_security: Some(false),
+            ttl_security_hops: Some(130),
+            families: vec!["families-value".to_string()],
+            graceful_restart: Some(true),
+            gr_restart_time: Some(107),
+            gr_peer_restart_time_max: Some(127),
+            gr_stale_routes_time: Some(u64::MAX),
+            llgr_stale_time: Some(109),
+            local_ipv6_nexthop: Some("local_ipv6_nexthop-value".to_string()),
+            route_reflector_client: Some(false),
+            route_server_client: Some(true),
+            remove_private_as: Some("remove_private_as-value".to_string()),
+            add_path_receive: Some(true),
+            add_path_send: Some(false),
+            add_path_send_max: Some(116),
+            import_policy: vec![crate::proto::PolicyStatement::default()],
+            export_policy: vec![crate::proto::PolicyStatement::default(); 2],
+            import_policy_chain: vec!["import_policy_chain-value".to_string()],
+            export_policy_chain: vec![
+                "export_policy_chain-value".to_string(),
+                "second-chain".to_string(),
+            ],
+            has_md5_password: Some(false),
+            orr_vantage: Some("orr_vantage-value".to_string()),
+            send_hold_time: Some(0),
+            per_client_best: Some(true),
+            paths_limit_receive_max: Some(125),
+            required_families: vec!["required_families-value".to_string()],
+            min_hold_time: Some(129),
+            discard_path_attributes: vec![131],
+        }
+    }
+
+    #[test]
+    fn peer_group_json_projection_covers_curated_definition() {
+        let response = crate::proto::GetPeerGroupResponse {
+            name: "customers".into(),
+            definition: Some(peer_group_projection_fixture()),
+        };
+        let definition = response.definition.unwrap();
+        // The write-only MD5 value is never projected; presence is authoritative.
+        // Inline policy bodies are counted, and the raw Paths-Limit preference
+        // remains outside this established detail representation.
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/peer-group-detail.json"))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(json_peer_group_detail(response.name, &definition)).unwrap(),
+            expected
+        );
+        let response = crate::proto::ListPeerGroupsResponse {
+            peer_groups: vec![crate::proto::NamedPeerGroup {
+                name: "customers".to_string(),
+                definition: Some(definition),
+            }],
+        };
+        let group = response.peer_groups.into_iter().next().unwrap();
+        assert_eq!(
+            serde_json::to_value(json_peer_group_summary(&group)).unwrap(),
+            serde_json::json!({"name": "customers", "families": ["families-value"],
+                "has_md5_password": false, "add_path_send": false, "add_path_send_max": 116,
+                "import_chain_len": 1, "export_chain_len": 2})
+        );
+        let group = crate::proto::NamedPeerGroup {
+            definition: None,
+            ..group
+        };
+        assert_eq!(
+            serde_json::to_value(json_peer_group_summary(&group)).unwrap(),
+            serde_json::json!({"name": "customers", "families": [],
+                "has_md5_password": false, "add_path_send": false, "add_path_send_max": 0,
+                "import_chain_len": 0, "export_chain_len": 0})
+        );
+        assert_eq!(
+            serde_json::to_value(json_peer_group_detail(
+                "empty".to_string(),
+                &crate::proto::PeerGroupDefinition::default()
+            ))
+            .unwrap(),
+            serde_json::json!({"name": "empty", "has_md5_password": false,
+            "families": [], "required_families": [], "inline_import_policy_count": 0,
+            "inline_export_policy_count": 0, "import_policy_chain": [], "export_policy_chain": []})
+        );
+    }
 
     /// Load-bearing projection proof: dropping the field from the peer-group
     /// JSON mapper removes it from this serialized operator view.

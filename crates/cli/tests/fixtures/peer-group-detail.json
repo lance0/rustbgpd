@@ -1,0 +1,43 @@
+{
+  "hold_time": 101,
+  "max_prefixes": 102,
+  "max_prefix_restart_seconds": 126,
+  "ttl_security": false,
+  "ttl_security_hops": 130,
+  "families": [
+    "families-value"
+  ],
+  "graceful_restart": true,
+  "gr_restart_time": 107,
+  "gr_peer_restart_time_max": 127,
+  "gr_stale_routes_time": 18446744073709551615,
+  "llgr_stale_time": 109,
+  "local_ipv6_nexthop": "local_ipv6_nexthop-value",
+  "route_reflector_client": false,
+  "route_server_client": true,
+  "remove_private_as": "remove_private_as-value",
+  "add_path_receive": true,
+  "add_path_send": false,
+  "add_path_send_max": 116,
+  "import_policy_chain": [
+    "import_policy_chain-value"
+  ],
+  "export_policy_chain": [
+    "export_policy_chain-value",
+    "second-chain"
+  ],
+  "has_md5_password": false,
+  "orr_vantage": "orr_vantage-value",
+  "send_hold_time": 0,
+  "per_client_best": true,
+  "required_families": [
+    "required_families-value"
+  ],
+  "min_hold_time": 129,
+  "discard_path_attributes": [
+    131
+  ],
+  "name": "customers",
+  "inline_import_policy_count": 1,
+  "inline_export_policy_count": 2
+}

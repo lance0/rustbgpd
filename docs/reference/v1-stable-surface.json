@@ -163,7 +163,7 @@
     "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
-        "id": "rbgp-json/1.0",
+        "id": "rbgp-json/1.1",
         "command_paths": ["config abort", "config apply", "config confirm", "config effective", "config plan", "config status", "dynamic-neighbor", "global", "gshut", "health", "neighbor", "neighbor-set", "peer-group", "policy explain", "policy list", "policy stats", "policy test", "rib", "rib advertised", "rib received", "shutdown"],
         "source": "crates/cli/src/output.rs",
         "test": "versioned_json_document_preserves_payload_and_inventory_floor",

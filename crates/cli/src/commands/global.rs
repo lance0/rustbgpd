@@ -13,6 +13,16 @@ fn tcp_ao_support_label(value: i32) -> &'static str {
     }
 }
 
+fn json_global(resp: &crate::proto::GlobalState) -> JsonGlobal {
+    JsonGlobal {
+        asn: resp.asn,
+        router_id: resp.router_id.clone(),
+        listen_port: resp.listen_port,
+        tcp_ao_support: tcp_ao_support_label(resp.tcp_ao_support).to_string(),
+        tcp_ao_detail: resp.tcp_ao_detail.clone(),
+    }
+}
+
 pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -21,13 +31,7 @@ pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
         .into_inner();
 
     if json {
-        let out = JsonGlobal {
-            asn: resp.asn,
-            router_id: resp.router_id.clone(),
-            listen_port: resp.listen_port,
-            tcp_ao_support: tcp_ao_support_label(resp.tcp_ao_support).to_string(),
-            tcp_ao_detail: resp.tcp_ao_detail.clone(),
-        };
+        let out = json_global(&resp);
         output::print_json_pretty(&out)?;
     } else {
         outln!("ASN:         {}", resp.asn)?;
@@ -53,6 +57,35 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn global_json_projection_covers_curated_state() {
+        let mut state = crate::proto::GlobalState {
+            asn: u32::MAX,
+            router_id: "192.0.2.1".into(),
+            listen_port: 179,
+            tcp_ao_support: 3,
+            tcp_ao_detail: "inspection failed".into(),
+            // Used by the policy freshness consumer, outside the global CLI summary.
+            policy_generation_loaded_timestamp_seconds: i64::MAX,
+        };
+        assert_eq!(
+            serde_json::to_value(json_global(&state)).unwrap(),
+            serde_json::json!({
+                "asn": u32::MAX, "router_id": "192.0.2.1", "listen_port": 179,
+                "tcp_ao_support": "probe_failed", "tcp_ao_detail": "inspection failed"
+            })
+        );
+        state.tcp_ao_detail.clear();
+        state.tcp_ao_support = 999;
+        assert_eq!(
+            serde_json::to_value(json_global(&state)).unwrap(),
+            serde_json::json!({
+                "asn": u32::MAX, "router_id": "192.0.2.1", "listen_port": 179,
+                "tcp_ao_support": "unknown"
+            })
+        );
+    }
 
     #[tokio::test]
     async fn run_calls_get_global() {

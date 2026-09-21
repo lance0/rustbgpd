@@ -476,23 +476,55 @@ checkpoint; use the event-bridge pattern when the consumer must store its own
 confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
 streams remain one-shot.
 
-The unicast, EVPN and FlowSpec route JSON projections have exhaustive API
-fixtures and exact-output regression checks. Adding a field to those generated
-route types requires an explicit projection decision; the tests also cover
-EVPN Prefix-SID details and FlowSpec components and typed actions. Configuration
-transaction plan, apply, status, confirm and abort documents have the same
-coverage for nested diffs, update-group impact and confirmation state. History
-checks cover every response field and rollback eligibility; effective-config
-checks preserve the TOML document as structured JSON, including unknown keys.
-Confirm, abort, history and effective-config also have plain/versioned output
-equivalence checks. This does not cover every CLI JSON projection or change
-existing arrays, envelopes or streams.
+RPC-backed JSON views use exhaustive generated-message fixtures and complete
+serialized expectations. A new protobuf field requires an explicit projection
+decision; losing an existing JSON field fails its output assertion. The coverage
+inventory is:
+
+| Views | Projection checks |
+| --- | --- |
+| Global, health, BFD, RPKI validation and caches | Curated status fields, unknown enum values, presence and bounded-result metadata |
+| Neighbor list, detail and update-group comparison | Configured and effective state, negotiated session, authentication, capacity, dynamic provenance and comparison reasons |
+| Peer groups, neighbor sets, dynamic ranges and FIB tables | Definitions and list summaries, explicit false/zero, absent optional values and runtime availability |
+| Policy list, detail, chains, test, statistics and import explain | Nested statements/modifications, counters, decisions, scoped peer identity and conditional omissions |
+| RIB route families, pages, FIB views, rejected routes and explanations | Route payloads, page metadata, source identity, decisions and sampling metadata |
+| FlowSpec | Complete component details, curated actions and raw extended communities, including unknown values and duplicate ordering |
+| Topology and ORR | Complete node, link, vantage and input-diagnostic records |
+| EVPN routes, pages, explanations and runtime views | Route selectors, nested export decisions, instances, netdevs, nexthops, Ethernet Segments, VRFs and mutation receipts |
+| Configuration plan, apply, status, confirm, abort, history and rollback | Nested diffs, update-group impact, confirmation and history eligibility; effective config preserves the TOML document, including unknown keys |
+
+These are curated views, not protobuf JSON. List summaries intentionally count
+or select detail fields. Neighbor detail reports configured `role`, effective
+capacity and per-family Paths-Limit state; it does not separately expose raw
+`local_role`, `max_prefixes`, `remove_private_as`, `paths_limit_receive_max` or
+Birdwatcher's `rejected_routes_retained`. Peer-group detail counts inline
+policies, omits the raw Paths-Limit preference and never prints `md5_password`;
+`has_md5_password` is the presence indicator. Global status omits the API's
+policy-load timestamp, which remains available through the API and metrics;
+health omits the daemon version used by doctor. Explain views preserve their
+existing outer identity and outcome-dependent null/omitted fields. Rejected
+routes retain formatted prefix identity without a separate `afi_safi` key.
+
+Mutation acknowledgments reuse the common result document. Effective-config
+TOML, derived diagnostic counts, and existing local/streaming/named formats have
+their own checks rather than a claim of one JSON key per protobuf field.
+Doctor remains a separate redacted support-bundle format: its version-2 manifest,
+section availability, daemon provenance, diagnostic report, and secret redaction
+are checked by its bundle tests. Its selected support snapshots and derived
+checks do not promise complete RPC responses; validation-policy posture is
+classified by its diagnostic tests rather than emitted as a policy document.
+Actual-process tests compare plain and versioned documents without changing
+arrays, envelopes, streams, exit status or failed-request output behavior.
+This coverage does not widen the [stable surface](../../docs/reference/stability.md)
+or the EVPN and Linux dataplane support boundaries.
 
 For a versioned document, select `rbgp -j --json-version 1 neighbor` (or another
-supported command). The result is `{"format":"rbgp-json","format_version":"1.0","data":...}`.
+supported command). The result is `{"format":"rbgp-json","format_version":"1.1","data":...}`.
 `data` contains the existing command result unchanged, including an empty `[]`,
 optional fields and bounded-list metadata. Ordinary `-j` keeps its current shape.
 The version describes the CLI JSON representation, not the daemon version.
+Version 1.1 adds inbound `path_id` to advertised-explain ORR candidates, so
+multiple paths from the same peer and next hop remain distinguishable.
 
 Consumers should check the format and major version and ignore unknown fields.
 Additive fields increment the minor version; removing or renaming fields, changing
