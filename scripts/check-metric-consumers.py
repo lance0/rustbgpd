@@ -1245,7 +1245,8 @@ def check_label_values(
                         skipped.append(where)
                         continue
                     if operator in ("=", "!="):
-                        values = [value] if value else []
+                        # `!=""` tests that the label is present and names no value.
+                        values = [] if operator == "!=" and not value else [value]
                     elif LITERAL_ALTERNATION.fullmatch(value):
                         values = value.split("|")
                     else:

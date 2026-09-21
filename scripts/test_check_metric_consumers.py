@@ -835,6 +835,52 @@ groups:
         ]
         self.assertEqual(len(wrapped), 1)
 
+    def test_empty_exact_value_on_a_closed_label_is_checked(self):
+        family = "bgp_sighup_reload_outcomes_total"
+        # A family's label set is fixed, so `=""` selects nothing unless the
+        # daemon emits the empty string for that label.
+        with self.assertRaisesRegex(
+            ValueError,
+            rf'{family}\{{outcome=""\}} names value "" the daemon cannot emit',
+        ):
+            self.check_selector(f'{family}{{outcome=""}}')
+        # `!=""` is a presence test, not a value: ignored and not counted.
+        self.assertEqual(self.check_selector(f'{family}{{outcome!=""}}'), (0, []))
+        self.assertEqual(
+            self.check_selector(f'{family}{{outcome!="",outcome="complete"}}'), (1, [])
+        )
+        # Open labels really are emitted empty, and stay ignored: a listed open
+        # label anywhere, and the rule tests' `interface=""` series.
+        self.assertEqual(
+            self.check_selector(f'{family}{{peer="",outcome="complete"}}'), (1, [])
+        )
+        self.assertEqual(
+            self.check_selector('bgp_peer_session_established{interface=""}', "t.yml",
+                                frozenset({"t.yml"})),
+            (0, []),
+        )
+        # A vocabulary that does carry the empty string accepts it.
+        key = (family, "outcome")
+        self.assertEqual(
+            CHECK.check_label_values(
+                {"rules.yml": [("line 1", f'{family}{{outcome=""}}')]},
+                {key: self.vocabularies[key] | {""}},
+                self.inventory,
+            ),
+            (1, []),
+        )
+        self.assertEqual(
+            CHECK.function_literals(
+                'fn label(unset: bool) -> &str { if unset { "" } else { "set" } }',
+                None, "label", "fn label",
+            ),
+            {"", "set"},
+        )
+        self.assertEqual(
+            CHECK.call_argument_literals({"a.rs": 'fn f() { m.set(peer, ""); }'}, "set", 1),
+            {""},
+        )
+
     def test_template_variable_on_a_closed_label_is_skipped_and_counted(self):
         family = "bgp_sighup_reload_outcomes_total"
         for matcher in ('="$outcome"', '="${outcome:regex}"', '=~"${outcome:pipe}"'):
