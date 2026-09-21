@@ -4,7 +4,8 @@
 **Date:** 2026-08-04
 **Decision recorded:** 2026-08-08
 **Amended:** 2026-08-08 (DR1 revised: the external pilot is advisory
-evidence, not a hard tagging gate)
+evidence, not a hard tagging gate); 2026-09-21 (the RFC 8212 posture pair is
+promoted into the frozen config inventory — see the amendment below)
 
 ## Decisions recorded
 
@@ -207,6 +208,35 @@ The actionable backlog seed: criterion → current state → what closes it.
 | E6 security posture | Fuzz/audit/reporting in place | SECURITY.md 1.x supported-versions row; keep artifact build floor |
 | E7 upgrade chain | Chain contiguous through the current anchor | Extend to the v1.0 anchor at tag time (existing process) |
 | DR6 re-bless list | Streaming ingress, history/rollback RPCs outside v1 | Deliberate re-bless review for each, or defer to a 1.x minor |
+
+## Amendment (2026-09-21): the RFC 8212 posture pair joins the config inventory
+
+`Config.config_epoch` and `Global.ebgp_requires_policy` are promoted from
+`explicitly_unstable_roots` (`outside_v1`) into the stable field lists of
+`Config` and `Global` in `docs/reference/v1-stable-surface.json`, and
+`ConfigEpoch` joins the pinned stable types.
+
+Why now: the exclusion dated from the ADR-0119 representation work, when the
+omission default was still moving. That transition is settled — E5 above is
+satisfied, activation shipped, and DR4 fixes the matrix (epoch-less and
+epoch-1 omission permissive forever, epoch-2 omission secure, explicit
+booleans keep their value). Meanwhile every shipped stable-role example and
+every archived upgrade fixture sets `ebgp_requires_policy` because
+`rustbgpd --check --strict` asks for an explicit posture, so a config written
+purely from the promised field set could not pass the project's own strict
+check. Promoting the pair closes that gap.
+
+What is promised: the presence, type, and meaning of both fields, and the
+epoch/omission/explicit-value matrix. The default is contextual — omission
+resolves through `config_epoch` — so it is pinned by the inventory's
+`config.contextual_posture` entry, which names the existing ADR-0119 matrix,
+legacy-advisory, and schema-representation tests; the checker requires each to
+stay live and to keep asserting its cell. No second matrix is added.
+
+What does not change: runtime resolution, the `--check --strict` readiness
+advisory for legacy omission (no iBGP-only exemption), raw-presence retention,
+canonicalization, and the restart-required boundary. The rest of `Global` and
+`Config` is not promoted by implication.
 
 ## Consequences
 

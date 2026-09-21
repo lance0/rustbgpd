@@ -31,6 +31,12 @@ In particular:
 - Unlisted RPCs and CLI commands remain alpha. For an inventoried CLI command,
   only the dimensions named by the inventory are stable; flags and output are
   not stable by implication.
+- The RFC 8212 posture pair, root `config_epoch` and
+  `[global] ebgp_requires_policy`, is inventoried. Its default is contextual:
+  an omitted boolean resolves through the epoch (`false` without an epoch or
+  at epoch 1, `true` at epoch 2), and an explicit value always keeps its stated
+  meaning. The pair's promotion does not promote the rest of `[global]` or the
+  document root.
 
 For operational boundaries and non-goals, see
 [`LIMITATIONS.md`](limitations.md).
