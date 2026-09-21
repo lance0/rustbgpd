@@ -36,7 +36,7 @@ use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
     ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
     ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError,
-    GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed,
+    GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed, RuntimeConfigCoordinatorPermit,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
@@ -58,6 +58,13 @@ use crate::reload::transaction_config_snapshot_accepted;
 
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT: Duration = Duration::from_mins(10);
+/// How long the confirm-window auto-revert may queue for the coordinator past
+/// its deadline before it is reported overdue, and the reminder cadence after
+/// that. It is the request-driven acquire bound: the point at which every
+/// other caller would have given up with "coordinator busy". Every watched
+/// owner is fenced by the 30-minute settlement budget, so an operator sees the
+/// first warning and two reminders before the watchdog resolves such a hold.
+const AUTO_REVERT_OVERDUE_INTERVAL: Duration = CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT;
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS: u32 = 600;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
 const MAX_CONFIRM_ID_CHARS: usize = 128;
@@ -122,6 +129,11 @@ struct PendingConfirmedTransaction {
     /// not repair; the operator resolves it by retrying abort, confirming the
     /// candidate, or restarting (boot revert from the retained journal).
     rollback_failed: Option<proto::ConfigTransactionConfirmationStatus>,
+    /// Overdue warnings issued while the timed-out auto-revert queues for the
+    /// runtime-config coordinator (non-zero = overdue). In-memory only: it is
+    /// cleared once the revert owns the coordinator or the deadline is reset,
+    /// and leaves with the pending entry on confirm/abort/replacement.
+    auto_revert_overdue_warnings: u32,
     /// The exact immutable pre-transaction object retained by disk-backed
     /// authority and reused by live abort/timeout planning.
     prior_snapshot: Arc<AcceptedConfigSnapshot>,
@@ -139,6 +151,16 @@ struct ConfirmedTransactionRecord {
     committed_sections: Vec<String>,
     runtime_snapshot_token: String,
     human_text: String,
+}
+
+/// Identity of the confirm-window timer that fired: the transaction and the
+/// monotonic deadline it was armed with. A rollback-duration reset re-arms the
+/// timer with a new deadline, so a wait carrying the old one cannot mark the
+/// re-armed transaction overdue.
+#[derive(Debug)]
+struct AutoRevertWait {
+    confirm_id: String,
+    deadline: tokio::time::Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -243,6 +265,7 @@ impl ConfigTransactionController {
     async fn execute_owned_operation<T, E, F, Fut>(
         self,
         kind: RuntimeConfigOperationKind,
+        auto_revert: Option<AutoRevertWait>,
         context: OwnedRuntimeConfigRequestContext,
         shutdown_message: &'static str,
         task_lost_message: &'static str,
@@ -261,8 +284,9 @@ impl ConfigTransactionController {
                 // The confirm-window revert has no caller to hand a deadline to
                 // and its one-shot timer is not re-armed: giving up here would
                 // leave the candidate live and still reported as pending. It
-                // keeps waiting for the owner, which is itself bounded.
-                acquire.await?
+                // keeps waiting for the owner, which is itself bounded, and
+                // reports the wait once it is overdue.
+                self.acquire_for_auto_revert(acquire, auto_revert).await?
             } else {
                 tokio::time::timeout(CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT, acquire)
                     .await
@@ -314,6 +338,73 @@ impl ConfigTransactionController {
             Ok(result) => result,
             Err(_) if watched => std::future::pending().await,
             Err(_) => Err(E::task_lost(task_lost_message)),
+        }
+    }
+
+    /// Wait for the coordinator on behalf of the confirm-window auto-revert.
+    /// The single acquire future is retained for the whole wait so the revert
+    /// never gives up its queue position; once the wait runs past
+    /// [`AUTO_REVERT_OVERDUE_INTERVAL`] after the deadline, the transaction is
+    /// marked overdue and a warning repeats at that cadence until the
+    /// coordinator frees. Nothing is journaled while waiting.
+    async fn acquire_for_auto_revert<F>(
+        &self,
+        acquire: F,
+        wait: Option<AutoRevertWait>,
+    ) -> Result<RuntimeConfigCoordinatorPermit, RuntimeConfigCoordinatorClosed>
+    where
+        F: std::future::Future<
+                Output = Result<RuntimeConfigCoordinatorPermit, RuntimeConfigCoordinatorClosed>,
+            >,
+    {
+        let Some(wait) = wait else {
+            return acquire.await;
+        };
+        let mut acquire = std::pin::pin!(acquire);
+        let mut reminders = tokio::time::interval_at(
+            wait.deadline + AUTO_REVERT_OVERDUE_INTERVAL,
+            AUTO_REVERT_OVERDUE_INTERVAL,
+        );
+        reminders.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                permit = &mut acquire => {
+                    self.clear_auto_revert_overdue(&wait).await;
+                    return permit;
+                }
+                _ = reminders.tick() => {
+                    if let Some(due_unix_seconds) = self.mark_auto_revert_overdue(&wait).await {
+                        warn!(
+                            confirm_id = %wait.confirm_id,
+                            due_unix_seconds,
+                            overdue_secs = wait.deadline.elapsed().as_secs(),
+                            "confirmed config transaction auto-revert is overdue: waiting for the runtime-config coordinator"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record an overdue auto-revert wait on the pending transaction the timer
+    /// was armed for; returns its due time, or `None` when that transaction
+    /// is no longer the pending one (resolved, replaced, or re-armed).
+    async fn mark_auto_revert_overdue(&self, wait: &AutoRevertWait) -> Option<u64> {
+        let mut state = self.state.lock().await;
+        let pending = state.pending.as_mut().filter(|pending| {
+            pending.confirm_id == wait.confirm_id && pending.deadline == wait.deadline
+        })?;
+        pending.auto_revert_overdue_warnings =
+            pending.auto_revert_overdue_warnings.saturating_add(1);
+        Some(pending.deadline_unix_seconds)
+    }
+
+    async fn clear_auto_revert_overdue(&self, wait: &AutoRevertWait) {
+        let mut state = self.state.lock().await;
+        if let Some(pending) = state.pending.as_mut().filter(|pending| {
+            pending.confirm_id == wait.confirm_id && pending.deadline == wait.deadline
+        }) {
+            pending.auto_revert_overdue_warnings = 0;
         }
     }
 
@@ -783,6 +874,7 @@ impl ConfigTransactionController {
         let result = self
             .execute_owned_operation(
                 RuntimeConfigOperationKind::GnmiSet,
+                None,
                 context,
                 "gNMI Set rejected: daemon is shutting down",
                 "gNMI Set transaction task did not complete",
@@ -1164,6 +1256,7 @@ impl ConfigTransactionController {
             committed_sections: response.committed_sections.clone(),
             runtime_snapshot_token: response.runtime_snapshot_token.clone(),
             rollback_failed: None,
+            auto_revert_overdue_warnings: 0,
             prior_snapshot,
             v3_files,
         };
@@ -1198,6 +1291,7 @@ impl ConfigTransactionController {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Confirm,
+            None,
             context,
             "config transaction confirm rejected: daemon is shutting down",
             "config transaction confirm task did not complete",
@@ -1273,6 +1367,7 @@ impl ConfigTransactionController {
         let confirm_id = validate_confirm_id(&request.confirm_id)?;
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Abort,
+            None,
             context,
             "config transaction abort rejected: daemon is shutting down",
             "config transaction abort task did not complete",
@@ -1363,6 +1458,7 @@ impl ConfigTransactionController {
             pending.timeout_seconds = timeout_seconds;
             pending.deadline = deadline;
             pending.deadline_unix_seconds = deadline_unix_seconds;
+            pending.auto_revert_overdue_warnings = 0;
         }
         self.spawn_confirm_timeout(confirm_id).await;
         Ok(())
@@ -1385,6 +1481,20 @@ impl ConfigTransactionController {
                 confirmation.status = status.into();
                 return Ok(proto::ConfigTransactionStatusResponse {
                     confirmation: Some(confirmation),
+                    human_text: format!("{human_text}\n"),
+                });
+            }
+            if pending.auto_revert_overdue_warnings > 0 {
+                // Derived from the timer's own deadline; the transaction is
+                // still pending and the rollback has not been attempted.
+                let human_text = format!(
+                    "Confirmed config transaction timed out at unix {}; its automatic rollback \
+                     is waiting for the runtime-config coordinator and runs once the current \
+                     owner finishes. Abort or confirm it to resolve it sooner.",
+                    pending.deadline_unix_seconds
+                );
+                return Ok(proto::ConfigTransactionStatusResponse {
+                    confirmation: Some(pending_confirmation_proto(pending, &human_text)),
                     human_text: format!("{human_text}\n"),
                 });
             }
@@ -1532,6 +1642,7 @@ impl ConfigTransactionController {
         }
         self.execute_owned_operation(
             RuntimeConfigOperationKind::Rollback,
+            None,
             context,
             "config rollback rejected: daemon is shutting down",
             "config rollback task did not complete",
@@ -1689,7 +1800,11 @@ impl ConfigTransactionController {
                 return;
             };
             tokio::time::sleep_until(deadline).await;
-            if let Err(error) = controller.auto_revert(task_confirm_id.clone()).await {
+            let wait = AutoRevertWait {
+                confirm_id: task_confirm_id.clone(),
+                deadline,
+            };
+            if let Err(error) = controller.auto_revert(wait).await {
                 error!(
                     confirm_id = %task_confirm_id,
                     error = %error,
@@ -1711,9 +1826,11 @@ impl ConfigTransactionController {
         }
     }
 
-    async fn auto_revert(self, confirm_id: String) -> Result<(), ConfigTransactionApplyError> {
+    async fn auto_revert(self, wait: AutoRevertWait) -> Result<(), ConfigTransactionApplyError> {
+        let confirm_id = wait.confirm_id.clone();
         self.execute_owned_operation(
             RuntimeConfigOperationKind::AutoRevert,
+            Some(wait),
             OwnedRuntimeConfigRequestContext::detached(),
             "config transaction auto-revert rejected: daemon is shutting down",
             "config transaction auto-revert task did not complete",

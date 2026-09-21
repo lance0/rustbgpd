@@ -791,7 +791,7 @@ runtime mutation. Ordinary unconfirmed Apply remains available.
 |-------|---------|
 | `..._UNSPECIFIED` | Default zero value; not emitted in normal responses. |
 | `..._NONE` | No confirmed transaction is currently tracked. |
-| `..._PENDING` | Applied and awaiting confirmation before the timer expires. |
+| `..._PENDING` | Applied and awaiting confirmation before the timer expires. Also reported while an expired timer's rollback is still waiting for the runtime-config coordinator; `human_text` then names the missed deadline and the wait. |
 | `..._CONFIRMED` | Made permanent by `ConfirmConfigTransaction`. |
 | `..._ABORTED` | Rolled back by `AbortConfigTransaction`. |
 | `..._AUTO_REVERTED` | Timer expired; the pre-commit snapshot was re-applied. |

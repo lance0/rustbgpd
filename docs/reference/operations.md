@@ -322,6 +322,15 @@ terminal outcome (lost persistence acknowledgement, post-persist finalization
 failure, or compound rollback failure) likewise retains the journal and blocks
 all config mutations until a restart boot-reverts.
 
+The timer rollback runs under the same runtime-config coordinator as every
+other config mutation, so it waits for the current owner (a long apply, a
+reload, or a runtime-config read) to finish. It never gives up that wait: the
+status stays `pending`, and once the rollback is ten minutes past its deadline
+the daemon logs a warning (repeated every ten minutes) and `rbgp config status`
+says the automatic rollback is waiting for the coordinator, with the deadline it
+missed. The rollback runs as soon as the owner releases; abort or confirm the
+transaction to resolve it sooner.
+
 Commit-confirmed also survives a daemon restart or crash inside the confirm
 window. Before the candidate commits, the v3 writer publishes three objects in
 order: the exact accepted normalized TOML at
