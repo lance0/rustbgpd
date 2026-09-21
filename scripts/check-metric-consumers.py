@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Require every emitted Prometheus family to have a shipped consumer."""
+"""Require every emitted Prometheus family to have a shipped consumer.
+
+Shipped rules and dashboards must also select only closed-label values that
+the daemon source can still emit.
+"""
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import re
@@ -20,6 +25,7 @@ SETTLEMENT = "crates/api/src/runtime_config_settlement.rs"
 CREDENTIALS = "crates/api/src/credentials.rs"
 DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
 ALERT_RULES = ROOT / "examples/prometheus/rustbgpd-alerts.yml"
+ALERT_RULE_TESTS = ROOT / "examples/prometheus/rustbgpd-alerts_test.yml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 
 # Decision records, evidence receipts, and point-in-time status documents remain
@@ -98,6 +104,112 @@ ALLOWLIST = {
     "process_threads": "generic raw process thread-count diagnostic",
 }
 
+REASON_LABELS = "crates/telemetry/src/reason_labels.rs"
+BLACKHOLE = "src/blackhole.rs"
+BLACKHOLE_LIMITS = "src/blackhole/limits.rs"
+POLICY_EVAL = "crates/policy/src/eval.rs"
+RIB_DISTRIBUTION = "crates/rib/src/manager/distribution/mod.rs"
+SETTLEMENT_FAMILIES = (
+    "bgp_runtime_config_settlement_active",
+    "bgp_runtime_config_settlement_elapsed_seconds",
+    "bgp_runtime_config_settlement_budget_seconds",
+)
+
+# Labels whose values are deployment data or Grafana variables, never a daemon
+# vocabulary. A shipped rule or dashboard selector on any other label needs a
+# row in CLOSED_LABEL_SOURCES, so a new closed-label selector cannot go unchecked.
+OPEN_LABELS = frozenset({"instance", "job", "peer", "vrf"})
+
+# Where the daemon defines each closed label vocabulary that a shipped consumer
+# selects on. Rows point at Rust source and never list values:
+#   ("fn", file, impl type or None, function): string literals in that body
+#   ("call", method, position): literal arguments of production calls to a
+#       telemetry method whose body writes the family
+#   ("buckets", file, const): the f64 bounds the histogram is built with
+CLOSED_LABEL_SOURCES = (
+    (
+        ("bgp_sighup_reload_outcomes_total",),
+        "outcome",
+        (("fn", TELEMETRY, "SighupReloadOutcome", "as_str"),),
+    ),
+    (
+        SETTLEMENT_FAMILIES,
+        "kind",
+        (("fn", SETTLEMENT, "RuntimeConfigOperationKind", "as_str"),),
+    ),
+    (
+        SETTLEMENT_FAMILIES,
+        "phase",
+        (("fn", SETTLEMENT, "RuntimeConfigSettlementPhase", "as_str"),),
+    ),
+    (
+        SETTLEMENT_FAMILIES,
+        "response_attached",
+        (("fn", SETTLEMENT, "SettlementMetricSnapshot", "labels"),),
+    ),
+    (
+        SETTLEMENT_FAMILIES,
+        "fence_reason",
+        (
+            ("fn", SETTLEMENT, "RuntimeConfigFenceReason", "as_str"),
+            # The unfenced default literal lives beside the label assembly.
+            ("fn", SETTLEMENT, "SettlementMetricSnapshot", "labels"),
+        ),
+    ),
+    (
+        ("bgp_blackhole_discard_rejected_total",),
+        "reason",
+        (
+            ("fn", BLACKHOLE, None, "derive_desired"),
+            ("fn", BLACKHOLE_LIMITS, None, "admit"),
+        ),
+    ),
+    (("bgp_rib_prefixes",), "afi_safi", (("call", "set_rib_prefixes", 1),)),
+    (
+        ("bgp_rib_adj_out_prefixes",),
+        "afi_safi",
+        (("call", "set_adj_rib_out_prefixes", 1),),
+    ),
+    (("bgp_rib_loc_prefixes",), "afi_safi", (("call", "set_loc_rib_prefixes", 0),)),
+    (
+        ("bgp_messages_received_total",),
+        "type",
+        (("call", "record_message_received", 1),),
+    ),
+    (("bgp_messages_sent_total",), "type", (("call", "record_message_sent", 1),)),
+    (("evpn_df_role",), "role", (("fn", TELEMETRY, None, "set_evpn_df_role"),)),
+    (
+        ("bgp_rib_policy_transition_actor_poll_duration_seconds",),
+        "le",
+        (("buckets", TELEMETRY, "RIB_ACTOR_DURATION_BUCKETS"),),
+    ),
+    (
+        ("bgp_rib_policy_transition_actor_poll_duration_seconds",),
+        "poll_kind",
+        (("fn", RIB_DISTRIBUTION, "CleanPolicyTransitionPollKind", "as_str"),),
+    ),
+    (
+        ("bgp_update_malformed_total",),
+        "disposition",
+        (("fn", REASON_LABELS, "MalformedUpdateDisposition", "as_str"),),
+    ),
+    (
+        ("bgp_exact_export_rejections_total",),
+        "reason",
+        (("fn", REASON_LABELS, "ExactExportReason", "as_str"),),
+    ),
+    (
+        ("bgp_exact_export_rejections_total",),
+        "family",
+        (("fn", TELEMETRY, None, "exact_export_family_label"),),
+    ),
+    (
+        ("bgp_policy_eval_errors_total",),
+        "kind",
+        (("fn", POLICY_EVAL, "EvalErrorKind", "label"),),
+    ),
+)
+
 METRIC_CONSTRUCTOR = re.compile(
     r"\b(?:Int)?(?:Counter|Gauge)(?:Vec)?::(?:new|with_opts)\s*\("
     r"|\bHistogram(?:Vec)?::(?:new|with_opts)\s*\("
@@ -122,6 +234,12 @@ RULE_METRIC_PREFIX = re.compile(
     r"^(?:bfd|bgp|bmp|evpn|gnmi|jemalloc|mrt|process)_"
 )
 EXTERNAL_RULE_INPUTS = frozenset({"up"})
+SELECTOR = re.compile(r"(?<![$\w:])([A-Za-z_:][A-Za-z0-9_:]*)\s*\{([^{}]*)\}")
+LABEL_MATCHER = re.compile(
+    r'([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"((?:\\.|[^"\\])*)"'
+)
+LITERAL_ALTERNATION = re.compile(r"[A-Za-z0-9_-]+(?:\|[A-Za-z0-9_-]+)*")
+RUST_STRING = re.compile(r"__RUST_STRING_(\d+)__")
 BLOCK_SCALARS = frozenset({">", ">-", ">+", "|", "|-", "|+"})
 INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
@@ -826,6 +944,243 @@ def rule_metric_references(
     return references
 
 
+@functools.cache
+def rust_lexed(source: str) -> tuple[str, list[str]]:
+    """Lex one production source once; label discovery revisits telemetry."""
+    return DASHBOARD_CHECK.rust_lex(source)
+
+
+def production_rust_sources(root: Path = ROOT) -> dict[str, str]:
+    """Read tracked non-test Rust files that can carry a label vocabulary."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "src/*.rs", "crates/*/src/*.rs"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"git ls-files exited {result.returncode}"
+        raise ValueError(f"cannot discover Rust label sources: {detail}")
+    return {
+        relative: production_source((root / relative).read_text(encoding="utf-8"))
+        for relative in result.stdout.split("\0")
+        if relative
+        and not relative.endswith("/tests.rs")
+        and not any(part in relative for part in ("/tests/", "/benches/", "/fuzz/"))
+    }
+
+
+def function_literals(
+    source: str, impl_type: str | None, function: str, description: str
+) -> set[str]:
+    """Return the string literals in one uniquely named function body."""
+    syntax, strings = rust_lexed(production_source(source))
+    if impl_type is not None:
+        syntax = braced_body(
+            syntax, rf"\bimpl\s+{re.escape(impl_type)}\s*\{{", f"impl {impl_type}"
+        )
+    body = braced_body(
+        syntax, rf"\bfn\s+{re.escape(function)}\s*\([^{{}}]*\{{", description
+    )
+    return {strings[int(index)] for index in RUST_STRING.findall(body)}
+
+
+def call_argument_literals(
+    sources: dict[str, str], method: str, position: int
+) -> set[str]:
+    """Return literal arguments at one position of every production method call."""
+    literals: set[str] = set()
+    for relative, source in sources.items():
+        if method not in source:
+            continue
+        if re.search(r"""b?'\\?"'""", source):
+            raise ValueError(
+                f"{relative}: quote character literal defeats call-site label discovery"
+            )
+        syntax, strings = rust_lexed(source)
+        for match in re.finditer(rf"\.\s*{re.escape(method)}\s*\(", syntax):
+            arguments = [""]
+            depth = 1
+            for character in syntax[match.end() :]:
+                depth += character in "([{"
+                depth -= character in ")]}"
+                if not depth:
+                    break
+                if character == "," and depth == 1:
+                    arguments.append("")
+                else:
+                    arguments[-1] += character
+            if position < len(arguments):
+                literal = RUST_STRING.fullmatch(arguments[position].strip())
+                if literal is not None:
+                    literals.add(strings[int(literal.group(1))])
+    return literals
+
+
+def family_constructor(source: str, family: str) -> tuple[str, str]:
+    """Return the variable and lexed constructor statement defining a family."""
+    syntax, strings = rust_lexed(production_source(source))
+    for match in STATIC_DEFINITION.finditer(syntax):
+        if strings[int(match.group(3))] == family:
+            return match.group(1), syntax[match.start() : syntax.find(";", match.end())]
+    raise ValueError(f"no telemetry constructor for {family}")
+
+
+def closed_label_vocabularies(
+    sources: dict[str, str], inventory: dict[str, str]
+) -> dict[tuple[str, str], set[str]]:
+    """Read every closed label vocabulary from the Rust source that defines it."""
+    vocabularies: dict[tuple[str, str], set[str]] = {}
+    for families, label, label_sources in CLOSED_LABEL_SOURCES:
+        for family in families:
+            where = f"closed label source {family}{{{label}}}"
+            if family not in inventory:
+                raise ValueError(f"{where} names a family the daemon does not emit")
+            if (family, label) in vocabularies:
+                raise ValueError(f"{where} is listed more than once")
+            values: set[str] = set()
+            for kind, *location in label_sources:
+                if kind != "call" and location[0] not in sources:
+                    raise ValueError(f"{where}: {location[0]} is not a production source")
+                if kind == "fn":
+                    relative, impl_type, function = location
+                    owner = f"{impl_type}::" if impl_type else ""
+                    found = function_literals(
+                        sources[relative], impl_type, function,
+                        f"fn {owner}{function} in {relative}",
+                    )
+                elif kind == "call":
+                    method, position = location
+                    variable, _ = family_constructor(sources[TELEMETRY], family)
+                    writer = braced_body(
+                        rust_lexed(sources[TELEMETRY])[0],
+                        rf"\bfn\s+{re.escape(method)}\s*\([^{{}}]*\{{",
+                        f"telemetry method {method}",
+                    )
+                    if re.search(rf"\.\s*{re.escape(variable)}\b", writer) is None:
+                        raise ValueError(f"{where}: {method} does not write {family}")
+                    found = call_argument_literals(sources, method, position)
+                else:
+                    relative, constant = location
+                    _, statement = family_constructor(sources[relative], family)
+                    bounds = re.search(
+                        rf"\bconst\s+{re.escape(constant)}\s*:\s*\[\s*f64\s*;[^\]]*\]"
+                        r"\s*=\s*\[([^\]]*)\]",
+                        rust_lexed(sources[relative])[0],
+                    )
+                    if (
+                        label != "le"
+                        or inventory[family] != "histogram"
+                        or bounds is None
+                        or re.search(rf"\b{re.escape(constant)}\b", statement) is None
+                    ):
+                        raise ValueError(f"{where}: {constant} does not bound {family}")
+                    found = {"+Inf", *re.findall(r"[0-9][0-9_.eE+-]*", bounds.group(1))}
+                if not found:
+                    raise ValueError(f"{where} yields no values from {location}")
+                values |= found
+            vocabularies[(family, label)] = values
+    return vocabularies
+
+
+def label_value_known(label: str, value: str, vocabulary: set[str]) -> bool:
+    if label != "le":
+        return value in vocabulary
+    try:
+        return float(value) in {float(bound.replace("_", "")) for bound in vocabulary}
+    except ValueError:
+        return False
+
+
+def check_label_values(
+    consumers: dict[str, list[tuple[str, str]]],
+    vocabularies: dict[tuple[str, str], set[str]],
+    inventory: dict[str, str],
+    lenient: frozenset[str] = frozenset(),
+) -> tuple[int, list[str]]:
+    """Require closed-label selector values to be ones the daemon can emit.
+
+    ``consumers`` maps a shipped file to its ``(context, PromQL text)`` pairs.
+    Files in ``lenient`` carry synthetic series on every label, so only their
+    mapped labels are checked; elsewhere an unmapped closed label is an error.
+    Returns the number of values checked and the selectors skipped as too
+    complex to enumerate.
+    """
+    failures: list[str] = []
+    skipped: list[str] = []
+    used: set[tuple[str, str]] = set()
+    checked = 0
+    for name, expressions in consumers.items():
+        for context, expression in expressions:
+            for token, matchers in SELECTOR.findall(expression):
+                family = normalize_metric(token, inventory)
+                if family is None:
+                    continue
+                for label, operator, value in LABEL_MATCHER.findall(matchers):
+                    key = (family, label)
+                    where = f"{name} ({context}): {token}{{{label}{operator}\"{value}\"}}"
+                    if key not in vocabularies:
+                        if label not in OPEN_LABELS and name not in lenient:
+                            failures.append(f"{where} selects a label with no closed label source")
+                        continue
+                    used.add(key)
+                    if operator in ("=", "!="):
+                        values = [value] if value else []
+                    elif LITERAL_ALTERNATION.fullmatch(value):
+                        values = value.split("|")
+                    else:
+                        skipped.append(where)
+                        continue
+                    for candidate in values:
+                        checked += 1
+                        if not label_value_known(label, candidate, vocabularies[key]):
+                            failures.append(
+                                f"{where} names value \"{candidate}\" the daemon cannot emit"
+                            )
+    unused = sorted(f"{family}{{{label}}}" for family, label in set(vocabularies) - used)
+    if unused:
+        failures.append(f"closed label sources without a shipped selector: {unused}")
+    if failures:
+        raise ValueError("label selector check: " + "; ".join(failures))
+    return checked, skipped
+
+
+def label_value_consumers() -> dict[str, list[tuple[str, str]]]:
+    """Collect PromQL text from the shipped rules, their tests, and dashboards."""
+    consumers = {
+        str(ALERT_RULES.relative_to(ROOT)): [
+            (
+                f"line {line_number}",
+                "\n".join(
+                    strip_yaml_inline_comment(line) for line in expression.splitlines()
+                ),
+            )
+            for line_number, expression in rule_expressions(
+                ALERT_RULES.read_text(encoding="utf-8")
+            )
+        ],
+        str(ALERT_RULE_TESTS.relative_to(ROOT)): [
+            (f"line {line_number}", strip_yaml_inline_comment(line))
+            for line_number, line in enumerate(
+                ALERT_RULE_TESTS.read_text(encoding="utf-8").splitlines(), 1
+            )
+        ],
+    }
+    for path in (DASHBOARD, DASHBOARD_CHECK.EVPN_DASHBOARD):
+        dashboard = json.loads(path.read_text(encoding="utf-8"))
+        consumers[str(path.relative_to(ROOT))] = [
+            (f"${variable.get('name')}", str(variable.get("query")))
+            for variable in dashboard.get("templating", {}).get("list", [])
+            if variable.get("type") == "query"
+        ] + [
+            (f"{panel.get('title')}/{target.get('refId')}", str(target.get("expr")))
+            for panel in DASHBOARD_CHECK.all_panels(dashboard.get("panels", []))
+            for target in panel.get("targets", [])
+        ]
+    return consumers
+
+
 def public_document_references(
     documents: dict[str, str], inventory: dict[str, str]
 ) -> dict[str, list[str]]:
@@ -1002,6 +1357,12 @@ def main() -> int:
         doc_refs = normative_document_references(public_doc_refs)
         consumers = dashboard_refs | rule_refs | doc_refs
         validate_coverage(inventory, consumers)
+        label_values, skipped_selectors = check_label_values(
+            label_value_consumers(),
+            closed_label_vocabularies(production_rust_sources(), inventory),
+            inventory,
+            lenient=frozenset({str(ALERT_RULE_TESTS.relative_to(ROOT))}),
+        )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"metric consumer check failed: {error}", file=sys.stderr)
         return 1
@@ -1011,8 +1372,12 @@ def main() -> int:
         f"{len(inventory)} emitted families; "
         f"{len(dashboard_refs)} dashboard, {len(rule_refs)} rules, "
         f"{len(doc_refs)} normative-doc families; {len(consumers)} consumed, "
-        f"{len(ALLOWLIST)} justified raw diagnostics"
+        f"{len(ALLOWLIST)} justified raw diagnostics; "
+        f"{label_values} closed-label selector values emitted by the daemon, "
+        f"{len(skipped_selectors)} complex selectors skipped"
     )
+    for selector in skipped_selectors:
+        print(f"skipped complex label selector: {selector}")
     return 0
 
 
