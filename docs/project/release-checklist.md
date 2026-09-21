@@ -779,7 +779,7 @@ Before rolling any versions:
    - Move `docs/reference/v1-stable-surface.json` `baseline_release` with
      the workspace version. For a new release line, append the consecutive
      upgrade exercise using the previous release's immutable fixture and
-     parser test. Keep the README baseline aligned; preserve older exercises.
+     the shared `v1_stable_archived_fixtures_parse` test. Keep the README baseline aligned; preserve older exercises.
    - Update the workspace release and target changelog section in
      `scripts/check_metric_release_notes.py` and its companion test. The
      baseline stays on the previous release here; it rolls to this tag in
@@ -894,8 +894,8 @@ After the tag publishes:
 
 13. **Freeze the released route-server fixture.** Copy the tagged
     `examples/route-server/config.toml` and `hygiene.rpol` into a new
-    `route-server` directory for the release under `tests/fixtures/v1-stable/`,
-    and add the matching immutable parse test in `src/config/tests/mod.rs`.
+    `route-server` directory for the release under `tests/fixtures/v1-stable/`.
+    Nothing else is needed: the existing fixture parse test walks that root.
     The next release's consecutive upgrade exercise consumes this fixture.
 14. **Roll the metric release-note baseline** in the same post-release commit
     as step 13, immediately after the tag. Every release rolls it, patch

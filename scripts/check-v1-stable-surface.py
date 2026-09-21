@@ -62,6 +62,15 @@ EXPECTED_EFFECTIVE_FAMILY_CASES = (
     '"neighbor_overrides_group",overridden.transport_config.peer.families,'
     '&[(Afi::Ipv4,Safi::Unicast)]',
 )
+FIXTURES_ROOT = "tests/fixtures/v1-stable"
+FIXTURE_VALIDATION_LINKAGE = (
+    (f'"{INVENTORY_PATH.relative_to(ROOT)}"', "read the stable-surface inventory"),
+    ('["fixture_directory"]', "take each exercise's fixture_directory"),
+    (f'"{FIXTURES_ROOT}"', "walk the archived fixtures root"),
+    ("toml::from_str", "parse config.toml with the current parser"),
+    (".load_rpol_files(", "load the fixture's rpol files"),
+    (".validate()", "validate the loaded config"),
+)
 EFFECTIVE_DEFAULT_ASSERTION_MACRO = "assert_v1_effective_default"
 EFFECTIVE_DEFAULT_ASSERTION_RE = re.compile(
     rf'\b{EFFECTIVE_DEFAULT_ASSERTION_MACRO}!\(\s*"([^"\\]+)"\s*,\s*'
@@ -894,6 +903,35 @@ def check_release_line_selftests() -> None:
         )
 
 
+def check_fixture_validation_linkage(test_region: str, test: str) -> None:
+    for needle, duty in FIXTURE_VALIDATION_LINKAGE:
+        if needle not in test_region:
+            fail(f"upgrade validation test {test!r} does not {duty}")
+
+
+def check_fixture_validation_test(source_name: str, qualified_test: str) -> None:
+    """One live test must parse every registered and every on-disk fixture."""
+    source_path = ROOT / safe_relative_path(source_name, "upgrade validation source")
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read upgrade validation source {source_name}: {error}")
+    test_region = named_rust_test_region(source, qualified_test.rsplit("::", 1)[-1])
+    if test_region is None:
+        fail(
+            f"upgrade validation test {qualified_test!r} disappeared from {source_name}"
+        )
+    check_fixture_validation_linkage(test_region, qualified_test)
+    for needle, duty in FIXTURE_VALIDATION_LINKAGE:
+        expect_checker_failure(
+            lambda needle=needle: check_fixture_validation_linkage(
+                test_region.replace(needle, ""), qualified_test
+            ),
+            f"does not {duty}",
+            f"fixture validation test that does not {duty}",
+        )
+
+
 def check_upgrade_exercises(inventory: dict) -> None:
     baseline, baseline_version = workspace_release()
     if inventory.get("baseline_release") != baseline:
@@ -905,9 +943,7 @@ def check_upgrade_exercises(inventory: dict) -> None:
     if not exercises:
         fail("at least one consecutive-release upgrade exercise is required")
     transitions: list[ReleaseTransition] = []
-    validation_tests = [exercise["validation_test"] for exercise in exercises]
-    if len(validation_tests) != len(set(validation_tests)):
-        fail("upgrade exercises must use unique validation_test ids")
+    validation_tests: set[tuple[str, str]] = set()
     for exercise in exercises:
         from_version = parse_release_tag(exercise["from_release"])
         to_version = parse_release_tag(exercise["to_release"])
@@ -986,25 +1022,10 @@ def check_upgrade_exercises(inventory: dict) -> None:
                 "consecutive-release migration exercise before updating the digest"
             )
 
-        validation_source = ROOT / safe_relative_path(
-            exercise["validation_source"], "upgrade validation source"
-        )
-        try:
-            validation_text = validation_source.read_text()
-        except OSError as error:
-            fail(f"cannot read upgrade validation source {exercise['validation_source']}: {error}")
-        validation_test = exercise["validation_test"].rsplit("::", 1)[-1]
-        test_region = named_rust_test_region(validation_text, validation_test)
-        if test_region is None:
-            fail(
-                f"upgrade validation test {exercise['validation_test']!r} disappeared from "
-                f"{exercise['validation_source']}"
-            )
-        if exercise["fixture_directory"] not in test_region:
-            fail(
-                f"upgrade validation test {exercise['validation_test']!r} does not reference "
-                f"the immutable fixture directory"
-            )
+        validation_tests.add((exercise["validation_source"], exercise["validation_test"]))
+
+    for validation_source, validation_test in sorted(validation_tests):
+        check_fixture_validation_test(validation_source, validation_test)
 
     if error := release_line_chain_error(transitions, baseline_version):
         fail(error)

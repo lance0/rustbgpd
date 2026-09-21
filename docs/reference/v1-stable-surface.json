@@ -320,7 +320,7 @@
       ],
       "semantic_toml_sha256": "064865a2dd6cf266d674a62f2f1dec70bf08b7cc01e81e742878a44440621626",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_50_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -336,7 +336,7 @@
       ],
       "semantic_toml_sha256": "064865a2dd6cf266d674a62f2f1dec70bf08b7cc01e81e742878a44440621626",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_51_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -350,7 +350,7 @@
       ],
       "semantic_toml_sha256": "ee265b2761539f3c88c0c0d449c9a44c8350cda99c742b14227cc0b7130beda9",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_60_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -364,7 +364,7 @@
       ],
       "semantic_toml_sha256": "450d3b3e844bb42d4dfe0974efbfafa5f2098e3c15547a94bb7fe70b7ad82704",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_61_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -378,7 +378,7 @@
       ],
       "semantic_toml_sha256": "450d3b3e844bb42d4dfe0974efbfafa5f2098e3c15547a94bb7fe70b7ad82704",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_62_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -392,7 +392,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_63_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -406,7 +406,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_64_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -420,7 +420,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_65_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -434,7 +434,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_66_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -448,7 +448,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_67_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -462,7 +462,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_68_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -476,7 +476,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_69_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     },
     {
@@ -490,7 +490,7 @@
       ],
       "semantic_toml_sha256": "c95411fc1f1b08f3e9370ea8aaa6ac405d8302fe42cddb6038c559c5ba0a5927",
       "validation_source": "src/config/tests/mod.rs",
-      "validation_test": "config::tests::v1_stable_v0_70_route_server_fixture_parses",
+      "validation_test": "config::tests::v1_stable_archived_fixtures_parse",
       "result": "accepted_without_config_migration"
     }
   ]

@@ -219,8 +219,10 @@ commit-confirmed rollback must use the transaction path.
 The first pinned exercise archives the complete v0.50.0 route-server example
 (`config.toml` plus its referenced `hygiene.rpol`) under
 `tests/fixtures/v1-stable/v0.50.0/`. The checker verifies every immutable byte
-digest against the v0.50.0 git tag, and a dedicated current-parser test loads,
-compiles, and validates that archived fixture under v0.51.0/current code. A
+digest against the v0.50.0 git tag, and one current-parser test
+(`v1_stable_archived_fixtures_parse`) loads, compiles, and validates every
+archived fixture directory under current code: each directory an exercise
+registers, plus everything else under `tests/fixtures/v1-stable/`. A
 version-bump PR therefore does not require the not-yet-created target tag;
 historical exercises require both release tags. The
 inventory records the source/target releases, file and semantic TOML digests,
@@ -240,8 +242,8 @@ anchor. An unannotated gap remains an error, and the annotation is rejected on
 an exercise that is actually between consecutive release lines.
 
 The accepted source/target pairs and archived fixture paths are listed in
-[`v1-stable-surface.json`](v1-stable-surface.json). Run the fixture parser tests
-below as a set. Staging a future source fixture alone does not advance the
+[`v1-stable-surface.json`](v1-stable-surface.json). The fixture parser test
+below covers them as a set. Staging a future source fixture alone does not advance the
 accepted release chain; the workspace version and inventory move together.
 
 ## Release gate
@@ -251,7 +253,7 @@ Run:
 ```bash
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
-cargo test -p rustbgpd route_server_fixture_parses
+cargo test -p rustbgpd --bin rustbgpd v1_stable_archived_fixtures_parse
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 
