@@ -78,6 +78,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coordinator so it never reports a table set that an in-flight mutation may
   yet roll back. The same deadline covers the table read that begins
   `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction.
+- Config transaction confirm, abort and rollback, and gNMI `Set`, no longer
+  wait without limit for the runtime-config coordinator. After ten minutes
+  they fail before taking ownership and without any runtime or persisted
+  effect, as `ApplyConfigTransaction` already did: `DEADLINE_EXCEEDED` for the
+  config transaction RPCs and `UNAVAILABLE` for gNMI `Set`. The automatic
+  revert of an unconfirmed transaction deliberately keeps waiting, so a busy
+  coordinator delays the revert instead of cancelling it.
 
 ## [0.71.0] — 2026-09-20
 

@@ -519,6 +519,9 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         (main, "move || settlement_wait.wait_until_idle()", 0),
         (main, "move || settlement_wait.wait_until_idle_or_fail_stop()", 1),
         (transaction, "self.deps.lock.acquire()", 2),
+        (transaction, ".acquire().await", 0),
+        (transaction, "CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,", 2),
+        (transaction, "acquire.await?", 1),
         (transaction, ".execute_owned_operation(", 5),
         (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
         (settlement, "watchdog.register_owned(", 1),
@@ -536,15 +539,30 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
     for (source, shape, count) in inventory {
         assert_eq!(source.matches(shape).count(), count, "{shape}");
     }
-    for kind in ["GnmiSet", "Confirm", "Abort", "Rollback", "AutoRevert"] {
+    // AutoRevert appears twice: its registration, and the one deliberate
+    // exemption from the bounded coordinator acquire.
+    for (kind, count) in [
+        ("GnmiSet", 1),
+        ("Confirm", 1),
+        ("Abort", 1),
+        ("Rollback", 1),
+        ("AutoRevert", 2),
+    ] {
         assert_eq!(
             transaction
                 .matches(&format!("RuntimeConfigOperationKind::{kind}"))
                 .count(),
-            1,
+            count,
             "settlement registration inventory for {kind}"
         );
     }
+    assert_eq!(
+        transaction
+            .matches("if kind == RuntimeConfigOperationKind::AutoRevert {")
+            .count(),
+        1,
+        "only auto-revert may wait for the coordinator without a bound"
+    );
     assert!(!settlement.contains("set_response_attached"));
     assert!(!server.contains("ConfigTransactionResponseAttachment"));
     assert!(!transaction.contains("response_attached: bool"));
@@ -2415,6 +2433,145 @@ async fn apply_times_out_before_coordinator_ownership_without_mutation() {
     assert!(fib_rx.try_recv().is_err());
     assert!(rib_rx.try_recv().is_err());
     assert!(config_rx.try_recv().is_err());
+}
+
+const OWNED_OPERATION_COORDINATOR_BUSY: &str = "config operation timed out waiting for the runtime \
+     config coordinator; coordinator ownership was not acquired and the operation did not begin";
+
+/// Drive `operation` against a held coordinator and return its error once the
+/// ten-minute acquire bound has elapsed. The wall-clock oracle intentionally
+/// does not use the implementation constant.
+async fn owned_operation_error_at_coordinator_deadline<T, E>(
+    name: &str,
+    operation: impl std::future::Future<Output = Result<T, E>> + Send + 'static,
+) -> E
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let operation = tokio::spawn(operation);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !operation.is_finished(),
+        "{name} gave up before ten minutes"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), operation)
+        .await
+        .unwrap_or_else(|_| panic!("{name} must not wait for the coordinator without a bound"))
+        .unwrap()
+        .err()
+        .unwrap_or_else(|| panic!("{name} acquired a held coordinator"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn request_driven_owned_operations_time_out_before_coordinator_ownership() {
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let history = tempfile::tempdir().unwrap();
+    let controller = ConfigTransactionController::new(
+        FibTableControlDeps {
+            config_history_dir: Some(history.path().to_path_buf()),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+    );
+    let _owner = controller.deps.lock.acquire().await.expect("coordinator");
+    let busy =
+        || ConfigTransactionApplyError::DeadlineExceeded(OWNED_OPERATION_COORDINATOR_BUSY.into());
+
+    let confirm = controller
+        .clone()
+        .confirm(proto::ConfirmConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        });
+    assert_eq!(
+        owned_operation_error_at_coordinator_deadline("Confirm", confirm).await,
+        busy()
+    );
+    let abort = controller
+        .clone()
+        .abort(proto::AbortConfigTransactionRequest {
+            confirm_id: "deploy-1".to_string(),
+        });
+    assert_eq!(
+        owned_operation_error_at_coordinator_deadline("Abort", abort).await,
+        busy()
+    );
+    let rollback = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            expected_runtime_snapshot_token: String::new(),
+            client_request_id: String::new(),
+            comment: String::new(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        });
+    assert_eq!(
+        owned_operation_error_at_coordinator_deadline("Rollback", rollback).await,
+        busy()
+    );
+    // gNMI Set has no deadline status in its vocabulary: same text, UNAVAILABLE.
+    let gnmi_set = controller
+        .clone()
+        .apply_gnmi_set(gnmi_set_commit_confirm("deploy-1"));
+    assert!(matches!(
+        owned_operation_error_at_coordinator_deadline("gNMI Set", gnmi_set).await,
+        GnmiSetError::Unavailable(message) if message == OWNED_OPERATION_COORDINATOR_BUSY
+    ));
+
+    assert!(peer_rx.try_recv().is_err());
+    assert!(config_rx.try_recv().is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn auto_revert_outwaits_the_acquire_bound_and_reverts_once_the_coordinator_frees() {
+    let previous_toml = base_toml("");
+    let (controller, snapshot_toml, ack_task) =
+        confirmed_dynamic_controller(previous_toml.clone(), dynamic_candidate_toml()).await;
+    {
+        let mut state = controller.state.lock().await;
+        state.timer.take().expect("confirm timer").abort();
+        state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
+    }
+    let owner = controller.deps.lock.acquire().await.expect("coordinator");
+    let revert = tokio::spawn(controller.clone().auto_revert("deploy-1".to_string()));
+    tokio::task::yield_now().await;
+
+    // Past the request-driven bound the safety net is still queued, and the
+    // transaction is still fenced and truthfully pending.
+    tokio::time::advance(Duration::from_secs(3_600)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !revert.is_finished(),
+        "auto-revert abandoned the pending transaction"
+    );
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect_err("an unreverted transaction must keep the mutation fence closed");
+
+    drop(owner);
+    tokio::time::timeout(Duration::from_secs(1), revert)
+        .await
+        .expect("auto-revert must run once the coordinator frees")
+        .unwrap()
+        .expect("auto-revert must succeed");
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+    );
+    assert_config_transaction_lifecycle_metric(&controller, "auto_revert", "success", 1.0);
+    assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect("a completed auto-revert reopens config admission");
+    ack_task.abort();
 }
 
 #[tokio::test(start_paused = true)]
