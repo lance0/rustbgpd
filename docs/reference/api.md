@@ -1888,9 +1888,12 @@ revalidation preserves the last completed value and reason, with
 result does not mean the candidate currently owns the selected entry.
 
 Infeasibility reasons are `missing_destination`, `nonzero_destination_offset`,
-`no_covering_unicast`, `missing_as_path`, `unsupported_as_path`,
-`originator_mismatch`, `leftmost_as_mismatch`, `unknown_neighbor_as`, and
-`conflicting_more_specific`. An empty reason means no completed failure.
+`no_covering_unicast`, `local_covering_unicast`, `missing_as_path`,
+`unsupported_as_path`, `originator_mismatch`, `leftmost_as_mismatch`,
+`unknown_neighbor_as`, and `conflicting_more_specific`. An empty reason means
+no completed failure. `local_covering_unicast` names an eBGP rule whose
+best-match cover is a locally injected unicast route without an AS_PATH, which
+cannot supply the leftmost AS that RFC 9117 section 4.2 requires.
 Received means retained after import policy, not a historical record of every
 UPDATE. See [the feasibility decision](../adr/0135-flowspec-feasibility.md)
 for opt-in validation and convergence semantics.

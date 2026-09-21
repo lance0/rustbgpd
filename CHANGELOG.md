@@ -29,6 +29,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
+  arrives again unchanged (route refresh, graceful-restart re-sync, periodic
+  re-send) now stays selected instead of being withdrawn from downstream peers
+  and re-announced after revalidation. Only a changed payload is revalidated.
+- The received FlowSpec view reports `local_covering_unicast` for an eBGP rule
+  whose best-match cover is a locally injected unicast route without an
+  AS_PATH, instead of `missing_as_path`; the infeasible verdict is unchanged.
+  With validation enabled and no received rules retained, unicast changes no
+  longer probe the FlowSpec dependency index.
 - Advertised-route explain JSON now includes each ORR candidate's inbound
   `path_id`, distinguishing Add-Path candidates that share a peer and next hop.
   The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;

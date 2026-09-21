@@ -29,6 +29,7 @@ pub(crate) enum InfeasibleReason {
     MissingDestination,
     NonzeroDestinationOffset,
     NoCoveringUnicast,
+    LocalCoveringUnicast,
     MissingAsPath,
     UnsupportedAsPath,
     OriginatorMismatch,
@@ -43,6 +44,7 @@ impl InfeasibleReason {
             Self::MissingDestination => "missing_destination",
             Self::NonzeroDestinationOffset => "nonzero_destination_offset",
             Self::NoCoveringUnicast => "no_covering_unicast",
+            Self::LocalCoveringUnicast => "local_covering_unicast",
             Self::MissingAsPath => "missing_as_path",
             Self::UnsupportedAsPath => "unsupported_as_path",
             Self::OriginatorMismatch => "originator_mismatch",
@@ -156,6 +158,10 @@ fn prepare(
         let flow_as = flow_head.ok_or(InfeasibleReason::UnknownNeighborAs)?;
         // Section 4.2 requires a real leftmost AS_SEQUENCE AS, so a local
         // covering route's synthetic local-AS identity cannot satisfy it.
+        // Name that cover: the missing AS_PATH is the cover's, not the rule's.
+        if best.origin_type == RouteOrigin::Local && best.as_path().is_none() {
+            return Err(InfeasibleReason::LocalCoveringUnicast);
+        }
         let best_as = sequence_head(best.as_path())?.ok_or(InfeasibleReason::UnknownNeighborAs)?;
         if flow_as != best_as {
             return Err(InfeasibleReason::LeftmostAsMismatch);
@@ -330,6 +336,17 @@ mod tests {
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::MissingAsPath)
+        );
+    }
+
+    #[test]
+    fn ebgp_rule_covered_by_local_injection_names_the_local_cover() {
+        let (flow, mut cover) = fixture();
+        cover.origin_type = RouteOrigin::Local;
+        cover.attributes = Arc::new(vec![]);
+        assert_eq!(
+            evaluate(&flow, Some(&cover), &[]),
+            invalid(InfeasibleReason::LocalCoveringUnicast)
         );
     }
 
