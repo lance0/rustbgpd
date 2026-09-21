@@ -111,7 +111,6 @@ struct ConfirmedState {
 #[derive(Clone)]
 struct PendingConfirmedTransaction {
     confirm_id: String,
-    rollback_expected_runtime_snapshot_token: String,
     timeout_seconds: u32,
     deadline: tokio::time::Instant,
     deadline_unix_seconds: u64,
@@ -358,7 +357,7 @@ impl ConfigTransactionController {
     async fn plan_preloaded_snapshot(
         &self,
         snapshot: Arc<AcceptedConfigSnapshot>,
-        expected_runtime_snapshot_token: String,
+        expected_runtime_snapshot_token: Option<String>,
     ) -> Result<PlannedTransactionConfig, ConfigTransactionApplyError> {
         let (barrier_tx, barrier_rx) = oneshot::channel();
         self.deps
@@ -384,7 +383,7 @@ impl ConfigTransactionController {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(InternalCommand::PlanAcceptedTransactionConfig {
             snapshot,
-            expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
+            expected_runtime_snapshot_token,
             reply: reply_tx,
         })
         .await
@@ -456,7 +455,7 @@ impl ConfigTransactionController {
                 let plan = self
                     .plan_preloaded_snapshot(
                         snapshot.clone(),
-                        request.expected_runtime_snapshot_token.clone(),
+                        Some(request.expected_runtime_snapshot_token.clone()),
                     )
                     .await?;
                 Ok((normalized_toml, Some(plan)))
@@ -1131,7 +1130,6 @@ impl ConfigTransactionController {
             .map_or(0, |duration| duration.as_secs());
         let pending = PendingConfirmedTransaction {
             confirm_id: confirmed.confirm_id.clone(),
-            rollback_expected_runtime_snapshot_token: response.runtime_snapshot_token.clone(),
             timeout_seconds: confirmed.timeout_seconds,
             deadline,
             deadline_unix_seconds,
@@ -1800,11 +1798,17 @@ impl ConfigTransactionController {
         pending: &PendingConfirmedTransaction,
         progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        // No expected runtime snapshot token: that token is a caller's
+        // Plan→Apply change detector and hashes the live update-group
+        // membership alongside the config, so any session going up or down
+        // inside the confirm window moves it. This rollback is not a caller
+        // with a stale view. It restores the snapshot this transaction
+        // recorded, under the runtime-config coordinator, while the pending
+        // fence refuses every other config writer — nothing the token could
+        // detect here is a reason to keep the unconfirmed candidate running.
         let request = proto::ApplyConfigTransactionRequest {
             candidate_toml: pending.prior_snapshot.normalized_toml().to_string(),
-            expected_runtime_snapshot_token: pending
-                .rollback_expected_runtime_snapshot_token
-                .clone(),
+            expected_runtime_snapshot_token: String::new(),
             client_request_id: format!("confirmed-rollback:{}", pending.confirm_id),
             comment: "confirmed transaction rollback".to_string(),
             confirm_id: String::new(),
@@ -1812,10 +1816,7 @@ impl ConfigTransactionController {
         };
         let prior = &pending.prior_snapshot;
         let plan = self
-            .plan_preloaded_snapshot(
-                Arc::clone(prior),
-                pending.rollback_expected_runtime_snapshot_token.clone(),
-            )
+            .plan_preloaded_snapshot(Arc::clone(prior), None)
             .await?;
         let peer_mgr_internal_tx = self.peer_mgr_internal_tx.as_ref().ok_or_else(|| {
             ConfigTransactionApplyError::Unavailable(
