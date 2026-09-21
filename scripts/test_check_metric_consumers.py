@@ -784,15 +784,104 @@ groups:
                 self.assertEqual(len(skipped), 1)
                 self.assertIn(pattern, skipped[0])
 
-    def test_histogram_bound_selectors_compare_numerically(self):
+    def test_histogram_bound_selectors_match_the_emitted_spelling(self):
         family = "bgp_rib_policy_transition_actor_poll_duration_seconds"
-        for bound in ("0.2", "0.200", "1", "+Inf"):
+        self.assertEqual(
+            self.vocabularies[(family, "le")],
+            {
+                "0.001", "0.005", "0.01", "0.025", "0.05", "0.1", "0.2", "0.5",
+                "1", "2.5", "5", "10", "30", "+Inf",
+            },
+        )
+        for bound in ("0.2", "0.01", "1", "30", "+Inf"):
             with self.subTest(bound=bound):
                 self.assertEqual(
                     self.check_selector(f'{family}_bucket{{le="{bound}"}}'), (1, [])
                 )
-        with self.assertRaisesRegex(ValueError, 'names value "0.3" the daemon cannot'):
-            self.check_selector(f'{family}_bucket{{le="0.3"}}')
+        # PromQL equality is an exact string match on the emitted label, so a
+        # numerically equal spelling selects nothing.
+        for bound in ("0.200", "0.010", "1.0", "30.0", "Inf", "0.3"):
+            with self.subTest(bound=bound), self.assertRaisesRegex(
+                ValueError, f'names value "{bound}" the daemon cannot emit'
+            ):
+                self.check_selector(f'{family}_bucket{{le="{bound}"}}')
+
+    def test_histogram_bound_rendering_normalizes_only_the_source_literal(self):
+        for literal, emitted in (
+            ("0.200", "0.2"), ("1.0", "1"), ("0.005", "0.005"), ("30.0", "30"),
+            ("2.5", "2.5"), ("1_000.0", "1000"), ("10", "10"), ("1e3", "1000"),
+        ):
+            with self.subTest(literal=literal):
+                self.assertEqual(CHECK.emitted_bucket_label(literal), emitted)
+        for literal in ("0.00001", "1e20", "-1.0", "f64::INFINITY"):
+            with self.subTest(literal=literal), self.assertRaisesRegex(
+                ValueError, "cannot render histogram bound"
+            ):
+                CHECK.emitted_bucket_label(literal)
+
+    def test_label_assembly_body_yields_only_the_mapped_label_values(self):
+        family = "bgp_runtime_config_settlement_active"
+        fence_reasons = {
+            "none", "budget_expired", "executor_lost", "known_divergence",
+            "publication_ambiguous", "acknowledgement_lost",
+        }
+        self.assertEqual(self.vocabularies[(family, "fence_reason")], fence_reasons)
+        self.assertEqual(
+            self.vocabularies[(family, "response_attached")], {"attached", "detached"}
+        )
+        for label, values in (
+            ("fence_reason", fence_reasons),
+            ("response_attached", {"attached", "detached"}),
+        ):
+            for value in sorted(values):
+                with self.subTest(label=label, value=value):
+                    self.assertEqual(
+                        self.check_selector(f'{family}{{{label}="{value}"}}'), (1, [])
+                    )
+        for matcher in ('fence_reason="attached"', 'response_attached="none"'):
+            with self.subTest(matcher=matcher), self.assertRaisesRegex(
+                ValueError, "the daemon cannot emit"
+            ):
+                self.check_selector(f"{family}{{{matcher}}}")
+
+    def test_blackhole_rejection_reasons_exclude_the_installable_default(self):
+        family = "bgp_blackhole_discard_rejected_total"
+        reasons = {
+            "not_ebgp", "broad_prefix", "active_limit_exceeded", "install_rate_limited",
+        }
+        self.assertEqual(self.vocabularies[(family, "reason")], reasons)
+        for reason in sorted(reasons):
+            with self.subTest(reason=reason):
+                self.assertEqual(
+                    self.check_selector(f'{family}{{reason="{reason}"}}'), (1, [])
+                )
+        # `eligible` labels installable candidates, which never reach the counter.
+        with self.assertRaisesRegex(
+            ValueError, 'names value "eligible" the daemon cannot emit'
+        ):
+            self.check_selector(f'{family}{{reason="eligible"}}')
+
+    def test_narrowed_function_sources_fail_when_the_body_changes(self):
+        rust = dict(self.rust)
+        rust[CHECK.BLACKHOLE] = rust[CHECK.BLACKHOLE].replace(
+            'reason = "broad_prefix";', 'reason = "covering_prefix";'
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"derive_desired in src/blackhole\.rs literals changed: "
+            r"gained \['covering_prefix'\], lost \['broad_prefix'\]",
+        ):
+            CHECK.closed_label_vocabularies(rust, self.inventory)
+
+        rust = dict(self.rust)
+        self.assertEqual(rust[CHECK.SETTLEMENT].count("self.phase.as_str(),"), 1)
+        rust[CHECK.SETTLEMENT] = rust[CHECK.SETTLEMENT].replace(
+            "self.phase.as_str(),", "", 1
+        )
+        with self.assertRaisesRegex(
+            ValueError, "labels .* has 3 elements for the 4 labels in METRIC_LABELS"
+        ):
+            CHECK.closed_label_vocabularies(rust, self.inventory)
 
     def test_unclassified_label_fails_only_in_shipped_selectors(self):
         expression = 'bgp_update_malformed_total{disposition="session_reset",reason="x"}'

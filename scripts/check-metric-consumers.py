@@ -121,11 +121,19 @@ SETTLEMENT_FAMILIES = (
 OPEN_LABELS = frozenset({"instance", "job", "peer", "vrf"})
 
 # Where the daemon defines each closed label vocabulary that a shipped consumer
-# selects on. Rows point at Rust source and never list values:
-#   ("fn", file, impl type or None, function): string literals in that body
+# selects on. Rows point at Rust source; only a "contract" row lists values:
+#   ("fn", file, impl type or None, function): every string literal in a body
+#       that returns one label's values and nothing else
+#   ("element", file, impl type, function, const): the body is one array of
+#       label values ordered as the named const label array; only the literals
+#       in the mapped label's element are read
+#   ("contract", file, function, values, other literals): a body whose label
+#       values are separated from its other literals by control flow. The body's
+#       literals must equal both sets together, so any change reopens the row.
 #   ("call", method, position): literal arguments of production calls to a
 #       telemetry method whose body writes the family
-#   ("buckets", file, const): the f64 bounds the histogram is built with
+#   ("buckets", file, const): the f64 bounds the histogram is built with,
+#       spelled as the daemon emits them
 CLOSED_LABEL_SOURCES = (
     (
         ("bgp_sighup_reload_outcomes_total",),
@@ -145,22 +153,35 @@ CLOSED_LABEL_SOURCES = (
     (
         SETTLEMENT_FAMILIES,
         "response_attached",
-        (("fn", SETTLEMENT, "SettlementMetricSnapshot", "labels"),),
+        (
+            (
+                "element", SETTLEMENT, "SettlementMetricSnapshot", "labels",
+                "METRIC_LABELS",
+            ),
+        ),
     ),
     (
         SETTLEMENT_FAMILIES,
         "fence_reason",
         (
             ("fn", SETTLEMENT, "RuntimeConfigFenceReason", "as_str"),
-            # The unfenced default literal lives beside the label assembly.
-            ("fn", SETTLEMENT, "SettlementMetricSnapshot", "labels"),
+            # The unfenced default literal sits in the label assembly.
+            (
+                "element", SETTLEMENT, "SettlementMetricSnapshot", "labels",
+                "METRIC_LABELS",
+            ),
         ),
     ),
     (
         ("bgp_blackhole_discard_rejected_total",),
         "reason",
         (
-            ("fn", BLACKHOLE, None, "derive_desired"),
+            # Only candidates marked not installable reach the counter, so the
+            # installable default is a literal of the body but never a reason.
+            (
+                "contract", BLACKHOLE, "derive_desired",
+                ("not_ebgp", "broad_prefix"), ("eligible",),
+            ),
             ("fn", BLACKHOLE_LIMITS, None, "admit"),
         ),
     ),
@@ -971,10 +992,10 @@ def production_rust_sources(root: Path = ROOT) -> dict[str, str]:
     }
 
 
-def function_literals(
+def function_body(
     source: str, impl_type: str | None, function: str, description: str
-) -> set[str]:
-    """Return the string literals in one uniquely named function body."""
+) -> tuple[str, list[str]]:
+    """Return one uniquely named lexed function body and the source's strings."""
     syntax, strings = rust_lexed(production_source(source))
     if impl_type is not None:
         syntax = braced_body(
@@ -983,7 +1004,75 @@ def function_literals(
     body = braced_body(
         syntax, rf"\bfn\s+{re.escape(function)}\s*\([^{{}}]*\{{", description
     )
-    return {strings[int(index)] for index in RUST_STRING.findall(body)}
+    return body, strings
+
+
+def syntax_literals(syntax: str, strings: list[str]) -> set[str]:
+    return {strings[int(index)] for index in RUST_STRING.findall(syntax)}
+
+
+def function_literals(
+    source: str, impl_type: str | None, function: str, description: str
+) -> set[str]:
+    """Return the string literals in one uniquely named function body."""
+    return syntax_literals(*function_body(source, impl_type, function, description))
+
+
+def top_level_elements(syntax: str) -> list[str]:
+    """Split the text after an opening bracket at its top-level commas."""
+    elements = [""]
+    depth = 1
+    for character in syntax:
+        depth += character in "([{"
+        depth -= character in ")]}"
+        if not depth:
+            break
+        if character == "," and depth == 1:
+            elements.append("")
+        else:
+            elements[-1] += character
+    return elements
+
+
+def label_element_literals(
+    source: str, impl_type: str, function: str, constant: str, label: str,
+    description: str,
+) -> set[str]:
+    """Return the literals in one label's element of an array-valued body."""
+    body, strings = function_body(source, impl_type, function, description)
+    names = re.search(
+        rf"\bconst\s+{re.escape(constant)}\s*:\s*\[\s*&str\s*;[^\]]*\]\s*=\s*\[([^\]]*)\]",
+        rust_lexed(production_source(source))[0],
+    )
+    body = body.strip()
+    if names is None or not (body.startswith("[") and body.endswith("]")):
+        raise ValueError(f"{description} is not one array ordered by {constant}")
+    labels = [strings[int(index)] for index in RUST_STRING.findall(names.group(1))]
+    elements = top_level_elements(body[1:])
+    if not elements[-1].strip():
+        elements.pop()
+    if len(elements) != len(labels) or label not in labels:
+        raise ValueError(
+            f"{description} has {len(elements)} elements for the {len(labels)} "
+            f"labels in {constant}, which must include {label}"
+        )
+    return syntax_literals(elements[labels.index(label)], strings)
+
+
+def emitted_bucket_label(literal: str) -> str:
+    """Spell one f64 source literal as the daemon's `le` label value.
+
+    The pinned prometheus crate renders a bound with f64 `Display`: the
+    shortest round-trip decimal, no exponent, no trailing `.0`. Python's repr
+    agrees wherever it does not switch to an exponent, so refuse those bounds.
+    """
+    try:
+        rendered = repr(float(literal.replace("_", "")))
+    except ValueError:
+        rendered = literal
+    if not re.fullmatch(r"[0-9]+\.[0-9]+", rendered):
+        raise ValueError(f"cannot render histogram bound {literal} as the daemon does")
+    return rendered.removesuffix(".0")
 
 
 def call_argument_literals(
@@ -1000,17 +1089,7 @@ def call_argument_literals(
             )
         syntax, strings = rust_lexed(source)
         for match in re.finditer(rf"\.\s*{re.escape(method)}\s*\(", syntax):
-            arguments = [""]
-            depth = 1
-            for character in syntax[match.end() :]:
-                depth += character in "([{"
-                depth -= character in ")]}"
-                if not depth:
-                    break
-                if character == "," and depth == 1:
-                    arguments.append("")
-                else:
-                    arguments[-1] += character
+            arguments = top_level_elements(syntax[match.end() :])
             if position < len(arguments):
                 literal = RUST_STRING.fullmatch(arguments[position].strip())
                 if literal is not None:
@@ -1050,6 +1129,24 @@ def closed_label_vocabularies(
                         sources[relative], impl_type, function,
                         f"fn {owner}{function} in {relative}",
                     )
+                elif kind == "element":
+                    relative, impl_type, function, constant = location
+                    found = label_element_literals(
+                        sources[relative], impl_type, function, constant, label,
+                        f"fn {impl_type}::{function} in {relative}",
+                    )
+                elif kind == "contract":
+                    relative, function, found, others = location
+                    found = set(found)
+                    body = function_literals(
+                        sources[relative], None, function, f"fn {function} in {relative}"
+                    )
+                    if body != found | set(others) or found & set(others):
+                        raise ValueError(
+                            f"{where}: fn {function} in {relative} literals changed: "
+                            f"gained {sorted(body - found - set(others))}, "
+                            f"lost {sorted((found | set(others)) - body)}"
+                        )
                 elif kind == "call":
                     method, position = location
                     variable, _ = family_constructor(sources[TELEMETRY], family)
@@ -1076,21 +1173,16 @@ def closed_label_vocabularies(
                         or re.search(rf"\b{re.escape(constant)}\b", statement) is None
                     ):
                         raise ValueError(f"{where}: {constant} does not bound {family}")
-                    found = {"+Inf", *re.findall(r"[0-9][0-9_.eE+-]*", bounds.group(1))}
+                    found = {"+Inf"} | {
+                        emitted_bucket_label(bound.strip())
+                        for bound in bounds.group(1).split(",")
+                        if bound.strip()
+                    }
                 if not found:
                     raise ValueError(f"{where} yields no values from {location}")
                 values |= found
             vocabularies[(family, label)] = values
     return vocabularies
-
-
-def label_value_known(label: str, value: str, vocabulary: set[str]) -> bool:
-    if label != "le":
-        return value in vocabulary
-    try:
-        return float(value) in {float(bound.replace("_", "")) for bound in vocabulary}
-    except ValueError:
-        return False
 
 
 def check_label_values(
@@ -1134,7 +1226,7 @@ def check_label_values(
                         continue
                     for candidate in values:
                         checked += 1
-                        if not label_value_known(label, candidate, vocabularies[key]):
+                        if candidate not in vocabularies[key]:
                             failures.append(
                                 f"{where} names value \"{candidate}\" the daemon cannot emit"
                             )
