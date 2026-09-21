@@ -148,12 +148,17 @@ struct ConfirmedApplyMode {
 }
 
 trait OwnedOperationError: From<RuntimeConfigCoordinatorClosed> + Send + 'static {
+    fn coordinator_busy(message: &'static str) -> Self;
     fn unavailable(message: &'static str) -> Self;
     fn task_lost(message: &'static str) -> Self;
     fn fence_reason(&self) -> Option<RuntimeConfigFenceReason>;
 }
 
 impl OwnedOperationError for ConfigTransactionApplyError {
+    fn coordinator_busy(message: &'static str) -> Self {
+        Self::DeadlineExceeded(message.to_string())
+    }
+
     fn unavailable(message: &'static str) -> Self {
         Self::Unavailable(message.to_string())
     }
@@ -185,6 +190,12 @@ impl From<RuntimeConfigCoordinatorClosed> for OwnedGnmiSetError {
 }
 
 impl OwnedOperationError for OwnedGnmiSetError {
+    // gNMI Set has no deadline status in its error vocabulary; a coordinator
+    // deadline maps to UNAVAILABLE, as `apply_error_to_gnmi_set_error` does.
+    fn coordinator_busy(message: &'static str) -> Self {
+        Self::Clean(GnmiSetError::Unavailable(message.to_string()))
+    }
+
     fn unavailable(message: &'static str) -> Self {
         Self::Clean(GnmiSetError::Unavailable(message.to_string()))
     }
@@ -245,7 +256,24 @@ impl ConfigTransactionController {
     {
         let watched = self.settlement.is_some();
         let join = tokio::spawn(async move {
-            let coordinator_permit = self.deps.lock.acquire().await?;
+            let acquire = self.deps.lock.acquire();
+            let coordinator_permit = if kind == RuntimeConfigOperationKind::AutoRevert {
+                // The confirm-window revert has no caller to hand a deadline to
+                // and its one-shot timer is not re-armed: giving up here would
+                // leave the candidate live and still reported as pending. It
+                // keeps waiting for the owner, which is itself bounded.
+                acquire.await?
+            } else {
+                tokio::time::timeout(CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT, acquire)
+                    .await
+                    .map_err(|_| {
+                        E::coordinator_busy(
+                            "config operation timed out waiting for the runtime config \
+                             coordinator; coordinator ownership was not acquired and the \
+                             operation did not begin",
+                        )
+                    })??
+            };
             let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
                 return body(self, None).await;
             };
