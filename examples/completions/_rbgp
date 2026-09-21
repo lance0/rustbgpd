@@ -858,7 +858,41 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rpki-command-$line[1]:"
         case $line[1] in
-            (caches)
+            (aspa)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
+'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':customer_asn:_default' \
+&& ret=0
+;;
+(verify-path)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor-asn=[Effective neighbor ASN (never inferred from the path)]:NEIGHBOR_ASN:_default' \
+'--role=[Local receiving role; none selects unconfigured-role upstream behavior]:ROLE:(none provider customer peer route-server rs-client)' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
+'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':as_path -- Space-separated decimal ASNs; AS_SET uses braces, for example "64500 {64501 64502}":_default' \
+&& ret=0
+;;
+(caches)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -902,7 +936,15 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rpki-help-command-$line[1]:"
         case $line[1] in
-            (caches)
+            (aspa)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify-path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(caches)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3984,7 +4026,15 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-rpki-command-$line[1]:"
         case $line[1] in
-            (caches)
+            (aspa)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify-path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(caches)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4613,7 +4663,7 @@ _rbgp_commands() {
 'neighbor:Manage BGP neighbors' \
 'summary:Manage BGP neighbors' \
 'bfd:Inspect single-hop and multihop BFD sessions (ADR-0067)' \
-'rpki:Validate a route origin against the current authoritative VRP table' \
+'rpki:Inspect RPKI caches and validate origins or AS paths' \
 'rib:Query and manage the RIB' \
 'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \
 'orr:Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)' \
@@ -5595,7 +5645,7 @@ _rbgp__subcmd__help_commands() {
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
 'bfd:Inspect single-hop and multihop BFD sessions (ADR-0067)' \
-'rpki:Validate a route origin against the current authoritative VRP table' \
+'rpki:Inspect RPKI caches and validate origins or AS paths' \
 'rib:Query and manage the RIB' \
 'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \
 'orr:Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)' \
@@ -6351,10 +6401,17 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__help__subcmd__rpki_commands() {
     local commands; commands=(
+'aspa:Look up one customer'\''s merged ASPA provider set' \
+'verify-path:Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress' \
 'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
     )
     _describe -t commands 'rbgp help rpki commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rpki__subcmd__aspa_commands] )) ||
+_rbgp__subcmd__help__subcmd__rpki__subcmd__aspa_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rpki aspa commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rpki__subcmd__caches_commands] )) ||
 _rbgp__subcmd__help__subcmd__rpki__subcmd__caches_commands() {
@@ -6365,6 +6422,11 @@ _rbgp__subcmd__help__subcmd__rpki__subcmd__caches_commands() {
 _rbgp__subcmd__help__subcmd__rpki__subcmd__validate_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help rpki validate commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rpki__subcmd__verify-path_commands] )) ||
+_rbgp__subcmd__help__subcmd__rpki__subcmd__verify-path_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rpki verify-path commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__shutdown_commands] )) ||
 _rbgp__subcmd__help__subcmd__shutdown_commands() {
@@ -7094,11 +7156,18 @@ _rbgp__subcmd__rib__subcmd__vpn_commands() {
 (( $+functions[_rbgp__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__rpki_commands() {
     local commands; commands=(
+'aspa:Look up one customer'\''s merged ASPA provider set' \
+'verify-path:Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress' \
 'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp rpki commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rpki__subcmd__aspa_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__aspa_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki aspa commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rpki__subcmd__caches_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__caches_commands() {
@@ -7108,11 +7177,18 @@ _rbgp__subcmd__rpki__subcmd__caches_commands() {
 (( $+functions[_rbgp__subcmd__rpki__subcmd__help_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__help_commands() {
     local commands; commands=(
+'aspa:Look up one customer'\''s merged ASPA provider set' \
+'verify-path:Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress' \
 'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp rpki help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rpki__subcmd__help__subcmd__aspa_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__help__subcmd__aspa_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki help aspa commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rpki__subcmd__help__subcmd__caches_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__help__subcmd__caches_commands() {
@@ -7129,10 +7205,20 @@ _rbgp__subcmd__rpki__subcmd__help__subcmd__validate_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rpki help validate commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__rpki__subcmd__help__subcmd__verify-path_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__help__subcmd__verify-path_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki help verify-path commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rpki__subcmd__validate_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__validate_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rpki validate commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rpki__subcmd__verify-path_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__verify-path_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki verify-path commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__shutdown_commands] )) ||
 _rbgp__subcmd__shutdown_commands() {

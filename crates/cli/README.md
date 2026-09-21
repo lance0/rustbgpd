@@ -129,6 +129,8 @@ rbgp neighbor-set set <name> --from-file set.json
 rbgp bfd
 rbgp bfd show <addr>
 rbgp rpki validate 192.0.2.0/24 64496       # complete verdict + bounded covering VRPs
+rbgp rpki aspa 64496                     # merged providers, presence and truncation
+rbgp rpki verify-path --role peer --neighbor-asn 64496 "64496 64497"
 rbgp rpki caches                             # configured caches + accepted RTR epochs
 ```
 
@@ -143,6 +145,20 @@ connected BMP collector whose `monitor` list includes `rib_out_post` and omits
 `["rib_in_pre"]` is not eligible). Its response confirms scheduling only. See the
 [replay contract](../../docs/reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors)
 for monitoring reset behavior, completion evidence, and the five-second bound.
+
+`rpki aspa` returns up to 256 sorted effective providers, retaining AS0 and
+explicit `found`, `complete`, and `omitted` fields in JSON. `rpki verify-path`
+requires the **local receiving role** (`none`, `provider`, `customer`, `peer`,
+`route-server`, or `rs-client`) and an explicit nonzero neighbor ASN. Only
+`rs-client` skips the first-AS check; `customer` selects downstream verification.
+The literal path accepts nonzero decimal ASNs and `{ASN ASN}` sets, at most
+4096 ASNs and 65536 input bytes. Empty quoted paths and AS_SETs produce an
+`invalid` verdict; malformed braces, AS0, and missing context are usage errors.
+All three verdicts (`valid`, `invalid`, `unknown`) exit successfully; this is a
+diagnostic, not a policy acceptance check. JSON includes `validation` and a
+nullable `invalid_hop` customer/provider pair. Both commands need an authoritative
+ASPA snapshot and use the normal 30-second unary read deadline. See the
+[API contract](../../docs/reference/api.md#aspa-provider-and-path-diagnostics).
 
 `rpki validate` requires the daemon's first authoritative VRP snapshot. Before
 that snapshot it fails with `FAILED_PRECONDITION`; an authoritative empty

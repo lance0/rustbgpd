@@ -2189,6 +2189,8 @@ For a point check against the daemon's current authoritative table, run:
 
 ```bash
 rbgp rpki validate 203.0.113.0/24 64496
+rbgp rpki aspa 64497
+rbgp rpki verify-path --role peer --neighbor-asn 64496 "64496 64497"
 ```
 
 The verdict always uses the complete table. The accompanying list is capped at

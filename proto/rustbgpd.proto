@@ -1993,7 +1993,7 @@ service BfdService {
 }
 
 // ---------------------------------------------------------------------------
-// RpkiService — bounded route-origin validation diagnostics (outside narrow v1)
+// RpkiService — bounded RPKI validation diagnostics (outside narrow v1)
 // ---------------------------------------------------------------------------
 
 service RpkiService {
@@ -2003,6 +2003,67 @@ service RpkiService {
   rpc ValidateRouteOrigin(ValidateRouteOriginRequest) returns (ValidateRouteOriginResponse);
   // List configured RTR caches and their latest atomically accepted epoch.
   rpc ListCaches(ListRpkiCachesRequest) returns (ListRpkiCachesResponse);
+  // Merged providers for one customer, bounded to 256 sorted unique ASNs.
+  rpc LookupAspa(LookupAspaRequest) returns (LookupAspaResponse);
+  // Hypothetical eBGP unicast verification of an effective four-octet AS_PATH.
+  // Explicit local role and neighbor ASN are required; no route is installed.
+  rpc VerifyAsPath(VerifyAsPathRequest) returns (VerifyAsPathResponse);
+}
+
+message LookupAspaRequest {
+  uint32 customer_asn = 1; // Nonzero.
+}
+
+message LookupAspaResponse {
+  uint32 customer_asn = 1;
+  // Distinguishes no attestation from a present empty provider set.
+  bool found = 2;
+  repeated uint32 provider_asns = 3; // AS0 is preserved.
+  bool complete = 4;
+  uint64 omitted = 5;
+}
+
+// The receiving speaker's role, not the neighbor's role. NONE explicitly
+// selects the existing unconfigured-role upstream behavior.
+enum AspaLocalRole {
+  ASPA_LOCAL_ROLE_UNSPECIFIED = 0;
+  ASPA_LOCAL_ROLE_NONE = 1;
+  ASPA_LOCAL_ROLE_PROVIDER = 2;
+  ASPA_LOCAL_ROLE_CUSTOMER = 3;
+  ASPA_LOCAL_ROLE_PEER = 4;
+  ASPA_LOCAL_ROLE_ROUTE_SERVER = 5;
+  ASPA_LOCAL_ROLE_RS_CLIENT = 6;
+}
+
+enum AspaSegmentKind {
+  ASPA_SEGMENT_KIND_UNSPECIFIED = 0;
+  ASPA_SEGMENT_KIND_SEQUENCE = 1;
+  ASPA_SEGMENT_KIND_SET = 2;
+}
+
+message AspaPathSegment {
+  AspaSegmentKind kind = 1;
+  repeated uint32 asns = 2; // Nonempty, nonzero ASNs.
+}
+
+message VerifyAsPathRequest {
+  // At most 4096 ASNs across at most 4096 nonempty segments. An empty list
+  // represents an empty path and returns Invalid, as does any AS_SET.
+  repeated AspaPathSegment segments = 1;
+  uint32 neighbor_asn = 2; // Nonzero; never inferred from the path.
+  AspaLocalRole local_role = 3; // UNSPECIFIED and unknown values are rejected.
+}
+
+message AspaInvalidHop {
+  uint32 customer_asn = 1;
+  uint32 provider_asn = 2;
+}
+
+message VerifyAsPathResponse {
+  RouteAspaValidation validation = 1;
+  // First proven NotProviderPlus pair when the verifier can identify one.
+  // Structural Invalid results (empty/AS_SET/first-AS mismatch) have no pair.
+  optional AspaInvalidHop invalid_hop = 2;
 }
 
 message ListRpkiCachesRequest {}

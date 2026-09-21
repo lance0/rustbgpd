@@ -20,9 +20,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   view with their reason and pending state. Local injection remains trusted
   origination, and validation does not add a FlowSpec dataplane. The RIB
   actor-work histogram adds the `flowspec_validation` work-unit label.
+- `rbgp rpki aspa CUSTOMER_ASN` and `rbgp rpki verify-path --role ROLE
+  --neighbor-asn ASN "AS_PATH"` expose bounded merged-provider lookup and
+  literal eBGP-unicast path verification through two `sensitive_read` RPCs.
+  Results distinguish unavailable ASPA data, missing attestations, and
+  authoritative empty data; verification reuses the ingress verifier and
+  reports the first proven invalid customer/provider pair when available.
 
 ### Fixed
 
+- Publish the first accepted empty VRP and ASPA tables to validation consumers,
+  allowing RPKI operator queries to report authoritative empty data correctly.
+  Identical replays remain suppressed, and pre-accept disconnects do not
+  fabricate available data.
 - Keep live RIB readiness responsive during selection-deferral release and
   collision-failback staging, including all released route families. Readiness
   reports the current unicast Loc-RIB count while general reads and mutations

@@ -262,7 +262,7 @@ enum Command {
         action: Option<BfdAction>,
     },
 
-    /// Validate a route origin against the current authoritative VRP table
+    /// Inspect RPKI caches and validate origins or AS paths
     Rpki {
         #[command(subcommand)]
         action: RpkiAction,
@@ -1338,6 +1338,23 @@ enum BfdAction {
 
 #[derive(Subcommand)]
 enum RpkiAction {
+    /// Look up one customer's merged ASPA provider set
+    Aspa {
+        #[arg(value_parser = clap::value_parser!(u32).range(1..))]
+        customer_asn: u32,
+    },
+    /// Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress
+    VerifyPath {
+        /// Space-separated decimal ASNs; AS_SET uses braces, for example "64500 {64501 64502}"
+        #[arg(value_parser = commands::rpki::parse_aspa_literal)]
+        as_path: String,
+        /// Effective neighbor ASN (never inferred from the path)
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        neighbor_asn: u32,
+        /// Local receiving role; none selects unconfigured-role upstream behavior
+        #[arg(long, value_enum)]
+        role: commands::rpki::LocalRole,
+    },
     /// List configured RTR caches and accepted validation epochs
     Caches,
     /// Validate one CIDR prefix and origin ASN
@@ -3401,6 +3418,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
         Command::Rpki { action } => match action {
             RpkiAction::Caches => commands::rpki::caches(connection, json).await,
+            RpkiAction::Aspa { customer_asn } => {
+                commands::rpki::aspa(connection, customer_asn, json).await
+            }
+            RpkiAction::VerifyPath {
+                as_path,
+                neighbor_asn,
+                role,
+            } => commands::rpki::verify_path(connection, &as_path, neighbor_asn, role, json).await,
             RpkiAction::Validate { prefix, origin_asn } => {
                 commands::rpki::validate(connection, &prefix, origin_asn, json).await
             }
