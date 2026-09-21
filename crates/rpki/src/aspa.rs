@@ -47,6 +47,15 @@ impl AspaTable {
         Self { records: map }
     }
 
+    /// Return the sorted, deduplicated merged provider set for a customer.
+    ///
+    /// `None` means no attestation; `Some(&[])` is a present empty set.
+    /// AS0 is preserved when present in the effective records.
+    #[must_use]
+    pub fn providers(&self, customer: u32) -> Option<&[u32]> {
+        self.records.get(&customer).map(Vec::as_slice)
+    }
+
     /// Check whether `provider` is an authorized provider of `customer`.
     #[must_use]
     pub fn authorized(&self, customer: u32, provider: u32) -> ProviderAuth {
@@ -85,6 +94,27 @@ impl Eq for AspaTable {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_lookup_preserves_union_presence_and_as0() {
+        let table = AspaTable::new(vec![
+            AspaRecord {
+                customer_asn: 1,
+                provider_asns: vec![3, 0, 2, 3],
+            },
+            AspaRecord {
+                customer_asn: 1,
+                provider_asns: vec![4, 2],
+            },
+            AspaRecord {
+                customer_asn: 5,
+                provider_asns: vec![],
+            },
+        ]);
+        assert_eq!(table.providers(1), Some([0, 2, 3, 4].as_slice()));
+        assert_eq!(table.providers(5), Some([].as_slice()));
+        assert_eq!(table.providers(6), None);
+    }
 
     #[test]
     fn empty_table_returns_no_attestation() {

@@ -40,7 +40,7 @@ complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "config" -d 'Runtime confi
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "neighbor" -d 'Manage BGP neighbors'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "summary" -d 'Manage BGP neighbors'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions (ADR-0067)'
-complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "rpki" -d 'Validate a route origin against the current authoritative VRP table'
+complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "rpki" -d 'Inspect RPKI caches and validate origins or AS paths'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "rib" -d 'Query and manage the RIB'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "topology" -d 'Show the RFC 9107 ORR topology graph derived from BGP-LS'
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "orr" -d 'Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)'
@@ -516,19 +516,48 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "show" -d 'Show a single BFD session by peer address'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "aspa" -d 'Look up one customer\'s merged ASPA provider set'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "verify-path" -d 'Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from aspa verify-path caches validate help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from aspa" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l neighbor-asn -d 'Effective neighbor ASN (never inferred from the path)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l role -d 'Local receiving role; none selects unconfigured-role upstream behavior' -r -f -a "none\t''
+provider\t''
+customer\t''
+peer\t''
+route-server\t''
+rs-client\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from verify-path" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
@@ -549,6 +578,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "aspa" -d 'Look up one customer\'s merged ASPA provider set'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "verify-path" -d 'Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
@@ -1897,7 +1928,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "config" -d 'Runtime config diagnostics'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "neighbor" -d 'Manage BGP neighbors'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "bfd" -d 'Inspect single-hop and multihop BFD sessions (ADR-0067)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "rpki" -d 'Validate a route origin against the current authoritative VRP table'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "rpki" -d 'Inspect RPKI caches and validate origins or AS paths'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "rib" -d 'Query and manage the RIB'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "topology" -d 'Show the RFC 9107 ORR topology graph derived from BGP-LS'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and not __fish_seen_subcommand_from global config neighbor bfd rpki rib topology orr diff flowspec evpn watch events health doctor metrics shutdown mrt-dump gshut top policy neighbor-set peer-group dynamic-neighbor fib-table completions man help" -f -a "orr" -d 'Show RFC 9107 ORR per-vantage status (resolution, SPF reach, peers)'
@@ -1940,6 +1971,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "replay-out" -d 'Replay this peer\'s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from bfd" -f -a "show" -d 'Show a single BFD session by peer address'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "aspa" -d 'Look up one customer\'s merged ASPA provider set'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "verify-path" -d 'Verify a literal effective AS_PATH for hypothetical eBGP unicast ingress'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "lookup" -d 'Find the longest-prefix match in the global best-route table'

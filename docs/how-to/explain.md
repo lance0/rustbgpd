@@ -309,3 +309,15 @@ comparison to look at next.
 | `rbgp config diff <candidate>` / `rbgp config plan <candidate>` | What a config change would touch, each field annotated hot-applied / session reset / restart required ([OPERATIONS.md](../reference/operations.md#config-diff-dry-run-reload)) |
 | `rbgp diff advertised --against <snapshot>` | Live Adj-RIB-Out vs a recorded snapshot — the shadow-cutover gate ([ribdiff.md](ribdiff.md)) |
 | `rbgp doctor` | Red/green triage checks plus a redacted support bundle ([OPERATIONS.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor)) |
+
+### Check ASPA evidence
+
+For an ASPA rejection shown by `rbgp rib received PEER --rejected`, use
+`rbgp rpki aspa CUSTOMER_ASN` to inspect the reported customer's merged
+provider set. To check the path against today's data, run
+`rbgp rpki verify-path --role ROLE --neighbor-asn ASN "AS_PATH"` with the
+receiving speaker's local role and effective neighbor ASN. This recomputes a
+hypothetical eBGP-unicast verdict; it does not replay the historical import
+snapshot or the complete import-policy decision. The
+[API contract](../reference/api.md#aspa-provider-and-path-diagnostics) describes
+limits and the difference between unavailable and empty data.
