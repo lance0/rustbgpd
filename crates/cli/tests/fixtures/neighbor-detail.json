@@ -1,0 +1,172 @@
+{
+  "uptime_seconds": 18446744073709551615,
+  "reconnect_in_seconds": 157,
+  "prefixes_received": 104,
+  "prefixes_received_ipv4": 141,
+  "prefixes_received_ipv6": 142,
+  "prefixes_sent": 105,
+  "updates_received": 106,
+  "updates_sent": 107,
+  "notifications_received": 108,
+  "notifications_sent": 109,
+  "messages_received": 123,
+  "messages_sent": 124,
+  "flap_count": 110,
+  "last_error": "last_error-value",
+  "is_dynamic": true,
+  "accepted_dynamic_range": {
+    "prefix": "prefix-value",
+    "peer_group": "peer_group-value"
+  },
+  "effective_max_prefixes": 143,
+  "effective_max_prefixes_ipv4": 144,
+  "effective_max_prefixes_ipv6": 145,
+  "max_prefix_headroom": 146,
+  "max_prefix_headroom_ipv4": 147,
+  "max_prefix_headroom_ipv6": 148,
+  "max_prefix_action": "max_prefix_action-value",
+  "max_prefix_restart_remaining_millis": 139,
+  "tcp_ao_desired_generation": 132,
+  "tcp_ao_applied_generation": 133,
+  "tcp_ao_rotation_phase": "tcp_ao_rotation_phase-value",
+  "tcp_ao_rotation_error": "tcp_ao_rotation_error-value",
+  "tcp_ao": {
+    "current_key_id": 101,
+    "rnext_key_id": 102,
+    "ao_required": false,
+    "accept_icmps": true,
+    "packets_good": 105,
+    "packets_bad": 106,
+    "packets_key_not_found": 107,
+    "packets_ao_required": 108,
+    "packets_dropped_icmp": 109,
+    "keys": [
+      {
+        "peer_address": "peer_address-value",
+        "prefix_length": 102,
+        "send_id": 103,
+        "recv_id": 104,
+        "algorithm": "algorithm-value",
+        "is_current": true,
+        "is_rnext": false,
+        "preferred": true,
+        "deprecated": false,
+        "packets_good": 110,
+        "packets_bad": 111,
+        "vrf_ifindex": 112
+      }
+    ]
+  },
+  "route_reflector_client": true,
+  "remote_role": "remote_role-value",
+  "role_negotiated": true,
+  "otc_routes_blocked": 117,
+  "import_policy_routes_permitted": 118,
+  "import_policy_routes_denied": 119,
+  "export_policy_routes_permitted": 120,
+  "export_policy_routes_denied": 121,
+  "update_group": "update_group-value",
+  "selection_deferral": [
+    {
+      "afi": 101,
+      "safi": 102,
+      "active": false,
+      "waiter_state": "waiter_state-value",
+      "waiter_session_id": 105,
+      "blocking_waiters": 106,
+      "remaining_millis": 107,
+      "release_reason": "release_reason-value"
+    }
+  ],
+  "outbound_prefix_limits": [
+    {
+      "family": "family-value",
+      "usage": 102,
+      "limit": 103,
+      "headroom": 104,
+      "blocking": false,
+      "reason": "reason-value"
+    }
+  ],
+  "inbound_prefix_limits": [
+    {
+      "scope": "scope-value",
+      "usage": 102,
+      "limit": 103,
+      "headroom": 104,
+      "blocking": false,
+      "reason": "reason-value"
+    }
+  ],
+  "slow_peer": true,
+  "graceful_shutdown_advertise_intent": false,
+  "negotiation_available": true,
+  "negotiated_session": {
+    "hold_time_seconds": 0,
+    "remote_router_id": "remote_router_id-value",
+    "four_octet_as": false,
+    "families": [
+      "families-value"
+    ],
+    "graceful_restart": {
+      "peer_families": [
+        "peer_families-value"
+      ],
+      "peer_restart_time_seconds": 0,
+      "effective_retention_time_seconds": 103
+    },
+    "peer_route_refresh": true,
+    "peer_enhanced_route_refresh": false,
+    "peer_extended_message": true,
+    "outbound_max_message_bytes": 109,
+    "local_address": "fe80::1",
+    "keepalive_interval_seconds": 0
+  },
+  "effective_posture": {
+    "next_hop_ownership": "strict_peer",
+    "interpret_rfc1997": true,
+    "rs_control_communities": false,
+    "orr_vantage": "orr_vantage-value"
+  },
+  "address": "fe80::2",
+  "interface": "eth0",
+  "remote_asn": 65002,
+  "description": "description-value",
+  "hold_time": 104,
+  "min_hold_time": 121,
+  "send_hold_time": 116,
+  "families": [
+    "families-value"
+  ],
+  "required_families": [
+    "required_families-value"
+  ],
+  "discard_path_attributes": [
+    122
+  ],
+  "peer_group": "peer_group-value",
+  "route_server_client": false,
+  "add_path_receive": true,
+  "add_path_send": false,
+  "add_path_send_max": 112,
+  "role": "rs",
+  "strict_role": false,
+  "max_prefix_restart_seconds": 119,
+  "state": "Established",
+  "authentication": "tcp_ao",
+  "tcp_ao_health": "degraded",
+  "distribution_mode": "add-path",
+  "rfc8212_import_policy": "present",
+  "rfc8212_export_policy": "missing",
+  "paths_limits": [
+    {
+      "family": "family-value",
+      "configured_receive_max": 102,
+      "advertised_receive_max": 103,
+      "received_receive_max": 104,
+      "effective_send_limit": 0,
+      "effective_send_active": true
+    }
+  ],
+  "per_client_best": true
+}

@@ -332,6 +332,156 @@ fn emit_neighbor_source_human(neighbor: &crate::proto::NeighborState) -> Result<
     Ok(())
 }
 
+fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
+    let cfg = n.config.as_ref();
+    let distribution_mode = effective_distribution_mode_label(n.effective_distribution_mode);
+    let max_prefix_action = max_prefix_action_label(&n.max_prefix_action);
+    let effective_max_prefixes = n.effective_max_prefixes;
+    let (negotiation_available, negotiated_session) = negotiated_session_json(n);
+    JsonNeighborDetail {
+        address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+        interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
+        remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
+        state: output::format_state_with_stale(n.state, n.stale).to_string(),
+        stale: n.stale,
+        slow_peer: n.slow_peer,
+        graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
+        uptime_seconds: n.uptime_seconds,
+        reconnect_in_seconds: n.reconnect_in_seconds.filter(|seconds| *seconds > 0),
+        prefixes_received: n.prefixes_received,
+        prefixes_received_ipv4: n.prefixes_received_ipv4,
+        prefixes_received_ipv6: n.prefixes_received_ipv6,
+        prefixes_sent: n.prefixes_sent,
+        updates_received: n.updates_received,
+        updates_sent: n.updates_sent,
+        notifications_received: n.notifications_received,
+        notifications_sent: n.notifications_sent,
+        messages_received: n.messages_received,
+        messages_sent: n.messages_sent,
+        flap_count: n.flap_count,
+        last_error: n.last_error.clone(),
+        is_dynamic: n.is_dynamic,
+        accepted_dynamic_range: output::json_accepted_dynamic_range(
+            n.accepted_dynamic_range.as_ref(),
+        ),
+        effective_max_prefixes,
+        effective_max_prefixes_ipv4: n.effective_max_prefixes_ipv4,
+        effective_max_prefixes_ipv6: n.effective_max_prefixes_ipv6,
+        max_prefix_headroom: n.max_prefix_headroom,
+        max_prefix_headroom_ipv4: n.max_prefix_headroom_ipv4,
+        max_prefix_headroom_ipv6: n.max_prefix_headroom_ipv6,
+        max_prefix_action: max_prefix_action.to_string(),
+        max_prefix_restart_seconds: cfg.and_then(|c| c.max_prefix_restart_seconds),
+        max_prefix_restart_remaining_millis: n.max_prefix_restart_remaining_millis,
+        authentication: authentication_label(n.authentication).to_string(),
+        tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
+        tcp_ao_desired_generation: n.tcp_ao_desired_generation,
+        tcp_ao_applied_generation: n.tcp_ao_applied_generation,
+        tcp_ao_rotation_phase: n.tcp_ao_rotation_phase.clone(),
+        tcp_ao_rotation_error: n.tcp_ao_rotation_error.clone(),
+        tcp_ao: n.tcp_ao.as_ref().map(|ao| JsonTcpAoState {
+            current_key_id: ao.current_key_id,
+            rnext_key_id: ao.rnext_key_id,
+            ao_required: ao.ao_required,
+            accept_icmps: ao.accept_icmps,
+            packets_good: ao.packets_good,
+            packets_bad: ao.packets_bad,
+            packets_key_not_found: ao.packets_key_not_found,
+            packets_ao_required: ao.packets_ao_required,
+            packets_dropped_icmp: ao.packets_dropped_icmp,
+            keys: ao
+                .keys
+                .iter()
+                .map(|key| JsonTcpAoKeyState {
+                    peer_address: key.peer_address.clone(),
+                    prefix_length: key.prefix_length,
+                    send_id: key.send_id,
+                    recv_id: key.recv_id,
+                    algorithm: key.algorithm.clone(),
+                    is_current: key.is_current,
+                    is_rnext: key.is_rnext,
+                    preferred: key.preferred,
+                    deprecated: key.deprecated,
+                    vrf_ifindex: key.vrf_ifindex,
+                    packets_good: key.packets_good,
+                    packets_bad: key.packets_bad,
+                })
+                .collect(),
+        }),
+        description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
+        hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
+        min_hold_time: cfg.and_then(|c| c.min_hold_time),
+        send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
+        families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
+        required_families: cfg.map(|c| c.required_families.clone()).unwrap_or_default(),
+        discard_path_attributes: cfg
+            .map(|config| config.discard_path_attributes.clone())
+            .unwrap_or_default(),
+        negotiation_available,
+        negotiated_session,
+        peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
+        route_reflector_client: n.route_reflector_client,
+        route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
+        per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
+        effective_posture: json_effective_posture(n.effective_posture.as_ref()),
+        distribution_mode: distribution_mode.to_string(),
+        add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
+        add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
+        add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
+        paths_limits: n.paths_limits.iter().map(json_paths_limit).collect(),
+        role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
+        strict_role: cfg.map(|c| c.strict_role).unwrap_or(false),
+        remote_role: n.remote_role.clone(),
+        role_negotiated: n.role_negotiated,
+        otc_routes_blocked: n.otc_routes_blocked,
+        import_policy_routes_permitted: n.import_policy_routes_permitted,
+        import_policy_routes_denied: n.import_policy_routes_denied,
+        export_policy_routes_permitted: n.export_policy_routes_permitted,
+        export_policy_routes_denied: n.export_policy_routes_denied,
+        update_group: n.update_group.clone(),
+        selection_deferral: n
+            .selection_deferral
+            .iter()
+            .map(|row| JsonSelectionDeferralFamily {
+                afi: row.afi,
+                safi: row.safi,
+                active: row.active,
+                waiter_state: row.waiter_state.clone(),
+                waiter_session_id: row.waiter_session_id,
+                blocking_waiters: row.blocking_waiters,
+                remaining_millis: row.remaining_millis,
+                release_reason: row.release_reason.clone(),
+            })
+            .collect(),
+        rfc8212_import_policy: rfc8212_policy_status_label(n.rfc8212_import_policy).to_string(),
+        rfc8212_export_policy: rfc8212_policy_status_label(n.rfc8212_export_policy).to_string(),
+        outbound_prefix_limits: n
+            .outbound_prefix_limits
+            .iter()
+            .map(|row| JsonOutboundPrefixLimit {
+                family: row.family.clone(),
+                usage: row.usage,
+                limit: row.limit,
+                headroom: row.headroom,
+                blocking: row.blocking,
+                reason: row.reason.clone(),
+            })
+            .collect(),
+        inbound_prefix_limits: n
+            .inbound_prefix_limits
+            .iter()
+            .map(|row| JsonInboundPrefixLimit {
+                scope: row.scope.clone(),
+                usage: row.usage,
+                limit: row.limit,
+                headroom: row.headroom,
+                blocking: row.blocking,
+                reason: row.reason.clone(),
+            })
+            .collect(),
+    }
+}
+
 pub async fn show(
     connection: Connection,
     address: &str,
@@ -355,149 +505,7 @@ pub async fn show(
     let max_prefix_action = max_prefix_action_label(&n.max_prefix_action);
     let effective_max_prefixes = n.effective_max_prefixes;
     if json {
-        let (negotiation_available, negotiated_session) = negotiated_session_json(&n);
-        let out = JsonNeighborDetail {
-            address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
-            interface: cfg.map(|c| c.interface.clone()).unwrap_or_default(),
-            remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
-            state: output::format_state_with_stale(n.state, n.stale).to_string(),
-            stale: n.stale,
-            slow_peer: n.slow_peer,
-            graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
-            uptime_seconds: n.uptime_seconds,
-            reconnect_in_seconds: n.reconnect_in_seconds.filter(|seconds| *seconds > 0),
-            prefixes_received: n.prefixes_received,
-            prefixes_received_ipv4: n.prefixes_received_ipv4,
-            prefixes_received_ipv6: n.prefixes_received_ipv6,
-            prefixes_sent: n.prefixes_sent,
-            updates_received: n.updates_received,
-            updates_sent: n.updates_sent,
-            notifications_received: n.notifications_received,
-            notifications_sent: n.notifications_sent,
-            messages_received: n.messages_received,
-            messages_sent: n.messages_sent,
-            flap_count: n.flap_count,
-            last_error: n.last_error.clone(),
-            is_dynamic: n.is_dynamic,
-            accepted_dynamic_range: output::json_accepted_dynamic_range(
-                n.accepted_dynamic_range.as_ref(),
-            ),
-            effective_max_prefixes,
-            effective_max_prefixes_ipv4: n.effective_max_prefixes_ipv4,
-            effective_max_prefixes_ipv6: n.effective_max_prefixes_ipv6,
-            max_prefix_headroom: n.max_prefix_headroom,
-            max_prefix_headroom_ipv4: n.max_prefix_headroom_ipv4,
-            max_prefix_headroom_ipv6: n.max_prefix_headroom_ipv6,
-            max_prefix_action: max_prefix_action.to_string(),
-            max_prefix_restart_seconds: cfg.and_then(|c| c.max_prefix_restart_seconds),
-            max_prefix_restart_remaining_millis: n.max_prefix_restart_remaining_millis,
-            authentication: authentication_label(n.authentication).to_string(),
-            tcp_ao_health: tcp_ao_health_label(n.tcp_ao_health).to_string(),
-            tcp_ao_desired_generation: n.tcp_ao_desired_generation,
-            tcp_ao_applied_generation: n.tcp_ao_applied_generation,
-            tcp_ao_rotation_phase: n.tcp_ao_rotation_phase.clone(),
-            tcp_ao_rotation_error: n.tcp_ao_rotation_error.clone(),
-            tcp_ao: n.tcp_ao.as_ref().map(|ao| JsonTcpAoState {
-                current_key_id: ao.current_key_id,
-                rnext_key_id: ao.rnext_key_id,
-                ao_required: ao.ao_required,
-                accept_icmps: ao.accept_icmps,
-                packets_good: ao.packets_good,
-                packets_bad: ao.packets_bad,
-                packets_key_not_found: ao.packets_key_not_found,
-                packets_ao_required: ao.packets_ao_required,
-                packets_dropped_icmp: ao.packets_dropped_icmp,
-                keys: ao
-                    .keys
-                    .iter()
-                    .map(|key| JsonTcpAoKeyState {
-                        peer_address: key.peer_address.clone(),
-                        prefix_length: key.prefix_length,
-                        send_id: key.send_id,
-                        recv_id: key.recv_id,
-                        algorithm: key.algorithm.clone(),
-                        is_current: key.is_current,
-                        is_rnext: key.is_rnext,
-                        preferred: key.preferred,
-                        deprecated: key.deprecated,
-                        vrf_ifindex: key.vrf_ifindex,
-                        packets_good: key.packets_good,
-                        packets_bad: key.packets_bad,
-                    })
-                    .collect(),
-            }),
-            description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
-            hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
-            min_hold_time: cfg.and_then(|c| c.min_hold_time),
-            send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
-            families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
-            required_families: cfg.map(|c| c.required_families.clone()).unwrap_or_default(),
-            discard_path_attributes: cfg
-                .map(|config| config.discard_path_attributes.clone())
-                .unwrap_or_default(),
-            negotiation_available,
-            negotiated_session,
-            peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
-            route_reflector_client: n.route_reflector_client,
-            route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
-            per_client_best: cfg.map(|c| c.per_client_best).unwrap_or(false),
-            effective_posture: json_effective_posture(n.effective_posture.as_ref()),
-            distribution_mode: distribution_mode.to_string(),
-            add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
-            add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
-            add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
-            paths_limits: n.paths_limits.iter().map(json_paths_limit).collect(),
-            role: cfg.map(|c| c.role.clone()).unwrap_or_default(),
-            strict_role: cfg.map(|c| c.strict_role).unwrap_or(false),
-            remote_role: n.remote_role.clone(),
-            role_negotiated: n.role_negotiated,
-            otc_routes_blocked: n.otc_routes_blocked,
-            import_policy_routes_permitted: n.import_policy_routes_permitted,
-            import_policy_routes_denied: n.import_policy_routes_denied,
-            export_policy_routes_permitted: n.export_policy_routes_permitted,
-            export_policy_routes_denied: n.export_policy_routes_denied,
-            update_group: n.update_group.clone(),
-            selection_deferral: n
-                .selection_deferral
-                .iter()
-                .map(|row| JsonSelectionDeferralFamily {
-                    afi: row.afi,
-                    safi: row.safi,
-                    active: row.active,
-                    waiter_state: row.waiter_state.clone(),
-                    waiter_session_id: row.waiter_session_id,
-                    blocking_waiters: row.blocking_waiters,
-                    remaining_millis: row.remaining_millis,
-                    release_reason: row.release_reason.clone(),
-                })
-                .collect(),
-            rfc8212_import_policy: rfc8212_policy_status_label(n.rfc8212_import_policy).to_string(),
-            rfc8212_export_policy: rfc8212_policy_status_label(n.rfc8212_export_policy).to_string(),
-            outbound_prefix_limits: n
-                .outbound_prefix_limits
-                .iter()
-                .map(|row| JsonOutboundPrefixLimit {
-                    family: row.family.clone(),
-                    usage: row.usage,
-                    limit: row.limit,
-                    headroom: row.headroom,
-                    blocking: row.blocking,
-                    reason: row.reason.clone(),
-                })
-                .collect(),
-            inbound_prefix_limits: n
-                .inbound_prefix_limits
-                .iter()
-                .map(|row| JsonInboundPrefixLimit {
-                    scope: row.scope.clone(),
-                    usage: row.usage,
-                    limit: row.limit,
-                    headroom: row.headroom,
-                    blocking: row.blocking,
-                    reason: row.reason.clone(),
-                })
-                .collect(),
-        };
+        let out = json_neighbor_detail(&n);
         emit_neighbor_detail_json(&out, n.negotiated_session.as_ref())?;
     } else {
         outln!(
@@ -1467,6 +1475,288 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+
+    // Exhaustive generated-message literals intentionally avoid Default so new
+    // API fields require an explicit curated-output decision.
+    fn neighbor_projection_fixture() -> crate::proto::NeighborState {
+        crate::proto::NeighborState {
+            config: Some(crate::proto::NeighborConfig {
+                address: "fe80::2".to_string(),
+                remote_asn: 65002,
+                description: "description-value".to_string(),
+                hold_time: 104,
+                max_prefixes: 105,
+                families: vec!["families-value".to_string()],
+                remove_private_as: "remove_private_as-value".to_string(),
+                peer_group: "peer_group-value".to_string(),
+                route_server_client: false,
+                add_path_receive: true,
+                add_path_send: false,
+                add_path_send_max: 112,
+                interface: "eth0".to_string(),
+                role: "rs".to_string(),
+                strict_role: false,
+                send_hold_time: Some(116),
+                per_client_best: true,
+                paths_limit_receive_max: 118,
+                max_prefix_restart_seconds: Some(119),
+                required_families: vec!["required_families-value".to_string()],
+                min_hold_time: Some(121),
+                discard_path_attributes: vec![122],
+            }),
+            state: 6,
+            uptime_seconds: u64::MAX,
+            prefixes_received: 104,
+            prefixes_sent: 105,
+            updates_received: 106,
+            updates_sent: 107,
+            notifications_received: 108,
+            notifications_sent: 109,
+            flap_count: 110,
+            last_error: "last_error-value".to_string(),
+            is_dynamic: true,
+            stale: false,
+            local_role: "deliberately-not-config-role".to_string(),
+            remote_role: "remote_role-value".to_string(),
+            role_negotiated: true,
+            otc_routes_blocked: 117,
+            import_policy_routes_permitted: 118,
+            import_policy_routes_denied: 119,
+            export_policy_routes_permitted: 120,
+            export_policy_routes_denied: 121,
+            update_group: "update_group-value".to_string(),
+            messages_received: 123,
+            messages_sent: 124,
+            route_reflector_client: true,
+            paths_limits: vec![crate::proto::PathsLimitState {
+                family: "family-value".to_string(),
+                configured_receive_max: 102,
+                advertised_receive_max: 103,
+                received_receive_max: 104,
+                effective_send_limit: Some(0),
+            }],
+            authentication: 3,
+            tcp_ao: Some(crate::proto::TcpAoState {
+                current_key_id: Some(101),
+                rnext_key_id: Some(102),
+                ao_required: false,
+                accept_icmps: true,
+                packets_good: 105,
+                packets_bad: 106,
+                packets_key_not_found: 107,
+                packets_ao_required: 108,
+                packets_dropped_icmp: 109,
+                keys: vec![crate::proto::TcpAoKeyState {
+                    peer_address: "peer_address-value".to_string(),
+                    prefix_length: 102,
+                    send_id: 103,
+                    recv_id: 104,
+                    algorithm: "algorithm-value".to_string(),
+                    is_current: true,
+                    is_rnext: false,
+                    preferred: true,
+                    deprecated: false,
+                    packets_good: 110,
+                    packets_bad: 111,
+                    vrf_ifindex: Some(112),
+                }],
+            }),
+            tcp_ao_health: 4,
+            effective_distribution_mode: 3,
+            selection_deferral: vec![crate::proto::SelectionDeferralFamilyState {
+                afi: 101,
+                safi: 102,
+                active: false,
+                waiter_state: "waiter_state-value".to_string(),
+                waiter_session_id: Some(105),
+                blocking_waiters: 106,
+                remaining_millis: 107,
+                release_reason: "release_reason-value".to_string(),
+            }],
+            tcp_ao_desired_generation: 132,
+            tcp_ao_applied_generation: 133,
+            tcp_ao_rotation_phase: "tcp_ao_rotation_phase-value".to_string(),
+            tcp_ao_rotation_error: "tcp_ao_rotation_error-value".to_string(),
+            slow_peer: true,
+            graceful_shutdown_advertise_intent: Some(false),
+            max_prefix_action: "max_prefix_action-value".to_string(),
+            max_prefix_restart_remaining_millis: Some(139),
+            update_group_comparison: Some(crate::proto::UpdateGroupComparison {
+                verdict: 3,
+                primary_membership: 2,
+                comparison_membership: 3,
+                differences: vec![1, 999, 2],
+            }),
+            prefixes_received_ipv4: 141,
+            prefixes_received_ipv6: 142,
+            effective_max_prefixes: Some(143),
+            effective_max_prefixes_ipv4: Some(144),
+            effective_max_prefixes_ipv6: Some(145),
+            max_prefix_headroom: Some(146),
+            max_prefix_headroom_ipv4: Some(147),
+            max_prefix_headroom_ipv6: Some(148),
+            negotiation_available: Some(true),
+            negotiated_session: Some(crate::proto::NegotiatedSessionState {
+                hold_time_seconds: Some(0),
+                remote_router_id: Some("remote_router_id-value".to_string()),
+                four_octet_as: Some(false),
+                families: vec!["families-value".to_string()],
+                graceful_restart: Some(crate::proto::NegotiatedGracefulRestartState {
+                    peer_families: vec!["peer_families-value".to_string()],
+                    peer_restart_time_seconds: Some(0),
+                    effective_retention_time_seconds: Some(103),
+                }),
+                peer_route_refresh: Some(true),
+                peer_enhanced_route_refresh: Some(false),
+                peer_extended_message: Some(true),
+                outbound_max_message_bytes: Some(109),
+                local_address: Some("fe80::1".to_string()),
+                keepalive_interval_seconds: Some(0),
+            }),
+            rfc8212_import_policy: 3,
+            rfc8212_export_policy: 4,
+            outbound_prefix_limits: vec![crate::proto::OutboundPrefixLimitState {
+                family: "family-value".to_string(),
+                usage: 102,
+                limit: Some(103),
+                headroom: Some(104),
+                blocking: false,
+                reason: Some("reason-value".to_string()),
+            }],
+            effective_posture: Some(crate::proto::EffectiveNeighborPosture {
+                next_hop_ownership: 2,
+                interpret_rfc1997: true,
+                rs_control_communities: false,
+                orr_vantage: Some("orr_vantage-value".to_string()),
+            }),
+            accepted_dynamic_range: Some(crate::proto::AcceptedDynamicNeighborRange {
+                prefix: "prefix-value".to_string(),
+                peer_group: "peer_group-value".to_string(),
+            }),
+            rejected_routes_retained: Some(156),
+            reconnect_in_seconds: Some(157),
+            inbound_prefix_limits: vec![crate::proto::InboundPrefixLimitState {
+                scope: "scope-value".to_string(),
+                usage: 102,
+                limit: 103,
+                headroom: 104,
+                blocking: false,
+                reason: Some("reason-value".to_string()),
+            }],
+        }
+    }
+
+    fn captured_neighbor_detail(state: &crate::proto::NeighborState) -> serde_json::Value {
+        begin_neighbor_show_capture();
+        emit_neighbor_detail_json(
+            &json_neighbor_detail(state),
+            state.negotiated_session.as_ref(),
+        )
+        .unwrap();
+        serde_json::from_slice(&take_neighbor_show_capture()).unwrap()
+    }
+
+    #[test]
+    fn neighbor_json_projection_covers_curated_state() {
+        let response = crate::proto::ListNeighborsResponse {
+            neighbors: vec![neighbor_projection_fixture()],
+        };
+        let state = response.neighbors.into_iter().next().unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/neighbor-detail.json"))
+                .unwrap();
+        assert_eq!(captured_neighbor_detail(&state), expected);
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/neighbor-list-row.json"))
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value(json_neighbor(&state)).unwrap(),
+            expected
+        );
+        // Configured role and effective capacity/paths are the curated view;
+        // local_role, rejected_routes_retained, raw max_prefixes,
+        // remove_private_as and paths_limit_receive_max are not detail keys.
+        // Comparison is a separate command view, not a nested detail field.
+        assert_eq!(
+            serde_json::to_value(
+                json_update_group_comparison(
+                    "fe80::2%eth0",
+                    "fe80::3%eth1",
+                    state.update_group_comparison.as_ref()
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "primary_neighbor": "fe80::2%eth0", "comparison_neighbor": "fe80::3%eth1",
+                "verdict": "shared", "primary_membership": "grouped",
+                "comparison_membership": "policy_peer_context",
+                "differences": ["export_policy", "unknown", "session_kind"]
+            })
+        );
+    }
+
+    #[test]
+    fn neighbor_json_projection_preserves_absence_and_unknown_state() {
+        let mut state = neighbor_projection_fixture();
+        state.stale = true;
+        state.state = 999;
+        assert_eq!(captured_neighbor_detail(&state)["state"], "Stale");
+        assert_eq!(
+            serde_json::to_value(json_neighbor(&state)).unwrap()["state"],
+            "Stale"
+        );
+        state.stale = false;
+        state.slow_peer = false;
+        state.config = None;
+        state.reconnect_in_seconds = Some(0);
+        state.negotiation_available = Some(false);
+        state.negotiated_session = None;
+        state.effective_posture = None;
+        state.accepted_dynamic_range = None;
+        state.tcp_ao = None;
+        state.authentication = 999;
+        state.tcp_ao_health = 999;
+        state.effective_distribution_mode = 999;
+        state.rfc8212_import_policy = 999;
+        state.rfc8212_export_policy = 999;
+        let value = captured_neighbor_detail(&state);
+        for key in [
+            "interface",
+            "stale",
+            "slow_peer",
+            "reconnect_in_seconds",
+            "negotiated_session",
+            "effective_posture",
+            "accepted_dynamic_range",
+            "tcp_ao",
+            "required_families",
+            "discard_path_attributes",
+            "min_hold_time",
+            "peer_group",
+        ] {
+            assert!(value.get(key).is_none(), "unexpected key {key}");
+        }
+        for key in [
+            "authentication",
+            "tcp_ao_health",
+            "distribution_mode",
+            "rfc8212_import_policy",
+            "rfc8212_export_policy",
+        ] {
+            assert_eq!(value[key], "unknown", "{key}");
+        }
+        assert_eq!(value["state"], "Unknown");
+        assert_eq!(value["negotiation_available"], false);
+        assert_eq!(value["remote_asn"], 0);
+        assert_eq!(value["families"], serde_json::json!([]));
+        state.negotiation_available = None;
+        assert!(
+            captured_neighbor_detail(&state)
+                .get("negotiation_available")
+                .is_none()
+        );
+    }
 
     #[derive(Default)]
     struct TestWriter {

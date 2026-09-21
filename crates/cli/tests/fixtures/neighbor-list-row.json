@@ -1,0 +1,21 @@
+{
+  "address": "fe80::2",
+  "interface": "eth0",
+  "remote_asn": 65002,
+  "state": "Established",
+  "slow_peer": true,
+  "uptime_seconds": 18446744073709551615,
+  "prefixes_received": 104,
+  "prefixes_sent": 105,
+  "messages_received": 123,
+  "messages_sent": 124,
+  "flap_count": 110,
+  "last_error": "last_error-value",
+  "is_dynamic": true,
+  "accepted_dynamic_range": {
+    "prefix": "prefix-value",
+    "peer_group": "peer_group-value"
+  },
+  "route_reflector_client": true,
+  "description": "description-value"
+}

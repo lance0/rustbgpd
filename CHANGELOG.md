@@ -22,6 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Advertised-route explain JSON now includes each ORR candidate's inbound
+  `path_id`, distinguishing Add-Path candidates that share a peer and next hop.
+  The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;
+  the separate `rbgp-rib` streaming format remains at 1.0. Exhaustive projection
+  fixtures now guard the remaining curated RPC JSON views against field loss.
 - Controller-injected unicast replacements and withdrawals now share the
   existing deferred attribute collection bound: 4,096 displaced routes or
   a one-second actor deadline for large intern tables. Route visibility,

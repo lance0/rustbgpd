@@ -205,6 +205,20 @@ mod tests {
                 link_count: 0,
             },
         ];
+        let response = crate::proto::ListTopologyNodesResponse { nodes: rows };
+        let rows = response.nodes;
+        assert_eq!(
+            serde_json::to_value(JsonTopologyNodes(&rows)).unwrap(),
+            serde_json::json!([
+                {"key":"0200000000000000000000fc00020000", "asn":64512, "bgp_ls_id":0,
+                 "router_id":"000000000001", "link_count":2},
+                {"key":"02aabb", "asn":0, "bgp_ls_id":0, "router_id":"", "link_count":0}
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonTopologyNodes(&[])).unwrap(),
+            serde_json::json!([])
+        );
         assert_eq!(short_key(&rows[0].key), "02000000000000..");
         assert_eq!(short_key(&rows[1].key), "02aabb");
         print_topology_nodes(&rows, false).unwrap();
@@ -231,6 +245,8 @@ mod tests {
             cost: 10,
             addresses: vec!["10.0.8.1".to_string(), "10.0.8.2".to_string()],
         };
+        let response = crate::proto::ListTopologyLinksResponse { links: vec![row] };
+        let row = response.links.into_iter().next().unwrap();
         assert_eq!(
             endpoint_label(&row.local_router_id, &row.local_key),
             "000000000001"
@@ -238,6 +254,16 @@ mod tests {
         assert_eq!(
             endpoint_label(&row.remote_router_id, &row.remote_key),
             "02ccdd"
+        );
+        assert_eq!(
+            serde_json::to_value(JsonTopologyLinks(std::slice::from_ref(&row))).unwrap(),
+            serde_json::json!([{"local_key":"02aabb", "local_router_id":"000000000001",
+                "remote_key":"02ccdd", "remote_router_id":"", "cost":10,
+                "addresses":["10.0.8.1","10.0.8.2"]}])
+        );
+        assert_eq!(
+            serde_json::to_value(JsonTopologyLinks(&[])).unwrap(),
+            serde_json::json!([])
         );
         print_topology_links(&[row], false).unwrap();
         print_topology_links(&[], false).unwrap();

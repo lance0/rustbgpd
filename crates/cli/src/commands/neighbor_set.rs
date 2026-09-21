@@ -31,6 +31,28 @@ struct JsonNeighborSetDetail {
     peer_groups: Vec<String>,
 }
 
+fn json_neighbor_set_summary(ns: &crate::proto::NamedNeighborSet) -> JsonNeighborSetSummary {
+    let def = ns.definition.as_ref();
+    JsonNeighborSetSummary {
+        name: ns.name.clone(),
+        address_count: def.map(|d| d.addresses.len()).unwrap_or(0),
+        asn_count: def.map(|d| d.remote_asns.len()).unwrap_or(0),
+        peer_group_count: def.map(|d| d.peer_groups.len()).unwrap_or(0),
+    }
+}
+
+fn json_neighbor_set_detail(
+    name: String,
+    def: &crate::proto::NeighborSetDefinition,
+) -> JsonNeighborSetDetail {
+    JsonNeighborSetDetail {
+        name,
+        addresses: def.addresses.clone(),
+        remote_asns: def.remote_asns.clone(),
+        peer_groups: def.peer_groups.clone(),
+    }
+}
+
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -45,15 +67,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
         let out: Vec<JsonNeighborSetSummary> = resp
             .neighbor_sets
             .iter()
-            .map(|ns| {
-                let def = ns.definition.as_ref();
-                JsonNeighborSetSummary {
-                    name: ns.name.clone(),
-                    address_count: def.map(|d| d.addresses.len()).unwrap_or(0),
-                    asn_count: def.map(|d| d.remote_asns.len()).unwrap_or(0),
-                    peer_group_count: def.map(|d| d.peer_groups.len()).unwrap_or(0),
-                }
-            })
+            .map(json_neighbor_set_summary)
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.neighbor_sets.is_empty() {
@@ -93,12 +107,7 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
 
     let def = resp.definition.unwrap_or_default();
     if json {
-        let detail = JsonNeighborSetDetail {
-            name: resp.name.clone(),
-            addresses: def.addresses.clone(),
-            remote_asns: def.remote_asns.clone(),
-            peer_groups: def.peer_groups.clone(),
-        };
+        let detail = json_neighbor_set_detail(resp.name.clone(), &def);
         output::print_json_pretty(&detail)?;
     } else {
         outln!("Name:        {}", resp.name)?;
@@ -179,6 +188,41 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use std::io::Write;
+
+    #[test]
+    fn neighbor_set_json_projection_covers_definition_and_summary() {
+        let definition = crate::proto::NeighborSetDefinition {
+            addresses: vec!["192.0.2.2".into(), "fe80::1%eth0".into()],
+            remote_asns: vec![u32::MAX],
+            peer_groups: vec!["a".into(), "b".into(), "c".into()],
+        };
+        let response = crate::proto::GetNeighborSetResponse {
+            name: "customers".into(),
+            definition: Some(definition),
+        };
+        let definition = response.definition.unwrap();
+        assert_eq!(
+            serde_json::to_value(json_neighbor_set_detail(response.name, &definition)).unwrap(),
+            serde_json::json!({"name":"customers", "addresses":["192.0.2.2", "fe80::1%eth0"],
+                "remote_asns":[u32::MAX], "peer_groups":["a", "b", "c"]})
+        );
+        let response = crate::proto::ListNeighborSetsResponse {
+            neighbor_sets: vec![crate::proto::NamedNeighborSet {
+                name: "customers".into(),
+                definition: Some(definition),
+            }],
+        };
+        let mut set = response.neighbor_sets.into_iter().next().unwrap();
+        assert_eq!(
+            serde_json::to_value(json_neighbor_set_summary(&set)).unwrap(),
+            serde_json::json!({"name":"customers", "address_count":2, "asn_count":1, "peer_group_count":3})
+        );
+        set.definition = None;
+        assert_eq!(
+            serde_json::to_value(json_neighbor_set_summary(&set)).unwrap(),
+            serde_json::json!({"name":"customers", "address_count":0, "asn_count":0, "peer_group_count":0})
+        );
+    }
 
     #[tokio::test]
     async fn list_renders_empty() {

@@ -74,7 +74,7 @@ The stable CLI set is also explicit. For an inventoried command, the v1 promise
 covers only its command path and command name. Flags, positional arguments,
 defaults, exit behavior, and human-readable output remain outside v1 unless a
 separate inventory entry explicitly pins them. The versioned machine formats
-currently include `rbgp-json/1.0` (explicit `-j --json-version 1` documents),
+currently include `rbgp-json/1.1` (explicit `-j --json-version 1` documents),
 `rbgp-rib/1.0` (explicit `--json-lines` accepted-unicast
 listings), `rbgp-ribdiff/1`, and `rbgp-ribsnap/1`. The RIB JSON-lines header
 declares `format: "rbgp-rib"` and `format_version: "1.0"`; additive optional

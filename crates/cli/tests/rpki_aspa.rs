@@ -190,7 +190,7 @@ async fn aspa_real_cli_preserves_requests_json_and_operational_errors() {
         );
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&versioned.stdout).unwrap(),
-            serde_json::json!({"format":"rbgp-json","format_version":"1.0","data":payload})
+            serde_json::json!({"format":"rbgp-json","format_version":"1.1","data":payload})
         );
     }
     for (customer, message) in [
