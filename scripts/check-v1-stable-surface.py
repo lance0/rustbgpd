@@ -11,6 +11,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 if sys.version_info < (3, 11):
@@ -63,6 +64,7 @@ EXPECTED_EFFECTIVE_FAMILY_CASES = (
     '&[(Afi::Ipv4,Safi::Unicast)]',
 )
 FIXTURES_ROOT = "tests/fixtures/v1-stable"
+STABLE_FIXTURE_ROLES = ("route-server", "route-reflector")
 FIXTURE_VALIDATION_LINKAGE = (
     (f'"{INVENTORY_PATH.relative_to(ROOT)}"', "read the stable-surface inventory"),
     ('["fixture_directory"]', "take each exercise's fixture_directory"),
@@ -903,6 +905,105 @@ def check_release_line_selftests() -> None:
         )
 
 
+def fixture_files(fixture_directory: Path) -> list[str]:
+    actual_files = []
+    for path in fixture_directory.rglob("*"):
+        relative_path = str(path.relative_to(fixture_directory))
+        if path.is_symlink():
+            fail(f"upgrade fixture {relative_path!r} must not be a symlink")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            fail(f"upgrade fixture {relative_path!r} must be a regular file")
+        actual_files.append(relative_path)
+    return sorted(actual_files)
+
+
+def check_archived_fixture_directories(
+    fixtures_root: Path, exercised: set[str], tagged=tagged_file
+) -> None:
+    """Anchor every `<tag>/<role>/` directory no exercise names to its tag.
+
+    A staged next-release fixture, and any role other than the exercised one,
+    must equal `<tag>:examples/<role>/` byte for byte. A tag that carries a
+    stable role's example owes that role's fixture directory.
+    """
+    for tag_directory in sorted(fixtures_root.iterdir()):
+        tag = tag_directory.name
+        if tag_directory.is_symlink() or not tag_directory.is_dir():
+            fail(f"archived fixture entry {FIXTURES_ROOT}/{tag} must be a tag directory")
+        parse_release_tag(tag)
+        require_git_tag(tag)
+        for role_directory in sorted(tag_directory.iterdir()):
+            role = role_directory.name
+            archived = f"{FIXTURES_ROOT}/{tag}/{role}"
+            if role_directory.is_symlink() or not role_directory.is_dir():
+                fail(f"archived fixture entry {archived} must be a role directory")
+            if archived in exercised:
+                continue
+            file_names = fixture_files(role_directory)
+            if "config.toml" not in file_names:
+                fail(f"archived fixture directory {archived} must contain config.toml")
+            for name in file_names:
+                if (role_directory / name).read_bytes() != tagged(
+                    tag, f"examples/{role}/{name}"
+                ):
+                    fail(
+                        f"archived fixture {archived}/{name} does not match "
+                        f"{tag}:examples/{role}/{name}"
+                    )
+        for role in STABLE_FIXTURE_ROLES:
+            if (
+                tagged(tag, f"examples/{role}/config.toml") is not None
+                and not (tag_directory / role).is_dir()
+            ):
+                fail(
+                    f"{tag} carries examples/{role}/config.toml but "
+                    f"{FIXTURES_ROOT}/{tag}/{role} is not archived"
+                )
+
+
+def check_archived_fixture_directory_selftests() -> None:
+    """Synthetic tree and tag lookup: independent of what is staged on disk."""
+    tag = f"v{'.'.join(map(str, V1_UPGRADE_HISTORY_ORIGIN))}"
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        for role in STABLE_FIXTURE_ROLES:
+            (root / tag / role).mkdir(parents=True)
+            (root / tag / role / "config.toml").write_bytes(b"tagged")
+
+        def carried(_tag: str, path: str) -> bytes | None:
+            return b"tagged" if path.endswith("/config.toml") else None
+
+        check_archived_fixture_directories(root, set(), carried)
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(
+                root, set(), lambda _tag, path: carried(_tag, path) and b"drifted"
+            ),
+            f"{tag}/route-reflector/config.toml does not match",
+            "unexercised fixture bytes drifted from the tag",
+        )
+        (root / tag / "route-server" / "stray.rpol").write_bytes(b"untagged")
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(root, set(), carried),
+            f"{tag}/route-server/stray.rpol does not match",
+            "unexercised fixture file the tag never carried",
+        )
+        (root / tag / "route-server" / "stray.rpol").unlink()
+        (root / tag / "route-reflector" / "config.toml").unlink()
+        (root / tag / "route-reflector").rmdir()
+        expect_checker_failure(
+            lambda: check_archived_fixture_directories(root, set(), carried),
+            f"{tag} carries examples/route-reflector/config.toml but",
+            "tag carries a stable role example with no archived fixture",
+        )
+        check_archived_fixture_directories(
+            root,
+            set(),
+            lambda _tag, path: None if "route-reflector" in path else carried(_tag, path),
+        )
+
+
 def check_fixture_validation_linkage(test_region: str, test: str) -> None:
     for needle, duty in FIXTURE_VALIDATION_LINKAGE:
         if needle not in test_region:
@@ -971,17 +1072,7 @@ def check_upgrade_exercises(inventory: dict) -> None:
         require_sorted_unique(file_names, "upgrade_exercise.files")
         if "config.toml" not in file_names:
             fail("upgrade exercise must archive config.toml")
-        actual_files = []
-        for path in fixture_directory.rglob("*"):
-            relative_path = str(path.relative_to(fixture_directory))
-            if path.is_symlink():
-                fail(f"upgrade fixture {relative_path!r} must not be a symlink")
-            if path.is_dir():
-                continue
-            if not path.is_file():
-                fail(f"upgrade fixture {relative_path!r} must be a regular file")
-            actual_files.append(relative_path)
-        actual_files.sort()
+        actual_files = fixture_files(fixture_directory)
         if actual_files != file_names:
             fail(
                 f"upgrade fixture directory must contain exactly the inventoried files: "
@@ -1026,6 +1117,12 @@ def check_upgrade_exercises(inventory: dict) -> None:
 
     for validation_source, validation_test in sorted(validation_tests):
         check_fixture_validation_test(validation_source, validation_test)
+
+    check_archived_fixture_directories(
+        ROOT / FIXTURES_ROOT,
+        {exercise["fixture_directory"] for exercise in exercises},
+    )
+    check_archived_fixture_directory_selftests()
 
     if error := release_line_chain_error(transitions, baseline_version):
         fail(error)

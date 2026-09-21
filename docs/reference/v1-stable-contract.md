@@ -243,8 +243,11 @@ an exercise that is actually between consecutive release lines.
 
 The accepted source/target pairs and archived fixture paths are listed in
 [`v1-stable-surface.json`](v1-stable-surface.json). The fixture parser test
-below covers them as a set. Staging a future source fixture alone does not advance the
-accepted release chain; the workspace version and inventory move together.
+below covers them as a set. Staging a future source fixture alone does not
+advance the accepted release chain; the workspace version and inventory move
+together. A staged directory is not editable text in the meantime: the checker
+compares every archived directory that no exercise names yet with the same
+path at its release tag, byte for byte.
 
 ## Release gate
 
