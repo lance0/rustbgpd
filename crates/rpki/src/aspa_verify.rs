@@ -8,6 +8,23 @@ use smallvec::SmallVec;
 
 use crate::aspa::{AspaTable, ProviderAuth};
 
+/// Construct the eBGP validation context shared by ingress and diagnostics.
+///
+/// `local_role` describes the receiving speaker. Only a route-server client
+/// skips the first-AS comparison; an unconfigured role uses upstream validation.
+/// The caller supplies the effective (negotiated, for a live session) neighbor ASN.
+#[must_use]
+pub const fn validation_context(
+    neighbor_asn: u32,
+    local_role: Option<BgpRole>,
+) -> AspaValidationContext {
+    AspaValidationContext {
+        neighbor_asn: Some(neighbor_asn),
+        local_role,
+        first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
+    }
+}
+
 /// Compressed `AS_PATH` hop list. Inline capacity 8 keeps the global-table
 /// common case (compressed paths of ~3-6 ASNs) allocation-free; this runs
 /// once per route per ASPA revalidation pass.
@@ -318,6 +335,26 @@ fn stops_ramp(auth: ProviderAuth, mode: BoundMode) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn context_requires_explicit_neighbor_and_exempts_only_rs_client() {
+        for role in [
+            None,
+            Some(BgpRole::Provider),
+            Some(BgpRole::Customer),
+            Some(BgpRole::Peer),
+            Some(BgpRole::RouteServer),
+            Some(BgpRole::RouteServerClient),
+        ] {
+            let context = validation_context(65_001, role);
+            assert_eq!(context.neighbor_asn, Some(65_001));
+            assert_eq!(context.local_role, role);
+            assert_eq!(
+                context.first_as_check_exempt,
+                role == Some(BgpRole::RouteServerClient)
+            );
+        }
+    }
+
     use super::*;
     use crate::aspa::AspaRecord;
     use rustbgpd_wire::{AsPathSegment, AspaValidationContext, BgpRole};

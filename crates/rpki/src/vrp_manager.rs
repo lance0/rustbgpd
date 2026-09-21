@@ -252,10 +252,10 @@ pub struct VrpManager {
     /// customer's previous provider set, and a withdraw removes the
     /// customer ASN entirely.
     server_aspa_tables: HashMap<SocketAddr, HashMap<u32, Vec<u32>>>,
-    /// Current merged VRP table.
-    current_table: Arc<VrpTable>,
-    /// Current merged ASPA table.
-    current_aspa_table: Arc<AspaTable>,
+    /// Current distributed VRP table; absent until the first accepted update.
+    current_table: Option<Arc<VrpTable>>,
+    /// Current distributed ASPA table; absent until the first accepted update.
+    current_aspa_table: Option<Arc<AspaTable>>,
     /// Receiver for updates from RTR clients.
     update_rx: mpsc::Receiver<VrpUpdate>,
     /// Sender for VRP table snapshots to the RIB manager.
@@ -276,8 +276,8 @@ impl VrpManager {
         Self {
             server_tables: HashMap::new(),
             server_aspa_tables: HashMap::new(),
-            current_table: Arc::new(VrpTable::new(vec![])),
-            current_aspa_table: Arc::new(AspaTable::new(vec![])),
+            current_table: None,
+            current_aspa_table: None,
             update_rx,
             rib_tx,
             aspa_rib_tx: None,
@@ -608,6 +608,10 @@ impl VrpManager {
     // ponytail: revisit with per-family incremental table maintenance only if
     // caches ever stream high-rate deltas.
     async fn rebuild_and_distribute_vrp(&mut self, delta: Option<Vec<VrpEntry>>) {
+        // A pre-accept disconnect must not initialize an authoritative table.
+        if self.current_table.is_none() && self.server_tables.is_empty() {
+            return;
+        }
         let merged: Vec<VrpEntry> = self
             .server_tables
             .values()
@@ -619,7 +623,7 @@ impl VrpManager {
         // Dropping a suppressed update's delta is sound: suppression proves
         // the merged table did not change, so the last *distributed* snapshot
         // still equals the table any later delta is computed against.
-        if *new_table == *self.current_table {
+        if self.current_table.as_ref() == Some(&new_table) {
             debug!("VRP table unchanged — skipping distribution");
             return;
         }
@@ -630,7 +634,7 @@ impl VrpManager {
             total = new_table.len(),
             "VRP table updated"
         );
-        self.current_table = Arc::clone(&new_table);
+        self.current_table = Some(Arc::clone(&new_table));
         let _ = self
             .rib_tx
             .send(RpkiTableUpdate {
@@ -644,6 +648,9 @@ impl VrpManager {
         let Some(ref aspa_tx) = self.aspa_rib_tx else {
             return;
         };
+        if self.current_aspa_table.is_none() && self.server_aspa_tables.is_empty() {
+            return;
+        }
 
         let merged: Vec<AspaRecord> = self
             .server_aspa_tables
@@ -658,13 +665,13 @@ impl VrpManager {
 
         let new_table = Arc::new(AspaTable::new(merged));
 
-        if *new_table == *self.current_aspa_table {
+        if self.current_aspa_table.as_ref() == Some(&new_table) {
             debug!("ASPA table unchanged — skipping distribution");
             return;
         }
 
         info!(records = new_table.len(), "ASPA table updated");
-        self.current_aspa_table = Arc::clone(&new_table);
+        self.current_aspa_table = Some(Arc::clone(&new_table));
         let _ = aspa_tx
             .send(AspaTableUpdate {
                 table: new_table,
@@ -931,6 +938,81 @@ mod tests {
         .await;
 
         assert!(rib_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn first_empty_validation_tables_published_once() {
+        for first_update in [
+            VrpUpdate::FullTable {
+                server: server1(),
+                entries: vec![],
+                aspa_records: vec![],
+            },
+            VrpUpdate::IncrementalUpdate {
+                server: server1(),
+                announced: vec![],
+                withdrawn: vec![],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
+            },
+        ] {
+            let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+            let (rib_tx, mut rib_rx) = mpsc::channel(16);
+            let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+            let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
+
+            // A disconnected cache that never supplied data is still unavailable.
+            mgr.handle_update(VrpUpdate::ServerDown { server: server1() })
+                .await;
+            assert_eq!(
+                aspa_rx.try_recv().unwrap_err(),
+                mpsc::error::TryRecvError::Empty
+            );
+
+            assert_eq!(
+                rib_rx.try_recv().unwrap_err(),
+                mpsc::error::TryRecvError::Empty
+            );
+
+            mgr.handle_update(first_update).await;
+            let update = rib_rx.try_recv().expect("first accepted empty VRP table");
+            assert!(update.table.is_empty());
+            let update = aspa_rx.try_recv().expect("first accepted empty ASPA table");
+            assert!(update.table.is_empty());
+
+            // Identical full/incremental replays and removal/reconnection of an
+            // empty contribution do not republish the initialized merged table.
+            for update in [
+                VrpUpdate::FullTable {
+                    server: server1(),
+                    entries: vec![],
+                    aspa_records: vec![],
+                },
+                VrpUpdate::IncrementalUpdate {
+                    server: server1(),
+                    announced: vec![],
+                    withdrawn: vec![],
+                    aspa_announced: vec![],
+                    aspa_withdrawn: vec![],
+                },
+                VrpUpdate::ServerDown { server: server1() },
+                VrpUpdate::FullTable {
+                    server: server1(),
+                    entries: vec![],
+                    aspa_records: vec![],
+                },
+            ] {
+                mgr.handle_update(update).await;
+                assert_eq!(
+                    rib_rx.try_recv().unwrap_err(),
+                    mpsc::error::TryRecvError::Empty
+                );
+                assert_eq!(
+                    aspa_rx.try_recv().unwrap_err(),
+                    mpsc::error::TryRecvError::Empty
+                );
+            }
+        }
     }
 
     #[tokio::test]
