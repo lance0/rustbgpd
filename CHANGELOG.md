@@ -27,6 +27,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;
   the separate `rbgp-rib` streaming format remains at 1.0. Exhaustive projection
   fixtures now guard the remaining curated RPC JSON views against field loss.
+- Controller-injected unicast replacements and withdrawals now share the
+  existing deferred attribute collection bound: 4,096 displaced routes or
+  a one-second actor deadline for large intern tables. Route visibility,
+  per-prefix distribution and successful RPC acknowledgement semantics are
+  unchanged; small tables retain immediate collection.
 - Publish the first accepted empty VRP and ASPA tables to validation consumers,
   allowing RPKI operator queries to report authoritative empty data correctly.
   Identical replays remain suppressed, and pre-accept disconnects do not
