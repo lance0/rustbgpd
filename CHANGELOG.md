@@ -34,6 +34,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Aborting a commit-confirmed config transaction (`rbgp config abort`, gNMI
+  commit cancel) and the confirm-timeout auto-revert no longer fail when a BGP
+  session goes up or down inside the confirm window. The rollback replayed the
+  post-commit runtime snapshot token, which also covers live update-group
+  membership, so an ordinary session flap made it fail with
+  `FAILED_PRECONDITION` ("runtime config snapshot changed"), left the
+  transaction `abort_failed` / `auto_revert_failed`, and kept the config
+  mutation fence closed until the candidate was confirmed or the daemon was
+  restarted. **Operator-visible:** rollback of a pending confirmed transaction
+  now restores the recorded pre-commit snapshot without a token check; a
+  caller's own Plan→Apply token still goes stale on a session change and must
+  be re-planned.
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers

@@ -756,6 +756,17 @@ pending with an `ABORT_FAILED`/`AUTO_REVERT_FAILED` status and the mutation
 fence stays closed until the abort is retried successfully, the candidate is
 confirmed, or a restart boot-reverts from the retained journal.
 
+Abort and timer rollback do not depend on the runtime snapshot token. The
+token is a Plan→Apply change detector for callers: it covers the runtime config
+and the live update-group membership, so a session going up or down changes
+it, and a caller's Plan, Apply, or `RollbackConfigTransaction` holding the older
+token still fails with `FAILED_PRECONDITION` and must re-plan. The rollback of a
+pending confirmed transaction instead restores the prior snapshot the
+transaction recorded, under the runtime-config coordinator and behind the
+mutation fence, whatever sessions did during the window. It depends on what
+any apply depends on: the peer manager and config persistence being available,
+and the prior snapshot still planning as committable.
+
 V3 commit-confirm caps the current accepted normalized prior at 384 MiB. An
 oversized prior makes Apply return `FAILED_PRECONDITION`, including actual and
 limit byte counts, before authority publication or peer, persistence, and
