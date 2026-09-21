@@ -12,6 +12,8 @@
 #   8. After an explicit restart into rfc9117 mode, received IPv4 FlowSpec
 #      follows source unicast withdrawal/restoration with retained diagnostics
 #      and no session flap or FlowSpec reinjection during that churn
+#   9. A ROUTE-REFRESH toward the source re-sends the unchanged rule; it stays
+#      selected and FRR receives no UPDATE (no withdraw/re-announce pair)
 #
 # Convergence-signal discipline (after the second-flake post-mortem):
 # the prior version relied on `show bgp ipv4 flowspec` text grep,
@@ -517,6 +519,55 @@ test_received_validation_churn() {
     ok "received validation churn completed without a BGP session flap or FlowSpec reinjection"
 }
 
+# UPDATE messages FRR has received from the validator. A withdraw followed by
+# a re-announce of an unchanged rule raises this by two; keepalives do not.
+frr_updates_received() {
+    docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" \
+        | jq -er '.["10.0.0.1"].messageStats.updatesRecv'
+}
+
+# UPDATE messages the validator has received from the source.
+validator_updates_from_source() {
+    grpcurl_call -d '{"address":"10.0.1.2"}' \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState \
+        | jq -er '(.updatesReceived // "0") | tonumber'
+}
+
+test_unchanged_rule_refresh() {
+    log "Test 9: ROUTE-REFRESH re-receipt of the unchanged rule stays selected with no downstream UPDATE"
+    local observer_before validator_before observer_after validator_after i
+    observer_before=$(frr_updates_received) || { fail "FRR message counters unavailable"; return 1; }
+    validator_before=$(validator_updates_from_source) || { fail "validator neighbor state unavailable"; return 1; }
+
+    # ROUTE-REFRESH toward the source makes it re-send its unchanged unicast
+    # cover and FlowSpec rule; the validator restamps both on receipt.
+    grpcurl_call -d '{"address":"10.0.1.2"}' \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/SoftResetIn >/dev/null \
+        || { fail "SoftResetIn toward the source was rejected"; return 1; }
+    validator_after=$validator_before
+    for i in $(seq 1 30); do
+        validator_after=$(validator_updates_from_source) || return 1
+        [ "$validator_after" -gt "$validator_before" ] && break
+        sleep 1
+    done
+    if [ "$validator_after" -le "$validator_before" ]; then
+        fail "source did not re-send its table after ROUTE-REFRESH (updates stayed at $validator_before)"
+        return 1
+    fi
+    ok "source re-sent after ROUTE-REFRESH (validator UPDATEs from source $validator_before -> $validator_after)"
+
+    # Leave room for a withdraw/re-announce pair to reach the observer before
+    # judging: a fast re-announce would otherwise hide behind the steady state.
+    sleep 5
+    wait_validation_state FLOW_SPEC_VALIDATION_STATUS_FEASIBLE true "" "after refresh" || return 1
+    observer_after=$(frr_updates_received) || { fail "FRR message counters unavailable"; return 1; }
+    if [ "$observer_after" -ne "$observer_before" ]; then
+        fail "FRR received $((observer_after - observer_before)) UPDATE(s) for an unchanged rule after ROUTE-REFRESH ($observer_before -> $observer_after)"
+        return 1
+    fi
+    ok "FRR UPDATE counter unchanged across the refresh ($observer_before); unchanged rule was neither withdrawn nor re-announced"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -544,6 +595,7 @@ main() {
     test_withdraw_rule1
     test_frr_withdrawal_propagated
     test_received_validation_churn
+    test_unchanged_rule_refresh
 
     echo ""
     print_summary

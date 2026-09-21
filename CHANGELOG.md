@@ -29,6 +29,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
+  arrives again unchanged (route refresh, graceful-restart re-sync, periodic
+  re-send) now stays selected instead of being withdrawn from downstream peers
+  and re-announced after revalidation. Only a changed payload is revalidated.
 - Advertised-route explain JSON now includes each ORR candidate's inbound
   `path_id`, distinguishing Add-Path candidates that share a peer and next hop.
   The opt-in `rbgp-json` envelope advances to version 1.1 for this additive field;

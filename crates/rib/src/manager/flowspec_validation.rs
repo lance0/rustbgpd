@@ -21,8 +21,9 @@ const DEPENDENCY_RULES_PER_TURN: usize = 16;
 
 type CandidateId = (FlowSpecKey, IpAddr, u32);
 
+/// Retained payload copy: the Adj-RIB-In row is overwritten before this
+/// reconciliation runs, so an exact comparison needs the previous payload.
 struct Candidate {
-    received_at: Instant,
     attributes: Vec<PathAttribute>,
     origin: RouteOrigin,
     revision: u64,
@@ -295,9 +296,10 @@ impl ValidationState {
                 .get(key)
                 .and_then(|rows| rows.get(&identity))
                 .is_some_and(|old| {
-                    old.received_at == route.received_at
-                        && old.attributes == route.attributes
-                        && old.origin == route.origin_type
+                    // A re-received identical payload (route refresh, GR
+                    // re-sync, periodic re-send) carries a fresh timestamp;
+                    // only the payload decides whether the verdict is stale.
+                    old.attributes == route.attributes && old.origin == route.origin_type
                 })
             {
                 continue;
@@ -311,7 +313,6 @@ impl ValidationState {
             self.candidates.entry(key.clone()).or_default().insert(
                 identity,
                 Candidate {
-                    received_at: route.received_at,
                     attributes: route.attributes.clone(),
                     origin: route.origin_type,
                     revision,
@@ -1130,6 +1131,70 @@ mod tests {
         assert_eq!(rows[0].validation, FlowSpecValidationStatus::Pending);
         drain(&mut manager);
         assert!(selected(&manager, &flow));
+    }
+
+    #[tokio::test]
+    async fn flowspec_validation_identical_re_receipt_keeps_selection_without_withdraw() {
+        let (mut manager, _tx, mut flow, _cover) = fixture();
+        drain(&mut manager);
+        assert!(selected(&manager, &flow));
+        let downstream = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        manager.handle_update(RibUpdate::PeerUp {
+            peer: downstream,
+            session_id: 0,
+            peer_asn: 65002,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+            is_ebgp: true,
+            route_reflector_client: false,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            orr_vantage: None,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        let initial = out_rx.try_recv().expect("initial FlowSpec table");
+        assert_eq!(initial.flowspec_announce.len(), 1);
+        while out_rx.try_recv().is_ok() {}
+
+        // Same payload, fresh receipt: a route refresh, GR re-sync, or a
+        // periodic re-send stamps a new timestamp and overwrites Adj-RIB-In.
+        flow.received_at = Instant::now();
+        manager.handle_update(RibUpdate::RoutesReceived {
+            peer: flow.peer,
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![flow.clone()],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+        while manager.process_next_route_chunk() {}
+        let rows = manager
+            .collect_received_flowspec(flow.peer, None, || false)
+            .unwrap();
+        assert!(
+            selected(&manager, &flow) && !rows[0].pending,
+            "identical payload re-announced: selected dropped, validation={:?} pending={}",
+            rows[0].validation,
+            rows[0].pending
+        );
+        assert_eq!(rows[0].validation, FlowSpecValidationStatus::Feasible);
+        let id = (flow.selection_key(), flow.peer, flow.path_id);
+        assert!(!manager.flowspec_validation.candidate(&id).unwrap().pending);
+        assert!(manager.flowspec_validation.queued.is_empty());
+        assert!(
+            out_rx.try_recv().is_err(),
+            "unchanged rule must not reach downstream as a withdraw or re-announce"
+        );
+        drain(&mut manager);
+        assert!(out_rx.try_recv().is_err());
     }
 
     #[test]
