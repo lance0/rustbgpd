@@ -892,11 +892,15 @@ Before rolling any versions:
 
 After the tag publishes:
 
-13. **Freeze the released route-server fixture.** Copy the tagged
-    `examples/route-server/config.toml` and `hygiene.rpol` into a new
-    `route-server` directory for the release under `tests/fixtures/v1-stable/`.
-    Nothing else is needed: the existing fixture parse test walks that root.
-    The next release's consecutive upgrade exercise consumes this fixture.
+13. **Freeze the released stable-role fixtures.** Under a new directory for
+    the tag in `tests/fixtures/v1-stable/`, copy the tagged
+    `examples/route-server/config.toml` and `hygiene.rpol` into `route-server`,
+    and the tagged `examples/route-reflector/config.toml` into
+    `route-reflector`. Nothing else is needed: the existing fixture parse test
+    walks that root, and `scripts/check-v1-stable-surface.py` fails until the
+    copies match the tag byte for byte and every role the tag carries is
+    present. The next release's consecutive upgrade exercise consumes the
+    `route-server` fixture.
 14. **Roll the metric release-note baseline** in the same post-release commit
     as step 13, immediately after the tag. Every release rolls it, patch
     releases included: the checker requires every metric family added or

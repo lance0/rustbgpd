@@ -253,6 +253,13 @@ together. A staged directory is not editable text in the meantime: the checker
 compares every archived directory that no exercise names yet with the same
 path at its release tag, byte for byte.
 
+Fixture directories are archived per stable role, as
+`tests/fixtures/v1-stable/<tag>/<role>/`, from the first tag that carries that
+role's example: `examples/route-server/` from `v0.50.0`, and
+`examples/route-reflector/` from the first release that ships it. Earlier tags
+owe nothing for a role they never carried; afterwards the checker requires the
+role's directory beside every archived tag and the same parser test accepts it.
+
 ## Release gate
 
 Run:
