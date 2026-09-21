@@ -125,13 +125,14 @@ count_stale_routes_from() {
             '[.routes[]? | select(.peerAddress == $p and (.stale // false))] | length'
 }
 
-# grpcurl renders SessionState by its proto enum name. Recognise the prefix
-# before comparing, so a rendering this script does not know reads as "cannot
+# grpcurl renders SessionState by its proto enum name. Only the states the
+# proto defines below Established read as down; Established, the unspecified
+# zero value, and any rendering this script does not know read as "cannot
 # tell" rather than as "not Established".
 session_state_is_down() {
     case "$1" in
-        SESSION_STATE_ESTABLISHED) return 1 ;;
-        SESSION_STATE_*) return 0 ;;
+        SESSION_STATE_IDLE | SESSION_STATE_CONNECT | SESSION_STATE_ACTIVE \
+            | SESSION_STATE_OPEN_SENT | SESSION_STATE_OPEN_CONFIRM) return 0 ;;
         *) return 1 ;;
     esac
 }
