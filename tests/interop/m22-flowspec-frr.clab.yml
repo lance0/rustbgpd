@@ -1,7 +1,9 @@
 # Containerlab topology: rustbgpd ↔ FRR (M22 — FlowSpec)
 #
 # Validates: FlowSpec rule injection via gRPC, distribution to FRR,
-# withdrawal propagation. FRR is the receiving side here; rustbgpd originates.
+# withdrawal propagation, then opt-in received-rule validation against unicast
+# churn. FRR 10.7.1 remains the wire observer; a second rustbgpd originates both
+# families over one source session. This is an IPv4 control-plane proof only.
 #
 # Flow: rustbgpd (gRPC inject) → eBGP → FRR (receive and display)
 #
@@ -24,6 +26,22 @@ topology:
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
         - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    source:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m22-source.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
       env:
         RUST_LOG: info
 
@@ -39,7 +57,10 @@ topology:
 
   links:
     - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+    - endpoints: ["rustbgpd:eth2", "source:eth1"]
 
 # Network: 10.0.0.0/24
 # rustbgpd: 10.0.0.1, AS 65001
 # FRR:      10.0.0.2, AS 65002
+
+# Source link: rustbgpd 10.0.1.1, source 10.0.1.2 (AS 65003).

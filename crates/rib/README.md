@@ -67,7 +67,8 @@ independent observations; no fleet-wide atomic snapshot is implied.
   ceilings with non-destructive blocking: net-new advertisements are
   held at the cap without withdrawing existing routes or resetting the
   session (ADR-0113)
-- **FlowSpec** — parallel storage for FlowSpec rules (SAFI 133)
+- **FlowSpec** — parallel storage for FlowSpec rules (SAFI 133), with optional
+  cross-RIB feasibility and retained-candidate diagnostics
 - **VPN, labeled-unicast, and RT-Constrain** — parallel storage and
   distribution for VPNv4/VPNv6 (SAFI 128), labeled-unicast (SAFI 4), and
   RT-Constrain membership (SAFI 132)

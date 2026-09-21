@@ -751,3 +751,55 @@ required_families = ["ipv6_unicast"]
 "#;
     parse(toml).unwrap();
 }
+
+#[test]
+fn flowspec_validation_defaults_off_and_accepts_only_named_modes() {
+    let absent = parse(valid_toml()).unwrap();
+    assert_eq!(absent.flowspec.validation, FlowSpecValidationMode::Off);
+    for fields in ["", "validation = \"off\""] {
+        let config = parse(&format!("{}\n[flowspec]\n{fields}\n", valid_toml())).unwrap();
+        assert_eq!(config.flowspec, absent.flowspec);
+        assert!(!diff_config(&absent, &config).has_any_changes());
+    }
+    let enabled = parse(&format!(
+        "{}\n[flowspec]\nvalidation = \"rfc9117\"\n",
+        valid_toml()
+    ))
+    .unwrap();
+    assert_eq!(enabled.flowspec.validation, FlowSpecValidationMode::Rfc9117);
+
+    for fields in [
+        "validation = \"rfc8955\"",
+        "validation = \"RFC9117\"",
+        "validation = \"on\"",
+        "validation = true",
+        "allow_destinationless = true",
+    ] {
+        let result = parse(&format!("{}\n[flowspec]\n{fields}\n", valid_toml()));
+        assert!(
+            matches!(result, Err(ConfigError::Parse(_))),
+            "{fields}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn flowspec_validation_survives_raw_effective_and_persisted_config() {
+    for (mode, expected) in [
+        (FlowSpecValidationMode::Off, "off"),
+        (FlowSpecValidationMode::Rfc9117, "rfc9117"),
+    ] {
+        let mut config = parse(valid_toml()).unwrap();
+        config.flowspec.validation = mode;
+        assert_eq!(config.effective_redacted().flowspec.validation, mode);
+        let ordinary = persisted_config_document(&config).unwrap();
+        let bounded = persisted_config_document_bounded(&mut config).unwrap();
+        assert_eq!(ordinary, bounded);
+        for document in [raw_config_document_bounded(&mut config).unwrap(), bounded] {
+            let decoded = parse_strict(&document).unwrap();
+            assert_eq!(decoded.flowspec.validation, mode);
+            let value: toml::Value = toml::from_str(&document).unwrap();
+            assert_eq!(value["flowspec"]["validation"].as_str(), Some(expected));
+        }
+    }
+}

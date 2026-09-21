@@ -29,7 +29,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
 | Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
-| FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
+| FlowSpec / blackhole | RFC 8955/8956 and RFC 9117 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Opt-in FlowSpec feasibility; opt-in BLACKHOLE Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 9003 (Extended Admin Shutdown Communication) | Receiver gating + initiator toggle |
 | Monitoring | RFC 7854/8671/9069 (BMP trio), RFC 9972 (selected BMP statistics), RFC 6396 (MRT TABLE_DUMP_V2), RFC 7951 (gNMI/OpenConfig JSON) | Pre-policy / post-policy / Loc-RIB BMP views |
@@ -1218,8 +1218,17 @@ carries inactive (absent), unlimited (zero), or finite.
   carries no destination prefix for policy, RPKI, or validation purposes:
   the pattern is the address shifted right by the offset, so it names no
   routable prefix, and RFC 8956 §5 counts only an offset-0 destination
-  toward validation item (a). The rule is still decoded and installed.
-- See ADR-0035.
+  toward validation item (a). The rule remains decoded and retained after
+  admission. A received rule with this offset is ineligible for selection when
+  cross-RIB validation is enabled.
+- Startup-only `[flowspec] validation = "rfc9117"` enables feasibility checks
+  against the selected unicast cover and all admitted, retained more-specific
+  unicast candidates. The default is `"off"`. Relevant unicast changes trigger
+  resumable revalidation, including losing Add-Path changes; infeasible rules
+  remain available in the received-peer diagnostic view. Local injection stays
+  trusted origination. This adds no FlowSpec forwarding dataplane.
+- See [ADR-0035](../adr/0035-flowspec.md) and the superseding validation decision
+  in [ADR-0135](../adr/0135-flowspec-feasibility.md).
 
 ---
 

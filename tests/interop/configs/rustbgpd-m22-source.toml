@@ -1,6 +1,7 @@
+# Local origination supplies both families over one eBGP session to the validator.
 [global]
-asn = 65001
-router_id = "10.0.0.1"
+asn = 65003
+router_id = "10.0.1.2"
 listen_port = 179
 
 [global.telemetry]
@@ -12,18 +13,12 @@ address = "0.0.0.0:50051"
 token_file = "/run/rustbgpd/grpc-test-only-operator.token"
 principal = "rustbgpd://operator/test-only"
 
-[[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
-description = "frr-m22-flowspec"
-hold_time = 90
-families = ["ipv4_unicast", "ipv4_flowspec"]
+[flowspec]
+validation = "off"
 
-# The source starts only after the original default-off injection tests.
 [[neighbors]]
-address = "10.0.1.2"
-remote_asn = 65003
-description = "m22-received-flowspec-source"
+address = "10.0.1.1"
+remote_asn = 65001
 hold_time = 90
 families = ["ipv4_unicast", "ipv4_flowspec"]
 

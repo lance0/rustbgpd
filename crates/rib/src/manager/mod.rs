@@ -8,6 +8,7 @@ pub use bench_support::{
     bench_evpn_dataplane_legacy_snapshot,
 };
 mod distribution;
+mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
 mod outbound_prefix_limits;
@@ -851,6 +852,8 @@ pub struct RibManager {
     replacement_readiness_receipts: Vec<ReplacementReadinessReceipt>,
     /// Large route batches that are being processed in chunks.
     pending_route_batches: VecDeque<PendingRoutesReceived>,
+    /// Retained receive-side `FlowSpec` feasibility; empty when disabled.
+    flowspec_validation: flowspec_validation::ValidationState,
     /// One explicit shared policy transition advanced by the actor itself.
     /// While present, only the dedicated type-narrow readiness lane may
     /// interleave; general queries, primary mutations, and timers remain
@@ -1821,6 +1824,7 @@ impl RibManager {
             #[cfg(test)]
             replacement_readiness_receipts: Vec::new(),
             pending_route_batches: VecDeque::new(),
+            flowspec_validation: flowspec_validation::ValidationState::default(),
             pending_clean_policy_transition: None,
             post_commit_query_trace: None,
             pending_destination_prestage: None,
@@ -3397,6 +3401,13 @@ impl RibManager {
             RibUpdate::QueryFlowSpecRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_flowspec(), filter.as_ref(), reply);
             }
+            RibUpdate::QueryReceivedFlowSpecRoutes {
+                peer,
+                filter,
+                reply,
+            } => {
+                self.send_received_flowspec(peer, filter.as_ref(), reply);
+            }
             RibUpdate::ExplainEvpnRoute {
                 key,
                 received_from,
@@ -4413,6 +4424,16 @@ impl RibManager {
                 continue;
             }
 
+            // One bounded validation slice per ordinary actor turn, including
+            // under sustained primary traffic. Clean transitions above retain
+            // their existing ownership fence.
+            let validated_flowspec = self.process_flowspec_validation_chunk();
+            if validated_flowspec {
+                self.drain_readiness_queries(None);
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
+            }
+
             // Arm the resync timer when resync work transitions none → some.
             if self.resync_tick_pending() && !resync_armed {
                 resync_sleep
@@ -4574,6 +4595,15 @@ impl RibManager {
                 self.drain_readiness_queries(None);
                 self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                 tokio::task::yield_now().await;
+            } else if validated_flowspec {
+                // Do not sleep while validation remains queued, but admit a
+                // primary update between slices instead of monopolizing turns.
+                if let Ok(update) = self.rx.try_recv() {
+                    self.traced(PostCommitWork::PrimaryUpdate, |manager| {
+                        manager.handle_update(update);
+                    });
+                    self.drain_general_queries_if_unfenced();
+                }
             } else if needs_timers {
                 tokio::select! {
                     readiness = Self::receive_readiness_query(&mut self.readiness_rx) => {

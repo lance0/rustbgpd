@@ -55,6 +55,12 @@ log_format = "json"
 # [security.grpc.roles]
 # mitigation-platform = "automation"
 
+# Preserve the compatibility receive-side behavior explicitly. Set "rfc9117"
+# to validate received FlowSpec against unicast routes (requires a restart).
+# Local rules injected by this mitigation platform remain trusted origination.
+[flowspec]
+validation = "off"
+
 # BMP export for audit trail — stream every rule change to your collector
 [bmp]
 sys_name = "rustbgpd-ddos"

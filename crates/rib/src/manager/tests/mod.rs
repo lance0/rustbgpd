@@ -1032,6 +1032,7 @@ fn route_chunk_and_its_coalesced_flush_are_observed_as_separate_work_units() {
             ("distribute_flush".to_owned(), 1),
             ("exact_export_retire".to_owned(), 1),
             ("attribute_gc".to_owned(), 0),
+            ("flowspec_validation".to_owned(), 0),
         ]),
         "one announce batch is one chunk plus one drained-batch tail"
     );

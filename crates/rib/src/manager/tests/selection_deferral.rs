@@ -1852,6 +1852,86 @@ fn collision_failback_logical_byte_cap_sweeps_full_unicast_union_before_release_
 }
 
 #[test]
+fn bgpls_rejected_sendability_scan_services_readiness_per_key() {
+    use std::sync::{Arc, Mutex};
+
+    const KEYS: u8 = 32;
+    let run = |with_unicast_peer| {
+        let (_tx, rx) = mpsc::channel(1);
+        let (readiness_tx, readiness_rx) = mpsc::channel(1);
+        let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+            .with_readiness_queries(readiness_rx);
+        manager.flush_poll_budget = Duration::ZERO;
+        let mut affected = HashSet::new();
+        for index in 0..KEYS {
+            let route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), index, 100);
+            affected.insert(route.key());
+            manager.loc_rib.insert_bgpls(route);
+        }
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(1);
+        if with_unicast_peer {
+            manager.outbound_peers.insert(peer(2), outbound_tx);
+            manager.peer_sendable_families.insert(peer(2), vec![FAMILY]);
+        }
+
+        let pending = Arc::new(Mutex::new(
+            None::<oneshot::Receiver<Result<usize, crate::RibReadinessError>>>,
+        ));
+        let replies = Arc::new(Mutex::new(0_usize));
+        manager.replacement_readiness_test_hook = Some(Arc::new({
+            let pending = Arc::clone(&pending);
+            let replies = Arc::clone(&replies);
+            move |stage| {
+                if stage != "selection_bgpls" {
+                    return;
+                }
+                if let Some(mut response) = pending.lock().unwrap().take() {
+                    assert_eq!(response.try_recv().unwrap().unwrap(), 0);
+                    *replies.lock().unwrap() += 1;
+                }
+                let (reply, response) = oneshot::channel();
+                readiness_tx
+                    .try_send(crate::RibReadinessQuery::LocRibCount {
+                        reply,
+                        enqueued: std::time::Instant::now(),
+                    })
+                    .unwrap();
+                *pending.lock().unwrap() = Some(response);
+            }
+        }));
+        manager.with_selection_readiness(|manager| {
+            manager.recompute_and_distribute_bgpls(&affected);
+        });
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .try_recv()
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(manager.loc_rib.bgpls_len(), 0);
+        let completed = *replies.lock().unwrap() + 1;
+        assert!(outbound_rx.try_recv().is_err());
+        completed
+    };
+
+    // Both runs do identical inventory, selection and retirement work. The
+    // IPv4-only peer must inspect every changed BGP-LS key before rejecting
+    // the family; these visits must add interior readiness opportunities.
+    let without_peer = run(false);
+    let with_rejecting_peer = run(true);
+    assert!(
+        with_rejecting_peer >= without_peer + usize::from(KEYS),
+        "rejected-key scan must service readiness per key: baseline={without_peer}, \
+         with rejecting peer={with_rejecting_peer}"
+    );
+}
+
+#[test]
 #[expect(
     clippy::too_many_lines,
     reason = "all typed stores share one release while readiness records exact unicast count changes and other lanes remain fenced"

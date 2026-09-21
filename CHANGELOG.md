@@ -13,6 +13,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Opt-in received FlowSpec feasibility validation against the unicast RIB,
+  including automatic revalidation after unicast changes. Set
+  `[flowspec] validation = "rfc9117"` at startup; the default remains `"off"`.
+  Infeasible candidates remain available through the received-peer FlowSpec
+  view with their reason and pending state. Local injection remains trusted
+  origination, and validation does not add a FlowSpec dataplane. The RIB
+  actor-work histogram adds the `flowspec_validation` work-unit label.
 - `rbgp rpki aspa CUSTOMER_ASN` and `rbgp rpki verify-path --role ROLE
   --neighbor-asn ASN "AS_PATH"` expose bounded merged-provider lookup and
   literal eBGP-unicast path verification through two `sensitive_read` RPCs.

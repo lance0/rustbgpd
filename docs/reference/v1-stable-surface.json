@@ -127,6 +127,7 @@
       {"path": "Config.evpn_instances", "classification": "alpha"},
       {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
       {"path": "Config.fib_tables", "classification": "alpha"},
+      {"path": "Config.flowspec", "classification": "outside_v1"},
       {"path": "Config.gnmi_dialout", "classification": "outside_v1"},
       {"path": "Config.inbound_admission", "classification": "alpha"},
       {"path": "Config.managed_netdevs", "classification": "alpha"},

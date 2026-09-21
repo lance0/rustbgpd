@@ -660,6 +660,7 @@ impl PeerManager {
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
                 policy: crate::config::PolicyConfig::default(),
+                flowspec: crate::config::FlowSpecConfig::default(),
                 rpki: None,
                 bmp: None,
                 gnmi_dialout: None,

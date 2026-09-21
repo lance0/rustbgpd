@@ -113,6 +113,10 @@ pub struct Config {
     /// RPKI route-origin validation via RTR cache servers.
     #[serde(default)]
     pub rpki: Option<RpkiConfig>,
+    /// `FlowSpec` cross-RIB feasibility validation. Default off preserves
+    /// existing deployments; changes require a daemon restart.
+    #[serde(default)]
+    pub flowspec: FlowSpecConfig,
     /// BGP Monitoring Protocol (RFC 7854) export.
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
@@ -194,6 +198,27 @@ pub struct Config {
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+/// Startup-only `FlowSpec` receive-side feasibility validation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FlowSpecConfig {
+    /// `off` preserves existing admission and selection; `rfc9117` enables
+    /// cross-RIB validation for received IPv4 and IPv6 `FlowSpec` candidates.
+    #[serde(default)]
+    pub validation: FlowSpecValidationMode,
+}
+
+/// `FlowSpec` feasibility mode. Omission deliberately preserves compatibility.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FlowSpecValidationMode {
+    /// Keep existing import-policy admission without cross-RIB validation.
+    #[default]
+    Off,
+    /// Apply RFC 8955 validation as revised by RFC 9117, with RFC 8956 IPv6 rules.
+    Rfc9117,
 }
 
 /// Versioned configuration-semantics boundary.

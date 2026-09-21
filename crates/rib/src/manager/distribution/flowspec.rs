@@ -362,14 +362,30 @@ impl RibManager {
 
     /// Recompute `FlowSpec` Loc-RIB best routes for affected rules and
     /// distribute changes to all outbound peers.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
-    )]
     pub(in crate::manager) fn recompute_and_distribute_flowspec(
         &mut self,
         affected: &HashSet<FlowSpecKey>,
     ) {
+        self.with_selection_readiness(|manager| {
+            manager.sync_flowspec_validation(affected);
+            manager.recompute_validated_flowspec_inner(affected);
+        });
+    }
+
+    pub(in crate::manager) fn recompute_validated_flowspec(
+        &mut self,
+        affected: &HashSet<FlowSpecKey>,
+    ) {
+        self.with_selection_readiness(|manager| {
+            manager.recompute_validated_flowspec_inner(affected);
+        });
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "family selection, checkpointed staging, and commit retain their shared mutation order"
+    )]
+    fn recompute_validated_flowspec_inner(&mut self, affected: &HashSet<FlowSpecKey>) {
         use crate::route::FlowSpecRoute;
 
         let readiness = self.replacement_readiness.clone();
@@ -396,13 +412,12 @@ impl RibManager {
 
         for key in &affected {
             checkpoint();
-            let candidates: Vec<&FlowSpecRoute> = self
-                .ribs
-                .values()
-                .inspect(|_| checkpoint())
-                .flat_map(|rib| rib.iter_flowspec_key(key))
-                .inspect(|_| checkpoint())
-                .collect();
+            let candidates: Vec<&FlowSpecRoute> = self.flowspec_validation.selection_candidates(
+                key,
+                &self.ribs,
+                &self.loc_rib,
+                &checkpoint,
+            );
             let did_change = self
                 .loc_rib
                 .recompute_flowspec(key.clone(), candidates.into_iter());

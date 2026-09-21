@@ -2093,6 +2093,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         ),
         ("bfd", "| reload-applied |"),
         ("ebgp_requires_policy", "| restart-required |"),
+        ("validation", "| restart-required |"),
     ] {
         let rows = reload_matrix_rows_for(&matrix, field);
         assert!(
@@ -2166,4 +2167,29 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         peer_group_change_hot_applicable(&old_group, &new_group),
         "a peer-group outbound-maximum edit must hot-apply in place"
     );
+}
+
+#[test]
+fn diff_config_flags_flowspec_validation_as_restart_required() {
+    let off = parse(valid_toml()).unwrap();
+    let mut enabled = off.clone();
+    enabled.flowspec.validation = FlowSpecValidationMode::Rfc9117;
+    for (old, new) in [(&off, &enabled), (&enabled, &off)] {
+        let diff = diff_config(old, new);
+        assert!(diff.flowspec_changed);
+        assert!(diff.has_restart_required_changes());
+        assert!(diff.has_any_changes());
+        assert!(!diff.has_reload_applied_changes());
+        assert!(!diff.has_informational_changes());
+        assert_eq!(
+            config_diff_json_value(&diff)["restart_required"]["flowspec_changed"],
+            true
+        );
+        let text = format_config_diff_with_style(&diff, &ConfigDiffTextStyle::default());
+        assert!(text.contains("[flowspec]"), "{text}");
+        let class = classify_config_transaction_v1(&diff);
+        assert!(!class.is_committable());
+        assert!(class.supported_sections.is_empty());
+        assert_eq!(class.restart_required_sections, ["[flowspec]"]);
+    }
 }

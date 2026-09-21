@@ -8,7 +8,10 @@
 #   4. Second rule injected, both visible on both sides
 #   5. Withdrawal of first rule propagates to FRR
 #   6. Second rule survives the withdrawal
-#   7. Session stays Established across the entire test (no flap)
+#   7. Session stays Established across the default-off injection tests
+#   8. After an explicit restart into rfc9117 mode, received IPv4 FlowSpec
+#      follows source unicast withdrawal/restoration with retained diagnostics
+#      and no session flap or FlowSpec reinjection during that churn
 #
 # Convergence-signal discipline (after the second-flake post-mortem):
 # the prior version relied on `show bgp ipv4 flowspec` text grep,
@@ -364,6 +367,157 @@ print(len(resp.get('routes', [])))
 }
 
 # ---------------------------------------------------------------------------
+# Opt-in received IPv4 validation: source -> validator -> FRR wire observer.
+# The deliberate restart below separates this from the default-off tests.
+# No session reset or FlowSpec reinjection is allowed inside the churn proof.
+# ---------------------------------------------------------------------------
+
+SOURCE="clab-${TOPO}-source"
+SOURCE_GRPC_ADDR=""
+VALIDATION_SESSION_BASELINE=""
+RECEIVED_RULE_IDENTITY=""
+VALIDATION_RULE='{"afiSafi":"ADDRESS_FAMILY_IPV4_FLOWSPEC","components":[{"type":1,"prefix":"203.0.113.0/24"},{"type":3,"value":"=6"},{"type":5,"value":"=443"}],"actions":[{"trafficRate":{"rate":0}}]}'
+COVER_ADD='{"prefix":"203.0.113.0","prefixLength":24,"nextHop":"10.0.1.2"}'
+COVER_DELETE='{"prefix":"203.0.113.0","prefixLength":24}'
+
+validation_sessions() {
+    local endpoint peer state counts=""
+    for pair in "$GRPC_ADDR,10.0.0.2" "$GRPC_ADDR,10.0.1.2" "$SOURCE_GRPC_ADDR,10.0.1.1"; do
+        endpoint=${pair%,*}
+        peer=${pair#*,}
+        state=$(grpcurl_call -d "{\"address\":\"$peer\"}" \
+            "$endpoint" rustbgpd.v1.NeighborService/GetNeighborState) || return 1
+        state=$(jq -er 'select(.state == "SESSION_STATE_ESTABLISHED" and (.stale // false) == false)
+            | (.flapCount // "0") | tostring' <<<"$state") || return 1
+        counts+="$peer=$state;"
+    done
+    state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" \
+        | jq -er '.["10.0.0.1"] | select(.bgpState == "Established")
+            | .connectionsEstablished | select(. != null)') || return 1
+    printf '%sFRR=%s\n' "$counts" "$state"
+}
+
+assert_validation_sessions() {
+    local actual
+    actual=$(validation_sessions) || {
+        fail "validation phase has a down or stale session"
+        return 1
+    }
+    if [ "$actual" != "$VALIDATION_SESSION_BASELINE" ]; then
+        fail "validation phase session counters changed: $VALIDATION_SESSION_BASELINE -> $actual"
+        return 1
+    fi
+}
+
+wait_validation_state() {
+    local status=$1 selected=$2 reason=$3 label=$4
+    local received="" loc="" observer="" identity="" i
+    for i in $(seq 1 30); do
+        assert_validation_sessions || return 1
+        received=$(grpcurl_call \
+            -d '{"afiSafi":"ADDRESS_FAMILY_IPV4_FLOWSPEC","receivedPeerAddress":"10.0.1.2"}' \
+            "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes) || return 1
+        loc=$(grpc_list_flowspec) || return 1
+        observer=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json") || return 1
+        if jq -e --arg status "$status" --arg reason "$reason" --argjson selected "$selected" '
+            .receivedView == true and ((.routes // []) | length) == 0
+            and (.receivedRoutes | length) == 1
+            and (.receivedRoutes[0] |
+                .validation == $status and (.selected // false) == $selected
+                and (.pending // false) == false and (.reason // "") == $reason
+                and .route.peerAddress == "10.0.1.2"
+                and .route.asPath == [65003]
+                and any(.route.components[]; .type == 1 and .prefix == "203.0.113.0/24"))
+            ' <<<"$received" >/dev/null \
+            && jq -e --argjson selected "$selected" '
+                ((.routes // []) | length) == (if $selected then 1 else 0 end)
+                and (any(.routes[]?.components[]?; .type == 1 and .prefix == "203.0.113.0/24") == $selected)
+                ' <<<"$loc" >/dev/null \
+            && jq -e --argjson selected "$selected" '
+                type == "object"
+                and ((.routes // {}) | to_entries | any(.key | contains("203.0.113.0/24"))) == $selected
+                and (.totalRoutes // 0) == (if $selected then 1 else 0 end)
+                ' <<<"$observer" >/dev/null; then
+            identity=$(jq -cS '.receivedRoutes[0] | {route, pathId: (.pathId // 0)}' <<<"$received")
+            if [ -n "$RECEIVED_RULE_IDENTITY" ] && [ "$identity" != "$RECEIVED_RULE_IDENTITY" ]; then
+                fail "retained FlowSpec payload/path identity changed during unicast-only churn"
+                return 1
+            fi
+            RECEIVED_RULE_IDENTITY=$identity
+            log "$label received diagnostic: $received"
+            log "$label FRR wire view: $observer"
+            assert_validation_sessions || return 1
+            ok "$label: retained candidate, selected view, and FRR agree (attempt $i)"
+            return 0
+        fi
+        sleep 1
+    done
+    log "Last received diagnostic: $received"
+    log "Last selected view: $loc"
+    log "Last FRR wire view: $observer"
+    fail "$label did not converge within 30s"
+    return 1
+}
+
+start_validation_phase() {
+    log "Phase boundary: restart validator once with startup-only rfc9117 mode"
+    # Remove the last local rule before switching phases. Source has not started.
+    grpc_delete_flowspec "$(jq 'del(.actions)' <<<"$RULE2_ADD")"
+    docker exec "$RUSTBGPD" sh -c '
+        for p in /proc/[0-9]*; do
+            [ "$(cat "$p/comm" 2>/dev/null)" = rustbgpd ] || continue
+            kill -TERM "${p##*/}"
+        done'
+    local stopped=false i
+    for i in $(seq 1 30); do
+        if ! rustbgpd_running; then stopped=true; break; fi
+        sleep 1
+    done
+    if [ "$stopped" != true ]; then
+        fail "validator did not stop at the explicit phase boundary"
+        return 1
+    fi
+    docker exec "$RUSTBGPD" sh -c '
+        cat /etc/rustbgpd/config.toml > /tmp/rfc9117.toml
+        printf "\n[flowspec]\nvalidation = \"rfc9117\"\n" >> /tmp/rfc9117.toml'
+    start_rustbgpd '/usr/local/bin/rustbgpd /tmp/rfc9117.toml'
+    SOURCE_GRPC_ADDR="$(resolve_ip "$SOURCE"):50051"
+    # Reuse the common startup helper's dynamically scoped node and endpoint.
+    start_source
+    for i in $(seq 1 45); do
+        if VALIDATION_SESSION_BASELINE=$(validation_sessions); then
+            ok "source, validator, and FRR sessions established; churn baseline $VALIDATION_SESSION_BASELINE"
+            return 0
+        fi
+        sleep 2
+    done
+    fail "validation phase sessions did not establish within 90s"
+    return 1
+}
+
+start_source() {
+    local RUSTBGPD="$SOURCE" GRPC_ADDR="$SOURCE_GRPC_ADDR"
+    start_rustbgpd
+}
+
+test_received_validation_churn() {
+    log "Test 8: received IPv4 rule follows covering unicast withdrawal/restoration"
+    start_validation_phase
+    grpcurl_call -d "$COVER_ADD" "$SOURCE_GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath
+    # Exactly one FlowSpec injection; subsequent mutations change only unicast.
+    grpcurl_call -d "$VALIDATION_RULE" "$SOURCE_GRPC_ADDR" rustbgpd.v1.InjectionService/AddFlowSpec
+    wait_validation_state FLOW_SPEC_VALIDATION_STATUS_FEASIBLE true "" "initial feasible"
+
+    grpcurl_call -d "$COVER_DELETE" "$SOURCE_GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath
+    wait_validation_state FLOW_SPEC_VALIDATION_STATUS_INFEASIBLE false no_covering_unicast "cover withdrawn"
+
+    grpcurl_call -d "$COVER_ADD" "$SOURCE_GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath
+    wait_validation_state FLOW_SPEC_VALIDATION_STATUS_FEASIBLE true "" "cover restored"
+    assert_validation_sessions
+    ok "received validation churn completed without a BGP session flap or FlowSpec reinjection"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -389,6 +543,7 @@ main() {
     test_frr_receives_both
     test_withdraw_rule1
     test_frr_withdrawal_propagated
+    test_received_validation_churn
 
     echo ""
     print_summary

@@ -3378,10 +3378,40 @@ message DeleteFlowSpecResponse {}
 
 message ListFlowSpecRequest {
   AddressFamily afi_safi = 1;
+  // Empty selects the existing Loc-RIB view. An IP address selects retained
+  // received candidates from that peer, including infeasible/nonselected rules.
+  string received_peer_address = 2;
+}
+
+// Last completed result, with PENDING used only before a first result exists.
+enum FlowSpecValidationStatus {
+  FLOW_SPEC_VALIDATION_STATUS_UNSPECIFIED = 0;
+  FLOW_SPEC_VALIDATION_STATUS_DISABLED = 1;
+  FLOW_SPEC_VALIDATION_STATUS_PENDING = 2;
+  FLOW_SPEC_VALIDATION_STATUS_LOCAL = 3;
+  FLOW_SPEC_VALIDATION_STATUS_FEASIBLE = 4;
+  FLOW_SPEC_VALIDATION_STATUS_INFEASIBLE = 5;
+}
+
+message ReceivedFlowSpecRouteEntry {
+  FlowSpecRouteEntry route = 1;
+  uint32 path_id = 2;
+  bool selected = 3;
+  FlowSpecValidationStatus validation = 4;
+  // Stable snake-case infeasibility reason; empty when no check has failed.
+  string reason = 5;
+  // The last completed result above can coexist with pending revalidation.
+  bool pending = 6;
 }
 
 message ListFlowSpecResponse {
+  // Populated only for the ordinary selected Loc-RIB view.
   repeated FlowSpecRouteEntry routes = 1;
+  // Populated only when received_peer_address was supplied.
+  repeated ReceivedFlowSpecRouteEntry received_routes = 2;
+  // True acknowledges received mode even for an empty table. Clients must
+  // check this to avoid treating an older server's selected view as received.
+  bool received_view = 3;
 }
 
 // ---------------------------------------------------------------------------

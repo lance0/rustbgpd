@@ -5582,6 +5582,9 @@ impl RibManager {
 
         self.record_deferred_unicast(best_changed);
         self.record_deferred_unicast(all_affected);
+        // Candidate storage has already changed even when selection is held.
+        // Revoke in-flight dependency revisions before filtering held families.
+        self.invalidate_flowspec_dependencies(all_affected);
         let best_changed: HashSet<_> = best_changed
             .iter()
             .inspect(|_| checkpoint())

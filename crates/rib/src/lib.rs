@@ -28,6 +28,8 @@ pub mod event;
 /// Sink boundary for handing route + EVPN events to an out-of-crate
 /// consumer (ADR-0072 durable event outbox).
 pub mod event_sink;
+/// Received `FlowSpec` feasibility against the unicast RIB.
+mod flowspec_validation;
 /// Loc-RIB: best route per prefix.
 pub mod loc_rib;
 /// RIB manager task and submodules.
@@ -84,18 +86,18 @@ pub use update::{
     ExactExportKey, ExactExportResult, ExactExportSnapshot, ExactFibInstallCandidates,
     ExplainAdvertisedRoute, ExplainAdvertisedRouteError, ExplainBestPath, ExplainDecision,
     ExplainEvpnExport, ExplainEvpnRoute, ExplainReason, ExportGateStep, ExportGateVerdict,
-    ExportPolicyCohortOutcome, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData,
-    NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
+    ExportPolicyCohortOutcome, FibInstallCandidatesPage, FlowSpecValidationStatus, MrtPeerEntry,
+    MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
     OUTBOUND_PREFIX_LIMIT_REACHED, OrrExplainCandidate, OutboundPrefixLimitConfig,
     OutboundPrefixLimitFamilyState, OutboundPrefixLimitPair, OutboundPrefixLimitViolation,
     OutboundRouteUpdate, PeerExportPolicyReplacement, PeerExportPolicyRestoreReceipt,
-    PeerOutboundState, PlannedGroupability, RibCommandError, RibReadinessError, RibReadinessQuery,
-    RibRowFilter, RibSummaryQuery, RibUpdate, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RpkiValidationCounts,
-    SelectionDeferralPeerFamilyState, SharedGroupEncode, UpdateGroupClassification,
-    UpdateGroupClassifierInput, UpdateGroupComparisonDifference, UpdateGroupComparisonMembership,
-    UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact, UpdateGroupFingerprint,
-    UpdateGroupImpactPlan, UpdateGroupImpactRollup, UpdateGroupPeerComparison,
-    UpdateGroupPeerSnapshot, UpdateGroupSnapshot, VersionedPeerGroups, WarmMrtSnapshotBudget,
-    WarmMrtSnapshotView, classify_update_group, route_query_key,
+    PeerOutboundState, PlannedGroupability, ReceivedFlowSpecRoute, RibCommandError,
+    RibReadinessError, RibReadinessQuery, RibRowFilter, RibSummaryQuery, RibUpdate, RoutePage,
+    RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    RouteSourceIdentity, RpkiValidationCounts, SelectionDeferralPeerFamilyState, SharedGroupEncode,
+    UpdateGroupClassification, UpdateGroupClassifierInput, UpdateGroupComparisonDifference,
+    UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict, UpdateGroupFamilyImpact,
+    UpdateGroupFingerprint, UpdateGroupImpactPlan, UpdateGroupImpactRollup,
+    UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, VersionedPeerGroups,
+    WarmMrtSnapshotBudget, WarmMrtSnapshotView, classify_update_group, route_query_key,
 };

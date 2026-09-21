@@ -519,6 +519,36 @@ use crate::route::{
     VpnRibRouteKey,
 };
 
+/// Last completed receive-side `FlowSpec` validation, or no result yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowSpecValidationStatus {
+    /// Receive-side validation is disabled.
+    Disabled,
+    /// No validation result has completed for this candidate.
+    Pending,
+    /// Trusted local origination, not received-route RFC validation.
+    Local,
+    /// All receive-side feasibility checks completed successfully.
+    Feasible,
+    /// A completed check failed; the candidate remains retained for diagnosis.
+    Infeasible,
+}
+
+/// One retained received `FlowSpec` candidate and its validation diagnostics.
+#[derive(Debug, Clone)]
+pub struct ReceivedFlowSpecRoute {
+    /// Full candidate, including the received Add-Path identifier.
+    pub route: FlowSpecRoute,
+    /// Whether this candidate currently owns the selected Loc-RIB entry.
+    pub selected: bool,
+    /// Last completed result, or `Pending` when none has completed.
+    pub validation: FlowSpecValidationStatus,
+    /// Stable snake-case failure reason for an infeasible result.
+    pub reason: Option<&'static str>,
+    /// Whether validation against the current unicast dependencies is pending.
+    pub pending: bool,
+}
+
 /// Stable identity of one route tested by the exact outbound encoder.
 ///
 /// The key deliberately contains no attributes or next-hop data: it is used
@@ -2780,6 +2810,15 @@ pub enum RibUpdate {
         filter: Option<RibRowFilter<FlowSpecRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
+    },
+    /// Query retained received `FlowSpec` candidates, including infeasible rows.
+    QueryReceivedFlowSpecRoutes {
+        /// Exact source peer whose Adj-RIB-In is inspected.
+        peer: IpAddr,
+        /// Row filter evaluated during cancellation-aware RIB traversal.
+        filter: Option<RibRowFilter<ReceivedFlowSpecRoute>>,
+        /// Response channel; abandoning it cancels only this diagnostic read.
+        reply: oneshot::Sender<Vec<ReceivedFlowSpecRoute>>,
     },
     /// Explain a typed EVPN key without changing selection, counters, or outbound state.
     ExplainEvpnRoute {

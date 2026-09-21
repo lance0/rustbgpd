@@ -2244,6 +2244,9 @@ pub struct ConfigDiff {
     /// is built once at startup (all fields are restart-required per
     /// the reload matrix), so edits must remain visible in `--diff`.
     pub inbound_admission_changed: bool,
+    /// `[flowspec]` receive-side validation mode changed. The RIB owns the
+    /// startup mode; edits require a restart and stay visible in diffs.
+    pub flowspec_changed: bool,
     /// `[[fib_tables]]` blocks added/removed/modified between old and new.
     /// Reload-applied in the common case: the ADR-0061 general-FIB actor
     /// accepts a runtime table-set swap on SIGHUP
@@ -2557,6 +2560,7 @@ impl ConfigDiff {
             || self.security_grpc_changed
             || self.event_history_changed
             || self.inbound_admission_changed
+            || self.flowspec_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -3867,6 +3871,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[event_history]".to_string());
     }
+    if diff.flowspec_changed {
+        class
+            .restart_required_sections
+            .push("[flowspec]".to_string());
+    }
     if diff.inbound_admission_changed {
         class
             .restart_required_sections
@@ -4131,6 +4140,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "security_grpc_changed": diff.security_grpc_changed,
             "event_history_changed": diff.event_history_changed,
             "inbound_admission_changed": diff.inbound_admission_changed,
+            "flowspec_changed": diff.flowspec_changed,
             "fib_tables_requires_restart": diff.fib_tables_requires_restart,
             "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
@@ -4408,6 +4418,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     }
     if diff.event_history_changed {
         restart_sections.push("[event_history]");
+    }
+    if diff.flowspec_changed {
+        restart_sections.push("[flowspec]");
     }
     if diff.inbound_admission_changed {
         restart_sections.push("[inbound_admission]");
@@ -4706,6 +4719,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         security_grpc_changed: old.security != new.security,
         event_history_changed: old.event_history != new.event_history,
         inbound_admission_changed: old.inbound_admission != new.inbound_admission,
+        flowspec_changed: old.flowspec != new.flowspec,
         fib_tables_changed: old.fib_tables != new.fib_tables,
         fib_tables_requires_restart: old.fib_tables.is_empty() && !new.fib_tables.is_empty(),
         dynamic_neighbors_changed: old.dynamic_neighbors != new.dynamic_neighbors,

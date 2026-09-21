@@ -1606,6 +1606,14 @@ enum TopologyAction {
 
 #[derive(Subcommand)]
 enum FlowspecAction {
+    /// Show retained received candidates, including infeasible and nonselected rules
+    Received {
+        /// Source peer IP address
+        peer: std::net::IpAddr,
+        /// Address family (ipv4_flowspec or ipv6_flowspec)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+    },
     /// Add a FlowSpec rule
     Add {
         /// Address family (required: ipv4_flowspec or ipv6_flowspec)
@@ -2914,6 +2922,16 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
                         ..
                     },
                 ),
+            ..
+        } if parse_family(family).is_none() => Err(CliError::Argument(format!(
+            "unknown address family: {family}"
+        ))),
+        Command::Flowspec {
+            action:
+                Some(FlowspecAction::Received {
+                    family: Some(family),
+                    ..
+                }),
             ..
         } if parse_family(family).is_none() => Err(CliError::Argument(format!(
             "unknown address family: {family}"
@@ -4342,7 +4360,11 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         Command::Flowspec { action, family } => {
             let family_val = resolve_family(&family)?;
             match action {
-                None => commands::flowspec::list(connection, family_val, json).await,
+                None => commands::flowspec::list(connection, family_val, None, json).await,
+                Some(FlowspecAction::Received { peer, family }) => {
+                    let family = resolve_family(&family)?.or(family_val);
+                    commands::flowspec::list(connection, family, Some(peer), json).await
+                }
                 Some(FlowspecAction::Add {
                     family: fam,
                     components,

@@ -276,6 +276,7 @@ impl RibManager {
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
             if !changed_keys.iter().any(|key| {
+                checkpoint();
                 sendable
                     .as_ref()
                     .is_some_and(|families| families.contains(&key.family.to_afi_safi()))

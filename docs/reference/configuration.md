@@ -2404,6 +2404,38 @@ comparison design.
 
 ---
 
+## `[flowspec]`
+
+Receive-side FlowSpec feasibility validation is an explicit, startup-only opt-in:
+
+```toml
+[flowspec]
+validation = "rfc9117"
+```
+
+| Field | Values | Default | Meaning |
+|-------|--------|---------|---------|
+| `validation` | `"off"`, `"rfc9117"` | `"off"` | Cross-RIB feasibility checks for received IPv4 and IPv6 FlowSpec (SAFI 133), using the same address family's unicast RIB. |
+
+Omitting this table, omitting `validation`, or explicitly configuring `"off"`
+preserves existing import-policy admission and FlowSpec selection. This is a
+compatibility default, not default-enabled RFC feasibility enforcement. Unknown
+values and unknown table keys are rejected.
+
+`"rfc9117"` enables the RFC 8955 validation procedure with RFC 9117 revisions
+and RFC 8956 IPv6 destination constraints. Infeasible received candidates remain
+available for diagnostics but cannot be newly selected or advertised. Local API
+injection remains trusted origination; it does not claim received-route validation.
+There are no per-peer exemptions or destinationless-rule bypass settings. See
+[ADR-0135](../adr/0135-flowspec-feasibility.md) for the exact validation and
+revalidation semantics.
+
+Changing either direction requires a daemon restart. SIGHUP preserves the
+running mode and retains the edited desired configuration; diffs continue to
+report `[flowspec]` as restart-required. Config transactions reject mode changes.
+Enabling a FlowSpec address family on a neighbor remains a separate setting.
+This option does not add a kernel FlowSpec dataplane.
+
 ## `[inbound_admission]`
 
 Per-source inbound accept-rate limiting
