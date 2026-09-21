@@ -4577,8 +4577,12 @@ count over the global committed stream (not the filtered
 subset) and then resumes replay from the earliest retained
 event. If retention evicts events ahead of a replay that is
 still in progress, the server emits another `StreamLagEvent`
-for exactly those ids before the next replayed event, so every
-id in the replay range is either delivered or counted. The
+for exactly those ids before the next replayed event. Every
+retained event that matches the subscription is delivered, and
+every evicted id is covered by a gap event's `missed_count`,
+which counts over the global committed stream rather than the
+filtered subset (so it can exceed the number of matching events
+lost). The
 `bgp_event_outbox_cursor_gap_total` counter
 tracks how often either fires — alert on non-zero to know your
 retention is undersized for the collector reconnect SLA.
