@@ -62,7 +62,7 @@ use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::proto::rpki_service_server::RpkiServiceServer;
 use crate::rib_service::RibService;
-use crate::rpki_service::{RpkiService, VrpSnapshotFn};
+use crate::rpki_service::{RpkiService, ValidationSnapshotFn};
 use crate::runtime_config_settlement::{
     OwnedRuntimeConfigRequestContext, OwnedRuntimeConfigResponseAttachment,
     RuntimeConfigFenceReason, RuntimeConfigSettlementWatchdog,
@@ -1105,10 +1105,10 @@ pub struct ServeConfig {
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Bounded RIB summary lane served during synchronous policy replacement.
     pub rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
-    /// Narrow synchronous reader for the latest authoritative VRP table.
-    /// The closure clones the table Arc and releases its watch borrow before
-    /// returning; `None` means no first authoritative snapshot has arrived.
-    pub vrp_snapshot: VrpSnapshotFn,
+    /// Narrow synchronous reader for the latest authoritative validation snapshot.
+    /// The closure clones its table Arcs and releases its watch borrow before
+    /// returning. An absent table means no authoritative data for that table.
+    pub validation_snapshot: ValidationSnapshotFn,
     /// Bounded actor-owned RTR cache inventory query lane.
     pub rpki_cache_queries: Option<CacheQueryHandle>,
     /// Optional MRT dump trigger channel (None if MRT not configured).
@@ -1700,7 +1700,7 @@ async fn run_listener(
     let peer_mgr_operator_tx = config.peer_mgr_operator_tx;
     let rib_readiness_tx = config.rib_readiness_tx;
     let rib_summary_tx = config.rib_summary_tx;
-    let vrp_snapshot = config.vrp_snapshot;
+    let validation_snapshot = config.validation_snapshot;
     let rpki_cache_queries = config.rpki_cache_queries;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
@@ -1763,7 +1763,7 @@ async fn run_listener(
                 rib_query_tx,
                 rib_readiness_tx,
                 rib_summary_tx,
-                vrp_snapshot.clone(),
+                validation_snapshot.clone(),
                 rpki_cache_queries.clone(),
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
@@ -1831,7 +1831,7 @@ async fn run_listener(
                 rib_query_tx,
                 rib_readiness_tx,
                 rib_summary_tx,
-                vrp_snapshot,
+                validation_snapshot,
                 rpki_cache_queries,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
@@ -1906,7 +1906,7 @@ async fn run_tcp_listener(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
-    vrp_snapshot: VrpSnapshotFn,
+    validation_snapshot: ValidationSnapshotFn,
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
@@ -2043,7 +2043,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(
-        RpkiService::new(vrp_snapshot).with_cache_queries(rpki_cache_queries),
+        RpkiService::new(validation_snapshot).with_cache_queries(rpki_cache_queries),
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
@@ -2186,7 +2186,7 @@ async fn run_uds_listener(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     rib_summary_tx: mpsc::Sender<RibSummaryQuery>,
-    vrp_snapshot: VrpSnapshotFn,
+    validation_snapshot: ValidationSnapshotFn,
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
@@ -2299,7 +2299,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(
-        RpkiService::new(vrp_snapshot).with_cache_queries(rpki_cache_queries),
+        RpkiService::new(validation_snapshot).with_cache_queries(rpki_cache_queries),
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(

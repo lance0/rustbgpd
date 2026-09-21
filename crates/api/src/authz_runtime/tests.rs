@@ -468,6 +468,60 @@ async fn audit_layer_denies_over_cap_request_after_valid_bearer_token() {
 }
 
 #[tokio::test]
+async fn aspa_diagnostics_require_authenticated_sensitive_read_access() {
+    for method in ["LookupAspa", "VerifyAsPath"] {
+        for (ceiling, token, expected) in [
+            (AuthTier::SensitiveRead, "Bearer secret", None),
+            (
+                AuthTier::Read,
+                "Bearer secret",
+                Some(tonic::Code::PermissionDenied),
+            ),
+            (
+                AuthTier::SensitiveRead,
+                "Bearer wrong",
+                Some(tonic::Code::Unauthenticated),
+            ),
+        ] {
+            let context = GrpcAuthAuditContext::new(
+                "tcp://127.0.0.1:50051",
+                "read_only",
+                ceiling,
+                GrpcAuthnKind::BearerToken,
+                "observer.example",
+            )
+            .with_roles(roles(&[("observer.example", PrincipalRole::Observer)]))
+            .with_bearer_token(Some("secret"));
+            let captured = Arc::new(Mutex::new(None));
+            let mut service = GrpcAuthzLayer::new(context, BgpMetrics::new())
+                .layer(RoleCaptureService(Arc::clone(&captured)));
+            let response = service
+                .call(
+                    Request::builder()
+                        .uri(format!("/rustbgpd.v1.RpkiService/{method}"))
+                        .header("authorization", token)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if let Some(expected) = expected {
+                assert_eq!(
+                    tonic::Status::from_header_map(response.headers())
+                        .unwrap()
+                        .code(),
+                    expected
+                );
+                assert!(captured.lock().unwrap().is_none());
+            } else {
+                assert_eq!(response.status(), http::StatusCode::OK);
+                assert_eq!(*captured.lock().unwrap(), Some(PrincipalRole::Observer));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn tier_enforcement_allows_observer_sensitive_read() {
     let metrics = BgpMetrics::new();
     let context = GrpcAuthAuditContext::new(

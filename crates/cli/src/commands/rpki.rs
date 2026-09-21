@@ -1,4 +1,4 @@
-//! `rbgp rpki validate` — bounded route-origin validation diagnostics.
+//! Bounded RPKI origin, provider-set, and AS_PATH diagnostics.
 
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -10,8 +10,10 @@ use crate::error::CliError;
 use crate::output;
 use crate::proto::rpki_service_client::RpkiServiceClient;
 use crate::proto::{
-    CoveringVrp, ListRpkiCachesRequest, ListRpkiCachesResponse, RouteOriginValidation,
-    ValidateRouteOriginRequest, ValidateRouteOriginResponse,
+    AspaLocalRole, AspaPathSegment, AspaSegmentKind, CoveringVrp, ListRpkiCachesRequest,
+    ListRpkiCachesResponse, LookupAspaRequest, LookupAspaResponse, RouteAspaValidation,
+    RouteOriginValidation, ValidateRouteOriginRequest, ValidateRouteOriginResponse,
+    VerifyAsPathRequest, VerifyAsPathResponse,
 };
 
 #[derive(Debug, Serialize)]
@@ -287,6 +289,214 @@ pub async fn caches(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
+/// The receiving speaker's local role, with an explicit unconfigured choice.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum LocalRole {
+    None,
+    Provider,
+    Customer,
+    Peer,
+    RouteServer,
+    RsClient,
+}
+
+impl LocalRole {
+    const fn to_proto(self) -> AspaLocalRole {
+        match self {
+            Self::None => AspaLocalRole::None,
+            Self::Provider => AspaLocalRole::Provider,
+            Self::Customer => AspaLocalRole::Customer,
+            Self::Peer => AspaLocalRole::Peer,
+            Self::RouteServer => AspaLocalRole::RouteServer,
+            Self::RsClient => AspaLocalRole::RsClient,
+        }
+    }
+}
+
+/// Validate literal syntax in Clap so malformed input exits with usage status.
+pub fn parse_aspa_literal(path: &str) -> Result<String, String> {
+    parse_aspa_path(path)
+        .map(|_| path.to_owned())
+        .map_err(|error| error.to_string())
+}
+
+/// Parse the display grammar: decimal ASNs, whitespace, and `{ASN ASN}` sets.
+/// Empty input is a legitimate empty path whose ASPA verdict is Invalid.
+fn parse_aspa_path(path: &str) -> Result<Vec<AspaPathSegment>, CliError> {
+    fn invalid() -> CliError {
+        CliError::Argument(
+            "AS_PATH requires nonzero decimal ASNs and nonempty, unnested {AS_SET} groups".into(),
+        )
+    }
+    if path.len() > 65_536 {
+        return Err(CliError::Argument(
+            "AS_PATH text exceeds 65536 bytes".into(),
+        ));
+    }
+    let separated = path.replace('{', " { ").replace('}', " } ");
+    let mut segments = Vec::new();
+    let mut asns = Vec::new();
+    let mut in_set = false;
+    let mut count = 0;
+    for token in separated.split_whitespace() {
+        match token {
+            "{" if !in_set => {
+                if !asns.is_empty() {
+                    segments.push(AspaPathSegment {
+                        kind: AspaSegmentKind::Sequence as i32,
+                        asns: std::mem::take(&mut asns),
+                    });
+                }
+                in_set = true;
+            }
+            "}" if in_set && !asns.is_empty() => {
+                segments.push(AspaPathSegment {
+                    kind: AspaSegmentKind::Set as i32,
+                    asns: std::mem::take(&mut asns),
+                });
+                in_set = false;
+            }
+            "{" | "}" => return Err(invalid()),
+            _ => {
+                if !token.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(invalid());
+                }
+                let asn = token.parse::<u32>().map_err(|_| invalid())?;
+                if asn == 0 {
+                    return Err(invalid());
+                }
+                count += 1;
+                if count > 4096 {
+                    return Err(CliError::Argument("AS_PATH exceeds 4096 ASNs".into()));
+                }
+                asns.push(asn);
+            }
+        }
+    }
+    if in_set {
+        return Err(invalid());
+    }
+    if !asns.is_empty() {
+        segments.push(AspaPathSegment {
+            kind: AspaSegmentKind::Sequence as i32,
+            asns,
+        });
+    }
+    Ok(segments)
+}
+
+fn aspa_json(response: &LookupAspaResponse) -> serde_json::Value {
+    serde_json::json!({
+        "customer_asn": response.customer_asn,
+        "found": response.found,
+        "provider_asns": response.provider_asns,
+        "complete": response.complete,
+        "omitted": response.omitted,
+    })
+}
+
+fn aspa_human(response: &LookupAspaResponse) -> String {
+    let providers = if response.found {
+        if response.provider_asns.is_empty() {
+            "(empty provider set)".to_string()
+        } else {
+            response
+                .provider_asns
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    } else {
+        "no attestation".to_string()
+    };
+    let listing = if response.complete {
+        "complete".to_string()
+    } else {
+        format!("incomplete ({} omitted)", response.omitted)
+    };
+    format!(
+        "Customer ASN: {}\nProviders: {providers}\nListing: {listing}\n",
+        response.customer_asn
+    )
+}
+
+fn aspa_validation_label(value: i32) -> &'static str {
+    match RouteAspaValidation::try_from(value).unwrap_or(RouteAspaValidation::Unspecified) {
+        RouteAspaValidation::Valid => "valid",
+        RouteAspaValidation::Invalid => "invalid",
+        RouteAspaValidation::Unknown => "unknown",
+        RouteAspaValidation::Unspecified => "unspecified",
+    }
+}
+
+fn path_json(response: &VerifyAsPathResponse) -> serde_json::Value {
+    serde_json::json!({
+        "validation": aspa_validation_label(response.validation),
+        "invalid_hop": response.invalid_hop.as_ref().map(|hop| serde_json::json!({
+            "customer_asn": hop.customer_asn, "provider_asn": hop.provider_asn,
+        })),
+    })
+}
+
+fn path_human(response: &VerifyAsPathResponse) -> String {
+    let mut rendered = format!(
+        "Validation: {}\n",
+        aspa_validation_label(response.validation)
+    );
+    if let Some(hop) = &response.invalid_hop {
+        writeln!(
+            rendered,
+            "NotProviderPlus: customer {} / provider {}",
+            hop.customer_asn, hop.provider_asn
+        )
+        .unwrap();
+    }
+    rendered
+}
+
+pub async fn aspa(connection: Connection, customer_asn: u32, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RpkiServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = read_rpc(
+        "LookupAspa",
+        client.lookup_aspa(LookupAspaRequest { customer_asn }),
+    )
+    .await?
+    .into_inner();
+    if json {
+        output::print_json_pretty(&aspa_json(&response))?;
+    } else {
+        output::print_text(&aspa_human(&response))?;
+    }
+    Ok(())
+}
+
+pub async fn verify_path(
+    connection: Connection,
+    path: &str,
+    neighbor_asn: u32,
+    role: LocalRole,
+    json: bool,
+) -> Result<(), CliError> {
+    let request = VerifyAsPathRequest {
+        segments: parse_aspa_path(path)?,
+        neighbor_asn,
+        local_role: role.to_proto() as i32,
+    };
+    let mut client =
+        RpkiServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = read_rpc("VerifyAsPath", client.verify_as_path(request))
+        .await?
+        .into_inner();
+    if json {
+        output::print_json_pretty(&path_json(&response))?;
+    } else {
+        output::print_text(&path_human(&response))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -302,6 +512,126 @@ mod tests {
     use rustbgpd_api::proto::rpki_service_server::{RpkiService, RpkiServiceServer};
 
     use super::*;
+
+    #[test]
+    fn aspa_literal_parser_preserves_sets_prepends_and_boundaries() {
+        assert!(parse_aspa_path("  ").unwrap().is_empty());
+        assert_eq!(
+            parse_aspa_path("65001 65001 {65002 4294967295} 65003").unwrap(),
+            vec![
+                AspaPathSegment {
+                    kind: AspaSegmentKind::Sequence as i32,
+                    asns: vec![65001, 65001]
+                },
+                AspaPathSegment {
+                    kind: AspaSegmentKind::Set as i32,
+                    asns: vec![65002, u32::MAX]
+                },
+                AspaPathSegment {
+                    kind: AspaSegmentKind::Sequence as i32,
+                    asns: vec![65003]
+                },
+            ]
+        );
+        for invalid in [
+            "0",
+            "4294967296",
+            "+1",
+            "AS65001",
+            "1.2",
+            "{}",
+            "{1",
+            "1}",
+            "{{1}}",
+            "{1 {2}}",
+            "{1,2}",
+            "(1 2)",
+        ] {
+            assert!(parse_aspa_path(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(
+            parse_aspa_path(&"1 ".repeat(4096)).unwrap()[0].asns.len(),
+            4096
+        );
+        assert!(parse_aspa_path(&"1 ".repeat(4097)).is_err());
+        assert!(parse_aspa_path(&" ".repeat(65_537)).is_err());
+    }
+
+    #[test]
+    fn aspa_output_preserves_absence_truncation_and_optional_hop() {
+        // Exhaustive construction makes future proto fields a compile-time
+        // reminder to extend this complete JSON contract.
+        let partial = LookupAspaResponse {
+            customer_asn: 1,
+            found: true,
+            provider_asns: vec![0, 2],
+            complete: false,
+            omitted: 3,
+        };
+        assert_eq!(
+            aspa_json(&partial),
+            serde_json::json!({"customer_asn":1,"found":true,"provider_asns":[0,2],"complete":false,"omitted":3})
+        );
+        assert_eq!(
+            aspa_human(&partial),
+            "Customer ASN: 1\nProviders: 0 2\nListing: incomplete (3 omitted)\n"
+        );
+        let missing = LookupAspaResponse {
+            found: false,
+            provider_asns: vec![],
+            complete: true,
+            omitted: 0,
+            ..partial
+        };
+        assert_eq!(
+            aspa_json(&missing),
+            serde_json::json!({"customer_asn":1,"found":false,"provider_asns":[],"complete":true,"omitted":0})
+        );
+        assert!(aspa_human(&missing).contains("no attestation"));
+        let empty = LookupAspaResponse {
+            found: true,
+            ..missing
+        };
+        assert!(aspa_human(&empty).contains("empty provider set"));
+        for (state, label) in [
+            (RouteAspaValidation::Valid, "valid"),
+            (RouteAspaValidation::Invalid, "invalid"),
+            (RouteAspaValidation::Unknown, "unknown"),
+        ] {
+            let result = VerifyAsPathResponse {
+                validation: state as i32,
+                invalid_hop: None,
+            };
+            assert_eq!(
+                path_json(&result),
+                serde_json::json!({"validation":label,"invalid_hop":null})
+            );
+            assert_eq!(path_human(&result), format!("Validation: {label}\n"));
+        }
+        let future = VerifyAsPathResponse {
+            validation: 99,
+            invalid_hop: None,
+        };
+        assert_eq!(
+            path_json(&future),
+            serde_json::json!({"validation":"unspecified","invalid_hop":null})
+        );
+        let invalid = VerifyAsPathResponse {
+            validation: RouteAspaValidation::Invalid as i32,
+            invalid_hop: Some(crate::proto::AspaInvalidHop {
+                customer_asn: 3,
+                provider_asn: 2,
+            }),
+        };
+        assert_eq!(
+            path_json(&invalid),
+            serde_json::json!({"validation":"invalid","invalid_hop":{"customer_asn":3,"provider_asn":2}})
+        );
+        assert_eq!(
+            path_human(&invalid),
+            "Validation: invalid\nNotProviderPlus: customer 3 / provider 2\n"
+        );
+    }
 
     fn response() -> ValidateRouteOriginResponse {
         ValidateRouteOriginResponse {
@@ -452,6 +782,19 @@ mod tests {
 
     #[tonic::async_trait]
     impl RpkiService for MockRpki {
+        async fn lookup_aspa(
+            &self,
+            _: Request<server_proto::LookupAspaRequest>,
+        ) -> Result<Response<server_proto::LookupAspaResponse>, Status> {
+            Err(Status::unimplemented("unused by this fixture"))
+        }
+        async fn verify_as_path(
+            &self,
+            _: Request<server_proto::VerifyAsPathRequest>,
+        ) -> Result<Response<server_proto::VerifyAsPathResponse>, Status> {
+            Err(Status::unimplemented("unused by this fixture"))
+        }
+
         async fn list_caches(
             &self,
             _request: Request<server_proto::ListRpkiCachesRequest>,

@@ -892,16 +892,12 @@ impl PeerSession {
         }
     }
     pub(super) fn aspa_validation_context(&self) -> AspaValidationContext {
-        let local_role = self.config.peer.local_role;
-        AspaValidationContext {
-            neighbor_asn: Some(
-                self.negotiated
-                    .as_ref()
-                    .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
-            ),
-            local_role,
-            first_as_check_exempt: matches!(local_role, Some(BgpRole::RouteServerClient)),
-        }
+        rustbgpd_rpki::aspa_verify::validation_context(
+            self.negotiated
+                .as_ref()
+                .map_or(self.config.peer.remote_asn, |n| n.peer_asn),
+            self.config.peer.local_role,
+        )
     }
     /// Return the received and negotiated ASNs when an IPv4/IPv6-unicast
     /// UPDATE from an eBGP peer fails the ASPA first-AS precondition. A

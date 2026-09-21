@@ -5227,12 +5227,12 @@ async fn run<T>(
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         rib_readiness_tx: rib_readiness_tx.clone(),
         rib_summary_tx,
-        vrp_snapshot: {
+        validation_snapshot: {
             let rx = validation_watch_rx.clone();
-            // Clone the table Arc while the watch borrow is scoped to this
+            // Clone the table Arcs while the watch borrow is scoped to this
             // synchronous statement. The API never holds that borrow while
             // walking the table or building a response.
-            Arc::new(move || rx.borrow().vrp_table.clone())
+            Arc::new(move || rx.borrow().clone())
         },
         rpki_cache_queries,
         mrt_trigger_tx,

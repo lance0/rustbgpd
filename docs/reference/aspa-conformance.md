@@ -157,3 +157,13 @@ means:
 Related material: the [IXP evaluation matrix](../explanation/ixp-evaluation.md), the
 [daemon comparison](../explanation/comparison.md), and the
 [route-server cookbook](../cookbook/route-server.md).
+
+## Operator diagnostics
+
+`rbgp rpki aspa CUSTOMER_ASN` displays the effective merged provider set.
+`rbgp rpki verify-path --role peer --neighbor-asn 64496 "64496 64497"` runs the
+same detailed verifier with explicit receiving-role and neighbor context.
+These bounded read operations do not change route eligibility, retained routes,
+or the mitigation/retention boundaries above. See the
+[API contract](api.md#aspa-provider-and-path-diagnostics) for unavailable versus
+empty data, limits, AS_SET handling, and the optional proven invalid hop.

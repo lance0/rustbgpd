@@ -200,11 +200,13 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetBfdSessions` | `sensitive_read` | ADR-0067 BFD session snapshot — peer addresses, state, diagnostics, strict flag, and multihop mode. |
 
-### RpkiService (2 RPCs)
+### RpkiService (4 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `ValidateRouteOrigin` | `sensitive_read` | Bounded origin-validation diagnostic over the current authoritative VRP table. Exposes effective covering ROAs and origin ASNs; outside the narrow v1 contract. |
+| `LookupAspa` | `sensitive_read` | Bounded merged-provider lookup for one customer ASN; outside the narrow v1 contract. |
+| `VerifyAsPath` | `sensitive_read` | Literal AS_PATH diagnostic with explicit local role and neighbor ASN; outside the narrow v1 contract. |
 | `ListCaches` | `sensitive_read` | Bounded configured-cache inventory with connection state and the latest atomically accepted RTR epoch; outside the narrow v1 contract. |
 
 ### EventService (5 RPCs)
@@ -268,12 +270,12 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 1 | 0.9% |
-| `sensitive_read` | 66 | 58.4% |
-| `mutating` | 22 | 19.5% |
-| `operator_only` | 24 | 21.2% |
-| **Total** | **113** | **100%** |
+| `sensitive_read` | 68 | 59.1% |
+| `mutating` | 22 | 19.1% |
+| `operator_only` | 24 | 20.9% |
+| **Total** | **115** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 113
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 115
 total is 109 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064

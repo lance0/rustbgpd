@@ -904,11 +904,17 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__rib,vpn)
                 cmd="rbgp__subcmd__help__subcmd__rib__subcmd__vpn"
                 ;;
+            rbgp__subcmd__help__subcmd__rpki,aspa)
+                cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__aspa"
+                ;;
             rbgp__subcmd__help__subcmd__rpki,caches)
                 cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__caches"
                 ;;
             rbgp__subcmd__help__subcmd__rpki,validate)
                 cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__validate"
+                ;;
+            rbgp__subcmd__help__subcmd__rpki,verify-path)
+                cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__verify__subcmd__path"
                 ;;
             rbgp__subcmd__help__subcmd__topology,links)
                 cmd="rbgp__subcmd__help__subcmd__topology__subcmd__links"
@@ -1243,6 +1249,9 @@ _rbgp() {
             rbgp__subcmd__rib__subcmd__help,vpn)
                 cmd="rbgp__subcmd__rib__subcmd__help__subcmd__vpn"
                 ;;
+            rbgp__subcmd__rpki,aspa)
+                cmd="rbgp__subcmd__rpki__subcmd__aspa"
+                ;;
             rbgp__subcmd__rpki,caches)
                 cmd="rbgp__subcmd__rpki__subcmd__caches"
                 ;;
@@ -1252,6 +1261,12 @@ _rbgp() {
             rbgp__subcmd__rpki,validate)
                 cmd="rbgp__subcmd__rpki__subcmd__validate"
                 ;;
+            rbgp__subcmd__rpki,verify-path)
+                cmd="rbgp__subcmd__rpki__subcmd__verify__subcmd__path"
+                ;;
+            rbgp__subcmd__rpki__subcmd__help,aspa)
+                cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__aspa"
+                ;;
             rbgp__subcmd__rpki__subcmd__help,caches)
                 cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__caches"
                 ;;
@@ -1260,6 +1275,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__rpki__subcmd__help,validate)
                 cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__validate"
+                ;;
+            rbgp__subcmd__rpki__subcmd__help,verify-path)
+                cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__verify__subcmd__path"
                 ;;
             rbgp__subcmd__topology,help)
                 cmd="rbgp__subcmd__topology__subcmd__help"
@@ -7220,8 +7238,22 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__rpki)
-            opts="caches validate"
+            opts="aspa verify-path caches validate"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__rpki__subcmd__aspa)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -7248,6 +7280,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__rpki__subcmd__validate)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__rpki__subcmd__verify__subcmd__path)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -10530,8 +10576,42 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rpki)
-            opts="-s -j -h --addr --token-file --json --json-version --json-lines --no-color --pager --help caches validate help"
+            opts="-s -j -h --addr --token-file --json --json-version --json-lines --no-color --pager --help aspa verify-path caches validate help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rpki__subcmd__aspa)
+            opts="-s -j -h --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -10598,8 +10678,22 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rpki__subcmd__help)
-            opts="caches validate help"
+            opts="aspa verify-path caches validate help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rpki__subcmd__help__subcmd__aspa)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -10653,6 +10747,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__rpki__subcmd__help__subcmd__verify__subcmd__path)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__rpki__subcmd__validate)
             opts="-s -j -h --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -10660,6 +10768,48 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rpki__subcmd__verify__subcmd__path)
+            opts="-s -j -h --neighbor-asn --role --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --neighbor-asn)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --role)
+                    COMPREPLY=($(compgen -W "none provider customer peer route-server rs-client" -- "${cur}"))
+                    return 0
+                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
