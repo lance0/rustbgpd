@@ -112,6 +112,8 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/protoc.zip \
+            --connect-timeout 10 --max-time 120 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
             https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip
           echo "f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80  /tmp/protoc.zip" | sha256sum -c
           unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
@@ -241,6 +243,8 @@ jobs:
         run: |
           set -euo pipefail
           curl -sSfL -o /tmp/nfpm.tgz \
+            --connect-timeout 10 --max-time 120 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
             https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
           echo "0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  /tmp/nfpm.tgz" | sha256sum -c
           tar -C /tmp -xzf /tmp/nfpm.tgz nfpm
