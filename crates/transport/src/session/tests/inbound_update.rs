@@ -619,3 +619,445 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
     );
     assert_eq!(announced[0].path_id, 42);
 }
+
+// ---------------------------------------------------------------------------
+// RFC 7606 §7.9 / §7.10: ORIGINATOR_ID and CLUSTER_LIST from an external
+// neighbor are discarded. These tests cover the well-formed case, which the
+// decoder does not remove.
+// ---------------------------------------------------------------------------
+
+const FORGED_ORIGINATOR: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
+
+fn forged_cluster_list() -> Vec<Ipv4Addr> {
+    vec![Ipv4Addr::new(10, 9, 9, 1), Ipv4Addr::new(10, 9, 9, 2)]
+}
+
+fn has_rr_attribute(attrs: &[PathAttribute]) -> bool {
+    attrs.iter().any(|a| matches!(a.type_code(), 9 | 10))
+}
+
+fn rr_attribute_update(peer_asn: u32, rr_attrs: Vec<PathAttribute>) -> UpdateMessage {
+    let segments = if peer_asn == 65001 {
+        vec![]
+    } else {
+        vec![AsPathSegment::AsSequence(vec![peer_asn])]
+    };
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    if peer_asn == 65001 {
+        attrs.push(PathAttribute::LocalPref(100));
+    }
+    attrs.extend(rr_attrs);
+    UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    )
+}
+
+fn discarded_type_code_counts(session: &PeerSession) -> Vec<(String, f64)> {
+    let mut rows: Vec<_> = counter_samples(&session.metrics, "bgp_path_attribute_discarded_total")
+        .into_iter()
+        .map(|(labels, value)| (labels["type_code"].clone(), value))
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// Process one body-IPv4 UPDATE on an Established session and return the
+/// route handed to the RIB.
+async fn receive_with_rr_attributes(
+    session: &mut PeerSession,
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+    peer_asn: u32,
+    rr_attrs: Vec<PathAttribute>,
+) -> Route {
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(session, peer_asn).await;
+    while rib_rx.try_recv().is_ok() {}
+    session
+        .process_update(rr_attribute_update(peer_asn, rr_attrs))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    let RibUpdate::RoutesReceived { mut announced, .. } =
+        rib_rx.try_recv().expect("the route must reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    announced.remove(0)
+}
+
+#[tokio::test]
+async fn external_neighbor_rr_attributes_are_discarded_and_counted() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let route = receive_with_rr_attributes(
+        &mut session,
+        &mut rib_rx,
+        65002,
+        vec![
+            PathAttribute::OriginatorId(FORGED_ORIGINATOR),
+            PathAttribute::ClusterList(forged_cluster_list()),
+        ],
+    )
+    .await;
+    assert!(
+        !has_rr_attribute(&route.attributes),
+        "ORIGINATOR_ID / CLUSTER_LIST from an external neighbor reached the RIB"
+    );
+    assert_eq!(route.originator_id(), None);
+    assert!(route.cluster_list().is_empty());
+    assert_eq!(
+        discarded_type_code_counts(&session),
+        vec![("10".to_string(), 1.0), ("9".to_string(), 1.0)]
+    );
+    assert!(
+        counter_samples(&session.metrics, "bgp_update_malformed_causes_total").is_empty(),
+        "a well-formed attribute is not a malformed-UPDATE cause"
+    );
+}
+
+#[tokio::test]
+async fn internal_neighbor_rr_attributes_are_kept() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let route = receive_with_rr_attributes(
+        &mut session,
+        &mut rib_rx,
+        65001,
+        vec![
+            PathAttribute::OriginatorId(FORGED_ORIGINATOR),
+            PathAttribute::ClusterList(forged_cluster_list()),
+        ],
+    )
+    .await;
+    assert_eq!(route.originator_id(), Some(FORGED_ORIGINATOR));
+    assert_eq!(route.cluster_list(), forged_cluster_list().as_slice());
+    assert!(discarded_type_code_counts(&session).is_empty());
+}
+
+/// An external neighbor's attributes are discarded, so they cannot trip the
+/// RFC 4456 §8 reflection-loop check first.
+#[tokio::test]
+async fn external_neighbor_rr_attributes_do_not_trigger_reflection_loop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+    session.config.cluster_id = Some(cluster_id);
+    let our_router_id = session.config.peer.local_router_id;
+    let route = receive_with_rr_attributes(
+        &mut session,
+        &mut rib_rx,
+        65002,
+        vec![
+            PathAttribute::OriginatorId(our_router_id),
+            PathAttribute::ClusterList(vec![cluster_id]),
+        ],
+    )
+    .await;
+    assert!(!has_rr_attribute(&route.attributes));
+    assert!(
+        counter_samples(&session.metrics, "bgp_rr_loop_detected_total")
+            .iter()
+            .all(|(_, value)| *value == 0.0),
+        "an external neighbor's UPDATE must not count as a reflection loop"
+    );
+}
+
+/// The internal-neighbor loop check is unchanged by the external gate.
+#[tokio::test]
+async fn internal_neighbor_reflection_loop_is_still_detected() {
+    for cluster_loop in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+        let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+        session.config.cluster_id = Some(cluster_id);
+        session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
+        let attr = if cluster_loop {
+            PathAttribute::ClusterList(vec![cluster_id])
+        } else {
+            PathAttribute::OriginatorId(session.config.peer.local_router_id)
+        };
+        session
+            .process_update(rr_attribute_update(65001, vec![attr]))
+            .await;
+        assert!(
+            !matches!(rib_rx.try_recv(), Ok(RibUpdate::RoutesReceived { ref announced, .. }) if !announced.is_empty()),
+            "a reflected route from an internal neighbor must still be dropped"
+        );
+    }
+}
+
+/// A forged low `ORIGINATOR_ID` or a forged `CLUSTER_LIST` from one external
+/// peer must not move the identifier / cluster-list tie-break against another.
+#[tokio::test]
+async fn external_neighbor_rr_attributes_do_not_change_best_path() {
+    use rustbgpd_rib::{BestPathReason, best_path::best_path_cmp_with_reason};
+    use std::cmp::Ordering;
+
+    async fn learned(peer_asn: u32, router_id: Ipv4Addr, rr_attrs: Vec<PathAttribute>) -> Route {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, peer_asn);
+        let mut negotiated = negotiated_session(peer_asn, false);
+        negotiated.peer_router_id = router_id;
+        session.negotiated = Some(Arc::new(negotiated));
+        session
+            .process_update(rr_attribute_update(peer_asn, rr_attrs))
+            .await;
+        let RibUpdate::RoutesReceived { mut announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected RoutesReceived");
+        };
+        announced.remove(0)
+    }
+
+    // Identifier step: the honest peer has the lower BGP Identifier; the
+    // other peer forges an ORIGINATOR_ID lower still.
+    let honest = learned(65002, Ipv4Addr::new(10, 0, 0, 2), vec![]).await;
+    let forger = learned(
+        65003,
+        Ipv4Addr::new(10, 0, 0, 3),
+        vec![PathAttribute::OriginatorId(FORGED_ORIGINATOR)],
+    )
+    .await;
+    // CLUSTER_LIST step: equal identifiers, one peer carries a forged list.
+    let plain = learned(65002, Ipv4Addr::new(10, 0, 0, 2), vec![]).await;
+    let padded = learned(
+        65003,
+        Ipv4Addr::new(10, 0, 0, 2),
+        vec![PathAttribute::ClusterList(forged_cluster_list())],
+    )
+    .await;
+    // Both steps are evaluated before asserting so one failure cannot hide
+    // the other. With nothing forged left, the second pair ties all the way
+    // down to the final path-id step.
+    assert_eq!(
+        (
+            best_path_cmp_with_reason(&honest, &forger),
+            best_path_cmp_with_reason(&plain, &padded),
+        ),
+        (
+            (Ordering::Less, BestPathReason::LowerBgpIdentifier),
+            (Ordering::Equal, BestPathReason::LowerPathId),
+        ),
+        "forged ORIGINATOR_ID / CLUSTER_LIST from an external peer changed selection"
+    );
+}
+
+/// An attribute covered by both the external-neighbor rule and the operator's
+/// `discard_path_attributes` is one discard, counted once.
+#[tokio::test]
+async fn external_neighbor_rr_discard_counts_once_with_configured_discard() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([9]);
+    let route = receive_with_rr_attributes(
+        &mut session,
+        &mut rib_rx,
+        65002,
+        vec![PathAttribute::OriginatorId(FORGED_ORIGINATOR)],
+    )
+    .await;
+    assert!(!has_rr_attribute(&route.attributes));
+    assert_eq!(
+        discarded_type_code_counts(&session),
+        vec![("9".to_string(), 1.0)]
+    );
+}
+
+/// Boundary: a zero-length `CLUSTER_LIST` decodes as an empty list. From an
+/// external neighbor it is discarded like any other, and counted once.
+#[tokio::test]
+async fn external_neighbor_empty_cluster_list_is_discarded() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let route = receive_with_rr_attributes(
+        &mut session,
+        &mut rib_rx,
+        65002,
+        vec![PathAttribute::ClusterList(vec![])],
+    )
+    .await;
+    assert!(!has_rr_attribute(&route.attributes));
+    assert_eq!(
+        discarded_type_code_counts(&session),
+        vec![("10".to_string(), 1.0)]
+    );
+}
+
+/// Every family path stores attributes derived from the one normalized set,
+/// so the external-neighbor discard holds for each of them.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix pins every family path that stores attributes from an UPDATE"
+)]
+async fn external_neighbor_rr_attributes_are_discarded_for_every_family() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        RtcNlri,
+    };
+
+    async fn stored_attrs(
+        family: (Afi, Safi),
+        next_hop: IpAddr,
+        fill: impl FnOnce(&mut rustbgpd_wire::MpReachNlri),
+    ) -> (Vec<PathAttribute>, Vec<(String, f64)>) {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        install_test_negotiated_session(&mut session, negotiated);
+        let mut reach = empty_nonunicast_reach(family.0, family.1, next_hop);
+        fill(&mut reach);
+        let mut attrs = nonunicast_accepted_attrs();
+        attrs.push(PathAttribute::OriginatorId(FORGED_ORIGINATOR));
+        attrs.push(PathAttribute::ClusterList(forged_cluster_list()));
+        session
+            .process_update(nonunicast_update(attrs, reach, None, false))
+            .await;
+        let counts = discarded_type_code_counts(&session);
+        let attrs = match rib_rx
+            .try_recv()
+            .unwrap_or_else(|_| panic!("{family:?}: no route reached the RIB"))
+        {
+            RibUpdate::RoutesReceived {
+                announced,
+                flowspec_announced,
+                evpn_announced,
+                ..
+            } => announced
+                .first()
+                .map(|r| (*r.attributes).clone())
+                .or_else(|| flowspec_announced.first().map(|r| r.attributes.clone()))
+                .or_else(|| evpn_announced.first().map(|r| (*r.attributes).clone())),
+            RibUpdate::BgpLsRoutesReceived { announced, .. } => {
+                announced.first().map(|r| (*r.attributes).clone())
+            }
+            RibUpdate::VpnRoutesReceived { announced, .. } => {
+                announced.first().map(|r| (*r.attributes).clone())
+            }
+            RibUpdate::LabeledRoutesReceived { announced, .. } => {
+                announced.first().map(|r| (*r.attributes).clone())
+            }
+            RibUpdate::RtcRoutesReceived { announced, .. } => {
+                announced.first().map(|r| (*r.attributes).clone())
+            }
+            _ => panic!("{family:?}: unexpected RIB update"),
+        }
+        .unwrap_or_else(|| panic!("{family:?}: the announcement was not installed"));
+        (attrs, counts)
+    }
+
+    let v4_next_hop = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let v6_prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:710::".parse().unwrap(), 48));
+    let cases = vec![
+        (
+            (Afi::Ipv6, Safi::Unicast),
+            stored_attrs(
+                (Afi::Ipv6, Safi::Unicast),
+                "2001:db8::2".parse().unwrap(),
+                |mp| {
+                    mp.announced = vec![NlriEntry {
+                        path_id: 0,
+                        prefix: v6_prefix,
+                    }];
+                },
+            )
+            .await,
+        ),
+        (
+            (Afi::Ipv4, Safi::FlowSpec),
+            stored_attrs((Afi::Ipv4, Safi::FlowSpec), v4_next_hop, |mp| {
+                mp.flowspec_announced = vec![FlowSpecRule {
+                    components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+                        Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+                    ))],
+                }];
+            })
+            .await,
+        ),
+        (
+            (Afi::L2Vpn, Safi::Evpn),
+            stored_attrs((Afi::L2Vpn, Safi::Evpn), v4_next_hop, |mp| {
+                mp.evpn_announced = vec![EvpnRoute::MacIp(EvpnMacIp {
+                    rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+                    esi: EthernetSegmentIdentifier::ZERO,
+                    ethernet_tag: EthernetTagId(100),
+                    mac: MacAddress([0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]),
+                    ip: None,
+                    label1: MplsLabel::new(10_000),
+                    label2: None,
+                })];
+            })
+            .await,
+        ),
+        (
+            (Afi::BgpLs, Safi::BgpLs),
+            stored_attrs((Afi::BgpLs, Safi::BgpLs), v4_next_hop, |mp| {
+                mp.bgpls_announced =
+                    decode_bgpls_nlri(&[0xfd, 0xe8, 0, 3, 0xaa, 0xcc, 11]).unwrap();
+            })
+            .await,
+        ),
+        (
+            (Afi::Ipv4, Safi::MplsVpn),
+            stored_attrs((Afi::Ipv4, Safi::MplsVpn), v4_next_hop, |mp| {
+                mp.vpn_announced = vec![rustbgpd_wire::VpnNlriEntry {
+                    path_id: 0,
+                    nlri: VpnNlri {
+                        labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+                        route_distinguisher: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 45]),
+                        prefix: VpnPrefix::v4(Ipv4Addr::new(10, 44, 5, 0), 24).unwrap(),
+                    },
+                }];
+            })
+            .await,
+        ),
+        (
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            stored_attrs((Afi::Ipv4, Safi::LabeledUnicast), v4_next_hop, |mp| {
+                mp.labeled_announced = vec![rustbgpd_wire::LabeledNlriEntry {
+                    path_id: 0,
+                    nlri: rustbgpd_wire::LabeledNlri {
+                        labels: vec![MplsLabelEntry::try_new(4092, 0, true).unwrap()],
+                        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 44, 6, 0), 24)),
+                    },
+                }];
+            })
+            .await,
+        ),
+        (
+            (Afi::Ipv4, Safi::RtConstrain),
+            stored_attrs((Afi::Ipv4, Safi::RtConstrain), v4_next_hop, |mp| {
+                mp.rtc_announced = vec![RtcNlri::new(65002, 0x0002_FDEA_0000_000B, 96).unwrap()];
+            })
+            .await,
+        ),
+    ];
+    assert_eq!(cases.len(), 7);
+    // Collect every failing family so one family cannot mask another.
+    let mut kept = Vec::new();
+    let mut miscounted = Vec::new();
+    for (family, (attrs, counts)) in cases {
+        assert!(
+            attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))),
+            "{family:?}: fixture sanity — the stored set must still carry AS_PATH"
+        );
+        if has_rr_attribute(&attrs) {
+            kept.push(family);
+        }
+        if counts != [("10".to_string(), 1.0), ("9".to_string(), 1.0)] {
+            miscounted.push(family);
+        }
+    }
+    assert_eq!(
+        (kept, miscounted),
+        (vec![], vec![]),
+        "families that kept (left) or did not count (right) an external neighbor's \
+         ORIGINATOR_ID / CLUSTER_LIST"
+    );
+}

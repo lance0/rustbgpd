@@ -552,6 +552,15 @@ message (§3 (h)).
   an *external* neighbor are discarded (§7.5, §7.9, §7.10); from an internal
   neighbor they are treat-as-withdraw. Duplicate attributes keep the first
   occurrence and discard the rest (§3 (g)).
+  §7.9 and §7.10 are not limited to malformed attributes: a well-formed
+  ORIGINATOR_ID or CLUSTER_LIST from an external neighbor is also discarded,
+  for every address family, before the route is stored and selected, and the
+  RFC 4456 reflection-loop check does not act on it. These removals are counted
+  in `bgp_path_attribute_discarded_total{type_code="9"|"10"}`; pre-policy BMP
+  still mirrors the UPDATE as received. The discard does not cover a wrong
+  Optional/Transitive flag class on these attributes: that is a §3 (c)
+  treat-as-withdraw from any neighbor, and the UPDATE's routes are withdrawn
+  before the discard applies.
 - **Session-reset** is retained only where the NLRI cannot be trusted:
   UPDATE section-length inconsistencies (§3 (b), unchanged), a structurally
   unparseable or duplicated MP_REACH_NLRI / MP_UNREACH_NLRI (§7.11, §3 (g)),

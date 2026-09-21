@@ -34,6 +34,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A well-formed ORIGINATOR_ID or CLUSTER_LIST received from an external (eBGP)
+  neighbor is now discarded, as RFC 7606 §7.9 and §7.10 require. Previously
+  only the length and Partial-flag error cases were removed, so a well-formed
+  attribute from an eBGP peer was kept in the stored route attributes in the
+  RIB, took part in best-path selection in every address family, and was
+  evaluated by the RFC 4456 reflection-loop check. Internal (iBGP) neighbors
+  are unchanged.
+  **Operator-visible:** best-path selection between external peers can change
+  where a peer was sending these attributes, because a received ORIGINATOR_ID
+  no longer replaces that peer's BGP Identifier in the identifier tie-break and
+  a received CLUSTER_LIST no longer lengthens its path in the cluster-list
+  tie-break. Such a peer's routes are also no longer dropped as reflection
+  loops when the attributes carry the local router ID or cluster ID.
+  Each removal increments
+  `bgp_path_attribute_discarded_total{type_code="9"}` or `{type_code="10"}`,
+  so that counter is no longer limited to `discard_path_attributes`; an
+  attribute covered by both counts once. Pre-policy BMP still mirrors the
+  UPDATE as received. Unchanged: an ORIGINATOR_ID or CLUSTER_LIST with the
+  wrong Optional/Transitive flag class is treat-as-withdraw from any neighbor
+  (RFC 7606 §3 (c)), so that UPDATE's routes are withdrawn, not kept without
+  the attribute.
+
+- Aborting a commit-confirmed config transaction (`rbgp config abort`, gNMI
+  commit cancel) and the confirm-timeout auto-revert no longer fail when a BGP
+  session goes up or down inside the confirm window. The rollback replayed the
+  post-commit runtime snapshot token, which also covers live update-group
+  membership, so an ordinary session flap made it fail with
+  `FAILED_PRECONDITION` ("runtime config snapshot changed"), left the
+  transaction `abort_failed` / `auto_revert_failed`, and kept the config
+  mutation fence closed until the candidate was confirmed or the daemon was
+  restarted. **Operator-visible:** rollback of a pending confirmed transaction
+  now restores the recorded pre-commit snapshot without a token check; a
+  caller's own Plan→Apply token still goes stale on a session change and must
+  be re-planned.
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers
@@ -68,6 +102,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recorded under the new `selection_release` seam of
   `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
   transition reason and seam.
+- `ListFibTables` (`rbgp fib-table list`) no longer waits without limit for
+  the FIB reconciler while it holds the daemon-wide runtime-config
+  coordinator. A reconciler that accepted the read and never answered parked
+  every config mutation, SIGHUP reload and the shutdown drain behind that one
+  read for as long as the client kept waiting. The read now fails
+  `UNAVAILABLE` after ten minutes and releases the coordinator, so the stall
+  is bounded at ten minutes rather than removed: the list still takes the
+  coordinator so it never reports a table set that an in-flight mutation may
+  yet roll back. The same deadline covers the table read that begins
+  `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction.
+- Config transaction confirm, abort and rollback, and gNMI `Set`, no longer
+  wait without limit for the runtime-config coordinator. After ten minutes
+  they fail before taking ownership and without any runtime or persisted
+  effect, as `ApplyConfigTransaction` already did: `DEADLINE_EXCEEDED` for the
+  config transaction RPCs and `UNAVAILABLE` for gNMI `Set`. The automatic
+  revert of an unconfirmed transaction deliberately keeps waiting, so a busy
+  coordinator delays the revert instead of cancelling it.
+- `rbgp config effective` now stops with a `deadline exceeded` error and exit
+  code 1 when the daemon accepts the request but never completes the response,
+  instead of waiting indefinitely. It uses the same allowance `rbgp doctor`
+  already applies to this read: the server's 30-minute effective-config
+  operation plus 30 seconds of response transfer.
 - `SubscribeFromEvent` durable replay no longer skips events silently when
   `[event_history]` retention evicts them while the replay is still in
   progress. Every replay chunk now reads the retention floor together with its

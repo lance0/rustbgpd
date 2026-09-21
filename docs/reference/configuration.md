@@ -1599,6 +1599,14 @@ Type code 0 and route-safety/framing attributes 1, 2, 3, 6, 7, 14, 15, 17,
 requires effective `route_server_client = true`. Malformed attributes already
 removed by RFC 7606 do not count as configured discards.
 
+Independently of this list, a well-formed ORIGINATOR_ID (9) or CLUSTER_LIST
+(10) received from any external neighbor is discarded, as RFC 7606 §7.9 and
+§7.10 require (one with a wrong Optional/Transitive flag class is
+treat-as-withdraw instead). That removal needs no configuration, the
+route-reflector-loop check does not act on those attributes for an external
+neighbor, and each removal is counted in the same
+`bgp_path_attribute_discarded_total` series.
+
 ```toml
 # IPv4 peer with dual-stack
 [[neighbors]]
@@ -3765,8 +3773,9 @@ and is capped at 86400. The change applies immediately, then remains pending
 until `rbgp config confirm <id>` (or `ConfirmConfigTransaction`) makes it
 permanent. `rbgp config abort <id>` rolls it back immediately, and an
 expired timer automatically re-applies the pre-commit runtime snapshot through
-the same transaction executor. While a confirmed transaction is applying or
-pending, persisted runtime config mutators such as static/dynamic neighbor CRUD,
+the same transaction executor. That rollback does not check a runtime snapshot
+token, so session flaps inside the window cannot block it. While a confirmed
+transaction is applying or pending, persisted runtime config mutators such as static/dynamic neighbor CRUD,
 policy/peer-group CRUD, FIB-table CRUD, and another config transaction are
 rejected with `FAILED_PRECONDITION`; SIGHUP reload is skipped and logged until
 the transaction is confirmed, aborted, or auto-reverted. Use

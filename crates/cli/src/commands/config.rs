@@ -1,4 +1,4 @@
-use crate::connection::{Connection, read_rpc};
+use crate::connection::{Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, read_rpc, rpc_with_timeout};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::config_service_client::ConfigServiceClient;
@@ -20,6 +20,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 const MAX_CONFIRM_ID_CHARS: usize = 128;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
@@ -775,11 +776,22 @@ fn format_unix_utc(unix_seconds: u64) -> String {
 /// redacted server-side. `--json` re-renders the same document as JSON; the
 /// daemon only ships TOML.
 pub async fn effective(connection: Connection, json: bool) -> Result<(), CliError> {
+    effective_with_deadline(connection, json, EFFECTIVE_CONFIG_RPC_TIMEOUT).await
+}
+
+async fn effective_with_deadline(
+    connection: Connection,
+    json: bool,
+    budget: Duration,
+) -> Result<(), CliError> {
     let mut client = connection.effective_config_client();
-    let resp = client
-        .get_effective_config(GetEffectiveConfigRequest {})
-        .await?
-        .into_inner();
+    let resp = rpc_with_timeout(
+        "GetEffectiveConfig",
+        budget,
+        client.get_effective_config(GetEffectiveConfigRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         print_json(effective_to_json(&resp.toml)?)?;
@@ -1584,6 +1596,34 @@ nested = [{ label = "first", values = [3, 1, 3] }, { label = "second", values = 
         let result = effective(connection, false).await;
 
         assert!(result.is_err(), "daemon error must take the exit-1 path");
+    }
+
+    #[tokio::test]
+    async fn effective_stops_at_its_response_deadline() {
+        let server = spawn_mock_server(None).await;
+        // The mock accepts the request and holds its response for a minute.
+        server
+            .state
+            .effective_config_delay_ms
+            .store(60_000, Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            effective_with_deadline(connection, false, Duration::from_millis(250)),
+        )
+        .await
+        .expect("config effective waited past its response deadline")
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "deadline exceeded: GetEffectiveConfig response timed out after 0.25s"
+        );
+        assert_eq!(
+            server.state.config_effective_calls.load(Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]

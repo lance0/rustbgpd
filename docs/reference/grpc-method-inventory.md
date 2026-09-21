@@ -275,8 +275,9 @@ shape itself does not raise the tier.
 | `operator_only` | 24 | 20.9% |
 | **Total** | **115** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 115
-total is 109 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC. The total
+includes the four `gnmi.gNMI` RPCs; the remainder are native `rustbgpd.v1`
+RPCs.)
 
 ## Notes for ADR-0064
 

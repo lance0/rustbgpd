@@ -1842,7 +1842,7 @@ impl BgpMetrics {
         let path_attribute_discarded = IntCounterVec::new(
             Opts::new(
                 "bgp_path_attribute_discarded_total",
-                "Inbound path-attribute occurrences discarded by configured route-server policy",
+                "Inbound path-attribute occurrences discarded by configured route-server policy or the RFC 7606 external-neighbor rule",
             ),
             &["peer", "type_code"],
         )
@@ -4954,7 +4954,8 @@ impl BgpMetrics {
             .inc_by(count);
     }
 
-    /// Record configured inbound path-attribute discards by wire type code.
+    /// Record inbound path-attribute discards by wire type code: the
+    /// configured list, and RFC 7606 §7.9/§7.10 external-neighbor removals.
     pub fn record_path_attribute_discarded(&self, peer: &str, type_code: u8, count: u64) {
         self.0
             .path_attribute_discarded
