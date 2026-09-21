@@ -53,7 +53,7 @@ async fn drain_subscription(
             Ok(Some(EventSubscriptionItem::Lagged(missed))) => {
                 panic!("unexpected lag signal while draining test subscription: {missed}")
             }
-            Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
+            Ok(Some(EventSubscriptionItem::RetentionGap { missed, .. })) => {
                 panic!("unexpected retention-gap signal while draining: missed={missed}")
             }
             Ok(Some(EventSubscriptionItem::Error(err))) => {
@@ -72,7 +72,7 @@ async fn drain_subscription(
                 Ok(Some(EventSubscriptionItem::Lagged(missed))) => {
                     panic!("unexpected lag signal while draining test subscription: {missed}")
                 }
-                Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
+                Ok(Some(EventSubscriptionItem::RetentionGap { missed, .. })) => {
                     panic!("unexpected retention-gap signal while draining: missed={missed}")
                 }
                 Ok(Some(EventSubscriptionItem::Error(err))) => {
@@ -401,7 +401,7 @@ async fn retention_gap_emits_as_leading_subscription_item_race_free() {
     // This test pins the new contract: `subscribe_from_event` issues
     // `OldestEventId` + the first replay chunk in one storage-thread op
     // (`QueryWithFloor`), and emits the gap as `EventSubscriptionItem
-    // ::RetentionGap(missed)` immediately before any replay rows. The
+    // ::RetentionGap` immediately before any replay rows. The
     // gRPC handler translates that to a leading `StreamLagEvent` on the
     // wire.
     let dir = TempDir::new().unwrap();
@@ -480,7 +480,13 @@ async fn retention_gap_emits_as_leading_subscription_item_race_free() {
         .unwrap()
         .expect("stream must yield at least the retention-gap item");
     let missed = match first {
-        EventSubscriptionItem::RetentionGap(n) => n,
+        EventSubscriptionItem::RetentionGap {
+            after_event_id,
+            missed,
+        } => {
+            assert_eq!(after_event_id, from, "leading gap starts at the cursor");
+            missed
+        }
         EventSubscriptionItem::Event(evt) => {
             panic!(
                 "expected leading RetentionGap, got Event id={}",
@@ -526,6 +532,279 @@ async fn slow_consumer_backpressures_without_dropping() {
 
     let ids = drain_subscription(rx, Duration::from_secs(3), 20).await;
     assert_eq!(ids, (1..=20_u64).collect::<Vec<_>>());
+
+    manager.shutdown().await;
+}
+
+// ── Retention eviction during replay ────────────────────────────────
+//
+// The seam is backpressure, not timing: `output_capacity = 1` gives a
+// 64-row replay chunk behind a one-slot output channel, so once the
+// test has received the first event the replay task is parked on
+// `send` with chunk one already read and chunk two not yet queried.
+// A retention pass issued at that point lands exactly between chunks.
+
+const REPLAY_CHUNK: u64 = 64;
+
+/// Commit `total` events (odd ids Route, even ids Session) with timer
+/// retention parked, and return the manager once all are durable.
+async fn start_with_committed(dir: &TempDir, total: u64, max_events: u64) -> EventHistoryManager {
+    let mut cfg = fast_cfg(dir.path().join("events.db"));
+    cfg.max_events = max_events;
+    cfg.retention_interval = Duration::from_secs(3600);
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+    for i in 1..=total {
+        let mut envelope = make_envelope(i);
+        if i % 2 == 0 {
+            envelope.category = Category::Session;
+        }
+        loop {
+            match manager.sender().try_send(envelope.clone()) {
+                Ok(()) => break,
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while manager.state().latest_event_id() < total {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "events not committed before the deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    manager
+}
+
+/// One received replay item, reduced to what the accounting needs.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    Event(u64),
+    Gap { after: u64, missed: u64 },
+}
+
+async fn next_seen(rx: &mut tokio::sync::mpsc::Receiver<EventSubscriptionItem>) -> Option<Seen> {
+    match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        Ok(Some(EventSubscriptionItem::Event(evt))) => Some(Seen::Event(evt.event_id)),
+        Ok(Some(EventSubscriptionItem::RetentionGap {
+            after_event_id,
+            missed,
+        })) => Some(Seen::Gap {
+            after: after_event_id,
+            missed,
+        }),
+        Ok(Some(EventSubscriptionItem::Lagged(n))) => panic!("unexpected broadcast lag: {n}"),
+        Ok(Some(EventSubscriptionItem::Error(err))) => panic!("unexpected error: {err}"),
+        Ok(None) | Err(_) => None,
+    }
+}
+
+/// Subscribe from 0 with a one-slot output, take the first event so
+/// chunk one is known to be read, run `between_chunks`, then drain.
+async fn replay_with_mid_replay_step<F, Fut>(
+    manager: &EventHistoryManager,
+    filter: SubscribeFilter,
+    between_chunks: F,
+) -> Vec<Seen>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut rx = manager
+        .subscribe_from_event(SubscribeRequest {
+            from_event_id: Some(0),
+            filter,
+            output_capacity: 1,
+        })
+        .await
+        .unwrap()
+        .into_receiver();
+    let mut seen = vec![next_seen(&mut rx).await.expect("first replay item")];
+    between_chunks().await;
+    while let Some(item) = next_seen(&mut rx).await {
+        seen.push(item);
+    }
+    seen
+}
+
+/// Every id in `1..=high_watermark` must be accounted for exactly once:
+/// delivered, covered by a gap, or (under a filter) not matching.
+/// Returns (delivered ids, total missed).
+fn account(seen: &[Seen], high_watermark: u64, matches: impl Fn(u64) -> bool) -> (Vec<u64>, u64) {
+    let mut cursor = 0_u64;
+    let mut delivered = Vec::new();
+    let mut missed_total = 0_u64;
+    for item in seen {
+        match *item {
+            Seen::Event(id) => {
+                assert!(id > cursor, "event {id} at or below cursor {cursor}");
+                assert!(
+                    (cursor + 1..id).all(|skipped| !matches(skipped)),
+                    "matching ids in {}..{id} neither delivered nor covered by a gap",
+                    cursor + 1
+                );
+                delivered.push(id);
+                cursor = id;
+            }
+            Seen::Gap { after, missed } => {
+                assert!(
+                    (cursor + 1..=after).all(|skipped| !matches(skipped)),
+                    "gap after {after} leaves matching ids above cursor {cursor} unaccounted"
+                );
+                assert!(
+                    after >= cursor,
+                    "gap after {after} re-covers cursor {cursor}"
+                );
+                assert!(missed > 0, "empty gap signal");
+                missed_total += missed;
+                cursor = after + missed;
+            }
+        }
+    }
+    assert!(cursor <= high_watermark, "accounted past the watermark");
+    assert!(
+        (cursor + 1..=high_watermark).all(|skipped| !matches(skipped)),
+        "replay ended at {cursor} with matching ids up to {high_watermark} unaccounted"
+    );
+    (delivered, missed_total)
+}
+
+#[tokio::test]
+async fn eviction_between_replay_chunks_is_signalled_as_a_gap() {
+    let dir = TempDir::new().unwrap();
+    let manager = start_with_committed(&dir, 200, 50).await;
+
+    let seen = replay_with_mid_replay_step(&manager, SubscribeFilter::default(), || async {
+        let outcome = manager.run_retention_pass().await.unwrap();
+        assert_eq!(outcome.evicted_count_cap, 150, "floor must move to id 151");
+    })
+    .await;
+
+    let (delivered, missed) = account(&seen, 200, |_| true);
+    // Chunk one (1..=64) was read before the pass; 65..=150 were evicted
+    // ahead of the cursor; 151..=200 survive.
+    let expected: Vec<u64> = (1..=REPLAY_CHUNK).chain(151..=200).collect();
+    assert_eq!(delivered, expected);
+    assert_eq!(missed, 150 - REPLAY_CHUNK);
+    assert_eq!(
+        seen[REPLAY_CHUNK as usize],
+        Seen::Gap {
+            after: REPLAY_CHUNK,
+            missed: 150 - REPLAY_CHUNK
+        },
+        "the gap must sit between the last chunk-one event and id 151"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn eviction_between_replay_chunks_is_signalled_under_a_category_filter() {
+    let dir = TempDir::new().unwrap();
+    let manager = start_with_committed(&dir, 400, 100).await;
+    let filter = SubscribeFilter {
+        category: Some(Category::Route),
+        ..SubscribeFilter::default()
+    };
+
+    let seen = replay_with_mid_replay_step(&manager, filter, || async {
+        let outcome = manager.run_retention_pass().await.unwrap();
+        assert_eq!(outcome.evicted_count_cap, 300, "floor must move to id 301");
+    })
+    .await;
+
+    let (delivered, missed) = account(&seen, 400, |id| id % 2 == 1);
+    // Chunk one holds the first 64 Route rows (odd ids 1..=127). The
+    // surviving Route rows start at 301, so consecutive delivered ids
+    // alone (127 → 301) cannot reveal the loss; the floor does.
+    let last_chunk_one = 2 * REPLAY_CHUNK - 1;
+    let expected: Vec<u64> = (1..=last_chunk_one)
+        .step_by(2)
+        .chain((301..=400).step_by(2))
+        .collect();
+    assert_eq!(delivered, expected);
+    // Global count, not the filtered subset: ids 128..=300.
+    assert_eq!(missed, 300 - last_chunk_one);
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn eviction_of_everything_left_mid_replay_ends_with_a_gap() {
+    let dir = TempDir::new().unwrap();
+    let manager = start_with_committed(&dir, 200, 0).await;
+
+    let seen = replay_with_mid_replay_step(&manager, SubscribeFilter::default(), || async {
+        let outcome = manager.run_retention_pass().await.unwrap();
+        assert_eq!(outcome.evicted_count_cap, 200, "table must be empty");
+    })
+    .await;
+
+    let (delivered, missed) = account(&seen, 200, |_| true);
+    assert_eq!(delivered, (1..=REPLAY_CHUNK).collect::<Vec<_>>());
+    assert_eq!(missed, 200 - REPLAY_CHUNK);
+    assert_eq!(
+        seen.last(),
+        Some(&Seen::Gap {
+            after: REPLAY_CHUNK,
+            missed: 200 - REPLAY_CHUNK
+        }),
+        "replay must end with the gap, not silently"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn multi_chunk_replay_without_eviction_has_no_gap_and_hands_off_to_live() {
+    let dir = TempDir::new().unwrap();
+    let manager = start_with_committed(&dir, 200, 1_000_000).await;
+
+    // Commit more while replay is parked between chunks: these are
+    // above the captured watermark and must arrive once, from live.
+    let seen = replay_with_mid_replay_step(&manager, SubscribeFilter::default(), || async {
+        for i in 201..=210_u64 {
+            manager.sender().try_send(make_envelope(i)).unwrap();
+        }
+        while manager.state().latest_event_id() < 210 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+
+    let expected: Vec<Seen> = (1..=210).map(Seen::Event).collect();
+    assert_eq!(
+        seen, expected,
+        "no gap, no duplicate, no hole at the watermark"
+    );
+
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn eviction_past_the_watermark_mid_replay_does_not_count_live_events() {
+    let dir = TempDir::new().unwrap();
+    let manager = start_with_committed(&dir, 200, 5).await;
+
+    // Ten live events land, then retention keeps only 206..=210: the
+    // floor is above the watermark (200). The gap must stop at 200;
+    // 201..=210 still arrive from the live path.
+    let seen = replay_with_mid_replay_step(&manager, SubscribeFilter::default(), || async {
+        for i in 201..=210_u64 {
+            manager.sender().try_send(make_envelope(i)).unwrap();
+        }
+        while manager.state().latest_event_id() < 210 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let outcome = manager.run_retention_pass().await.unwrap();
+        assert_eq!(outcome.evicted_count_cap, 205);
+    })
+    .await;
+
+    let (delivered, missed) = account(&seen, 210, |_| true);
+    let expected: Vec<u64> = (1..=REPLAY_CHUNK).chain(201..=210).collect();
+    assert_eq!(delivered, expected);
+    assert_eq!(missed, 200 - REPLAY_CHUNK);
 
     manager.shutdown().await;
 }

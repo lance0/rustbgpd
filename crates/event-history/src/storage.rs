@@ -103,7 +103,7 @@ pub(crate) enum StoreOp {
     /// Same as `Query` but additionally returns the live `MIN(event_id)`
     /// over the events table, evaluated under the SAME storage-thread
     /// iteration that runs the row read. The cursor handler uses this
-    /// op for the FIRST replay chunk of a `SubscribeFromEvent` request
+    /// op for EVERY replay chunk of a `SubscribeFromEvent` request
     /// to compute the retention-gap signal race-free against retention
     /// — submitting `OldestEventId` then `Query` as two ops lets
     /// retention be processed in between, which is the race ADR-0072
@@ -279,35 +279,39 @@ impl StoreHandle {
     pub(crate) fn test_query_failure(failure: TestQueryFailure) -> Self {
         let (tx, mut rx) = mpsc::channel(1);
         tokio::spawn(async move {
+            // `LaterReply` answers the first chunk with a full `limit`
+            // rows (a short chunk would end replay) and fails the next.
+            let mut fail = failure == TestQueryFailure::FirstReply;
             while let Some(op) = rx.recv().await {
                 match op {
-                    StoreOp::QueryWithFloor { reply, .. } => match failure {
-                        TestQueryFailure::FirstReply => drop(reply),
-                        TestQueryFailure::LaterReply => {
-                            let _ = reply.send(Ok(QueryWithFloorOutcome {
-                                rows: vec![PersistedEvent {
-                                    event_id: 1,
-                                    timestamp_ns: 0,
-                                    category: Category::Route,
-                                    event_type: "test".to_string(),
-                                    peer: None,
-                                    previous_peer: None,
-                                    target_peer: None,
-                                    afi_safi: None,
-                                    prefix: None,
-                                    rd: None,
-                                    evpn_route_type: None,
-                                    severity: Severity::Info,
-                                    daemon_boot_id: "test".to_string(),
-                                    payload_codec: "opaque".to_string(),
-                                    payload: Vec::new(),
-                                }],
-                                floor: Some(1),
-                            }));
-                        }
-                    },
-                    StoreOp::Query { reply, .. } => drop(reply),
-                    _ => unreachable!("query failure test received a non-query operation"),
+                    StoreOp::QueryWithFloor { reply, .. } if fail => drop(reply),
+                    StoreOp::QueryWithFloor { limit, reply, .. } => {
+                        fail = true;
+                        let rows = (1..=limit as u64)
+                            .map(|event_id| PersistedEvent {
+                                event_id,
+                                timestamp_ns: 0,
+                                category: Category::Route,
+                                event_type: "test".to_string(),
+                                peer: None,
+                                previous_peer: None,
+                                target_peer: None,
+                                afi_safi: None,
+                                prefix: None,
+                                rd: None,
+                                evpn_route_type: None,
+                                severity: Severity::Info,
+                                daemon_boot_id: "test".to_string(),
+                                payload_codec: "opaque".to_string(),
+                                payload: Vec::new(),
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(QueryWithFloorOutcome {
+                            rows,
+                            floor: Some(1),
+                        }));
+                    }
+                    _ => unreachable!("query failure test received a non-replay operation"),
                 }
             }
         });

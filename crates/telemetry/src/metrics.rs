@@ -711,9 +711,11 @@ struct BgpMetricsInner {
     event_outbox_open_failures: IntCounter,
     event_outbox_degraded: IntGauge,
     event_outbox_storage_failed: IntGauge,
-    /// Number of `SubscribeFromEvent` requests that emitted a
-    /// leading `StreamLagEvent` because the client cursor was
-    /// older than the retained floor. Operator signal that
+    /// Number of cursor-gap `StreamLagEvent`s emitted on
+    /// `SubscribeFromEvent` streams because the replay cursor was
+    /// older than the retained floor: the leading gap for a stale
+    /// request cursor, plus one per mid-replay eviction that
+    /// overtook the cursor. Operator signal that
     /// `[event_history].max_events` / `max_bytes` is undersized
     /// for the collector reconnect SLA (ADR-0072 PR5).
     event_outbox_cursor_gap: IntCounter,
@@ -2596,7 +2598,7 @@ impl BgpMetrics {
 
         let event_outbox_cursor_gap = IntCounter::new(
             "bgp_event_outbox_cursor_gap_total",
-            "SubscribeFromEvent requests that emitted a leading StreamLagEvent because the client cursor was older than the retained floor. Operator signal that [event_history].max_events / max_bytes is undersized for the collector reconnect SLA (ADR-0072).",
+            "Cursor-gap StreamLagEvents emitted on SubscribeFromEvent streams because the replay cursor was older than the retained floor, at subscribe time or when retention overtook a replay in progress. Operator signal that [event_history].max_events / max_bytes is undersized for the collector reconnect SLA (ADR-0072).",
         )
         .expect("valid metric definition");
 
@@ -6102,8 +6104,8 @@ impl BgpMetrics {
     }
 
     /// Increment the `SubscribeFromEvent` cursor-gap counter. The
-    /// gRPC handler calls this whenever it emits a leading
-    /// `StreamLagEvent` because the requested cursor was below the
+    /// gRPC handler calls this whenever it emits a cursor-gap
+    /// `StreamLagEvent` because the replay cursor was below the
     /// retention floor (ADR-0072 PR5).
     pub fn record_event_outbox_cursor_gap(&self) {
         self.0.event_outbox_cursor_gap.inc();

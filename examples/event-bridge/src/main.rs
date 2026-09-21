@@ -14,8 +14,9 @@
 //! - `0`              ⇒ replay everything retained, then live.
 //! - `N` (`N > 0`)    ⇒ replay events with `event_id > N`, then live.
 //!
-//! If the daemon emits a leading `StreamLagEvent` (cursor older
-//! than retention), the bridge emits it as a JSON line marked
+//! If the daemon emits a `StreamLagEvent` (cursor older than
+//! retention, at the head of the stream or mid-replay), the bridge
+//! emits it as a JSON line marked
 //! `category: "unspecified", event_type: "BGP_EVENT_TYPE_STREAM_LAGGED"`
 //! and then continues. Operators should alert on those.
 //!

@@ -588,11 +588,13 @@ impl proto::event_service_server::EventService for EventService {
     /// - `Some(N>0)` ⇒ replay events with `event_id > N`, then live.
     ///
     /// When the requested cursor is older than the retention floor,
-    /// the server emits a single leading `StreamLagEvent` with the
+    /// the server emits a leading `StreamLagEvent` with the
     /// missed count over the **global committed stream** (not the
     /// filtered subset), then continues replay from the earliest
-    /// retained event. Collectors continue moving while observing
-    /// the gap.
+    /// retained event. If retention evicts rows ahead of a replay
+    /// already in progress, another `StreamLagEvent` covering exactly
+    /// those ids precedes the next replayed event. Collectors continue
+    /// moving while observing the gap.
     ///
     /// When the daemon was started with `[event_history].enabled =
     /// false` or EHM failed to start with `required = false`, returns
@@ -2437,13 +2439,30 @@ mod tests {
 
     #[test]
     fn cursor_gap_event_saturates_requested_cursor_before_subtracting() {
-        let event = cursor::build_cursor_gap_event(u64::MAX, u64::MAX);
+        let event = cursor::build_cursor_gap_event(u64::MAX, u64::MAX, false);
         let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
             panic!("expected stream lag payload");
         };
         assert_eq!(
             lag.missed_count, 0,
             "u64::MAX cursor must not wrap before saturating the retained-floor gap"
+        );
+    }
+
+    #[test]
+    fn mid_replay_cursor_gap_event_counts_the_evicted_ids_and_says_so() {
+        // Replayed through 64, retention moved the floor to 151.
+        let event = cursor::build_cursor_gap_event(64, 151, true);
+        assert_eq!(event.event_type, proto::BgpEventType::StreamLagged as i32);
+        assert_eq!(event.category, proto::EventCategory::Unspecified as i32);
+        let Some(proto::bgp_event::Payload::StreamLag(lag)) = event.payload else {
+            panic!("expected stream lag payload");
+        };
+        assert_eq!(lag.missed_count, 86);
+        assert_eq!(
+            lag.reason,
+            "retention evicted events during replay; \
+             replayed_through_event_id=64 next_available_event_id=151"
         );
     }
 

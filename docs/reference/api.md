@@ -2265,7 +2265,10 @@ presence: absent means live-only, `0` replays every retained event before
 joining live, and `N > 0` replays events with `event_id > N` before joining
 live. If `N` is older than the retention floor, the first response is a
 `BGP_EVENT_TYPE_STREAM_LAGGED` event whose `missed_count` describes the global
-outbox gap; the stream then continues from the earliest retained event. Empty
+outbox gap; the stream then continues from the earliest retained event. If
+retention evicts events ahead of a replay still in progress, another such event
+precedes the next replayed event and counts exactly the evicted ids, so a
+collector must accept this event at any position in the stream. Empty
 category and type filters select every EHM-fed category on this RPC: route,
 EVPN, session lifecycle, session notifications, policy, dataplane, and BFD.
 Dataplane summary and per-route FIB apply events remain live on `WatchEvents`
