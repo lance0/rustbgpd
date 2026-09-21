@@ -5389,12 +5389,12 @@ impl BgpMetrics {
             .observe(duration.as_secs_f64());
     }
 
-    /// Observe one RIB actor ingest component.
+    /// Observe one RIB actor work component.
     ///
     /// `work_unit` is one of the bounded `route_chunk`, `distribute_flush`,
-    /// `exact_export_retire`, or `attribute_gc` labels. Components may service
-    /// readiness internally or run consecutively; their durations do not bound
-    /// readiness latency.
+    /// `exact_export_retire`, `attribute_gc`, or `flowspec_validation` labels.
+    /// Components may service readiness internally or run consecutively; their
+    /// durations do not bound readiness latency.
     pub fn observe_rib_actor_work(&self, work_unit: &str, duration: std::time::Duration) {
         self.0
             .rib_actor_work_duration_seconds

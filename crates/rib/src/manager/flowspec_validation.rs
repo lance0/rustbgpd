@@ -221,25 +221,73 @@ impl ValidationState {
         self.candidates.get_mut(&id.0)?.get_mut(&(id.1, id.2))
     }
 
-    /// Reconcile retained `FlowSpec` mutations at the existing selection seam.
-    fn sync_rule(
+    /// Reconcile one atomic affected set without rescanning the retained table
+    /// for each rule. The temporary inventory borrows both keys and routes.
+    fn sync_rules(
         &mut self,
-        key: &FlowSpecKey,
+        affected: &HashSet<FlowSpecKey>,
         ribs: &HashMap<IpAddr, AdjRibIn>,
         loc: &LocRib,
         checkpoint: &impl Fn(),
     ) {
-        let Some(local_as) = self.local_as else {
+        if self.local_as.is_none() || affected.is_empty() {
             return;
-        };
-        let mut retained = HashSet::new();
+        }
+        let mut groups: HashMap<_, Vec<&FlowSpecRoute>> = affected
+            .iter()
+            .inspect(|_| checkpoint())
+            .map(|key| ((key.afi, &key.rule), Vec::new()))
+            .collect();
         for route in ribs
             .values()
             .inspect(|_| checkpoint())
             .flat_map(AdjRibIn::iter_flowspec)
             .inspect(|_| checkpoint())
-            .filter(|route| route.afi == key.afi && route.rule == key.rule)
         {
+            if let Some(rows) = groups.get_mut(&(route.afi, &route.rule)) {
+                rows.push(route);
+            }
+        }
+        let mut retired = false;
+        for key in affected {
+            checkpoint();
+            let rows = groups.remove(&(key.afi, &key.rule)).unwrap_or_default();
+            retired |= self.sync_rule(key, &rows, loc, checkpoint);
+        }
+        if retired {
+            // Retirement is also batch-scoped: a multi-rule withdrawal must
+            // not walk every queued candidate once per removed rule.
+            let candidates = &self.candidates;
+            let retained = |id: &CandidateId| {
+                checkpoint();
+                candidates
+                    .get(&id.0)
+                    .is_some_and(|rows| rows.contains_key(&(id.1, id.2)))
+            };
+            for queue in &mut self.queues {
+                queue.retain(&retained);
+            }
+            self.queued.retain(&retained);
+            if self.active.as_ref().is_some_and(|job| !retained(&job.id)) {
+                self.active = None;
+            }
+        }
+    }
+
+    /// Reconcile retained `FlowSpec` mutations at the existing selection seam.
+    fn sync_rule(
+        &mut self,
+        key: &FlowSpecKey,
+        routes: &[&FlowSpecRoute],
+        loc: &LocRib,
+        checkpoint: &impl Fn(),
+    ) -> bool {
+        let Some(local_as) = self.local_as else {
+            return false;
+        };
+        let mut retained = HashSet::new();
+        for route in routes {
+            checkpoint();
             let identity = (route.peer, route.path_id);
             retained.insert(identity);
             if self
@@ -286,27 +334,6 @@ impl ValidationState {
             });
             rows.len() != before
         });
-        if retired {
-            // Prune only after retirement; ordinary inserts must not rescan
-            // every queued candidate for each newly received rule.
-            for queue in &mut self.queues {
-                queue.retain(|id| {
-                    checkpoint();
-                    &id.0 != key || retained.contains(&(id.1, id.2))
-                });
-            }
-            self.queued.retain(|id| {
-                checkpoint();
-                &id.0 != key || retained.contains(&(id.1, id.2))
-            });
-            if self
-                .active
-                .as_ref()
-                .is_some_and(|job| &job.id.0 == key && !retained.contains(&(job.id.1, job.id.2)))
-            {
-                self.active = None;
-            }
-        }
         if retained.is_empty() {
             self.candidates.remove(key);
             if let Some(destination) = key.rule.destination_prefix() {
@@ -328,6 +355,7 @@ impl ValidationState {
                 .entry_or_default(destination)
                 .insert(key.rule.clone());
         }
+        retired
     }
 
     fn invalidate_rule(
@@ -527,11 +555,8 @@ impl RibManager {
         let readiness = self.replacement_readiness.clone();
         let checkpoint =
             || super::replacement_readiness_checkpoint_at(&readiness, "flowspec_inventory", false);
-        for key in affected {
-            checkpoint();
-            self.flowspec_validation
-                .sync_rule(key, &self.ribs, &self.loc_rib, &checkpoint);
-        }
+        self.flowspec_validation
+            .sync_rules(affected, &self.ribs, &self.loc_rib, &checkpoint);
     }
 
     pub(super) fn invalidate_flowspec_dependencies(&mut self, changed: &HashSet<Prefix>) {
@@ -1151,6 +1176,98 @@ mod tests {
         );
         drain(&mut manager);
         assert!(selected(&manager, &flow));
+    }
+
+    #[test]
+    fn flowspec_validation_batch_inventory_and_retirement_visit_rows_once() {
+        use rustbgpd_wire::{FlowSpecComponent, NumericMatch};
+        use std::cell::Cell;
+
+        let (mut manager, _tx, flow, _cover) = fixture();
+        let mut affected = HashSet::new();
+        let mut withdrawals = Vec::new();
+        for port in 1..=64 {
+            for path_id in 0..2 {
+                let mut route = flow.clone();
+                route.path_id = path_id;
+                route
+                    .rule
+                    .components
+                    .push(FlowSpecComponent::DestinationPort(vec![NumericMatch {
+                        end_of_list: true,
+                        and_bit: false,
+                        lt: false,
+                        gt: false,
+                        eq: true,
+                        value: port,
+                    }]));
+                affected.insert(route.selection_key());
+                withdrawals.push(route.key());
+                manager
+                    .ribs
+                    .get_mut(&flow.peer)
+                    .unwrap()
+                    .insert_flowspec(route);
+            }
+        }
+        let visits = Cell::new(0);
+        let checkpoint = || visits.set(visits.get() + 1);
+        manager.flowspec_validation.sync_rules(
+            &affected,
+            &manager.ribs,
+            &manager.loc_rib,
+            &checkpoint,
+        );
+        assert_eq!(manager.flowspec_validation.candidates.len(), 65);
+        assert_eq!(manager.flowspec_validation.queued.len(), 129);
+        // Count actual inventory and retirement checkpoints, not elapsed time.
+        // A per-key retained-table scan exceeds this linear bound by >5x.
+        let bound = 8 * (129 + affected.len());
+        assert!(visits.get() <= bound, "inventory visits: {}", visits.get());
+        for key in withdrawals {
+            manager
+                .ribs
+                .get_mut(&flow.peer)
+                .unwrap()
+                .withdraw_flowspec(&key);
+        }
+        visits.set(0);
+        manager.flowspec_validation.sync_rules(
+            &affected,
+            &manager.ribs,
+            &manager.loc_rib,
+            &checkpoint,
+        );
+        assert!(visits.get() <= bound, "retirement visits: {}", visits.get());
+        assert_eq!(manager.flowspec_validation.candidates.len(), 1);
+        assert_eq!(manager.flowspec_validation.queued.len(), 1);
+        assert_eq!(
+            manager
+                .flowspec_validation
+                .queues
+                .iter()
+                .map(VecDeque::len)
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            manager
+                .flowspec_validation
+                .destinations
+                .get(&flow.rule.destination_prefix().unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        drain(&mut manager);
+        assert!(manager.flowspec_validation.queued.is_empty());
+        assert!(selected(&manager, &flow));
+
+        let mut disabled = ValidationState::default();
+        visits.set(0);
+        disabled.sync_rules(&affected, &manager.ribs, &manager.loc_rib, &checkpoint);
+        assert_eq!(visits.get(), 0, "off mode must not inventory routes");
+        assert!(disabled.candidates.is_empty());
     }
 
     #[test]
