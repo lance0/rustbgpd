@@ -664,13 +664,20 @@ pub(crate) async fn read_current_tables(
         return Ok(None);
     };
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(FibRuntimeCommand::GetTables { reply: reply_tx })
-        .await
-        .map_err(|_| actor_error("FIB reconciler command channel closed".to_string()))?;
-    let tables = reply_rx
-        .await
-        .map_err(|_| actor_error("FIB reconciler dropped the GetTables reply".to_string()))?;
-    Ok(Some(tables))
+    // Every caller holds the runtime-config coordinator across this read, so a
+    // stalled reconciler must not park it forever. One deadline spans the send
+    // and the reply: a read has no accepted-but-unanswered effect to classify.
+    tokio::time::timeout(OWNED_FIB_ACTOR_TIMEOUT, async {
+        tx.send(FibRuntimeCommand::GetTables { reply: reply_tx })
+            .await
+            .map_err(|_| actor_error("FIB reconciler command channel closed".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| actor_error("FIB reconciler dropped the GetTables reply".to_string()))
+    })
+    .await
+    .map_err(|_| actor_error("FIB reconciler did not answer GetTables in time".to_string()))?
+    .map(Some)
 }
 
 fn apply_mutation(
@@ -961,6 +968,59 @@ mod tests {
                 .unwrap_err();
             assert_actor_read_error(&status, Code::Unavailable, failure);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_fib_actor_bounds_list_and_releases_the_coordinator() {
+        let (fib_tx, mut fib_rx) = mpsc::channel(1);
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let deps = Arc::new(FibTableControlDeps {
+            fib_cmd_tx: Some(fib_tx),
+            peer_mgr_tx,
+            rib_tx: None,
+            config_tx: None,
+            lock: coordinator.clone(),
+            config_mutation_gate: None,
+            startup_tables: Vec::new(),
+            confirm_journal_path: None,
+            config_history_dir: None,
+        });
+        let list = tokio::spawn(handle(
+            deps,
+            (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
+            FibTableControlRequest::List,
+        ));
+        // The actor accepts the read and never answers it.
+        let Some(FibRuntimeCommand::GetTables { reply: _stalled }) = fib_rx.recv().await else {
+            panic!("expected GetTables")
+        };
+        assert!(
+            tokio::time::timeout(Duration::ZERO, coordinator.acquire())
+                .await
+                .is_err(),
+            "List holds the coordinator across the actor read"
+        );
+
+        // Wall-clock oracle, deliberately not the implementation constant.
+        tokio::time::advance(Duration::from_secs(599)).await;
+        tokio::task::yield_now().await;
+        assert!(!list.is_finished(), "List gave up before ten minutes");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = tokio::time::timeout(Duration::from_secs(1), list)
+            .await
+            .expect("a stalled FIB actor must not hold List past its deadline")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            FibTableControlError::Unavailable(message)
+                if message == "FIB reconciler did not answer GetTables in time"
+        ));
+        let _free = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("the timed-out List must release the coordinator")
+            .unwrap();
     }
 
     #[tokio::test]

@@ -111,7 +111,6 @@ struct ConfirmedState {
 #[derive(Clone)]
 struct PendingConfirmedTransaction {
     confirm_id: String,
-    rollback_expected_runtime_snapshot_token: String,
     timeout_seconds: u32,
     deadline: tokio::time::Instant,
     deadline_unix_seconds: u64,
@@ -149,12 +148,17 @@ struct ConfirmedApplyMode {
 }
 
 trait OwnedOperationError: From<RuntimeConfigCoordinatorClosed> + Send + 'static {
+    fn coordinator_busy(message: &'static str) -> Self;
     fn unavailable(message: &'static str) -> Self;
     fn task_lost(message: &'static str) -> Self;
     fn fence_reason(&self) -> Option<RuntimeConfigFenceReason>;
 }
 
 impl OwnedOperationError for ConfigTransactionApplyError {
+    fn coordinator_busy(message: &'static str) -> Self {
+        Self::DeadlineExceeded(message.to_string())
+    }
+
     fn unavailable(message: &'static str) -> Self {
         Self::Unavailable(message.to_string())
     }
@@ -186,6 +190,12 @@ impl From<RuntimeConfigCoordinatorClosed> for OwnedGnmiSetError {
 }
 
 impl OwnedOperationError for OwnedGnmiSetError {
+    // gNMI Set has no deadline status in its error vocabulary; a coordinator
+    // deadline maps to UNAVAILABLE, as `apply_error_to_gnmi_set_error` does.
+    fn coordinator_busy(message: &'static str) -> Self {
+        Self::Clean(GnmiSetError::Unavailable(message.to_string()))
+    }
+
     fn unavailable(message: &'static str) -> Self {
         Self::Clean(GnmiSetError::Unavailable(message.to_string()))
     }
@@ -246,7 +256,24 @@ impl ConfigTransactionController {
     {
         let watched = self.settlement.is_some();
         let join = tokio::spawn(async move {
-            let coordinator_permit = self.deps.lock.acquire().await?;
+            let acquire = self.deps.lock.acquire();
+            let coordinator_permit = if kind == RuntimeConfigOperationKind::AutoRevert {
+                // The confirm-window revert has no caller to hand a deadline to
+                // and its one-shot timer is not re-armed: giving up here would
+                // leave the candidate live and still reported as pending. It
+                // keeps waiting for the owner, which is itself bounded.
+                acquire.await?
+            } else {
+                tokio::time::timeout(CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT, acquire)
+                    .await
+                    .map_err(|_| {
+                        E::coordinator_busy(
+                            "config operation timed out waiting for the runtime config \
+                             coordinator; coordinator ownership was not acquired and the \
+                             operation did not begin",
+                        )
+                    })??
+            };
             let Some((watchdog, daemon_gate)) = self.settlement.clone() else {
                 return body(self, None).await;
             };
@@ -358,7 +385,7 @@ impl ConfigTransactionController {
     async fn plan_preloaded_snapshot(
         &self,
         snapshot: Arc<AcceptedConfigSnapshot>,
-        expected_runtime_snapshot_token: String,
+        expected_runtime_snapshot_token: Option<String>,
     ) -> Result<PlannedTransactionConfig, ConfigTransactionApplyError> {
         let (barrier_tx, barrier_rx) = oneshot::channel();
         self.deps
@@ -384,7 +411,7 @@ impl ConfigTransactionController {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(InternalCommand::PlanAcceptedTransactionConfig {
             snapshot,
-            expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
+            expected_runtime_snapshot_token,
             reply: reply_tx,
         })
         .await
@@ -456,7 +483,7 @@ impl ConfigTransactionController {
                 let plan = self
                     .plan_preloaded_snapshot(
                         snapshot.clone(),
-                        request.expected_runtime_snapshot_token.clone(),
+                        Some(request.expected_runtime_snapshot_token.clone()),
                     )
                     .await?;
                 Ok((normalized_toml, Some(plan)))
@@ -1131,7 +1158,6 @@ impl ConfigTransactionController {
             .map_or(0, |duration| duration.as_secs());
         let pending = PendingConfirmedTransaction {
             confirm_id: confirmed.confirm_id.clone(),
-            rollback_expected_runtime_snapshot_token: response.runtime_snapshot_token.clone(),
             timeout_seconds: confirmed.timeout_seconds,
             deadline,
             deadline_unix_seconds,
@@ -1800,11 +1826,17 @@ impl ConfigTransactionController {
         pending: &PendingConfirmedTransaction,
         progress: &RuntimeConfigMutationProgress,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
+        // No expected runtime snapshot token: that token is a caller's
+        // Plan→Apply change detector and hashes the live update-group
+        // membership alongside the config, so any session going up or down
+        // inside the confirm window moves it. This rollback is not a caller
+        // with a stale view. It restores the snapshot this transaction
+        // recorded, under the runtime-config coordinator, while the pending
+        // fence refuses every other config writer — nothing the token could
+        // detect here is a reason to keep the unconfirmed candidate running.
         let request = proto::ApplyConfigTransactionRequest {
             candidate_toml: pending.prior_snapshot.normalized_toml().to_string(),
-            expected_runtime_snapshot_token: pending
-                .rollback_expected_runtime_snapshot_token
-                .clone(),
+            expected_runtime_snapshot_token: String::new(),
             client_request_id: format!("confirmed-rollback:{}", pending.confirm_id),
             comment: "confirmed transaction rollback".to_string(),
             confirm_id: String::new(),
@@ -1812,10 +1844,7 @@ impl ConfigTransactionController {
         };
         let prior = &pending.prior_snapshot;
         let plan = self
-            .plan_preloaded_snapshot(
-                Arc::clone(prior),
-                pending.rollback_expected_runtime_snapshot_token.clone(),
-            )
+            .plan_preloaded_snapshot(Arc::clone(prior), None)
             .await?;
         let peer_mgr_internal_tx = self.peer_mgr_internal_tx.as_ref().ok_or_else(|| {
             ConfigTransactionApplyError::Unavailable(

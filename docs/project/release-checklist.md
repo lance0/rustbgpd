@@ -524,7 +524,8 @@ If the release touches LLGR capability, negotiation, retained-route lifecycle,
 or outbound rewriting (`crates/wire/src/capability.rs`,
 `crates/fsm/src/config.rs`, `crates/fsm/src/negotiation.rs`,
 `crates/rib/src/manager/graceful_restart.rs`,
-`crates/rib/src/manager/peer_lifecycle.rs`, or
+`crates/rib/src/manager/peer_lifecycle.rs`,
+`crates/rib/src/manager/route_refresh.rs`, or
 `crates/transport/src/session/export.rs`), also run:
 
 ```bash
@@ -536,8 +537,11 @@ containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 If the release includes EVPN changes (any commit touching
 `crates/wire/src/evpn.rs`, `crates/wire/src/pmsi.rs`, EVPN paths in
 `crates/rib/src/`, the EVPN gRPC surface, `crates/evpn-linux/src/`,
-`crates/evpn/src/origination.rs`, `src/evpn_dataplane.rs`,
-`src/evpn_originator/`, or `src/evpn_imet.rs`), run at least one of
+`crates/evpn/src/`, `src/evpn_ack.rs`, `src/evpn_dataplane.rs`,
+`src/evpn_es_drain.rs`, `src/evpn_es_link_drain.rs`, `src/evpn_imet.rs`,
+`src/evpn_l3_originator.rs`, `src/evpn_originator/`,
+`src/evpn_plan_decomposer.rs`, `src/evpn_runtime_converger.rs`,
+`src/evpn_segment.rs`, or `src/evpn_svi.rs`), run at least one of
 M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
 (scale) before any release that claims new performance numbers:
 
@@ -558,12 +562,16 @@ bash tests/interop/scripts/test-m33-evpn-scale.sh
 containerlab destroy -t tests/interop/m33-evpn-scale.clab.yml --cleanup
 ```
 
-If the release touches the **VTEP dataplane** (`crates/evpn-linux/`)
+If the release touches the **VTEP dataplane** (`crates/evpn-linux/`, the
+RIB-to-dataplane glue in `src/evpn_dataplane.rs`, or the remote-MAC
+projection in `crates/evpn/src/projection.rs`)
 or **local-MAC origination** (`crates/evpn/src/origination.rs`,
 `src/evpn_originator/`, `src/evpn_imet.rs`,
 `crates/wire/src/pmsi.rs`), additionally run M36 (downward, Gate 7b)
 and M37 (upward, Gate 7b+1) before tagging. If it touches the
-**ADR-0079 adoption/reap sweep** (`crates/evpn-linux/src/reconcile.rs`),
+**ADR-0079 adoption/reap sweep** (`crates/evpn-linux/src/reconcile.rs`,
+`crates/evpn-linux/src/l3_adoption.rs`, or
+`crates/evpn-linux/src/linux/l3_adoption.rs`),
 M60 (kill-and-restart FDB adoption sweep) and M61 (kill-and-restart
 L3 adoption sweep) run in the hosted `Kernel Dataplane` workflow and
 can be reproduced manually the same way. M36 and M37 run in the hosted
@@ -604,7 +612,9 @@ to validate DF election + Type 1/4 origination against a peer running
 the same code; the source-to-proof map above adds M66/M67 where the daemon
 owner also crosses a drain boundary. If the release touches **Gate 9 /
 ADR-0059 / ADR-0087 / ADR-0090** (IP-VRF, Type 5, L3 FIB programming,
-overlay-index recursion/origination, aliasing ECMP, or FDB nexthop groups),
+overlay-index recursion/origination, aliasing ECMP, or FDB nexthop groups —
+including the Type 5 originator in `src/evpn_l3_originator.rs` and the IP-VRF
+model in `crates/evpn/src/ip_vrf/`),
 run the hosted
 `Kernel Dataplane` workflow for M39, M40, M68, M71, and M72 as
 appropriate. If it touches
@@ -650,11 +660,12 @@ containerlab destroy -t tests/interop/m71-evpn-esi-overlay-type5-receive-gobgp.c
 ```
 
 If the release touches **ADR-0061 / ADR-0066 / ADR-0068 general unicast FIB**
-(`src/fib.rs`, `src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`,
+(`src/fib.rs`, `src/fib_common.rs`, `src/fib_runtime.rs`,
+`src/fib_table_control.rs`, `[[fib_tables]]`, `ListFibRoutes`,
 `rbgp rib fib`, ECMP caps, `multipath_relax`, or weighted multipath), run
 the hosted `Kernel Dataplane` workflow for the relevant FIB suites: M42 for
-base configured-table install, M50 for ECMP, and M52 for multipath-relax. Manual
-reproduction:
+base configured-table install, M50 for ECMP, M52 for multipath-relax, and M58
+for runtime FIB-table CRUD. Manual reproduction:
 
 ```bash
 # M42 — ADR-0061 configured-table unicast Linux FIB runtime
@@ -675,6 +686,7 @@ containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
 ```
 
 If the release touches **ADR-0067 BFD** (`crates/bfd`, `src/bfd_runtime.rs`,
+the RFC 5882 BGP coupling in `src/peer_manager/bfd.rs`,
 `[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rbgp bfd`, or BFD
 events / coupling), run the hosted `Kernel Dataplane` workflow for M51 and
 M108.
