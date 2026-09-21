@@ -60,8 +60,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skips the waits that have no deadline (the unowned permit, the EVPN IMET
   sweep, the peer-manager drain, the BMP shutdown enqueue, and the RIB event
   stage) while bounded kernel, BFD, and event-history cleanup still runs. It
-  does not cut short an owned mutation. `TimeoutStopSec=32min` in the shipped
-  unit is unchanged.
+  does not cut short an owned mutation. A runtime-config mutation or SIGHUP
+  reload that obtains the coordinator only after shutdown has begun is refused
+  (`UNAVAILABLE`, `runtime config coordinator is closed`) before it changes
+  anything, so nothing starts mutating behind a wait shutdown gave up on.
+  `TimeoutStopSec=32min` in the shipped unit is unchanged.
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers

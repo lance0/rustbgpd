@@ -6553,8 +6553,16 @@ struct RuntimeConfigDrain<R> {
 /// only the settlement watchdog may end that wait, by settlement or fail-stop.
 /// `deadline` and `stop_waiting` apply solely while no owner is registered,
 /// when the permit can only be held outside the watchdog. An owner that
-/// registers between the idle check and the drain sends the loop back to the
-/// watchdog wait instead of being abandoned.
+/// registers before the abandon check sends the loop back to the watchdog
+/// wait instead of being abandoned.
+///
+/// The loop alone does not cover a task that took the permit before the
+/// coordinator closed and registers after that check. Every registration
+/// site closes the gap from its side: it re-reads the shutdown gate right
+/// after registering and, once `begin_shutdown()` has run, settles without
+/// running its body. The gate flag and the owner cell are both sequentially
+/// consistent, so this function sees the owner or the owner sees shutdown.
+/// `begin_shutdown()` must therefore precede this call.
 async fn drain_runtime_config<R>(
     runtime_config_settlement: &RuntimeConfigSettlementWatchdog,
     runtime_config_lock: &RuntimeConfigCoordinator,
@@ -7336,6 +7344,74 @@ mod tests {
             "shutdown stopped waiting for an owned runtime-config operation"
         );
         assert_eq!(drain.coordinator, ShutdownWait::Completed(()));
+    }
+
+    #[tokio::test]
+    async fn an_owner_registering_after_the_drain_was_abandoned_never_mutates() {
+        // The abandon branch can race a task that took the permit before the
+        // coordinator closed and has not registered yet. Model that task as an
+        // `execute_owned` caller that receives the permit only after the drain
+        // has given up on it: the drain saw a held permit with no owner, and
+        // the registration happens with shutdown already begun.
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        let daemon_gate = DaemonGate::new();
+        let permit = coordinator.acquire().await.unwrap();
+        let body_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_owner = tokio::spawn({
+            let (settlement, coordinator) = (settlement.clone(), coordinator.clone());
+            let daemon_gate = daemon_gate.clone();
+            let body_ran = Arc::clone(&body_ran);
+            async move {
+                settlement
+                    .execute_owned(
+                        RuntimeConfigOperationKind::PolicySet,
+                        coordinator,
+                        daemon_gate,
+                        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        move |_operation| async move {
+                            body_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::AcknowledgedAuthority(())
+                        },
+                    )
+                    .await
+            }
+        });
+
+        daemon_gate.begin_shutdown();
+        let stop_waiting = tokio_util::sync::CancellationToken::new();
+        stop_waiting.cancel();
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config::<()>(
+                &settlement,
+                &coordinator,
+                None,
+                Duration::from_secs(3600),
+                &stop_waiting,
+            ),
+        )
+        .await
+        .expect("the drain did not give up on a permit no owner holds");
+        assert_eq!(drain.coordinator, ShutdownWait::SecondSignal);
+
+        // Only now does the late task get the permit and register.
+        drop(permit);
+        let status = tokio::time::timeout(DRAIN_TEST_GUARD, late_owner)
+            .await
+            .expect("the late owner did not finish")
+            .unwrap()
+            .expect_err("an owner registered after shutdown began must be rejected");
+        assert!(
+            !body_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a mutation started after shutdown stopped waiting for its permit"
+        );
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "runtime config coordinator is closed");
+        assert!(!settlement.has_owner());
+        tokio::time::timeout(DRAIN_TEST_GUARD, coordinator.wait_until_drained())
+            .await
+            .expect("the late owner kept the coordinator permit");
     }
 
     #[tokio::test]
