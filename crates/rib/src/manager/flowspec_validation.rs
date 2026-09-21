@@ -1147,6 +1147,48 @@ mod tests {
     }
 
     #[test]
+    fn flowspec_validation_disabled_selector_checkpoints_nonmatching_rows() {
+        use std::cell::Cell;
+
+        use rustbgpd_wire::{FlowSpecComponent, NumericMatch};
+
+        let (mut manager, _tx, flow, _cover) = fixture();
+        manager.flowspec_validation = ValidationState::default();
+        let port = |value| {
+            FlowSpecComponent::DestinationPort(vec![NumericMatch {
+                end_of_list: true,
+                and_bit: false,
+                lt: false,
+                gt: false,
+                eq: true,
+                value,
+            }])
+        };
+        for value in 1..=500 {
+            let mut other = flow.clone();
+            other.rule.components.push(port(value));
+            manager
+                .ribs
+                .get_mut(&flow.peer)
+                .unwrap()
+                .insert_flowspec(other);
+        }
+        let mut missing = flow.selection_key();
+        missing.rule.components.push(port(501));
+        for (key, expected) in [(flow.selection_key(), 1), (missing, 0)] {
+            let visits = Cell::new(0);
+            let rows = manager.flowspec_validation.selection_candidates(
+                &key,
+                &manager.ribs,
+                &manager.loc_rib,
+                &|| visits.set(visits.get() + 1),
+            );
+            assert_eq!(rows.len(), expected);
+            assert_eq!(visits.get(), 502, "one peer plus every retained row");
+        }
+    }
+
+    #[test]
     fn flowspec_validation_off_preserves_selection_without_unicast_cover() {
         let (mut manager, _tx, flow, cover) = fixture();
         manager.flowspec_validation = ValidationState::default();
