@@ -733,19 +733,32 @@ impl RibManager {
         &mut self,
         affected: &HashSet<LabeledRibRouteKey>,
     ) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || {
+            super::super::replacement_readiness_checkpoint_at(
+                &readiness,
+                "selection_labeled",
+                false,
+            );
+        };
+        checkpoint();
         self.record_deferred_labeled(affected);
-        let affected_nlri: HashSet<Prefix> = affected
+        let mut affected_nlri: HashSet<Prefix> = affected
             .iter()
+            .inspect(|_| checkpoint())
             .filter(|key| !self.selection_deferred(key.afi_safi()))
             .map(|key| key.prefix)
             .collect();
 
         let mut changed_keys: HashSet<Prefix> = HashSet::new();
         for key in &affected_nlri {
+            checkpoint();
             let candidates: Vec<&LabeledRibRoute> = self
                 .ribs
                 .values()
+                .inspect(|_| checkpoint())
                 .flat_map(|rib| rib.iter_labeled_for_prefix(key))
+                .inspect(|_| checkpoint())
                 .collect();
             if self.loc_rib.recompute_labeled(*key, candidates.into_iter()) {
                 changed_keys.insert(*key);
@@ -760,12 +773,14 @@ impl RibManager {
         // Add-Path-send peers need the same widening: a non-best candidate
         // change can alter the staged top-N set.
         let any_widened_peer = self.outbound_peers.keys().any(|peer| {
+            checkpoint();
             self.peer_orr_vantage
                 .get(peer)
                 .is_some_and(|vantage| self.orr.spf.contains_key(vantage))
                 || self.peer_labeled_add_path_send(*peer)
         });
         if changed_keys.is_empty() && !any_widened_peer {
+            super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
             return;
         }
 
@@ -774,8 +789,14 @@ impl RibManager {
                 .set_loc_rib_prefixes("labeled", gauge_val(self.loc_rib.labeled_len()));
         }
 
-        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        let peers: Vec<IpAddr> = self
+            .outbound_peers
+            .keys()
+            .inspect(|_| checkpoint())
+            .copied()
+            .collect();
         for peer in peers {
+            checkpoint();
             if self.outbound_channel_gone(peer) {
                 self.drop_gone_dirty_peer(peer);
                 continue;
@@ -861,12 +882,13 @@ impl RibManager {
                 policy_stats: &mut *policy_stats,
                 peer_label: &target_peer_label,
             };
-            Self::stage_labeled_routes(
+            Self::stage_labeled_routes_with_checkpoint(
                 &context,
                 staged_keys,
                 &mut target,
                 &mut labeled_announce,
                 &mut labeled_withdraw,
+                &mut checkpoint,
             );
 
             if (!labeled_announce.is_empty() || !labeled_withdraw.is_empty())
@@ -883,5 +905,7 @@ impl RibManager {
                 self.mark_outbound_dirty(peer);
             }
         }
+        super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+        super::super::retire_hash_set(&mut affected_nlri, &mut checkpoint);
     }
 }

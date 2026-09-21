@@ -11,7 +11,7 @@ use rustbgpd_policy::{NamedPolicy, PolicyChain, rpol::RpolFile, sets::SetStore};
 use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportResult,
     ExactExportSnapshot, PeerExportPolicyReplacement, RibManager, RibSummaryQuery, RibUpdate,
-    Route, RouteOrigin,
+    Route, RouteOrigin, SelectionDeferralConfig, SelectionDeferralWaiterConfig,
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -363,12 +363,22 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_completes_inside_actual_rib_initial_export() {
+    health_completes_inside_actual_rib_export(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_completes_inside_actual_rib_selection_release() {
+    health_completes_inside_actual_rib_export(true).await;
+}
+
 #[expect(
     clippy::too_many_lines,
-    reason = "one end-to-end fixture holds initial export and proves actual health RPC completion before owner release"
+    reason = "shared end-to-end fixture holds real export and proves health completion and command fencing before owner release"
 )]
-async fn health_completes_inside_actual_rib_initial_export() {
+async fn health_completes_inside_actual_rib_export(selection_release: bool) {
     let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let source: IpAddr = "192.0.2.9".parse().unwrap();
     let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let hold = Arc::new(ProbeHold {
@@ -380,8 +390,17 @@ async fn health_completes_inside_actual_rib_initial_export() {
     let (rib_tx, rib_rx) = mpsc::channel(16);
     let (query_tx, query_rx) = mpsc::channel(8);
     let (readiness_tx, readiness_rx) = mpsc::channel(8);
-    let manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new())
+    let mut manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new())
         .with_readiness_queries(readiness_rx);
+    if selection_release {
+        manager = manager.with_selection_deferral(SelectionDeferralConfig {
+            timeout: Duration::from_secs(60),
+            waiters: vec![SelectionDeferralWaiterConfig {
+                peer: source,
+                families: vec![(Afi::Ipv4, Safi::Unicast)],
+            }],
+        });
+    }
     let manager_task = tokio::spawn(manager.run());
     let (peer_tx, _peer_rx) = mpsc::channel(1);
     let (peer_readiness_tx, mut peer_readiness_rx) = mpsc::channel(8);
@@ -407,12 +426,29 @@ async fn health_completes_inside_actual_rib_initial_export() {
     )
     .with_peer_manager_readiness(peer_readiness_tx)
     .with_rib_readiness(readiness_tx.clone());
-    // Seed routes before registration, so both held probes belong to the
-    // initial dump rather than subsequent ordinary route distribution.
+    let (source_tx, _source_rx) = mpsc::channel(32);
+    if selection_release {
+        rib_tx
+            .send(RibUpdate::SetPeerGracefulRestartContext {
+                peer: source,
+                session_id: 1,
+                peer_restart_state: false,
+                peer_gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+                peer_enhanced_refresh: true,
+            })
+            .await
+            .unwrap();
+        rib_tx
+            .send(export_peer_up(source, 1, source_tx))
+            .await
+            .unwrap();
+    }
+    // Selection remains deferred until the source EoR; without deferral these
+    // routes seed the table before the destination's initial registration.
     rib_tx
         .send(RibUpdate::RoutesReceived {
-            peer: "192.0.2.9".parse().unwrap(),
-            session_id: 0,
+            peer: source,
+            session_id: u64::from(selection_release),
             announced: (0..4).map(route).collect(),
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -432,26 +468,40 @@ async fn health_completes_inside_actual_rib_initial_export() {
         .unwrap();
     let (outbound_tx, mut outbound_rx) = mpsc::channel(32);
     rib_tx
-        .send(RibUpdate::PeerUp {
-            peer,
-            session_id: 0,
-            peer_asn: 65001,
-            peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
-            outbound_tx,
-            export_policy: None,
-            sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
-            is_ebgp: true,
-            route_reflector_client: false,
-            orr_vantage: None,
-            per_client_best: false,
-            interpret_rfc1997: true,
-            add_path_send_families: vec![],
-            add_path_send_max: 0,
-            negotiated_orf_recv: vec![],
-            negotiated_llgr_families: vec![],
-        })
+        .send(export_peer_up(peer, 0, outbound_tx))
         .await
         .unwrap();
+    if selection_release {
+        // The command-lane barrier proves all four routes reached Adj-RIB-In
+        // while the live Loc-RIB is still empty, before release recomputes it.
+        let (reply, response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryLocRibCount { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        let before = ControlRpc::get_health(&service, Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(before.total_routes, 0);
+        assert!(outbound_rx.try_recv().is_err(), "selection gate holds EoR");
+        rib_tx
+            .send(RibUpdate::EndOfRib {
+                peer: source,
+                session_id: 1,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            })
+            .await
+            .unwrap();
+    }
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
             .await
@@ -462,6 +512,17 @@ async fn health_completes_inside_actual_rib_initial_export() {
     query_tx
         .send(RibUpdate::QueryLocRibCount {
             reply: general_reply,
+        })
+        .await
+        .unwrap();
+    // A mutation with an acknowledgement must stay queued too. The absent
+    // injection leaves the four-route expectation unchanged after dispatch.
+    let (mutation_reply, mut mutation_response) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::WithdrawInjected {
+            prefix: route(255).prefix,
+            path_id: 0,
+            reply: mutation_reply,
         })
         .await
         .unwrap();
@@ -491,16 +552,20 @@ async fn health_completes_inside_actual_rib_initial_export() {
         general_response.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     );
+    let mutation_fenced = matches!(
+        mutation_response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    );
     let outbound_held = outbound_rx.try_recv().is_err();
     // Capture all results while the owner is held, then release it before
     // asserting so a failing negative control does not strand the probe.
     release_tx.send(()).unwrap();
     assert_eq!(
         readiness_capacity, 8,
-        "initial-export checkpoint must consume the queued readiness request"
+        "export checkpoint must consume the queued readiness request"
     );
     let health = health
-        .expect("GetHealth must complete while the initial-export owner remains held")
+        .expect("GetHealth must complete while the export owner remains held")
         .unwrap()
         .expect("GetHealth retains its 200 ms readiness deadline")
         .into_inner();
@@ -509,7 +574,8 @@ async fn health_completes_inside_actual_rib_initial_export() {
     assert_eq!(health.total_routes, 4);
     assert_eq!(calls, 2);
     assert!(general_fenced);
-    assert!(outbound_held, "initial dump is still held");
+    assert!(mutation_fenced);
+    assert!(outbound_held, "export is still held");
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), general_response)
             .await
@@ -517,6 +583,13 @@ async fn health_completes_inside_actual_rib_initial_export() {
             .unwrap(),
         4
     );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), mutation_response)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(rustbgpd_rib::RibCommandError::NotFound(_))
+    ));
     let mut announced = 0;
     tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(update) = outbound_rx.recv().await {
@@ -529,8 +602,33 @@ async fn health_completes_inside_actual_rib_initial_export() {
         panic!("outbound closed before initial EoR");
     })
     .await
-    .expect("initial dump finishes with EoR after probe release");
+    .expect("export finishes with EoR after probe release");
     assert_eq!(announced, 4);
     manager_task.abort();
     peer_task.abort();
+}
+
+fn export_peer_up(
+    peer: IpAddr,
+    session_id: u64,
+    outbound_tx: mpsc::Sender<rustbgpd_rib::OutboundRouteUpdate>,
+) -> RibUpdate {
+    RibUpdate::PeerUp {
+        peer,
+        session_id,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    }
 }
