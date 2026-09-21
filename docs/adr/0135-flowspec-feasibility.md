@@ -198,6 +198,13 @@ withdrew and restored the rule; session counters stayed unchanged during churn,
 and the source did not reinject FlowSpec. The intentional phase-boundary restart
 is excluded from that no-flap claim.
 
+A second run at source `ab0be54f6` passed all 17 checks after inventory
+reconciliation changed to one borrowed-route pass per affected batch and queued
+candidate retirement changed to one pass per batch. Independent negative
+controls restore each old repeated scan and fail the deterministic visit-count
+regression. The second run used the same daemon and FRR versions, IPv4 churn
+sequence, and no-flap scope as the original receipt.
+
 IPv6 semantics have evaluator and actor coverage; this live receipt covers IPv4
 only. It establishes control-plane behavior in this small topology, not scale,
 forwarding, or a wall-clock revalidation guarantee.
