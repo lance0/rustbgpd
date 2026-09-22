@@ -78,12 +78,22 @@
 #   46  EoR: on the final RS→BIRD TCP stream, the exact snapshotted
 #       nonempty initial prefix set precedes one IPv4-unicast End-of-RIB
 #       (later live deltas do not redefine the initial update)
+#   --- unchanged re-send: zero downstream UPDATEs ---
+#   47  ROUTE-REFRESH (SoftResetIn) toward BIRD: the RS counts BIRD's
+#       re-sent UPDATEs (the re-send is observed, not assumed)
+#   48  ... and neither FRR (per-client-best) nor GoBGP (Add-Path)
+#       receives an UPDATE: their received-UPDATE counters stay flat
+#   49  BIRD-initiated re-export (`birdc reload out`): RS counts re-sent
+#       UPDATEs from BIRD
+#   50  ... and both downstream received-UPDATE counters stay flat
+#   51  positive control: withdraw + re-announce of 203.0.113.0/24 from
+#       BIRD moves each downstream counter by at least two
 #   --- withdraw propagation + reload stability ---
-#   47  BIRD withdraws 203.0.113.0/24 → gone on FRR
-#   48  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
-#   49  policy reload changes still-present FRR route 100.67.0.0/24
+#   52  BIRD withdraws 203.0.113.0/24 → gone on FRR
+#   53  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
+#   54  policy reload changes still-present FRR route 100.67.0.0/24
 #       from LP 100→110 and bumps its import-chain install generation
-#   50  FRR remains authoritatively Established/non-stale with unchanged
+#   55  FRR remains authoritatively Established/non-stale with unchanged
 #       flap count, nondecreasing uptime, and cumulative session marker
 #
 # Prerequisites:
@@ -1477,6 +1487,146 @@ assert_wire() {
     fi
 }
 
+# UPDATE messages each downstream member has received from the RS.
+frr_updates_received() {
+    docker exec "$FRR" vtysh -c "show bgp neighbors ${RS_FRR_ADDR} json" 2>/dev/null \
+        | jq -er --arg p "$RS_FRR_ADDR" '.[$p].messageStats.updatesRecv'
+}
+
+gobgp_updates_received() {
+    docker exec "$GOBGP" gobgp --json neighbor "$RS_GOBGP_ADDR" 2>/dev/null \
+        | jq -er '.state.messages.received.update'
+}
+
+downstream_updates_received() {
+    local frr gobgp
+    frr=$(frr_updates_received) || return 1
+    gobgp=$(gobgp_updates_received) || return 1
+    echo "$frr $gobgp"
+}
+
+# UPDATE messages the RS has received from BIRD.
+source_updates_received() {
+    rs_neighbor_state "$BIRD_ADDR" | jq -er '.updatesReceived | tonumber'
+}
+
+# Print a counter once three consecutive 1 s reads agree. wait_settled cmd...
+wait_settled() {
+    local current previous stable=0
+    current=$("$@") || return 1
+    for _ in $(seq 1 30); do
+        previous=$current
+        sleep 1
+        current=$("$@") || return 1
+        if [ "$current" = "$previous" ]; then
+            stable=$((stable + 1))
+            if [ "$stable" -ge 3 ]; then
+                echo "$current"
+                return 0
+            fi
+        else
+            stable=0
+        fi
+    done
+    return 1
+}
+
+soft_reset_in_bird() {
+    grpcurl_call -d "{\"address\":\"${BIRD_ADDR}\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/SoftResetIn >/dev/null
+}
+
+bird_reload_out() {
+    docker exec "$BIRD" birdc reload out routeserver >/dev/null
+}
+
+# An unchanged table re-sent by a member must not reach the other members.
+# Per-client-best and Add-Path distribution stage every affected prefix, not
+# only Loc-RIB best changes, so the Adj-RIB-Out equality diff is what keeps
+# the re-send off their wires. assert_unchanged_resend_quiet label trigger...
+assert_unchanged_resend_quiet() {
+    local label=${1:?}
+    shift
+    local downstream_before downstream_after source_before source_after
+    local frr_before gobgp_before frr_after gobgp_after
+    if ! downstream_before=$(wait_settled downstream_updates_received); then
+        fail "$label: downstream UPDATE counters unavailable or not steady before the re-send"
+        return 1
+    fi
+    source_before=$(source_updates_received) \
+        || { fail "$label: RS neighbor counters for BIRD unavailable"; return 1; }
+
+    "$@" || { fail "$label: trigger was rejected"; return 1; }
+
+    # Guard against a vacuous pass: BIRD must actually re-send.
+    source_after=$source_before
+    for _ in $(seq 1 30); do
+        source_after=$(source_updates_received) || source_after=$source_before
+        [ "$source_after" -gt "$source_before" ] && break
+        sleep 1
+    done
+    if [ "$source_after" -le "$source_before" ] \
+        || ! source_after=$(wait_settled source_updates_received); then
+        fail "$label: BIRD did not re-send a settled table (RS UPDATEs from BIRD $source_before -> $source_after)"
+        return 1
+    fi
+    ok "$label: RS received $((source_after - source_before)) re-sent UPDATE(s) from BIRD ($source_before -> $source_after)"
+
+    # Leave room for a withdraw/re-announce pair to reach the members.
+    sleep 5
+    downstream_after=$(downstream_updates_received) \
+        || { fail "$label: downstream UPDATE counters unavailable after the re-send"; return 1; }
+    read -r frr_before gobgp_before <<<"$downstream_before"
+    read -r frr_after gobgp_after <<<"$downstream_after"
+    if [ "$frr_after" -eq "$frr_before" ] && [ "$gobgp_after" -eq "$gobgp_before" ]; then
+        ok "$label: zero downstream UPDATEs (FRR per-client-best stayed $frr_before, GoBGP Add-Path stayed $gobgp_before)"
+    else
+        fail "$label: unchanged re-send reached members (FRR $frr_before -> $frr_after, GoBGP $gobgp_before -> $gobgp_after UPDATEs)"
+    fi
+}
+
+prefix_gone_downstream() {
+    ! frr_has_prefix "${1:?}" && ! gobgp_has_prefix "$1"
+}
+
+# Positive control for the zero-UPDATE checks: a genuine withdraw and
+# re-announce from the same source moves both counters by at least two.
+assert_genuine_change_reaches_members() {
+    log "Assertion 51: a genuine change from BIRD reaches both downstream counters"
+    local downstream_before downstream_after
+    local frr_before gobgp_before frr_after gobgp_after
+    downstream_before=$(downstream_updates_received) \
+        || { fail "downstream UPDATE counters unavailable"; return 1; }
+    docker exec "$BIRD" birdc disable statics_uniq >/dev/null
+    if ! wait_for "203.0.113.0/24 withdrawn from FRR and GoBGP" 30 \
+        prefix_gone_downstream 203.0.113.0/24; then
+        fail "positive-control withdraw of 203.0.113.0/24 did not converge"
+        return 1
+    fi
+    docker exec "$BIRD" birdc enable statics_uniq >/dev/null
+    if ! wait_for "203.0.113.0/24 back on FRR" 30 frr_has_prefix 203.0.113.0/24 \
+        || ! wait_for "203.0.113.0/24 back on GoBGP" 30 gobgp_has_prefix 203.0.113.0/24; then
+        fail "positive-control re-announce of 203.0.113.0/24 did not converge"
+        return 1
+    fi
+    downstream_after=$(downstream_updates_received) \
+        || { fail "downstream UPDATE counters unavailable"; return 1; }
+    read -r frr_before gobgp_before <<<"$downstream_before"
+    read -r frr_after gobgp_after <<<"$downstream_after"
+    if [ "$frr_after" -ge $((frr_before + 2)) ] && [ "$gobgp_after" -ge $((gobgp_before + 2)) ]; then
+        ok "withdraw + re-announce counted downstream (FRR $frr_before -> $frr_after, GoBGP $gobgp_before -> $gobgp_after UPDATEs)"
+    else
+        fail "genuine change not counted downstream (FRR $frr_before -> $frr_after, GoBGP $gobgp_before -> $gobgp_after; want +2 each)"
+    fi
+}
+
+assert_unchanged_resends() {
+    log "Assertions 47-50: an unchanged re-sent table produces zero downstream UPDATEs"
+    assert_unchanged_resend_quiet "ROUTE-REFRESH toward BIRD" soft_reset_in_bird
+    assert_unchanged_resend_quiet "BIRD re-export (reload out)" bird_reload_out
+    assert_genuine_change_reaches_members
+}
+
 quiesce_bird_origination() {
     log "Quiescing BIRD member-route origination before the EoR probe..."
     docker exec "$BIRD" birdc disable statics >/dev/null
@@ -1552,7 +1702,7 @@ bounce_bird_session() {
 }
 
 assert_withdraw_propagation() {
-    log "Assertions 47-48: withdraw propagation (BIRD withdraws 203.0.113.0/24)"
+    log "Assertions 52-53: withdraw propagation (BIRD withdraws 203.0.113.0/24)"
     docker exec "$BIRD" birdc disable statics_uniq >/dev/null 2>&1 || true
     local gone_frr=0 gone_gobgp=0
     for _ in $(seq 1 30); do
@@ -1574,7 +1724,7 @@ assert_withdraw_propagation() {
 }
 
 assert_reload_stability() {
-    log "Assertions 49-50: live route change and session stability through a policy reload"
+    log "Assertions 54-55: live route change and session stability through a policy reload"
     local marker_before marker_after state_before state_after
     local flaps_before flaps_after uptime_before uptime_after
     local lp_before lp_after generation_before generation_after
@@ -1701,6 +1851,7 @@ main() {
     assert_per_client_best
     assert_runner_up_withdraw_converges
     assert_add_path_both
+    assert_unchanged_resends
 
     # Prove the independent withdraw path before quiescing the remaining
     # BIRD-originated probes for the exact initial-table wire oracle.
