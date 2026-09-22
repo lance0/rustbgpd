@@ -122,7 +122,10 @@ def check(root: Path) -> list[str]:
         errors.append(f"{LIST}: {path} is listed for {source}, which no longer names it")
     listed_scanners = set(data.get("all_markdown", []))
     for source in sorted(scanners - listed_scanners):
-        errors.append(f"{source} scans every Markdown file but is not in `all_markdown`")
+        errors.append(
+            f"{source} scans every Markdown file but is not in `all_markdown`; prefer a "
+            "check in scripts/check_markdown_claims.py so documentation changes compile no Rust"
+        )
     for source in sorted(listed_scanners - scanners):
         errors.append(f"{LIST}: all_markdown lists {source}, which no longer scans *.md")
     for source in sorted({source for source, _ in pinned} | listed_scanners):

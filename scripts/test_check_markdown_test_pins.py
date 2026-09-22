@@ -113,6 +113,12 @@ class MarkdownTestPinTests(unittest.TestCase):
         rustbgpd = next(line for line in selected if line.startswith("-p rustbgpd "))
         self.assertIn("--test starter_configs_check_strict", rustbgpd)
 
+    def test_repository_unpinned_markdown_selects_no_rust_target(self) -> None:
+        # Whole-tree Markdown checks live in scripts/check_markdown_claims.py, so
+        # `all_markdown` is empty and an unpinned document compiles nothing.
+        self.assertEqual(guard.load_list(guard.ROOT)["all_markdown"], [])
+        self.assertEqual(guard.select(guard.ROOT, ["docs/explanation/feature-tour.md"]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

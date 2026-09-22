@@ -86,6 +86,8 @@ check-contracts:
     python3 scripts/check_release_checklist_paths.py
     python3 -m unittest -v scripts/test_check_markdown_test_pins.py
     python3 scripts/check_markdown_test_pins.py
+    python3 -m unittest -v scripts/test_check_markdown_claims.py
+    python3 scripts/check_markdown_claims.py
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
     python3 -m unittest -v scripts/test_check_release_preflight.py

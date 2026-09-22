@@ -19,9 +19,7 @@
     "docs/how-to/deployment.md": ["tools/rs-config-render/tests/exit_codes.rs"],
     "docs/how-to/evpn-vtep-setup.md": ["crates/evpn-linux/src/linux/probe.rs"],
     "docs/how-to/explain.md": ["crates/cli/src/main.rs"],
-    "docs/interop.md": ["crates/cli/src/main.rs"],
     "docs/project/roadmap.md": ["crates/telemetry/src/metrics.rs"],
-    "docs/reference/api.md": ["crates/cli/src/main.rs"],
     "docs/reference/configuration.md": ["crates/mrt/src/codec.rs"],
     "docs/reference/grpc-method-inventory.md": ["crates/api/src/authz.rs"],
     "docs/reference/notification-registry.md": ["crates/wire/tests/notification_registry.rs"],
@@ -35,12 +33,11 @@
     "tools/rs-config-render/README.md": ["tools/rs-config-render/tests/exit_codes.rs"]
   },
   "not_read": {
-    "CHANGELOG.md": ["tests/evpn_bum_default_docs.rs"],
     "README.md": ["crates/bmp/src/manager.rs", "crates/cli/src/commands/rib.rs", "crates/mrt/src/codec.rs", "tools/rs-config-render/tests/exit_codes.rs"],
     "crates/cli/README.md": ["crates/cli/src/main.rs"],
     "docs/how-to/evpn-vtep-troubleshooting.md": ["tests/evpn_instances_binary.rs"],
     "docs/reference/configuration.md": ["src/config/tests/examples.rs", "src/config/tests/grpc_security.rs"],
     "docs/reference/reload-matrix.md": ["src/config/tests/examples.rs"]
   },
-  "all_markdown": ["crates/cli/src/main.rs", "tests/evpn_bum_default_docs.rs", "tests/grpc_service_count_docs.rs"]
+  "all_markdown": []
 }

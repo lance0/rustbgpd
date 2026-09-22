@@ -134,6 +134,11 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_sighup_architecture.py
           python3 scripts/check_sighup_architecture.py
+      - name: Check whole-tree Markdown claims against the code
+        if: matrix.contract == 'public'
+        run: |
+          python3 -m unittest -v scripts/test_check_markdown_claims.py
+          python3 scripts/check_markdown_claims.py
       - name: Check IXP Manager docs against the pinned contract
         if: matrix.contract == 'public'
         run: |
