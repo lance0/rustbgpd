@@ -5695,7 +5695,9 @@ mod tests {
             .sender()
             .try_send(session_envelope(Lost, Some(SessionState::Idle)))
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
+        // EHM rides a real SQLite commit whose storage thread still fsyncs
+        // under NORMAL, so this is a generous hang guard, not a latency bound.
+        tokio::time::timeout(Duration::from_secs(30), async {
             while state.latest_event_id() == 0 {
                 tokio::task::yield_now().await;
             }
