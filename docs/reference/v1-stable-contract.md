@@ -66,6 +66,19 @@ The inventory also records the expected value of each scalar contextual default
 under `config.effective_defaults.values`, and the checker compares it with the
 literal that test asserts, so changing a resolver and its test together still
 requires an inventory edit and the compatibility review that goes with it.
+The RFC 8212 posture pair, `Config.config_epoch` and
+`Global.ebgp_requires_policy`, is a stable field pair whose default is
+contextual in a different way: omission of the boolean resolves through the
+epoch (effective `false` without an epoch or at epoch 1, effective `true` at
+epoch 2), while an explicit boolean keeps its stated meaning in every epoch.
+The JSON Schema `default` values (`1` and `false`) are serialization
+representations of omission, not that runtime resolution. The pair is pinned
+under `config.contextual_posture`, which names the existing epoch/omission/
+explicit-value matrix test, the legacy-omission readiness advisory test, and
+the schema-representation test; the checker requires each to be live and to
+keep asserting its cells, so a resolver change, a dropped advisory, or a
+gutted test cannot leave the inventory green. Inventorying the pair does not
+promote the rest of `Global` or the document root.
 Nested protobuf evolution follows the compatibility rules below. The
 message-graph digest is a review tripwire, not an implicit promotion:
 experimental fields such as Paths-Limit are explicitly excluded in the
@@ -269,6 +282,7 @@ python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
 cargo test -p rustbgpd --bin rustbgpd v1_stable_archived_fixtures_parse
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
+cargo test -p rustbgpd --bin rustbgpd config::tests::rfc8212::
 ```
 
 Updating a digest is not a mechanical fix. Review the compatibility policy,

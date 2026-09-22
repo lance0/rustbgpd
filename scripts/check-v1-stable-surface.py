@@ -73,6 +73,28 @@ FIXTURE_VALIDATION_LINKAGE = (
     (".load_rpol_files(", "load the fixture's rpol files"),
     (".validate()", "validate the loaded config"),
 )
+EXPECTED_CONTEXTUAL_POSTURE_PATHS = ("Config.config_epoch", "Global.ebgp_requires_policy")
+# The RFC 8212 posture pair's default is contextual (ADR-0119): omission
+# resolves through the epoch. Each pinned test must keep touching the cell or
+# guard it exists to protect, so gutting a test cannot leave the inventory green.
+CONTEXTUAL_POSTURE_LINKAGE = {
+    "matrix": (
+        (".rfc8212_posture()", "derive the posture through Config::rfc8212_posture"),
+        ("Rfc8212PolicySource::ExplicitFalse", "pin the explicit-false cells"),
+        ("Rfc8212PolicySource::ExplicitTrue", "pin the explicit-true cells"),
+        ("Rfc8212PolicySource::LegacyOmission", "pin the epoch-less and epoch-1 omitted cells"),
+        ("Rfc8212PolicySource::Epoch2Default", "pin the epoch-2 omitted cell"),
+    ),
+    "legacy_advisory": (
+        (".advisories()", "read the config advisories"),
+        ("rfc8212_secure_default_ready", "name the legacy-omission readiness advisory"),
+        ("source=legacy_omission, effective=false", "pin the advisory's retained posture"),
+    ),
+    "schema_representation": (
+        ('epoch["default"], 1', "pin the config_epoch schema representation default"),
+        ('policy["default"], false', "pin the ebgp_requires_policy schema representation default"),
+    ),
+}
 EFFECTIVE_DEFAULT_ASSERTION_MACRO = "assert_v1_effective_default"
 EFFECTIVE_DEFAULT_ASSERTION_RE = re.compile(
     rf'\b{EFFECTIVE_DEFAULT_ASSERTION_MACRO}!\(\s*"([^"\\]+)"\s*,\s*'
@@ -456,6 +478,57 @@ def check_effective_defaults(
     )
 
 
+def check_contextual_posture_linkage(test_region: str, role: str, test: str) -> None:
+    for needle, duty in CONTEXTUAL_POSTURE_LINKAGE[role]:
+        if needle not in test_region:
+            fail(f"contextual posture {role} test {test!r} does not {duty}")
+
+
+def check_contextual_posture(inventory: dict, stable_paths: set[str]) -> None:
+    posture = inventory["config"].get("contextual_posture")
+    if not isinstance(posture, dict) or set(posture) != {
+        "paths",
+        "validation_source",
+        "validation_tests",
+    }:
+        fail(
+            "config.contextual_posture must contain exactly paths, validation_source, "
+            "and validation_tests"
+        )
+    if posture["paths"] != list(EXPECTED_CONTEXTUAL_POSTURE_PATHS):
+        fail("config.contextual_posture.paths must be the exact RFC 8212 posture pair")
+    for path in posture["paths"]:
+        if path not in stable_paths:
+            fail(f"contextual posture path {path!r} is not a stable config field")
+    tests = posture["validation_tests"]
+    if not isinstance(tests, dict) or list(tests) != sorted(CONTEXTUAL_POSTURE_LINKAGE):
+        fail(
+            "config.contextual_posture.validation_tests must name exactly the "
+            f"{', '.join(sorted(CONTEXTUAL_POSTURE_LINKAGE))} tests, sorted"
+        )
+    source_name = posture["validation_source"]
+    source_path = ROOT / safe_relative_path(source_name, "contextual posture source")
+    try:
+        source = source_path.read_text()
+    except OSError as error:
+        fail(f"cannot read contextual posture source {source_name}: {error}")
+    for role, test in tests.items():
+        if not isinstance(test, str) or not test:
+            fail(f"config.contextual_posture.validation_tests.{role} must be a test name")
+        test_region = named_rust_test_region(source, test)
+        if test_region is None:
+            fail(f"contextual posture {role} test {test!r} is not a live named test")
+        check_contextual_posture_linkage(test_region, role, test)
+        for needle, duty in CONTEXTUAL_POSTURE_LINKAGE[role]:
+            expect_checker_failure(
+                lambda needle=needle, region=test_region, role=role, test=test: (
+                    check_contextual_posture_linkage(region.replace(needle, ""), role, test)
+                ),
+                f"does not {duty}",
+                f"contextual posture {role} test that does not {duty}",
+            )
+
+
 def check_config(inventory: dict, schema: dict) -> None:
     stable_entries = inventory["config"]["stable_fields"]
     definitions: set[str] = set()
@@ -530,6 +603,7 @@ def check_config(inventory: dict, schema: dict) -> None:
     if missing:
         fail(f"top-level config roots are unclassified: {', '.join(missing)}")
     check_effective_defaults(inventory, schema, stable_paths)
+    check_contextual_posture(inventory, stable_paths)
 
 
 RPC_RE = re.compile(

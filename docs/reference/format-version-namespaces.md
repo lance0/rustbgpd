@@ -24,8 +24,9 @@ With `global.ebgp_requires_policy` omitted, epoch-less or epoch-1 configs
 resolve to `false` (`legacy_omission`), while epoch 2 resolves to `true`
 (`epoch_2_default`). Explicit booleans retain their value under both epochs,
 and ADR-0125 DR4 keeps epoch-less and epoch-1 omission permissive forever.
-The v1 inventory classifies `Config.config_epoch` as `outside_v1`:
-`config_epoch = 1` does not make the field part of the frozen v1 contract.
+The v1 inventory pins `Config.config_epoch` and `Global.ebgp_requires_policy`
+as stable fields whose contextual default is that matrix; the epoch value is a
+semantics selector, not a format version.
 
 ## Why the compatibility behaviors differ
 

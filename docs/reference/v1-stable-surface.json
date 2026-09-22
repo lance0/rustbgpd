@@ -61,8 +61,8 @@
   ],
   "config": {
     "stable_fields": [
-      {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "f18e9cf437e78c8fb48be7a51de93f9142fdf26c229ef040b2b44c5655015b3e"},
-      {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "0c466a203cb6519f865d6fe3fc9a81921cef27942240e38125738259aa73eb5d"},
+      {"definition": "Config", "fields": ["bmp", "config_epoch", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "81a92b110ab35add21a0a79a8d56cb3cd6e84b95beeafbd58e8a5bb8413a1926"},
+      {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "ebgp_requires_policy", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "49d2a01119f345d3d261757d82f6935c3c274a65413a5e673a1bfc0914814469"},
       {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "57dd4b53da31e8ee50be7491812f1bff0e813651635480084678a9e4017319ea"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},
       {"definition": "GrpcUdsListenerConfig", "fields": ["access_mode", "enabled", "max_tier", "mode", "path", "principal", "token_file"], "schema_sha256": "1616e6489f89848d729f1e0cc11f5150539bc22d6f548a09b4519735ebf1b6c0"},
@@ -89,6 +89,7 @@
     "stable_types": [
       {"definition": "BgpRoleConfig", "schema_sha256": "33acb141838f6612e3cff7273c7936e30683836d7ef8b56d09012215f745f183"},
       {"definition": "BmpMonitorView", "schema_sha256": "dec0dcdce7c5514ca4be543940f036bbe33e9223f12404ca66fc5d82b552ba16"},
+      {"definition": "ConfigEpoch", "schema_sha256": "f7c7a4659ddb1441631d1f093429a36aca8dc11bf21d508aa6cd2bb9934bcd90"},
       {"definition": "GrpcAccessModeConfig", "schema_sha256": "83c96eb88d57e5c0b689443bb415086df4ed403fae8e5ccc77a5dd0fe7b7c577"},
       {"definition": "GrpcEnforcementConfig", "schema_sha256": "191a2c9e85eefb3a60509df99e81edc496c422170b0bbd24961d9030de42f588"},
       {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
@@ -131,11 +132,19 @@
         "Neighbor.send_hold_time": "480"
       }
     },
+    "contextual_posture": {
+      "paths": ["Config.config_epoch", "Global.ebgp_requires_policy"],
+      "validation_source": "src/config/tests/rfc8212.rs",
+      "validation_tests": {
+        "legacy_advisory": "legacy_omission_advisory_is_stable_and_independent_of_policy_completeness",
+        "matrix": "rfc8212_epoch_and_policy_activation_matrix_is_lossless_and_exact",
+        "schema_representation": "rfc8212_schema_preserves_optional_non_null_defaults"
+      }
+    },
     "explicitly_unstable_roots": [
       {"path": "AddPathConfig.receive_max", "classification": "experimental"},
       {"path": "Config.apply_bum_enforcement", "classification": "alpha"},
       {"path": "Config.bfd_profiles", "classification": "outside_v1"},
-      {"path": "Config.config_epoch", "classification": "outside_v1"},
       {"path": "Config.ethernet_segments", "classification": "alpha"},
       {"path": "Config.evpn_instances", "classification": "alpha"},
       {"path": "Config.evpn_ip_vrfs", "classification": "alpha"},
@@ -144,7 +153,6 @@
       {"path": "Config.gnmi_dialout", "classification": "outside_v1"},
       {"path": "Config.inbound_admission", "classification": "alpha"},
       {"path": "Config.managed_netdevs", "classification": "alpha"},
-      {"path": "Global.ebgp_requires_policy", "classification": "outside_v1"},
       {"path": "Global.listen_addresses", "classification": "alpha"},
       {"path": "Neighbor.bfd", "classification": "outside_v1"},
       {"path": "Neighbor.interface", "classification": "outside_v1"},
