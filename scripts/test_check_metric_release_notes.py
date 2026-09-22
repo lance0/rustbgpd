@@ -2,6 +2,7 @@
 """Regression tests for the emitted-metric release-note contract."""
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -18,10 +19,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         current = set(check.METRIC_CHECK.workspace_metric_inventory())
         version = check.workspace_version(check.CARGO_MANIFEST.read_bytes())
         check.validate_workspace_release(version)
-        section = check.release_section(
-            check.CHANGELOG.read_text(encoding="utf-8"),
-            check.TARGET_CHANGELOG_SECTION,
-        )
+        section = check.target_notes(check.CHANGELOG.read_text(encoding="utf-8"), check.ROOT)
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
@@ -169,6 +167,43 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             check.validate_release_notes(
                 {"bgp_stable"}, {"bgp_stable", "bgp_new_total"}, section, {}
             )
+
+    def test_fragment_notes_count_and_are_required_alongside_unreleased(self):
+        changelog = f"""# Changelog
+
+## [{check.UNRELEASED_SECTION}]
+
+- Export `bgp_in_section_total`.
+
+## [0.71.0] - 2026-09-20
+
+- Export `bgp_carried_total`.
+"""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "changelog.d").mkdir()
+        baseline = {"bgp_stable"}
+        current = {"bgp_stable", "bgp_in_section_total", "bgp_in_fragment_total"}
+
+        with self.assertRaisesRegex(ValueError, "added=bgp_in_fragment_total$"):
+            check.validate_release_notes(
+                baseline, current, check.target_notes(changelog, root), {}
+            )
+
+        (root / "changelog.d/added-fragment.md").write_text(
+            "### Added\n\n- Export `bgp_in_fragment_total`\n  over two lines.\n",
+            encoding="utf-8",
+        )
+        added, removed = check.validate_release_notes(
+            baseline, current, check.target_notes(changelog, root), {}
+        )
+        self.assertEqual(added, {"bgp_in_section_total", "bgp_in_fragment_total"})
+        self.assertEqual(removed, set())
+
+        (root / "changelog.d/broken.md").write_text("- no category\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "changelog.d/broken.md: first line"):
+            check.target_notes(changelog, root)
 
     def test_empty_versioned_target_section_still_fails_closed(self):
         changelog = """# Changelog

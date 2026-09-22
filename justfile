@@ -89,6 +89,16 @@ check-contracts:
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
     python3 -m unittest -v scripts/test_check_release_preflight.py
+    just check-changelog-fragments
+
+# Check the pending release notes under changelog.d/ assemble cleanly into CHANGELOG.md (seconds, no compilation).
+check-changelog-fragments:
+    python3 -m unittest -v scripts/test_assemble_changelog.py
+    python3 scripts/assemble-changelog.py --check
+
+# Merge the changelog.d/ fragments into the CHANGELOG.md `[Unreleased]` section and delete them (release preparation).
+assemble-changelog:
+    python3 scripts/assemble-changelog.py
 
 # Lint every workspace target with warnings denied.
 check-clippy:
@@ -198,12 +208,13 @@ gate-msrv:
         cargo "+${msrv}" check --locked --workspace --all-targets
 
 # The release-only checks are skipped, and listed, while the root CHANGELOG
-# `[Unreleased]` section still has entries; `--mode release` forces them.
+# `[Unreleased]` section still has entries or a changelog.d/ fragment is
+# pending; `--mode release` forces them, and then refuses a leftover fragment.
 # `--base <commit>` replaces the origin/main merge base of the README check,
 # and `--heavy` adds `cargo audit`, the release build, and the multi-package
 # publish dry-run.
 
-# Run the checks that otherwise first fail on a release commit: metric release notes, published-crate README freshness, crate changelogs, and the root changelog section.
+# Run the checks that otherwise first fail on a release commit: metric release notes, changelog fragments, published-crate README freshness, crate changelogs, and the root changelog section.
 gate-release *args:
     python3 -m unittest -v scripts/test_check_release_preflight.py
     python3 scripts/check_release_preflight.py {{args}}

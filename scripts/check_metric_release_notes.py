@@ -29,17 +29,18 @@ METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")
 RELEASE_NOTE_EXCEPTIONS: dict[str, str] = {}
 
 
-def load_metric_checker() -> ModuleType:
-    path = ROOT / "scripts/check-metric-consumers.py"
-    spec = importlib.util.spec_from_file_location("metric_consumer_contract", path)
+def load_script(relative: str, name: str) -> ModuleType:
+    path = ROOT / relative
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ValueError(f"cannot load metric inventory checker {path.relative_to(ROOT)}")
+        raise ValueError(f"cannot load {relative}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-METRIC_CHECK = load_metric_checker()
+METRIC_CHECK = load_script("scripts/check-metric-consumers.py", "metric_consumer_contract")
+ASSEMBLER = load_script("scripts/assemble-changelog.py", "assemble_changelog")
 
 
 def parse_baseline(text: str) -> set[str]:
@@ -122,6 +123,17 @@ def release_section(changelog: str, version: str) -> str:
     return section
 
 
+def target_notes(changelog: str, root: Path) -> str:
+    """The notes under review: the target section plus every pending fragment.
+
+    A fragment under `changelog.d/` becomes an `[Unreleased]` entry at release
+    preparation, so a note there documents the family as well as one already in
+    the section. A malformed fragment fails here, before release preparation.
+    """
+    section = release_section(changelog, TARGET_CHANGELOG_SECTION)
+    return section + "".join(fragment.body for fragment in ASSEMBLER.load_fragments(root))
+
+
 def metric_delta(
     baseline: set[str], current: set[str]
 ) -> tuple[set[str], set[str]]:
@@ -185,9 +197,7 @@ def main() -> int:
         current = set(METRIC_CHECK.workspace_metric_inventory())
         version = workspace_version(CARGO_MANIFEST.read_bytes())
         validate_workspace_release(version)
-        section = release_section(
-            CHANGELOG.read_text(encoding="utf-8"), TARGET_CHANGELOG_SECTION
-        )
+        section = target_notes(CHANGELOG.read_text(encoding="utf-8"), ROOT)
         added, removed = validate_release_notes(baseline, current, section)
     except (OSError, ValueError) as error:
         print(f"metric release-note check: {error}", file=sys.stderr)

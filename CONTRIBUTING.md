@@ -136,13 +136,14 @@ The recipes intentionally expose their direct commands:
   beside it.
 - `just gate-release [--mode release] [--base <commit>] [--heavy]` runs the
   checks that otherwise first fail on a release commit: the metric
-  release-note contract, the published-crate README freshness check against
-  the merge base with `origin/main`, and the `CHANGELOG.md` heading of every
-  crate whose manifest is ahead of
-  `docs/reference/published-crate-versions.json`. On a release commit, or
-  with `--mode release`, it also requires dated crate headings, released
-  crate README wording, and the root `CHANGELOG.md` section that the release
-  workflow extracts; otherwise it lists those checks as skipped. `--heavy`
+  release-note contract, the `changelog.d/` fragment assembly, the
+  published-crate README freshness check against the merge base with
+  `origin/main`, and the `CHANGELOG.md` heading of every crate whose manifest
+  is ahead of `docs/reference/published-crate-versions.json`. On a release
+  commit, or with `--mode release`, it also requires that no fragment remains,
+  dated crate headings, released crate README wording, and the root
+  `CHANGELOG.md` section that the release workflow extracts; otherwise it
+  lists those checks as skipped. `--heavy`
   adds `cargo audit`, the release build, and the publish dry-run.
 - `just fuzz-list` prints every cargo-fuzz `<crate> <target>` pair from the
   fail-closed inventory in `scripts/check_fuzz_target_inventory.py`.
@@ -469,7 +470,7 @@ These are not guidelines — they are enforced invariants:
 
 - **Bug fixes:** Steps to reproduce, how you verified the fix
 - **New protocol behavior:** RFC citation and proposed interop test
-- **New features:** Update CHANGELOG.md and relevant docs
+- **New features:** Add a `changelog.d/` fragment and update relevant docs
 
 ### Documentation Update Discipline
 
@@ -491,10 +492,12 @@ records rather than rewriting them to describe current behavior.
 Multi-PR batches often touch the same release and roadmap files. Keep doc
 updates low-conflict and reviewable:
 
-- **CHANGELOG.md `[Unreleased]`:** append new entries to the bottom of the
-  relevant subsection (`Added`, `Changed`, `Fixed`, etc.) instead of rewriting
-  existing entries or resorting the whole block. Prefer one compact entry per
-  PR concern.
+- **Changelog entries:** add one fragment file per user-visible change under
+  [`changelog.d/`](changelog.d/README.md) (`### <Category>` on the first
+  line, then `- ` bullets in the `CHANGELOG.md` style) instead of editing the
+  `CHANGELOG.md` `[Unreleased]` section, which is assembled from the fragments
+  at release preparation. Prefer one compact entry per PR concern.
+  `just check-changelog-fragments` validates the pending fragments.
 - **docs/project/roadmap.md:** use one row or checkbox per concern. When a PR ships one
   slice of a broader item, update that row in place with a short "shipped /
   remaining" sentence instead of rewriting surrounding roadmap prose.
@@ -502,9 +505,9 @@ updates low-conflict and reviewable:
   `docs/project/evpn-enablement.md`, and similar matrices, update the exact gate or row
   your PR owns. Avoid broad summary rewrites unless the feature state actually
   changed across the whole page.
-- **Process-only docs PRs:** do not add a CHANGELOG entry unless the process
-  change affects users or operators. The PR description should explain the
-  intentional no-op.
+- **Process-only docs PRs:** do not add a changelog fragment unless the
+  process change affects users or operators. The PR description should explain
+  the intentional no-op.
 
 ### What Requires Discussion First
 
