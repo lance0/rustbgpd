@@ -240,3 +240,12 @@ existing BUM-enforcement flow. Projection rule (`project_one`):
 - M66 (`tests/interop/m66-evpn-es-drain-handover.clab.yml`) — the
   proof that motivated Decision 5 and will regression-pin Decisions
   1–3.
+
+## Amendment (2026-09-22): the hold-off key is `recovery_delay_seconds`
+
+The Decision 3 hold-off key is now spelled `recovery_delay_seconds`, matching
+the other `_seconds` timer keys. The bounds and default are unchanged
+(`0..=3600`, default 30). The original spelling `recovery_delay_secs`, used in
+the decisions above, is still accepted as an alias, and the config JSON Schema
+publishes it as a deprecated property with the same bounds. See the
+[`[[ethernet_segments]]` configuration reference](../reference/configuration.md#ethernet_segments).

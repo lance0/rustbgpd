@@ -350,7 +350,7 @@ Template: `docs/soaks/soak-m37-local-origination-churn-24h.md`.
 Long-running variant of the M67 ADR-0085 link-driven Ethernet Segment drain
 interop proof. The M67 smoke proves one active-PE attachment-circuit failure:
 pe1 drains because its bound AC loses carrier, pe2 promotes to DF, traffic
-fails over, pe1's recovery is held for `recovery_delay_secs`, and pe1 re-wins
+fails over, pe1's recovery is held for `recovery_delay_seconds`, and pe1 re-wins
 DF after the hold-off. The soak repeats that down/up cycle for hours while
 sampling route withdrawal/return, DF-role gauges, drain reasons, AC-gate state,
 ping blackout, release timing, container restarts, and RSS.

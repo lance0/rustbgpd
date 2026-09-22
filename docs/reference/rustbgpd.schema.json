@@ -558,7 +558,7 @@
       ]
     },
     "EthernetSegmentConfig": {
-      "description": "One Ethernet Segment this PE participates in (Gate 8).\n\nEach entry produces:\n\n- One Type 4 ES route announcing this PE as a candidate for the\n  ESI's per-`(ESI, VNI)` DF election.\n- One Type 1 EAD-per-ES route signalling ES liveness.\n- One Type 1 EAD-per-EVI route per `member_vni` carrying the\n  role-aware ESI Label flag.\n\n**Operator prerequisite**: every member VNI must already be\ndeclared in `[[evpn_instances]]`. Members referencing unknown\nVNIs are rejected at config-load time.\n\n## Fields\n\n- `esi` — 10-byte Ethernet Segment Identifier in canonical\n  `XX:XX:XX:XX:XX:XX:XX:XX:XX:XX` form. Must be exactly 10\n  colon-separated hex bytes. Type 0 (all zero) is rejected\n  because Type 0 means \"single-homed\" and thus shouldn't appear\n  in a multihoming config.\n- `member_vnis` — non-empty set of VNIs that participate in\n  this ES. Each member contributes a slot to the per-(ESI, VNI)\n  DF election.\n- `df_preference` — RFC 9785 Designated Forwarder preference\n  value (`0..=65535`, default 32768). Used only by\n  `\"highest-preference\"` / `\"lowest-preference\"`; default-modulo\n  and HRW require the default because they ignore preference.\n- `df_algorithm` — DF election algorithm string. Gate 8 accepts\n  `\"default-modulo\"` (RFC 7432 §8.5) and\n  `\"highest-random-weight\"` (RFC 8584 §3.2), plus RFC 9785\n  `\"highest-preference\"` / `\"lowest-preference\"` (revertive;\n  local Don't-Preempt/non-revertive behavior is deferred).\n  Default `\"default-modulo\"`.\n- `redundancy_mode` — `\"all-active\"` (default) or\n  `\"single-active\"`; single-active sets the ESI Label extcomm flag\n  and prevents receiver-side all-active aliasing ECMP for remote\n  single-active ES reachability.\n- `originator_ip` — IP this PE uses as the Type 4 ES route's\n  originator address. Typically equals `evpn_instances[].local_vtep_ip`.\n- `interface` — optional attachment-circuit link binding\n  (ADR-0085 decision 1). When set, the ES's drain state follows\n  that link's carrier (`IFF_LOWER_UP`): carrier loss drains the\n  ES immediately; a link absent from the kernel counts as down\n  (fail-closed). Unbound segments behave as before — drain only\n  via the ADR-0084 RPC.\n- `recovery_delay_secs` — hold-off after carrier returns before\n  the link drain is released (ADR-0085 decision 3). Default 30,\n  range `0..=3600`; the timer re-arms on every up edge, so a\n  flapping circuit stays drained until it holds carrier for the\n  full window. Only meaningful — and only accepted — together\n  with `interface`.",
+      "description": "One Ethernet Segment this PE participates in (Gate 8).\n\nEach entry produces:\n\n- One Type 4 ES route announcing this PE as a candidate for the\n  ESI's per-`(ESI, VNI)` DF election.\n- One Type 1 EAD-per-ES route signalling ES liveness.\n- One Type 1 EAD-per-EVI route per `member_vni` carrying the\n  role-aware ESI Label flag.\n\n**Operator prerequisite**: every member VNI must already be\ndeclared in `[[evpn_instances]]`. Members referencing unknown\nVNIs are rejected at config-load time.\n\n## Fields\n\n- `esi` — 10-byte Ethernet Segment Identifier in canonical\n  `XX:XX:XX:XX:XX:XX:XX:XX:XX:XX` form. Must be exactly 10\n  colon-separated hex bytes. Type 0 (all zero) is rejected\n  because Type 0 means \"single-homed\" and thus shouldn't appear\n  in a multihoming config.\n- `member_vnis` — non-empty set of VNIs that participate in\n  this ES. Each member contributes a slot to the per-(ESI, VNI)\n  DF election.\n- `df_preference` — RFC 9785 Designated Forwarder preference\n  value (`0..=65535`, default 32768). Used only by\n  `\"highest-preference\"` / `\"lowest-preference\"`; default-modulo\n  and HRW require the default because they ignore preference.\n- `df_algorithm` — DF election algorithm string. Gate 8 accepts\n  `\"default-modulo\"` (RFC 7432 §8.5) and\n  `\"highest-random-weight\"` (RFC 8584 §3.2), plus RFC 9785\n  `\"highest-preference\"` / `\"lowest-preference\"` (revertive;\n  local Don't-Preempt/non-revertive behavior is deferred).\n  Default `\"default-modulo\"`.\n- `redundancy_mode` — `\"all-active\"` (default) or\n  `\"single-active\"`; single-active sets the ESI Label extcomm flag\n  and prevents receiver-side all-active aliasing ECMP for remote\n  single-active ES reachability.\n- `originator_ip` — IP this PE uses as the Type 4 ES route's\n  originator address. Typically equals `evpn_instances[].local_vtep_ip`.\n- `interface` — optional attachment-circuit link binding\n  (ADR-0085 decision 1). When set, the ES's drain state follows\n  that link's carrier (`IFF_LOWER_UP`): carrier loss drains the\n  ES immediately; a link absent from the kernel counts as down\n  (fail-closed). Unbound segments behave as before — drain only\n  via the ADR-0084 RPC.\n- `recovery_delay_seconds` — hold-off after carrier returns before\n  the link drain is released (ADR-0085 decision 3). Default 30,\n  range `0..=3600`; the timer re-arms on every up edge, so a\n  flapping circuit stays drained until it holds carrier for the\n  full window. Only meaningful — and only accepted — together\n  with `interface`.",
       "type": "object",
       "properties": {
         "df_algorithm": {
@@ -602,13 +602,25 @@
           "description": "Originator IP carried on the Type 4 ES route.",
           "type": "string"
         },
-        "recovery_delay_secs": {
-          "description": "ADR-0085 decision 3: seconds to hold the link drain after\ncarrier returns (default 30, range `0..=3600`). Rejected\nwithout `interface` — it has no meaning unbound.",
+        "recovery_delay_seconds": {
+          "description": "ADR-0085 decision 3: seconds to hold the link drain after\ncarrier returns (default 30, range `0..=3600`). Rejected\nwithout `interface` — it has no meaning unbound. The earlier\nspelling `recovery_delay_secs` is still accepted.",
           "type": [
             "integer",
             "null"
           ],
           "format": "uint64",
+          "maximum": 3600,
+          "minimum": 0
+        },
+        "recovery_delay_secs": {
+          "description": "Deprecated spelling of `recovery_delay_seconds`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "deprecated": true,
+          "maximum": 3600,
           "minimum": 0
         },
         "redundancy_mode": {
@@ -741,25 +753,26 @@
           "default": "detect"
         },
         "recovery_seconds": {
-          "description": "Suppression hold time in seconds for `suppress_local`. Default\n540 (three M windows). Must still be non-zero in detect-only mode\nso reloads can flip the action without introducing invalid state.",
+          "description": "Suppression hold time in seconds for `suppress_local`. Default\n540 (three M windows), range `1..=31536000` (one year). Must still\nbe non-zero in detect-only mode so reloads can flip the action\nwithout introducing invalid state.",
           "type": "integer",
           "format": "uint64",
           "default": 540,
-          "minimum": 0
+          "maximum": 31536000,
+          "minimum": 1
         },
         "threshold": {
           "description": "RFC 7432 N move threshold. Default 5.",
           "type": "integer",
           "format": "uint32",
           "default": 5,
-          "minimum": 0
+          "minimum": 1
         },
         "window_seconds": {
           "description": "RFC 7432 M window in seconds. Default 180.",
           "type": "integer",
           "format": "uint64",
           "default": 180,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false

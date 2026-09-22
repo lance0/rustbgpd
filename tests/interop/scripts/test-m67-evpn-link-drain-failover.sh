@@ -6,7 +6,7 @@
 # M66 proved the ADR-0084 drain primitive with the operator RPC as
 # the stimulus; this job proves the production trigger end-to-end: a
 # real attachment-circuit failure on the active PE. pe1 binds its
-# CE-facing AC (`interface = "eth2"`, `recovery_delay_secs = 5`), so
+# CE-facing AC (`interface = "eth2"`, `recovery_delay_seconds = 5`), so
 # `ip link set eth2 down` INSIDE pe1 — the binding watches pe1's own
 # ifindex carrier, which is why the injection point is pe1's end of
 # the veth (the CE side drops carrier too: cable-pull semantics) —
@@ -15,7 +15,7 @@
 # withdrawal wire shape (Type 4 + EAD-per-ES + EAD-per-EVI + the
 # member VNI's Type 2s gone from the vtep), pe2's DF promotion, the
 # receive-side handover, and service continuity. Carrier return must
-# be HELD for `recovery_delay_secs` before origination resumes
+# be HELD for `recovery_delay_seconds` before origination resumes
 # (RFC 8584 §3 recovery damping), a flap inside the window must
 # re-arm the hold (decision 3), and the operator/link drain reasons
 # must compose so neither trigger overrides the other (decision 2).
@@ -23,7 +23,7 @@
 # Asserts (hard on mechanism, informational on timing — the
 # M63/M65/M66 philosophy; the ONE strict-ish timing assert is the
 # hold-off itself, framed as "the gauge is still 1 at up+3 s", not
-# as an exact-duration measure — recovery_delay_secs=5 gives 2 s of
+# as an exact-duration measure — recovery_delay_seconds=5 gives 2 s of
 # margin):
 #
 # 1. Bring-up/steady state (M66 phase 1-2 shape, with deliberately
@@ -105,7 +105,7 @@ CE_RECOVERY_BROADCAST_IP="192.168.67.99"
 # pe1's bound attachment circuit (must match `interface` in
 # rustbgpd-m67-pe1.toml). The failure injection target.
 AC_IF="eth2"
-# Must match `recovery_delay_secs` in the PE configs.
+# Must match `recovery_delay_seconds` in the PE configs.
 RECOVERY_DELAY_SECS="5"
 # The strict-ish hold-off sample window: the link gauge must still be
 # 1 on every sample through this many ms after carrier return. 3 s
@@ -454,7 +454,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase 3 — recovery hold-off: carrier return must NOT undrain for
-# recovery_delay_secs (the one strict-ish timing assert)
+# recovery_delay_seconds (the one strict-ish timing assert)
 # ---------------------------------------------------------------------------
 
 log "[phase 3] starting the recovery re-pin prober on hr..."

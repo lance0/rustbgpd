@@ -66,7 +66,7 @@ esi = "00:00:00:00:00:00:00:00:00:01"
 member_vnis = [100]
 originator_ip = "10.0.0.100"
 interface = "eth2"
-recovery_delay_secs = 7
+recovery_delay_seconds = 7
 "#,
     );
     let old = parse(&old_toml).unwrap();
@@ -177,7 +177,7 @@ esi = "00:00:00:00:00:00:00:00:00:01"
 member_vnis = [100]
 originator_ip = "10.0.0.100"
 interface = "bond0"
-recovery_delay_secs = 5
+recovery_delay_seconds = 5
 
 [[ethernet_segments]]
 esi = "00:00:00:00:00:00:00:00:00:02"
@@ -248,7 +248,7 @@ local_vtep_ip = "10.0.0.100"
 esi = "00:00:00:00:00:00:00:00:00:01"
 member_vnis = [100]
 originator_ip = "10.0.0.100"
-recovery_delay_secs = 5
+recovery_delay_seconds = 5
 "#,
     );
     let err = parse(&toml).unwrap_err();
@@ -258,15 +258,25 @@ recovery_delay_secs = 5
         "expected InvalidEthernetSegment, got {msg}"
     );
     assert!(
-        msg.contains("recovery_delay_secs") && msg.contains("interface"),
+        msg.contains("recovery_delay_seconds") && msg.contains("interface"),
         "msg must explain the dependency: {msg}"
     );
 }
 
+/// Both spellings of the hold-off key publish the validator's `0..=3600`
+/// bounds: the bound parses, one past it is rejected.
 #[test]
 fn ethernet_segment_rejects_recovery_delay_out_of_range() {
-    let toml = evpn_toml_with(
-        r#"
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let properties = &schema["$defs"]["EthernetSegmentConfig"]["properties"];
+    assert_eq!(properties["recovery_delay_seconds"].get("deprecated"), None);
+    assert_eq!(properties["recovery_delay_secs"]["deprecated"], true);
+    for key in ["recovery_delay_seconds", "recovery_delay_secs"] {
+        assert_eq!(properties[key]["minimum"], 0, "{key} schema minimum");
+        assert_eq!(properties[key]["maximum"], 3600, "{key} schema maximum");
+        let segment = |value: u64| {
+            evpn_toml_with(&format!(
+                r#"
 [[evpn_instances]]
 vni = 100
 rd = "65000:100"
@@ -278,16 +288,49 @@ esi = "00:00:00:00:00:00:00:00:00:01"
 member_vnis = [100]
 originator_ip = "10.0.0.100"
 interface = "eth1"
-recovery_delay_secs = 3601
-"#,
-    );
-    let err = parse(&toml).unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
-        "expected InvalidEthernetSegment, got {msg}"
-    );
-    assert!(msg.contains("3601") && msg.contains("3600"), "{msg}");
+{key} = {value}
+"#
+            ))
+        };
+        parse(&segment(3600)).unwrap_or_else(|e| panic!("{key} = 3600 is in range: {e}"));
+        let err = parse(&segment(3601)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+            "expected InvalidEthernetSegment for {key}, got {msg}"
+        );
+        assert!(msg.contains("3601") && msg.contains("3600"), "{msg}");
+    }
+}
+
+#[test]
+fn ethernet_segment_accepts_legacy_recovery_delay_secs_spelling() {
+    let segment = |key: &str| {
+        evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+interface = "eth1"
+{key} = 12
+"#
+        ))
+    };
+    let legacy = parse(&segment("recovery_delay_secs")).unwrap();
+    let canonical = parse(&segment("recovery_delay_seconds")).unwrap();
+    assert_eq!(legacy.ethernet_segments[0].recovery_delay_seconds, Some(12));
+    assert_eq!(legacy.ethernet_segments, canonical.ethernet_segments);
+
+    let both = segment("recovery_delay_secs = 12\nrecovery_delay_seconds");
+    let err = parse(&both).unwrap_err().to_string();
+    assert!(err.contains("duplicate field"), "{err}");
 }
 
 #[test]

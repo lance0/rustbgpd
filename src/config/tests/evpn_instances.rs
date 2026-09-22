@@ -1493,15 +1493,14 @@ duplicate_mac_detection = { action = "suppress_local", window_seconds = 30, thre
     );
 }
 
+/// The published schema bounds and the daemon validator must agree: each
+/// bound is accepted, and the value just outside it is rejected by both.
 #[test]
-fn evpn_duplicate_mac_detection_rejects_invalid_values() {
-    for (field, value) in [
-        ("window_seconds", "0"),
-        ("threshold", "0"),
-        ("recovery_seconds", "0"),
-        ("recovery_seconds", "31536001"),
-    ] {
-        let toml = evpn_toml_with(&format!(
+fn evpn_duplicate_mac_detection_schema_bounds_match_validation() {
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let properties = &schema["$defs"]["EvpnDuplicateMacDetectionConfig"]["properties"];
+    let mac_toml = |field: &str, value: u64| {
+        evpn_toml_with(&format!(
             r#"
 [[evpn_instances]]
 vni = 100
@@ -1510,14 +1509,42 @@ route_targets = ["65000:100"]
 local_vtep_ip = "10.0.0.100"
 duplicate_mac_detection = {{ {field} = {value} }}
 "#
-        ));
-        let err = parse(&toml).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            matches!(err, ConfigError::InvalidEvpnInstance { .. }),
-            "expected InvalidEvpnInstance for {field}, got {msg}"
-        );
-        assert!(msg.contains(field), "message should name {field}: {msg}");
+        ))
+    };
+    for (field, min, max) in [
+        ("window_seconds", 1, None),
+        ("threshold", 1, None),
+        ("recovery_seconds", 1, Some(31_536_000_u64)),
+    ] {
+        assert_eq!(properties[field]["minimum"], min, "{field} schema minimum");
+        if let Some(max) = max {
+            assert_eq!(properties[field]["maximum"], max, "{field} schema maximum");
+        } else {
+            assert!(
+                properties[field].get("maximum").is_none(),
+                "{field} has no validator maximum, so the schema must not publish one"
+            );
+        }
+
+        let mut rejected = vec![min - 1];
+        let mut accepted = vec![min];
+        if let Some(max) = max {
+            rejected.push(max + 1);
+            accepted.push(max);
+        }
+        for value in rejected {
+            let err = parse(&mac_toml(field, value)).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+                "expected InvalidEvpnInstance for {field} = {value}, got {msg}"
+            );
+            assert!(msg.contains(field), "message should name {field}: {msg}");
+        }
+        for value in accepted {
+            parse(&mac_toml(field, value))
+                .unwrap_or_else(|e| panic!("{field} = {value} is inside the schema bounds: {e}"));
+        }
     }
 }
 

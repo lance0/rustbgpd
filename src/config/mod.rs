@@ -1233,7 +1233,7 @@ impl Config {
 
     /// Resolve the ADR-0085 attachment-circuit bindings declared on
     /// `[[ethernet_segments]]` entries (`interface` +
-    /// `recovery_delay_secs`) into the daemon-side map keyed by ESI.
+    /// `recovery_delay_seconds`) into the daemon-side map keyed by ESI.
     ///
     /// Deliberately separate from [`Self::resolve_ethernet_segments`]:
     /// the binding is coordinator-side trigger state, not part of the
@@ -1264,7 +1264,7 @@ impl Config {
                 EsLinkBinding {
                     interface,
                     recovery_delay: std::time::Duration::from_secs(
-                        cfg.recovery_delay_secs
+                        cfg.recovery_delay_seconds
                             .unwrap_or(DEFAULT_ES_RECOVERY_DELAY_SECS),
                     ),
                 },
@@ -6251,7 +6251,7 @@ fn parse_duplicate_mac_detection(
 /// startup/recovery delay.
 pub const DEFAULT_ES_RECOVERY_DELAY_SECS: u64 = 30;
 
-/// Upper bound for `recovery_delay_secs` (one hour). Beyond this an
+/// Upper bound for `recovery_delay_seconds` (one hour). Beyond this an
 /// operator wants a manual ADR-0084 drain, not a timer.
 pub const MAX_ES_RECOVERY_DELAY_SECS: u64 = 3600;
 
@@ -6271,7 +6271,7 @@ pub struct EsLinkBinding {
 /// [`EthernetSegment`] domain type. Validates the ESI text form,
 /// rejects Type 0 (single-homed sentinel), confirms every member
 /// VNI exists in the resolved EVPN instance set, and validates the
-/// ADR-0085 `interface` / `recovery_delay_secs` binding fields.
+/// ADR-0085 `interface` / `recovery_delay_seconds` binding fields.
 #[expect(
     clippy::too_many_lines,
     reason = "linear ESI/member-VNI/DF-algorithm/preference/redundancy-mode/binding validation reads clearest as one sequence"
@@ -6426,11 +6426,11 @@ fn parse_ethernet_segment(
             });
         }
     }
-    if let Some(delay) = cfg.recovery_delay_secs {
+    if let Some(delay) = cfg.recovery_delay_seconds {
         if cfg.interface.is_none() {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
-                    "esi {:?}: recovery_delay_secs is only meaningful with an \
+                    "esi {:?}: recovery_delay_seconds is only meaningful with an \
                      `interface` binding (ADR-0085); remove it or bind the \
                      attachment-circuit link",
                     cfg.esi
@@ -6440,7 +6440,7 @@ fn parse_ethernet_segment(
         if delay > MAX_ES_RECOVERY_DELAY_SECS {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
-                    "esi {:?}: recovery_delay_secs {delay} outside the supported \
+                    "esi {:?}: recovery_delay_seconds {delay} outside the supported \
                      range 0..={MAX_ES_RECOVERY_DELAY_SECS}",
                     cfg.esi
                 ),

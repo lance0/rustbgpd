@@ -4063,7 +4063,7 @@ originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 ori
 | `redundancy_mode` | string | no       | `"all-active"` | `"all-active"` sets the ESI Label extcomm Single-Active flag to 0 and allows receiver-side aliasing ECMP. `"single-active"` sets the flag to 1, suppresses all-active aliasing ECMP for remote single-active ES reachability, and enables the receive-side backup-path pre-install path from ADR-0083 |
 | `originator_ip` | string   | yes      | --            | Source IP carried in Type 1/4 origination. Usually equals a member VNI's `local_vtep_ip` |
 | `interface`     | string   | no       | --            | ADR-0085 attachment-circuit link binding: name of the local link whose carrier drives this ES's link drain. When set, carrier loss on the link drains the segment automatically |
-| `recovery_delay_secs` | u64 | no       | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it |
+| `recovery_delay_seconds` | u64 | no     | `30`          | ADR-0085 hold-off (seconds, `0..=3600`) to wait after carrier returns before releasing the link drain. Only valid with `interface` — rejected without it. The earlier spelling `recovery_delay_secs` is still accepted as an alias |
 
 ### What gets originated
 
