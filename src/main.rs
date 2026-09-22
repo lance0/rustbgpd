@@ -7450,11 +7450,21 @@ mod tests {
             .expect("the late owner kept the coordinator permit");
     }
 
+    /// Serializes the tests that raise a process-wide signal. A `raise`
+    /// notifies every `Signal` stream registered for that kind anywhere in
+    /// the process, so two listeners alive at once would cancel each other's
+    /// token. Each test registers its streams while holding this, after any
+    /// earlier raise has been delivered, and a stream never sees a signal
+    /// raised before it was created.
+    static SIGNAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn a_signal_during_coordinated_shutdown_stops_waiting() {
         use tokio::signal::unix::{SignalKind, signal};
+        let _signals = SIGNAL_TEST_LOCK.lock().await;
         // SIGUSR1/SIGUSR2 stand in for SIGINT/SIGTERM so the raise cannot
-        // reach another test; the listener only sees two signal streams.
+        // reach the daemon's real listeners; the sibling signal test holds
+        // the same lock so the two never overlap.
         let stop_waiting = stop_waiting_on_signal(
             signal(SignalKind::user_defined1()).unwrap(),
             signal(SignalKind::user_defined2()).unwrap(),
@@ -7471,6 +7481,7 @@ mod tests {
     #[tokio::test]
     async fn a_signal_with_no_owner_fences_nothing_and_a_late_registrant_is_refused() {
         use tokio::signal::unix::{SignalKind, signal};
+        let _signals = SIGNAL_TEST_LOCK.lock().await;
         // The real signal task against a production watchdog: fencing anything
         // here would `_exit(70)` this test process, so surviving it proves the
         // no-owner signal fenced nothing. A permit holder that registers only

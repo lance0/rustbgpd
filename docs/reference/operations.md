@@ -127,8 +127,9 @@ supervisor does next depends on how the stop was requested: raw signals to a
 running unit end in exit 70, an unclean exit code that `Restart=on-failure`
 restarts, while systemd never automatically restarts a unit stopped
 explicitly with `systemctl stop`, whatever its exit status. Recovery from the
-persisted transaction runs on the next actual start either way. A wedge that consumes the full 30-minute budget intentionally
-does not reach five starts in ten minutes; the limit bounds fast deterministic
+persisted transaction runs on the next actual start either way. A wedge that
+consumes the full 30-minute budget intentionally does not reach five starts
+in ten minutes; the limit bounds fast deterministic
 failures, while the independent fatal clock still bounds each slow wedge. After
 inspecting and fixing the config directory, bind mount,
 and on-disk authority, recover a rate-limited unit with:
