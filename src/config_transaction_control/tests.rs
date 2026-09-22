@@ -521,7 +521,10 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         (transaction, "self.deps.lock.acquire()", 2),
         (transaction, ".acquire().await", 0),
         (transaction, "CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,", 2),
-        (transaction, "acquire.await?", 1),
+        (transaction, "acquire.await?", 0),
+        (transaction, "self.acquire_for_auto_revert(acquire, auto_revert).await?", 1),
+        (transaction, "return acquire.await;", 1),
+        (transaction, "permit = &mut acquire =>", 1),
         (transaction, ".execute_owned_operation(", 5),
         (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
         (settlement, "watchdog.register_owned(", 1),
@@ -2538,7 +2541,8 @@ async fn auto_revert_outwaits_the_acquire_bound_and_reverts_once_the_coordinator
         state.pending.as_mut().unwrap().deadline = tokio::time::Instant::now();
     }
     let owner = controller.deps.lock.acquire().await.expect("coordinator");
-    let revert = tokio::spawn(controller.clone().auto_revert("deploy-1".to_string()));
+    let wait = auto_revert_wait(&controller, "deploy-1").await;
+    let revert = tokio::spawn(controller.clone().auto_revert(wait));
     tokio::task::yield_now().await;
 
     // Past the request-driven bound the safety net is still queued, and the
@@ -2572,6 +2576,395 @@ async fn auto_revert_outwaits_the_acquire_bound_and_reverts_once_the_coordinator
         .await
         .expect("a completed auto-revert reopens config admission");
     ack_task.abort();
+}
+
+/// A confirmed transaction whose timer has fired against a held coordinator,
+/// advanced to the first overdue tick. Wall-clock oracles are literal and do
+/// not use the implementation constants.
+struct OverdueAutoRevertWait {
+    controller: ConfigTransactionController,
+    snapshot_toml: Arc<Mutex<String>>,
+    ack_task: tokio::task::JoinHandle<()>,
+    owner: RuntimeConfigCoordinatorPermit,
+    timer_id: tokio::task::Id,
+    metadata_path: std::path::PathBuf,
+    _journal_dir: tempfile::TempDir,
+    previous_toml: String,
+    candidate_toml: String,
+}
+
+async fn overdue_auto_revert_wait() -> OverdueAutoRevertWait {
+    let previous_toml = base_toml("");
+    let candidate_toml = dynamic_candidate_toml();
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let peers = Arc::new(Mutex::new(Vec::new()));
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_snapshot_peer_manager(
+        peer_rx,
+        plan(
+            RuntimeConfigTransactionStatus::Committable,
+            vec!["[[dynamic_neighbors]]".to_string()],
+        ),
+        snapshot_toml.clone(),
+        peers,
+    ));
+    let (config_tx, config_rx) = mpsc::channel(8);
+    let ack_task = tokio::spawn(ack_config_transaction_commits(config_rx));
+    let journal_dir = tempfile::tempdir().unwrap();
+    let journal_path = journal_dir.path().join("commit-confirm-journal.json");
+    let controller = with_test_preloaded_plan(
+        with_v3_test_authority(
+            FibTableControlDeps {
+                confirm_journal_path: Some(journal_path),
+                ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+            },
+            journal_dir.path(),
+            &previous_toml,
+        ),
+        plan(
+            RuntimeConfigTransactionStatus::Committable,
+            vec!["[[dynamic_neighbors]]".to_string()],
+        ),
+        snapshot_toml.clone(),
+    );
+    let metadata_path = journal_dir
+        .path()
+        .join(crate::confirm_journal::v3::METADATA_FILE_NAME);
+    controller
+        .clone()
+        .apply(confirmed_dynamic_request(
+            candidate_toml.clone(),
+            "deploy-1",
+            60,
+        ))
+        .await
+        .expect("confirmed apply must succeed");
+    let timer_id = controller
+        .state
+        .lock()
+        .await
+        .timer
+        .as_ref()
+        .expect("confirm timer")
+        .id();
+
+    let owner = controller.deps.lock.acquire().await.expect("coordinator");
+    // The timer fires and its auto-revert queues behind the holder.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    tokio::task::yield_now().await;
+    // Not overdue until ten minutes past the deadline.
+    tokio::time::advance(Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(overdue_warnings(&controller).await, 0, "overdue too early");
+    assert_eq!(
+        controller.status().await.unwrap().human_text,
+        "Confirmed config transaction is awaiting confirmation.\n"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    OverdueAutoRevertWait {
+        controller,
+        snapshot_toml,
+        ack_task,
+        owner,
+        timer_id,
+        metadata_path,
+        _journal_dir: journal_dir,
+        previous_toml,
+        candidate_toml,
+    }
+}
+
+async fn overdue_warnings(controller: &ConfigTransactionController) -> u32 {
+    controller
+        .state
+        .lock()
+        .await
+        .pending
+        .as_ref()
+        .map_or(0, |pending| pending.auto_revert_overdue_warnings)
+}
+
+#[tokio::test(start_paused = true)]
+async fn overdue_auto_revert_wait_is_reported_without_failing_and_reverts_once_freed() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    let journal_before = std::fs::read(&wait.metadata_path).unwrap();
+
+    // First warning at deadline + 10 min; one reminder per further 10 min.
+    assert_eq!(overdue_warnings(controller).await, 1);
+    tokio::time::advance(Duration::from_secs(599)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        overdue_warnings(controller).await,
+        1,
+        "reminders are rate-limited"
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(overdue_warnings(controller).await, 2);
+
+    // Status stays pending and names the due time and the wait; nothing
+    // failed, nothing was journaled, and the timer is the same task.
+    let status = controller.status().await.unwrap();
+    let confirmation = status.confirmation.clone().unwrap();
+    assert_eq!(
+        confirmation.status,
+        proto::ConfigTransactionConfirmationStatus::Pending as i32
+    );
+    assert_eq!(confirmation.confirm_id, "deploy-1");
+    let expected = format!(
+        "Confirmed config transaction timed out at unix {}; its automatic rollback is waiting \
+         for the runtime-config coordinator and runs as soon as the current owner finishes, \
+         with no action required. A confirm or abort issued now waits behind it for the same \
+         owner and may time out as coordinator busy.",
+        confirmation.deadline_unix_seconds
+    );
+    assert_eq!(confirmation.human_text, expected);
+    assert_eq!(status.human_text, format!("{expected}\n"));
+    {
+        let state = controller.state.lock().await;
+        let pending = state.pending.as_ref().unwrap();
+        assert_eq!(pending.rollback_failed, None);
+        let timer = state.timer.as_ref().expect("timer must stay armed");
+        assert_eq!(timer.id(), wait.timer_id);
+        assert!(!timer.is_finished(), "the waiting timer must not be lost");
+    }
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_eq!(
+        std::fs::read(&wait.metadata_path).unwrap(),
+        journal_before,
+        "merely waiting must not write the journal"
+    );
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect_err("an unreverted transaction keeps the mutation fence closed");
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.candidate_toml);
+
+    // Release: exactly one rollback runs and the wait resolves.
+    let timer = controller.state.lock().await.timer.take().unwrap();
+    drop(wait.owner);
+    tokio::time::timeout(Duration::from_secs(1), timer)
+        .await
+        .expect("auto-revert must run once the coordinator frees")
+        .unwrap();
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.previous_toml);
+    assert!(controller.state.lock().await.pending.is_none());
+    controller
+        .reject_if_pending("test mutation")
+        .await
+        .expect("a completed auto-revert reopens config admission");
+    wait.ack_task.abort();
+}
+
+/// Confirm and abort also need the coordinator, so in production they win
+/// only when queued ahead of the timer; the locked paths model that here.
+#[tokio::test(start_paused = true)]
+async fn confirm_while_auto_revert_wait_is_overdue_skips_the_rollback() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    assert_eq!(overdue_warnings(controller).await, 1);
+
+    controller
+        .confirm_locked(
+            "deploy-1".to_string(),
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .expect("confirm must succeed");
+    let timer = controller.state.lock().await.timer.take();
+    assert!(timer.is_none(), "confirm consumes the timer");
+    drop(wait.owner);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::Confirmed as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.candidate_toml);
+    wait.ack_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn abort_while_auto_revert_wait_is_overdue_rolls_back_once() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    assert_eq!(overdue_warnings(controller).await, 1);
+
+    controller
+        .abort_locked(
+            "deploy-1".to_string(),
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .expect("abort must succeed");
+    drop(wait.owner);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::Aborted as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "abort", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.previous_toml);
+    wait.ack_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn rollback_duration_reset_clears_overdue_wait_and_the_old_timer_cannot_re_mark_it() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    assert_eq!(overdue_warnings(controller).await, 1);
+
+    // Re-arm for an hour: same confirm id, new deadline generation.
+    controller
+        .reset_rollback_duration_locked(
+            "deploy-1".to_string(),
+            3_600,
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .expect("reset must succeed");
+    assert_eq!(
+        overdue_warnings(controller).await,
+        0,
+        "reset clears the diagnostic"
+    );
+    let new_timer_id = controller.state.lock().await.timer.as_ref().unwrap().id();
+    assert_ne!(new_timer_id, wait.timer_id);
+
+    // The old wait's next reminder must not mark the re-armed transaction.
+    tokio::time::advance(Duration::from_secs(600)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(overdue_warnings(controller).await, 0);
+    assert_eq!(
+        controller.status().await.unwrap().human_text,
+        "Confirmed config transaction is awaiting confirmation.\n"
+    );
+
+    // Freed: the old wait acquires, sees the future deadline and does nothing.
+    drop(wait.owner);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.candidate_toml);
+    assert_eq!(
+        controller
+            .status()
+            .await
+            .unwrap()
+            .confirmation
+            .unwrap()
+            .status,
+        proto::ConfigTransactionConfirmationStatus::Pending as i32
+    );
+
+    // The re-armed timer produces the one outcome.
+    let timer = controller.state.lock().await.timer.take().unwrap();
+    tokio::time::advance(Duration::from_secs(3_600)).await;
+    tokio::time::timeout(Duration::from_secs(1), timer)
+        .await
+        .expect("re-armed timer must auto-revert")
+        .unwrap();
+    assert_eq!(
+        controller
+            .status()
+            .await
+            .unwrap()
+            .confirmation
+            .unwrap()
+            .status,
+        proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.previous_toml);
+    wait.ack_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_auto_revert_waiter_does_not_revert_a_re_armed_transaction() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    assert_eq!(overdue_warnings(controller).await, 1);
+
+    // Re-arm for an hour while the old waiter stays queued (its timer task
+    // was aborted by the re-arm, but the detached acquisition lives on).
+    controller
+        .reset_rollback_duration_locked(
+            "deploy-1".to_string(),
+            3_600,
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .expect("reset must succeed");
+    let re_armed_deadline = controller
+        .status()
+        .await
+        .unwrap()
+        .confirmation
+        .unwrap()
+        .deadline_unix_seconds;
+    let re_armed_timer = controller.state.lock().await.timer.take().unwrap();
+    // Queue position between the stale waiter and the re-armed one: this
+    // acquisition observes the state right after the stale waiter releases.
+    let lock = controller.deps.lock.clone();
+    let observer = tokio::spawn(async move { lock.acquire().await });
+    tokio::task::yield_now().await;
+
+    // The holder outlives the re-armed deadline, so both waiters are queued.
+    tokio::time::advance(Duration::from_secs(3_600)).await;
+    tokio::task::yield_now().await;
+    drop(wait.owner);
+    let observer = tokio::time::timeout(Duration::from_secs(1), observer)
+        .await
+        .expect("stale waiter must release the coordinator")
+        .unwrap()
+        .expect("coordinator");
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::Pending as i32,
+        "a waiter bound to the old deadline must not revert the re-armed transaction"
+    );
+    assert_eq!(status.deadline_unix_seconds, re_armed_deadline);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.candidate_toml);
+
+    // The re-armed waiter produces the one outcome.
+    drop(observer);
+    tokio::time::timeout(Duration::from_secs(1), re_armed_timer)
+        .await
+        .expect("re-armed timer must auto-revert")
+        .unwrap();
+    assert_eq!(
+        controller
+            .status()
+            .await
+            .unwrap()
+            .confirmation
+            .unwrap()
+            .status,
+        proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.previous_toml);
+    wait.ack_task.abort();
 }
 
 #[tokio::test(start_paused = true)]
@@ -2923,6 +3316,22 @@ fn confirmed_dynamic_request(
         comment: "confirmed deploy".to_string(),
         confirm_id: confirm_id.to_string(),
         confirm_timeout_seconds,
+    }
+}
+
+/// The timer identity for the pending transaction `confirm_id`, as
+/// `spawn_confirm_timeout` would carry it into `auto_revert`.
+async fn auto_revert_wait(
+    controller: &ConfigTransactionController,
+    confirm_id: &str,
+) -> AutoRevertWait {
+    let state = controller.state.lock().await;
+    AutoRevertWait {
+        confirm_id: confirm_id.to_string(),
+        deadline: state
+            .pending
+            .as_ref()
+            .map_or_else(tokio::time::Instant::now, |pending| pending.deadline),
     }
 }
 
@@ -4610,9 +5019,10 @@ remote_asn = 65010
     );
     assert_config_transaction_lifecycle_metric(&controller, "confirm", "success", 1.0);
     assert_config_transaction_lifecycle_metric(&controller, "confirm", "failure", 0.0);
+    let wait = auto_revert_wait(&controller, "deploy-1").await;
     controller
         .clone()
-        .auto_revert("deploy-1".to_string())
+        .auto_revert(wait)
         .await
         .expect("stale timeout after confirm must be a no-op");
     let status = controller
@@ -5273,9 +5683,10 @@ remote_asn = 65010
             .expect("confirmed apply should be pending")
             .deadline = tokio::time::Instant::now();
     }
+    let wait = auto_revert_wait(&controller, "deploy-1").await;
     controller
         .clone()
-        .auto_revert("deploy-1".to_string())
+        .auto_revert(wait)
         .await
         .expect_err("auto-revert rollback should fail");
 
