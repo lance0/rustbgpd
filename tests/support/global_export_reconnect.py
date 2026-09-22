@@ -198,16 +198,16 @@ action = "deny"
                 else:
                     assert kind == 4, ("unexpected BGP message", last, kind, body.hex())
 
-    def wait(predicate, label):
-        deadline = time.monotonic() + 20
+    def wait(predicate, label, deadline=None):
+        deadline = deadline or time.monotonic() + 20
         while not predicate():
             assert time.monotonic() < deadline, (label, routes)
             drain(.1)
         drain(.2)
         assert predicate(), ("unstable result", label, routes)
 
-    def observe(label, expected):
-        wait(lambda: all(routes[peer] == expected for peer in sessions if peer != 2), label)
+    def observe(label, expected, deadline=None):
+        wait(lambda: all(routes[peer] == expected for peer in sessions if peer != 2), label, deadline)
         result = subprocess.run([str(args.rbgp), "--addr", addr, "--json", "policy", "stats", "--direction", "export"], capture_output=True, text=True, timeout=10, check=True)
         snapshot = {"label": label, "routes": {str(peer): sorted(value) for peer, value in routes.items()}, "stats": json.loads(result.stdout)}
         snapshots.append(snapshot)
@@ -215,22 +215,22 @@ action = "deny"
 
     def reload(name, expected):
         config_path.write_bytes((args.out / f"{name}.toml").read_bytes())
-        deadline = time.monotonic() + 20
+        # One budget covers the whole reload. Durable config-history writes
+        # can keep the previous SIGHUP settling for seconds under I/O load,
+        # and the daemon ignores a SIGHUP that arrives before its main loop
+        # has seen that reload task finish, which can be after the
+        # settlement's own log line. Resend until the daemon logs that it
+        # accepted this SIGHUP, then wait for that reload to apply.
+        deadline = time.monotonic() + 30
         while True:
             offset = log_path.stat().st_size
             daemon.send_signal(signal.SIGHUP)
-            # The daemon logs an answer to every SIGHUP. It ignores one that
-            # arrives while the previous reload is still settling (durable
-            # config-history writes are slow under I/O load), so resend after
-            # that settlement reports instead of waiting for a reload that
-            # never started.
-            wait(lambda: "SIGHUP received" in log_path.read_text()[offset:], "SIGHUP answer")
-            if "previous reload still in flight" not in log_path.read_text()[offset:]:
+            wait(lambda: "SIGHUP received" in log_path.read_text()[offset:], "SIGHUP answer", deadline)
+            if "SIGHUP received, reloading configuration" in log_path.read_text()[offset:]:
                 break
-            assert time.monotonic() < deadline, "daemon kept ignoring SIGHUP"
-            wait(lambda: "runtime config settlement settled" in log_path.read_text()[offset:], "previous reload settlement")
-        wait(lambda: "reload generation applied" in log_path.read_text()[offset:], "SIGHUP completion")
-        observe(f"reload-{name}", expected)
+            drain(.2)
+        wait(lambda: "reload generation applied" in log_path.read_text()[offset:], "SIGHUP completion", deadline)
+        observe(f"reload-{name}", expected, deadline)
 
     def reconnect(last, label, expected):
         sessions.pop(last).close()
