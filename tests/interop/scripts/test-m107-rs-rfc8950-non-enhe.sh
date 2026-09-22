@@ -101,6 +101,16 @@ member3_extended_next_hop_state() {
         || echo "unreadable"
 }
 
+# member3's session state to the route server as FRR reports it right now.
+# Every failure to read it — stopped bgpd, broken vtysh, unparsable JSON —
+# resolves to a non-Established string, so a dead peer can never be mistaken
+# for a live one that is withholding a route.
+member3_bgp_state() {
+    docker exec "$FRR_M3" vtysh -c "show bgp neighbors $RS_ADDR json" 2>/dev/null \
+        | jq -r --arg rs "$RS_ADDR" '.[$rs].bgpState // "absent"' 2>/dev/null \
+        || echo "unreadable"
+}
+
 member_negotiated_extended_next_hop() {
     docker exec "$(member_container "${1:?}")" gobgp neighbor "$RS_ADDR" -j 2>/dev/null \
         | jq -e '
@@ -193,15 +203,26 @@ assert_rfc8950_suppression() {
         fail "member2 received 198.51.100.0/24 with unexpected next-hop $got_nh"
     fi
 
-    # member3 (non-ENHE) must have the IPv4 route WITHHELD
+    # member3 (non-ENHE) must have the IPv4 route WITHHELD. Suppression is the
+    # whole point of this cell, so it must be proven rather than inferred from
+    # a missing answer: no output at all, unparsable output, or a stopped bgpd
+    # all have to fail here. That takes three pieces of positive evidence —
+    # vtysh answered with parsable JSON, the answer carries no path for the
+    # prefix, and the session that would have carried the route is Established
+    # at that moment. FRR 10.7.1 renders an absent prefix as `{}` rather than
+    # an empty `paths` array, so the predicate accepts either shape and rejects
+    # everything else, including a non-object.
     sleep 3
-    local m3_v4_routes m3_v4_count
+    local m3_v4_routes m3_v4_state
     m3_v4_routes=$(docker exec "$FRR_M3" vtysh -c "show bgp ipv4 unicast 198.51.100.0/24 json" 2>/dev/null || true)
-    m3_v4_count=$(echo "$m3_v4_routes" | jq '.paths | length' 2>/dev/null || echo 0)
-    if [ "$m3_v4_count" -eq 0 ] || [ -z "$m3_v4_routes" ]; then
-        ok "member3 (non-ENHE): IPv4 route with IPv6 next-hop is WITHHELD (paths=0, RFC 8950 suppression)"
+    m3_v4_state=$(member3_bgp_state)
+    if [ "$m3_v4_state" != "Established" ]; then
+        fail "member3 (non-ENHE): session to RS reads '$m3_v4_state', not Established — suppression is unproven"
+    elif ! jq -e 'type == "object" and ((.paths // []) | length) == 0' \
+        >/dev/null 2>&1 <<<"$m3_v4_routes"; then
+        fail "member3 (non-ENHE): IPv4 route was exported or unreadable: '$m3_v4_routes'"
     else
-        fail "member3 (non-ENHE): IPv4 route was unexpectedly exported: $m3_v4_routes"
+        ok "member3 (non-ENHE): session Established and 198.51.100.0/24 carries no path (RFC 8950 suppression)"
     fi
 
     # member3 (non-ENHE) must STILL receive the IPv6 route
