@@ -419,7 +419,7 @@ mod tests {
             attributes: Arc::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            peer_router_id: crate::test_support::session_router_id(next_hop),
             is_stale: false,
             is_llgr_stale: false,
             path_id: 0,

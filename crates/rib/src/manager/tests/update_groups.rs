@@ -7392,7 +7392,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V4(src)),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,

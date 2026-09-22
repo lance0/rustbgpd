@@ -25,7 +25,7 @@ fn make_multipath_route_v6(
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V4(peer)),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -1093,7 +1093,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V4(peer_addr)),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -1791,7 +1791,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V6("fe80::2".parse().unwrap())),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -1845,7 +1845,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V6(peer.parse().unwrap())),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -1970,7 +1970,7 @@ async fn fib_install_candidates_weighted_proportional_to_link_bandwidth() {
     let handle = tokio::spawn(manager.run());
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-    let peer1 = Ipv4Addr::new(1, 0, 0, 1); // best (lowest peer), 40G
+    let peer1 = Ipv4Addr::new(1, 0, 0, 1); // best (lowest BGP Identifier), 40G
     let peer2 = Ipv4Addr::new(1, 0, 0, 2); // sibling, 10G
     for (peer, bw) in [(peer1, 40e9), (peer2, 10e9)] {
         tx.send(RibUpdate::RoutesReceived {

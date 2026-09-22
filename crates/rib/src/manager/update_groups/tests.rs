@@ -3699,7 +3699,7 @@ fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
         attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: crate::test_support::session_router_id(src),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,

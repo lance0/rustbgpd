@@ -25,7 +25,7 @@ use crate::route::{FlowSpecRoute, Route, RouteOrigin};
 /// carries the `0.0.0.0` injection sentinel, so these fixtures must not
 /// either — pairing `Ebgp` with the sentinel builds a route the daemon
 /// cannot, and decides the identifier step by a state it cannot reach.
-fn session_router_id(peer: IpAddr) -> Ipv4Addr {
+pub(crate) fn session_router_id(peer: IpAddr) -> Ipv4Addr {
     match peer {
         IpAddr::V4(addr) => addr,
         // The lowest nonzero 32-bit word, so a `::`-tailed peer does not

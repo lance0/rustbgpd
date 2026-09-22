@@ -577,7 +577,7 @@ fn validate_route_rpki_empty_as_path() {
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: Ipv4Addr::new(1, 0, 0, 1),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -700,7 +700,8 @@ async fn rpki_cache_update_changes_best_path() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
 
-    // Both routes same LP, same AS_PATH length. peer1 has lower peer address → wins initially.
+    // Both routes same LP, same AS_PATH length. peer1 has the lower BGP
+    // Identifier → wins initially.
     let route1 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 1), vec![65001]);
     let route2 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 2), vec![65002]);
 
@@ -729,7 +730,7 @@ async fn rpki_cache_update_changes_best_path() {
     .await
     .unwrap();
 
-    // Before RPKI: peer1 should be best (lower address)
+    // Before RPKI: peer1 should be best (lower BGP Identifier)
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryBestRoutes {
         deadline: full_snapshot_query_deadline(),
@@ -783,7 +784,7 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
 
-    // peer1 has lower address → wins initially
+    // peer1 has the lower BGP Identifier → wins initially
     let route1 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 1), vec![65001]);
     let route2 = make_route_with_as_path(prefix, Ipv4Addr::new(1, 0, 0, 2), vec![65002]);
 

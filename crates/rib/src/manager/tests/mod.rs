@@ -19,7 +19,7 @@ use crate::route::{
     VpnRibRoute,
 };
 use crate::test_support::{
-    make_flowspec_route, make_route, make_route_with_lp, make_v6_route, set_peer,
+    make_flowspec_route, make_route, make_route_with_lp, make_v6_route, session_router_id, set_peer,
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
@@ -1219,7 +1219,7 @@ fn make_multipath_route(
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V4(peer)),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
@@ -1245,7 +1245,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(IpAddr::V4(peer)),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,
