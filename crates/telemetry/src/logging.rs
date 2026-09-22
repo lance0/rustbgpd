@@ -34,8 +34,11 @@ fn rust_log_env() -> Option<String> {
 /// unparseable one is returned as `` `directive`: parse error `` for the
 /// caller to report. `EnvFilter::try_from_default_env` would reject the whole
 /// variable over one bad directive, and `parse_lossy` only prints the errors
-/// itself, so neither lets the caller report them. When nothing in a set
-/// `RUST_LOG` parses, the base falls back to `info`, as for an unset variable.
+/// itself, so neither lets the caller report them. Blank pieces (an empty,
+/// whitespace-only or separator-only value) are skipped without a report.
+/// Whenever no valid directive remains, the base falls back to `info`, as
+/// for an unset variable, rather than an empty filter that disables all
+/// logging.
 fn build_filter(
     rust_log: Option<&str>,
     extra_directives: &[String],
@@ -46,7 +49,7 @@ fn build_filter(
         Some(value) => {
             let valid: Vec<&str> = value
                 .split(',')
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.trim().is_empty())
                 .filter(|s| match s.parse::<Directive>() {
                     Ok(_) => true,
                     Err(e) => {
@@ -55,7 +58,7 @@ fn build_filter(
                     }
                 })
                 .collect();
-            if valid.is_empty() && !rejected.is_empty() {
+            if valid.is_empty() {
                 EnvFilter::new("info")
             } else {
                 // Every directive already parsed, so this drops nothing.
@@ -349,6 +352,22 @@ mod tests {
         let (filter, rejected) = build_filter(None, &[]).expect("filter");
         assert!(rejected.is_empty(), "{rejected:?}");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
+    }
+
+    /// An empty, whitespace-only or separator-only `RUST_LOG` behaves as
+    /// unset: `info`, no report. `EnvFilter` alone turns `""` and `","`
+    /// into an empty filter that disables all logging.
+    #[test]
+    fn blank_rust_log_is_info_without_report() {
+        for value in ["", " ", ",", " , "] {
+            let (filter, rejected) = build_filter(Some(value), &[]).expect("filter");
+            assert!(rejected.is_empty(), "{value:?}: {rejected:?}");
+            assert_eq!(
+                filter.max_level_hint(),
+                Some(LevelFilter::INFO),
+                "{value:?} falls back to info"
+            );
+        }
     }
 
     /// A `RUST_LOG` with no valid directive falls back to `info` (as the

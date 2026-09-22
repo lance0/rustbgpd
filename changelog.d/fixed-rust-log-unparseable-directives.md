@@ -7,5 +7,7 @@
   **Operator-visible:** each dropped directive is reported with its parse
   error, as one `warning:` line on stderr at startup and as a `warn` event
   when a SIGHUP reload rebuilds the per-peer log filter. A `RUST_LOG` with no
-  valid directive still falls back to `info`. Neither case fails startup or
-  `--check`.
+  valid directive still falls back to `info`. An empty or comma-only
+  `RUST_LOG`, which previously disabled all logging, is now treated as unset
+  (`info`, no report), as is a whitespace-only one. Neither case fails
+  startup or `--check`.
