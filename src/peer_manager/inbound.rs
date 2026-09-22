@@ -341,7 +341,9 @@ impl PeerManager {
                 self.metrics
                     .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
                 warn!(
-                    peer = %peer_addr,
+                    peer = %peer_ip,
+                    port = v6.port(),
+                    scope_id = v6.scope_id(),
                     "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
                 );
                 return;
