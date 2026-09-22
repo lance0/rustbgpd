@@ -58,6 +58,7 @@ const OWNED_FIB_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 const COORDINATOR_CLOSED: &str = "runtime config coordinator is closed";
 const STAGE_TIMED_OUT: &str =
     "config persistence did not stage the FIB-table candidate in time; nothing was applied";
+const FIB_CHANNEL_CLOSED: &str = "FIB reconciler command channel closed";
 
 /// Dependencies for the FIB-table control hook, wired from `main.rs`.
 pub struct FibTableControlDeps {
@@ -145,13 +146,19 @@ async fn handle(
             if deps.lock.is_closed() {
                 return Err(FibTableControlError::Unavailable(COORDINATOR_CLOSED.into()));
             }
-            // Query the reconciler's running status without holding the exclusive
-            // mutation coordinator lock, so unrelated config mutations and SIGHUP
-            // reloads can proceed even while an actor read is in flight or stalled.
-            let runtime_available =
-                read_current_tables(deps.fib_cmd_tx.as_ref(), FibTableControlError::Unavailable)
-                    .await?
-                    .is_some();
+            // Reads never enqueue on the reconciler's command queue: it is shared
+            // with mutations, so queued reads could delay a mutation's dispatch.
+            // `is_closed` is only a channel-closure check. An open channel does not
+            // prove the actor is responsive or that a later mutation will apply.
+            let runtime_available = match &deps.fib_cmd_tx {
+                None => false,
+                Some(tx) if tx.is_closed() => {
+                    return Err(FibTableControlError::Unavailable(
+                        FIB_CHANNEL_CLOSED.to_string(),
+                    ));
+                }
+                Some(_) => true,
+            };
             // The authoritative committed configuration is the source of truth for
             // configured tables: this ensures reads during apply-before-persist,
             // failed persistence, or transaction rollback expose only the coherent
@@ -694,8 +701,9 @@ async fn compensate_fib_not_published(
     )
 }
 
-/// Read the reconciler's current table set. `Ok(None)` means no reconciler is
-/// running (used by `List` to report `runtime_available = false`).
+/// Read the reconciler's current table set for a mutation's read-modify-write.
+/// `Ok(None)` means no reconciler is running. `List` never calls this: it
+/// serves the committed snapshot without using the command queue.
 pub(crate) async fn read_current_tables(
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     actor_error: fn(String) -> FibTableControlError,
@@ -705,13 +713,12 @@ pub(crate) async fn read_current_tables(
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     // A mutation caller holds the runtime-config coordinator across this read,
-    // so a stalled reconciler must not park it forever. `List` holds no permit
-    // and the same deadline bounds the RPC itself. One deadline spans the send
-    // and the reply: a read has no accepted-but-unanswered effect to classify.
+    // so a stalled reconciler must not park it forever. One deadline spans the
+    // send and the reply: a read has no accepted-but-unanswered effect to classify.
     tokio::time::timeout(OWNED_FIB_ACTOR_TIMEOUT, async {
         tx.send(FibRuntimeCommand::GetTables { reply: reply_tx })
             .await
-            .map_err(|_| actor_error("FIB reconciler command channel closed".to_string()))?;
+            .map_err(|_| actor_error(FIB_CHANNEL_CLOSED.to_string()))?;
         reply_rx
             .await
             .map_err(|_| actor_error("FIB reconciler dropped the GetTables reply".to_string()))
@@ -1004,70 +1011,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_fib_tables_actor_read_outages_are_unavailable() {
-        for failure in [ReadFailure::SendClosed, ReadFailure::ReplyDropped] {
-            let status = rpc_service(Some(failing_fib_actor(None, failure)), vec![])
-                .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
-                .await
-                .unwrap_err();
-            assert_actor_read_error(&status, Code::Unavailable, failure);
-        }
+    async fn list_fib_tables_closed_actor_channel_is_unavailable() {
+        let status = rpc_service(
+            Some(failing_fib_actor(None, ReadFailure::SendClosed)),
+            vec![table("edge", 1000)],
+        )
+        .list_fib_tables(Request::new(proto::ListFibTablesRequest {}))
+        .await
+        .unwrap_err();
+        assert_actor_read_error(&status, Code::Unavailable, ReadFailure::SendClosed);
     }
 
+    /// `List` must not use the reconciler's command queue it shares with
+    /// mutations: reads beyond the queue depth, against an actor that never
+    /// drains it, must enqueue nothing and leave room for a mutation.
     #[tokio::test(start_paused = true)]
-    async fn stalled_fib_actor_bounds_list_without_taking_the_coordinator() {
-        let (fib_tx, mut fib_rx) = mpsc::channel(1);
+    async fn list_does_not_occupy_the_fib_command_queue() {
+        const QUEUE_DEPTH: usize = 8; // the reconciler's production depth
+        let (fib_tx, mut fib_rx) = mpsc::channel(QUEUE_DEPTH);
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
-        let coordinator = RuntimeConfigCoordinator::new();
         let deps = Arc::new(FibTableControlDeps {
-            fib_cmd_tx: Some(fib_tx),
+            fib_cmd_tx: Some(fib_tx.clone()),
             peer_mgr_tx,
             rib_tx: None,
             config_tx: None,
-            lock: coordinator.clone(),
+            lock: RuntimeConfigCoordinator::new(),
             config_mutation_gate: None,
-            startup_tables: Vec::new(),
+            startup_tables: vec![table("edge", 1000)],
             confirm_journal_path: None,
             config_history_dir: None,
             accepted_rx: None,
         });
-        let list = tokio::spawn(handle(
-            deps,
-            (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
-            FibTableControlRequest::List,
-        ));
-        // The actor accepts the read and never answers it.
-        let Some(FibRuntimeCommand::GetTables { reply: _stalled }) = fib_rx.recv().await else {
-            panic!("expected GetTables")
+        let list = || {
+            handle(
+                deps.clone(),
+                (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
+                FibTableControlRequest::List,
+            )
         };
-        // Mutation coordinator is NOT held while the actor is awaited — an unrelated
-        // config mutation can acquire ownership and complete without waiting on the FIB actor.
-        let permit = tokio::time::timeout(Duration::ZERO, coordinator.acquire())
+        let started = tokio::time::Instant::now();
+        let mut reads = tokio::task::JoinSet::new();
+        for _ in 0..=QUEUE_DEPTH {
+            reads.spawn(list());
+        }
+        let responses = tokio::time::timeout(Duration::from_secs(1), reads.join_all())
             .await
-            .expect("List must not hold the coordinator permit across the actor read")
-            .expect("coordinator must be open");
-        drop(permit);
+            .expect("List must not wait on the FIB command queue");
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(responses.len(), QUEUE_DEPTH + 1);
+        for response in responses {
+            let response = response.expect("an open actor channel serves List");
+            assert!(response.runtime_available);
+            assert_eq!(response.tables, [config_to_proto(&table("edge", 1000))]);
+        }
+        assert_eq!(fib_tx.capacity(), QUEUE_DEPTH, "List enqueued a command");
 
-        // Wall-clock oracle, deliberately not the implementation constant.
-        tokio::time::advance(Duration::from_secs(599)).await;
-        tokio::task::yield_now().await;
-        assert!(!list.is_finished(), "List gave up before ten minutes");
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let error = tokio::time::timeout(Duration::from_secs(1), list)
+        // A mutation command can still be enqueued behind those reads.
+        let (reply, _reply_rx) = oneshot::channel();
+        fib_tx
+            .try_send(FibRuntimeCommand::OwnedReplaceTables {
+                tables: Vec::new(),
+                reply,
+            })
+            .expect("reads must leave the queue free for a mutation");
+
+        // Even with the queue full, List still answers from the snapshot.
+        while fib_tx.capacity() > 0 {
+            let (reply, _) = oneshot::channel();
+            fib_tx
+                .try_send(FibRuntimeCommand::GetTables { reply })
+                .unwrap();
+        }
+        let response = tokio::time::timeout(Duration::from_secs(1), list())
             .await
-            .expect("a stalled FIB actor must not hold List past its deadline")
-            .unwrap()
-            .unwrap_err();
-        assert!(matches!(
-            &error,
-            FibTableControlError::Unavailable(message)
-                if message == "FIB reconciler did not answer GetTables in time"
-        ));
-        let _free = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
-            .await
-            .expect("the timed-out List must leave the coordinator open")
+            .expect("a full FIB command queue must not delay List")
             .unwrap();
+        assert!(response.runtime_available);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(matches!(
+            fib_rx.recv().await,
+            Some(FibRuntimeCommand::OwnedReplaceTables { .. })
+        ));
     }
+
     #[tokio::test]
     async fn list_returns_committed_tables_not_in_flight_mutation_candidate() {
         let original = table("edge", 1000);
@@ -1123,7 +1149,7 @@ families = ["ipv4_unicast"]
             accepted_rx: Some(accepted_rx),
         });
 
-        // Even though the actor currently reports `candidate` (simulating an in-flight
+        // Even though the actor would report `candidate` (simulating an in-flight
         // uncommitted mutation before persistence settles), ListFibTables must expose
         // only the committed configuration (`original`).
         let resp = handle(

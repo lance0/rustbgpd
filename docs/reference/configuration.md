@@ -3702,8 +3702,10 @@ to the TOML config (atomic write) **only after** the reconciler acknowledges the
 exact accepted set — and runtime CRUD is serialized with SIGHUP reloads through
 one coordinator lock, so runtime and on-disk config cannot drift. The mutating
 RPCs require the reconciler to be running (return `FAILED_PRECONDITION`
-otherwise) and are tier `mutating`; `ListFibTables` is `sensitive_read` and also
-reports whether the reconciler is running.
+otherwise) and are tier `mutating`; `ListFibTables` is `sensitive_read`, returns
+the committed table set, and reports whether the reconciler was started with an
+open command channel (it does not query the reconciler, so this is not a
+responsiveness check).
 
 **Config transactions** (ADR-0076): `ConfigService.PlanConfigTransaction` can
 validate a complete candidate TOML and return an optimistic runtime snapshot
