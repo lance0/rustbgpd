@@ -476,13 +476,21 @@ test_administrative_reset_notification_and_backoff() {
     assert_eq "FRR recorded the RFC 9003 communication text" \
         "planned maintenance" "$shutdown"
 
-    # Session dropped
-    local dropped_state
-    dropped_state=$(frr_state)
+    # Session dropped. FRR can still report Established for a moment while it
+    # processes the NOTIFICATION and tears the session down, so a single
+    # snapshot fails a correct reset under load. Poll for the drop the way the
+    # recovery check below polls; a session that never leaves Established
+    # within the bound still fails.
+    local dropped_state="Established"
+    for _ in $(seq 1 60); do
+        dropped_state=$(frr_state)
+        [ "$dropped_state" != "Established" ] && break
+        sleep 0.5
+    done
     if [ "$dropped_state" != "Established" ]; then
         ok "Session dropped from Established after administrative reset (state: $dropped_state)"
     else
-        fail "Session unexpectedly stayed Established immediately after reset"
+        fail "Session stayed Established for 30s after administrative reset"
     fi
 
     # Wait for session to recover after backoff
