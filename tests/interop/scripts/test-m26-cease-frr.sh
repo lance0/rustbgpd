@@ -50,6 +50,12 @@ grpc_enable_neighbor() {
         -d '{"address": "10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/EnableNeighbor >/dev/null
 }
+grpc_reset_neighbor() {
+    grpcurl_call \
+        -d "{\"address\": \"$1\", \"communication\": \"$2\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/ResetNeighbor >/dev/null
+}
+
 
 frr_state() {
     docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
@@ -431,6 +437,56 @@ test_frr_cease_subcode_acceptance() {
         fail "FRR not responding after Cease"
     fi
 }
+test_administrative_reset_notification_and_backoff() {
+    log "Test 7b: ResetNeighbor sends Cease/4 with RFC 9003 text and backs off"
+
+    assert_eq "Session established before reset" "Established" "$(frr_state)"
+
+    grpc_reset_neighbor "10.0.0.2" "planned maintenance"
+    ok "ResetNeighbor RPC issued with communication 'planned maintenance'"
+
+    sleep 1
+
+    # FRR must observe the Cease/4 notification
+    local neighbor_json code subcode reason
+    neighbor_json=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
+    code=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationCode // 0' 2>/dev/null || echo 0)
+    subcode=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationSubcode // 0' 2>/dev/null || echo 0)
+    reason=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationReason // ""' 2>/dev/null || echo "")
+
+    assert_eq "FRR received Notification code 6 (Cease)" "6" "$code"
+    assert_eq "FRR received Notification subcode 4 (Administrative Reset)" "4" "$subcode"
+    if echo "$reason" | grep -qi "administrative reset"; then
+        ok "FRR recorded notification reason Cease/administrative reset ($reason)"
+    else
+        fail "FRR notification reason unexpected: '$reason'"
+    fi
+
+    # Session dropped
+    local dropped_state
+    dropped_state=$(frr_state)
+    if [ "$dropped_state" != "Established" ]; then
+        ok "Session dropped from Established after administrative reset (state: $dropped_state)"
+    else
+        fail "Session unexpectedly stayed Established immediately after reset"
+    fi
+
+    # Wait for session to recover after backoff
+    local recovered=false
+    for _ in $(seq 1 30); do
+        if [ "$(frr_state)" = "Established" ]; then
+            recovered=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$recovered" = true ]; then
+        ok "Session re-established after administrative reset backoff"
+    else
+        fail "Session failed to re-establish after administrative reset backoff"
+    fi
+}
+
 
 test_block_action_withholds_and_recovers() {
     log "Test 8: block action withholds beyond the bound and recovers by one ROUTE-REFRESH"
@@ -607,6 +663,7 @@ main() {
     test_enable_while_over_limit_relatches
     test_recovery_requires_removal_and_enable
     test_frr_cease_subcode_acceptance
+    test_administrative_reset_notification_and_backoff
     test_block_action_withholds_and_recovers
     test_warning_action_reports_and_keeps_accepting
 

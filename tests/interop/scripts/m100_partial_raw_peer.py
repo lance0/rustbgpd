@@ -664,6 +664,13 @@ def candidate_from_snapshot(receiver: str, text: str, case: str) -> bool:
         matches = [item for item in value if item.get("prefix") == CANDIDATE]
         if case == "med" and matches and matches[0].get("med") != 100:
             raise RuntimeError("rustbgpd MED observation is not 100")
+        if (
+            receiver == "rustbgpd_current"
+            and case == "originator_id"
+            and matches
+            and matches[0].get("originator_id") is not None
+        ):
+            raise RuntimeError("rustbgpd_current route status retained discarded ORIGINATOR_ID")
         return bool(matches)
     if receiver == "openbgpd":
         if value == {}:

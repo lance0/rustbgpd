@@ -39,6 +39,17 @@ grpc_list_best() {
     grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
+grpc_add_path() {
+    grpcurl_call \
+        -d "$1" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath 2>/dev/null
+}
+
+grpc_delete_path() {
+    grpcurl_call \
+        -d "$1" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
+}
 
 wait_established() {
     local peer_addr=$1
@@ -266,6 +277,63 @@ for r in data.get('routes', []):
         fi
     done
 }
+# ---------------------------------------------------------------------------
+# Test 7: Plain eBGP export strips non-transitive Extended Communities
+# ---------------------------------------------------------------------------
+test_export_strips_non_transitive_extended_communities() {
+    log "Test 7: Plain eBGP export strips non-transitive Extended Communities"
+
+    local transitive_ec="844433100869674"        # 0x0002_FDE9_0000_002A (RT:65001:42, transitive)
+    local non_transitive_ec="4827503716943822850" # 0x4300_0000_0000_0002 (OVS Invalid, non-transitive)
+
+    grpc_add_path "{
+        \"prefix\": \"10.99.0.0\",
+        \"prefix_length\": 24,
+        \"next_hop\": \"10.0.1.1\",
+        \"origin\": 0,
+        \"as_path\": [65001],
+        \"extended_communities\": [\"$transitive_ec\", \"$non_transitive_ec\"]
+    }"
+    ok "Injected 10.99.0.0/24 with transitive and non-transitive extended communities"
+
+    sleep 3
+
+    # Verify rustbgpd Loc-RIB retains both
+    local best
+    best=$(grpc_list_best)
+    if echo "$best" | grep -q "$transitive_ec" && echo "$best" | grep -q "$non_transitive_ec"; then
+        ok "rustbgpd Loc-RIB retains both transitive and non-transitive extended communities"
+    else
+        fail "rustbgpd Loc-RIB missing one or both extended communities"
+    fi
+
+    # Verify FRR-B receives the route
+    local frr_b_route
+    frr_b_route=$(docker exec "$FRR_B" vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json" 2>/dev/null)
+    if echo "$frr_b_route" | grep -q "10.99.0.0"; then
+        ok "FRR-B received 10.99.0.0/24 from rustbgpd"
+    else
+        fail "FRR-B did not receive 10.99.0.0/24"
+    fi
+
+    # Transitive EC (RT:65001:42) must be preserved in FRR-B
+    if echo "$frr_b_route" | grep -q "65001:42"; then
+        ok "FRR-B received transitive extended community (RT:65001:42)"
+    else
+        fail "FRR-B missing transitive extended community RT:65001:42"
+    fi
+
+    # Non-transitive EC must NOT be present in FRR-B
+    if echo "$frr_b_route" | grep -qiE "invalid|4827503716943822850|4300:"; then
+        fail "FRR-B unexpectedly received non-transitive extended community"
+    else
+        ok "FRR-B export stripped non-transitive extended community"
+    fi
+
+    # Cleanup
+    grpc_delete_path '{"prefix": "10.99.0.0", "prefix_length": 24}'
+    sleep 2
+}
 
 # Use the robust `start_rustbgpd` from test-lib.sh (10 s poll loop
 # rather than a 3 s fixed sleep) — required under parallel CI load
@@ -298,6 +366,7 @@ main() {
     test_export_med
     test_export_as_path_prepend
 
+    test_export_strips_non_transitive_extended_communities
     echo ""
     log "Results: $pass passed, $fail failed"
     if [ "$fail" -gt 0 ]; then
