@@ -1163,6 +1163,13 @@ fn runtime_config_settlement_matrix_four_rows_three_cycles() {
 // the watchdog deadline. Well above every harness wait in these rows.
 const ESCALATION_HOLD_BUDGET: Duration = SETUP_BUDGET;
 const SIGNAL_LINE: &str = "termination signal received during coordinated shutdown";
+// The two distinct continuations of SIGNAL_LINE: the signal fenced the owner
+// itself, versus the signal arrived after something else already had. Neither
+// string is a substring of the other, so each excludes the other.
+const SIGNAL_FENCED_NOW: &str =
+    "the owned runtime-config settlement is fenced and the daemon will fail-stop";
+const SIGNAL_ALREADY_FENCED: &str =
+    "the owned runtime-config settlement is already fenced and the daemon will fail-stop";
 const FAIL_STOP_LINE: &str = "runtime config settlement fail-stop armed";
 const SETTLED_LINE: &str = "runtime config settlement settled";
 const OPERATOR_FORCED: &str = "\"fence_reason\":\"operator_forced\"";
@@ -1193,6 +1200,12 @@ fn escalate_and_wait_exit70(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> I
     let signalled = Instant::now();
     daemon.sigterm();
     daemon.wait_log(SIGNAL_LINE, OPERATOR_FORCED);
+    daemon.wait_log(SIGNAL_LINE, SIGNAL_FENCED_NOW);
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, SIGNAL_ALREADY_FENCED),
+        "a signal that fenced the owner must not report it as already fenced\n{}",
+        daemon.log()
+    );
     daemon.wait_log(FAIL_STOP_LINE, OPERATOR_FORCED);
     wait_metrics(lab, row, "operator_forced", true, daemon);
     assert_eq!(ready(daemon.metrics), Some(503));
@@ -1346,6 +1359,74 @@ fn escalation_row_no_owner(ordinal: usize) {
     assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
 }
 
+/// A further signal that finds the owner already fenced by its own budget
+/// rather than by the signal: the daemon reports the fail-stop that is
+/// already in flight, with the real reason, instead of a skipped wait.
+///
+/// This cannot be a third signal inside another row's grace window.
+/// `stop_waiting_on_signal` awaits one signal, logs, cancels its token and
+/// ends, so a later signal has no receiver awaiting it and is never logged.
+/// The owner must therefore be fenced by something other than the signal
+/// before the first further signal arrives, and the only such cause the lab
+/// can drive is budget expiry. The default two-second hold budget expires
+/// while coordinated shutdown waits on the owner, which leaves the
+/// five-second recovery-fence grace to deliver the further signal into.
+fn escalation_row_already_fenced(ordinal: usize) {
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row returns its request");
+    };
+    daemon.sigterm();
+    daemon.wait_log("initiating coordinated shutdown", "");
+    // The owner's own budget fences it while the drain waits; the signal did not.
+    let fenced_at = wait_fenced(&lab, MatrixRow::PeerGroup, &mut daemon);
+    daemon.wait_log(FAIL_STOP_LINE, "\"fence_reason\":\"budget_expired\"");
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, ""),
+        "nothing has taken the further-signal path yet\n{}",
+        daemon.log()
+    );
+
+    // The further signal lands inside the grace, with the owner already
+    // fenced. The row's existing outcome must be unchanged: one fence, one
+    // fail-stop line, still exit 70 within the grace. Assert the log after
+    // that exit rather than polling for it: the daemon exits at the grace
+    // boundary whatever the signal did, so polling would race the exit, and
+    // every line it wrote is in the file once it is gone.
+    daemon.sigterm();
+    daemon.wait_exit70(fenced_at);
+    assert!(
+        daemon.log_has(SIGNAL_LINE, SIGNAL_ALREADY_FENCED),
+        "the further signal did not report the fail-stop already in flight\n{}",
+        daemon.log()
+    );
+    assert!(
+        daemon.log_has(SIGNAL_LINE, "\"fence_reason\":\"budget_expired\""),
+        "the already-fenced report must carry the real fence reason\n{}",
+        daemon.log()
+    );
+    for absent in [SIGNAL_FENCED_NOW, OPERATOR_FORCED] {
+        assert!(
+            !daemon.log_has(SIGNAL_LINE, absent),
+            "the signal must not claim it fenced an already-fenced owner\n{}",
+            daemon.log()
+        );
+    }
+    assert!(
+        !daemon.log_has(FAIL_STOP_LINE, OPERATOR_FORCED),
+        "the owner must not be fenced a second time\n{}",
+        daemon.log()
+    );
+    for request in requests {
+        assert_failed(
+            &request.wait_output(Duration::from_secs(2)),
+            "fenced mutation",
+        );
+    }
+}
+
 #[test]
 fn shutdown_signal_escalation_rows() {
     let _ = rbgp_binary();
@@ -1354,6 +1435,7 @@ fn shutdown_signal_escalation_rows() {
     escalation_row_owner_settles_first(103);
     escalation_row_signal_lands_first(104);
     escalation_row_no_owner(105);
+    escalation_row_already_fenced(106);
 }
 
 #[test]
