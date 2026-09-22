@@ -730,6 +730,136 @@ fn rejection_evidence_lost_after_repointing_requires_recovery() {
     }
 }
 
+/// `recover rollback --apply` with the rollback's own activation command in
+/// `command` (the rig's, unless it is `None`: a path that cannot start).
+fn cli_recover_rollback(rig: &Rig, command: Option<&Path>, settle: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_rs-config-render"))
+        .args(["recover", "rollback", "--apply", "--state-dir"])
+        .arg(&rig.state)
+        .args(["--router-handle", "b2-rs1-lan1-ipv4"])
+        .arg("--runtime-state-dir")
+        .arg(&rig.runtime)
+        .arg("--host-state-dir")
+        .arg(&rig.host)
+        .arg("--rbgp")
+        .arg(&rig.rbgp)
+        .arg("--rbgp-addr")
+        .arg(rig.binding(&rig.state).rbgp_addr())
+        .args(["--settle-seconds", settle, "--activation-command"])
+        .arg(command.map_or_else(|| rig.root.join("missing-command"), Path::to_path_buf))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn recover_rollback_reports_a_reload_not_applied_as_nothing_changed() {
+    let _serial = activation_test_guard();
+    const NOT_SETTLED: &str = "rs-config-render: recover rollback: rollback did not settle: current is re-pointed but the daemon did not prove it; inspect with status\n";
+    // What the rollback's own reload does, and what the verb must report:
+    // settled is success; a reload provably not applied (never started, or
+    // the daemon's own terminal no-effect outcome for exactly that reload,
+    // re-proven after `current` is restored) changed nothing, exit 2 with
+    // `current` back on the generation it was rolled away from; anything
+    // else is exit 5, on the target unless the restore itself was reached.
+    for (mode_name, code, on_target, stderr) in [
+        ("ok", 0, true, ""),
+        (
+            "no-effect-rejected",
+            2,
+            false,
+            "rs-config-render: recover rollback: daemon rejected the rollback reload without runtime effect; current restored, nothing changed; the daemon log names the reason\n",
+        ),
+        (
+            "missing-command",
+            2,
+            false,
+            "rs-config-render: recover rollback: activation command did not start; current restored, nothing changed\n",
+        ),
+        (
+            "repoint-settling",
+            5,
+            false,
+            "rs-config-render: recover rollback: rollback target was not applied, but restoring current could not be re-proven; inspect with status\n",
+        ),
+        ("no-effect-silent", 5, true, NOT_SETTLED),
+        ("no-effect-ignored", 5, true, NOT_SETTLED),
+        ("no-effect-restarted", 5, true, NOT_SETTLED),
+        ("no-effect-settling", 5, true, NOT_SETTLED),
+        ("no-effect-no-metrics", 5, true, NOT_SETTLED),
+        ("partial", 5, true, NOT_SETTLED),
+        ("down", 5, true, NOT_SETTLED),
+    ] {
+        let rig = Rig::new();
+        let first = rig.candidate("candidate-a", 140);
+        rig.run(&first, true, &rig.activation).unwrap();
+        let target = rig.current();
+        // A partial apply: exit 5, `current` on the candidate, fence left.
+        rig.set("activation-mode", "partial");
+        assert_eq!(
+            rig.run_with_settle(
+                &rig.candidate("candidate-partial", 141),
+                false,
+                &rig.activation,
+                DEADLINE_SETTLE
+            ),
+            Err(Error::RecoveryRequired)
+        );
+        let from = rig.current();
+        let receipt = fs::read(rig.state.join("activation-receipt.json")).unwrap();
+        let activations = fs::read_to_string(rig.root.join("activation.log")).unwrap();
+        rig.set("activation-mode", mode_name);
+        if mode_name == "ok" {
+            // A full reload replaces the partially applied runtime.
+            fs::remove_file(rig.root.join("runtime-toml")).unwrap();
+        }
+        let output = cli_recover_rollback(
+            &rig,
+            (mode_name != "missing-command").then_some(rig.activation.as_path()),
+            if mode_name == "ok" { "30" } else { "2" },
+        );
+        assert_eq!(output.status.code(), Some(code), "{mode_name}: {output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            stderr,
+            "{mode_name}"
+        );
+        assert_eq!(
+            rig.current(),
+            if on_target { &*target } else { &*from },
+            "{mode_name}"
+        );
+        assert_eq!(
+            fs::read_to_string(rig.root.join("activation.log"))
+                .unwrap()
+                .lines()
+                .count(),
+            activations.lines().count() + usize::from(mode_name != "missing-command"),
+            "{mode_name}"
+        );
+        assert_eq!(
+            rig.host.join("ixp-manager-host-fence.json").exists(),
+            code != 0,
+            "{mode_name}"
+        );
+        if code == 2 {
+            assert_eq!(
+                fs::read(rig.state.join("activation-receipt.json")).unwrap(),
+                receipt,
+                "{mode_name}: the receipt must be untouched"
+            );
+        } else {
+            let receipt = rig.receipt();
+            let status = if code == 0 {
+                "rolled_back"
+            } else {
+                "recovery_required"
+            };
+            assert_eq!(receipt["status"], status, "{mode_name}");
+            assert_eq!(receipt["phases"]["runtime_equal"], code == 0, "{mode_name}");
+        }
+    }
+}
+
 #[test]
 fn initial_failed_command_exits_five_with_last_recovery_receipt() {
     let _serial = activation_test_guard();
@@ -998,7 +1128,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 18);
+    assert_eq!(tests, 19);
 }
 
 mod prune {

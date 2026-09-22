@@ -808,6 +808,24 @@ mod unix {
         !after.settling && after.process_start == before.process_start && after.outcomes == expected
     }
 
+    /// Whether an unsettled attempt provably left the runtime untouched: the
+    /// command never started, or the daemon's own terminal no-effect outcome
+    /// for the one reload it observed since `before`. Callers ask again after
+    /// re-pointing `current`: a reload that registers after that re-point
+    /// reads the restored generation, and one registered before it is still
+    /// visible.
+    fn not_applied(
+        attempt: Attempt,
+        activation: Activation<'_>,
+        before: Option<&Reloads>,
+        deadline: Instant,
+    ) -> bool {
+        !attempt.ran
+            || before.is_some_and(|before| {
+                rejected_once_since(activation.rbgp, activation.rbgp_addr, before, deadline)
+            })
+    }
+
     fn settle(rbgp: &Path, rbgp_addr: &str, comparison: &Path, deadline: Instant) -> bool {
         loop {
             if health_probe(rbgp, rbgp_addr, deadline) == Health::Reachable(true)
@@ -1127,24 +1145,19 @@ mod unix {
                     finish("activated", phases)?;
                     return Ok(Status::Activated);
                 }
-                // A started command is rolled back only on the daemon's own
-                // terminal no-effect outcome for the one reload it observed,
-                // re-proven after `current` names the previous generation: a
-                // reload that registers after that re-point reads the previous
-                // files, and one registered before it is still visible.
-                let rejected = |deadline| {
-                    before.as_ref().is_some_and(|before| {
-                        rejected_once_since(options.rbgp, options.rbgp_addr, before, deadline)
-                    })
+                // Roll back only an attempt proven not applied, before and
+                // after `current` names the previous generation again.
+                let unapplied = |deadline| {
+                    not_applied(phases.candidate, options.into(), before.as_ref(), deadline)
                 };
-                if !phases.candidate.ran || rejected(Instant::now() + options.settle) {
+                if unapplied(Instant::now() + options.settle) {
                     let rollback = publish_current(options.state_dir, previous_target);
                     if rollback != Publication::UnchangedError {
                         phases.rollback_publication = Some(rollback);
                     }
                     let deadline = Instant::now() + options.settle;
                     if rollback == Publication::Durable
-                        && (!phases.candidate.ran || rejected(deadline))
+                        && unapplied(deadline)
                         && health_probe(options.rbgp, options.rbgp_addr, deadline)
                             == Health::Reachable(true)
                         && equal_runtime(
@@ -1220,19 +1233,38 @@ mod unix {
         )
     }
 
+    /// What a [`republish`] left behind.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Republished {
+        /// The daemon settled on the target; receipt `rolled_back`.
+        Settled,
+        /// Not proven either way; `current` names the target, receipt
+        /// `recovery_required`.
+        Unsettled,
+        /// Provably not applied (`started`: the daemon rejected the reload
+        /// without runtime effect; otherwise the command never started), and
+        /// `current` restored and re-proven: nothing changed, receipt untouched.
+        NotApplied { started: bool },
+        /// Proven not applied, but not re-proven after restoring `current`,
+        /// which may name either generation; receipt `recovery_required`.
+        RestoreUnproven,
+    }
+
     /// Re-point `current` at the already published generation `target` and run
     /// the activation command through the same publish-activate-settle path a
     /// first activation uses, then write the activation receipt for
     /// `candidate` (the generation being rolled away from): `rolled_back` when
-    /// the daemon settled on `target`, `recovery_required` otherwise. The
-    /// caller holds the activation state lock. Returns whether it settled.
+    /// the daemon settled on `target`, `recovery_required` otherwise. An
+    /// attempt proven [`not_applied`] instead re-points `current` back at
+    /// `candidate` and leaves the receipt alone. The caller holds the
+    /// activation state lock.
     pub(crate) fn republish(
         state: &Path,
         target: &str,
         candidate: &str,
         activation: Activation<'_>,
         binding: &Binding,
-    ) -> AResult<bool> {
+    ) -> AResult<Republished> {
         let verified = verify_candidate(&state.join(target), binding)?;
         let comparison =
             comparison_file(&normalized_toml(&verified.config, state)?, state, "recover")?;
@@ -1251,9 +1283,30 @@ mod unix {
             ));
         }
         phases.rollback_publication = Some(publication);
+        let mut outcome = Republished::Unsettled;
         if publication == Publication::Durable {
+            let before = reloads(
+                activation.rbgp,
+                activation.rbgp_addr,
+                Instant::now() + activation.settle,
+            );
             phases.rollback = activate_and_settle(activation, comparison.as_ref());
             phases.runtime_equal = phases.rollback.settled;
+            let unapplied =
+                |deadline| not_applied(phases.rollback, activation, before.as_ref(), deadline);
+            if phases.runtime_equal {
+                outcome = Republished::Settled;
+            } else if unapplied(Instant::now() + activation.settle) {
+                if publish_current(state, &format!("generations/{candidate}"))
+                    == Publication::Durable
+                    && unapplied(Instant::now() + activation.settle)
+                {
+                    return Ok(Republished::NotApplied {
+                        started: phases.rollback.ran,
+                    });
+                }
+                outcome = Republished::RestoreUnproven;
+            }
         }
         drop(comparison);
         let status = if phases.runtime_equal {
@@ -1270,7 +1323,7 @@ mod unix {
             &verified.checker_version,
             binding,
         )?;
-        Ok(phases.runtime_equal)
+        Ok(outcome)
     }
 
     fn host_error(error: ixp_manager_host::Error) -> Error {
@@ -1422,7 +1475,7 @@ mod unix {
 pub use unix::activate;
 #[cfg(unix)]
 pub(crate) use unix::{
-    Activation, Comparison, Health, RuntimeDiff, activate_guarded, comparison_file, current_target,
-    health_probe, normalized_toml, private, republish, runtime_diff, state_lock, unique_name,
-    valid_digest, verify_candidate, write_kept_receipt,
+    Activation, Comparison, Health, Republished, RuntimeDiff, activate_guarded, comparison_file,
+    current_target, health_probe, normalized_toml, private, republish, runtime_diff, state_lock,
+    unique_name, valid_digest, verify_candidate, write_kept_receipt,
 };

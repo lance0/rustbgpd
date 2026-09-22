@@ -386,7 +386,7 @@ connection `resume` takes); a plain `activate` exit 5 needs neither.
 | Verb | Does | Refuses when |
 |---|---|---|
 | `keep-current --rbgp <PATH> [--force]` | probes health and, only when healthy, runs `config diff` against `current`; then writes the receipt as `kept`, delivers `updated` (or `release-update-lock` when the journal shows nothing was activated), and removes journal and fence | the comparison is `Different` or `Unknown` (unless `--force`); the lock was already released |
-| `rollback --rbgp <PATH> --activation-command … [--activation-arg …] [--settle-seconds N] [--to generations/<digest>]` | re-points `current` at the previous generation and runs the activation command through the same publish-activate-settle path as a first activation, writes the receipt as `rolled_back`, delivers `release-update-lock`, removes journal and fence | the previous generation is unknown (receipt absent or stale) and `--to` is not given; the target is `current` or not a published generation; the journal shows nothing was activated; the lock was already released |
+| `rollback --rbgp <PATH> --activation-command … [--activation-arg …] [--settle-seconds N] [--to generations/<digest>]` | re-points `current` at the previous generation and runs the activation command through the same publish-activate-settle path as a first activation, writes the receipt as `rolled_back`, delivers `release-update-lock`, removes journal and fence | the previous generation is unknown (receipt absent or stale) and `--to` is not given; the target is `current` or not a published generation; the journal shows nothing was activated; the lock was already released; under `--apply`, the target was provably not applied (the activation command did not start, or the daemon rejected its reload without runtime effect), after which `current` is restored and nothing else changed |
 | `release-lock --kept\|--rolled-back` | delivers that one callback and marks the journal `lock_released`; retryable | there is no journal |
 | `clear` | removes journal and fence | a journal exists whose callback no verb delivered |
 
@@ -394,7 +394,10 @@ Callback intent is journaled before the request, exactly as the lifecycle does
 it. A step that does not complete under `--apply` — a callback not delivered, a
 rollback that does not settle — exits 5 with fence and journal retained and a
 message naming the retry (`recover release-lock --kept`, `status`); exit 5 keeps
-its single table meaning, "a human is needed". The
+its single table meaning, "a human is needed". A rollback whose reload the
+daemon rejects without runtime effect is not one of those: the same metrics
+proof `activate` uses, repeated after `current` is re-pointed back, shows the
+verb changed nothing, so it exits 2. The
 [manual-recovery runbook](../../docs/cookbook/activation-manual-recovery.md)
 shows each verb's exact output and keeps the hand procedures as an appendix.
 
@@ -512,8 +515,8 @@ Codes 1–4 and 8–9 leave the previous configuration running untouched
 (fenced, busy, or unreadable forensic state — nothing removed), and 8. `status`
 uses 0 (any readable state, manual recovery included), 1 (unreadable state
 directory), and 2 (invalid binding). The `recover` verbs use 0, 2 (no fence for
-this binding, resumable or unreadable state, an unmet gate — nothing changed),
-and 5 (an `--apply` step did not complete; fence and journal retained, the
+this binding, resumable or unreadable state, an unmet gate, or a rollback target
+provably not applied — nothing changed), and 5 (an `--apply` step did not complete; fence and journal retained, the
 message names the retry).
 
 Refused knobs: RTT-based communities and `rtt_thresholds` (ARouteServer

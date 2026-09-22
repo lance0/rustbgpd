@@ -178,10 +178,21 @@ symlink swap) and writes the activation receipt as `rolled_back`. If the daemon
 does not settle on the target within `--settle-seconds`, the verb exits 5
 (`rollback did not settle`): `current` is re-pointed, the receipt reads
 `recovery_required`, fence and journal stay — run `status` again and work from
-step 1. It refuses when the journal shows no candidate was activated (the
-lock-ambiguous case: use `release-lock --rolled-back` and `clear`), when the
-target is the current generation, or when the target is not a published
-generation.
+step 1. The exception is a target provably not applied: the activation command
+did not start, or the daemon rejected the reload without runtime effect (the
+same `rbgp metrics` proof `activate` uses: one new `rejected_no_effect` outcome
+from the same process and no settlement in progress, checked again after
+`current` is re-pointed back). The verb then restores `current` to the
+generation it rolled away from and exits 2 (`daemon rejected the rollback
+reload without runtime effect; current restored, nothing changed; the daemon
+log names the reason`; the daemon's `SIGHUP reload rejected without runtime
+effect` line carries it). Fence, journal, receipt and upstream lock are as they
+were, and the daemon still runs what it ran before, so choose again from step
+1. If that second check fails, the verb exits 5 (`restoring current could not
+be re-proven`) and `current` may name either generation. It refuses when the
+journal shows no candidate was activated (the lock-ambiguous case: use
+`release-lock --rolled-back` and `clear`), when the target is the current
+generation, or when the target is not a published generation.
 
 In both verbs the callback is the one step that can fail on its own (step 3):
 the local work is then done, the exit is 5, and the message names the retry
