@@ -186,13 +186,18 @@ groups:
 
       - alert: BgpPeerAdjRibInEmpty
         # At least one current scoped session is Established, but the
-        # peer's unicast Adj-RIB-In is empty (afi_safi="all" is IPv4 and
-        # IPv6 unicast combined, not every family). Aggregating the
-        # session gauge by peer handles link-local siblings while the
-        # join preserves native labels from the RIB series. Expected for
-        # send-only peers — silence or drop this rule for those.
+        # peer holds no counted Adj-RIB-In paths. The sum covers every
+        # afi_safi the daemon emits for this gauge: "all" (IPv4 and IPv6
+        # unicast combined), "evpn" and "flowspec", so an EVPN-only or
+        # FlowSpec-only peer does not fire. VPN, labeled-unicast, BGP-LS
+        # and RTC paths are not counted, so a peer sending only those
+        # families still fires. Summing without afi_safi keeps the other
+        # native labels of the RIB series; aggregating the session gauge
+        # by peer handles link-local siblings. Expected for send-only
+        # peers and peers of the uncounted families — silence or drop
+        # this rule for those.
         expr: >-
-          bgp_rib_prefixes{afi_safi="all"} == 0
+          sum without (afi_safi) (bgp_rib_prefixes) == 0
           and on (instance, peer)
           max by (instance, peer) (bgp_peer_session_established) == 1
         for: 10m
@@ -202,8 +207,8 @@ groups:
           summary: "No prefixes from {{ $labels.peer }}"
           description: >-
             The session to {{ $labels.peer }} on {{ $labels.instance }}
-            is Established but its Adj-RIB-In has held zero prefixes
-            for 10 minutes.
+            is Established but its unicast, EVPN and FlowSpec
+            Adj-RIB-In tables have held zero paths for 10 minutes.
 
       - alert: BgpMaxPrefixLimitExceeded
         # Each increment is followed by a Cease NOTIFICATION and
