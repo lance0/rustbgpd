@@ -345,6 +345,9 @@ test as-path-65 {{
             "reject-first-as-not-peer-as",
             "reject-irrdb-origin-as-filtered",
             "reject-irrdb-prefix-filtered",
+            "info-rpki-valid",
+            "info-rpki-unknown",
+            "info-irrdb-valid",
             "accept-authorized",
         ],
     );
@@ -400,40 +403,40 @@ fn rpki_valid_route_without_route_object_passes_the_irrdb_prefix_term() {
             "42",
             "valid",
             "accept",
-            "accept-authorized",
+            &["info-rpki-valid", "accept-authorized"][..],
         ),
         (
             "31.135.160.0/19",
             "42",
             "not-found",
             "reject",
-            "reject-irrdb-prefix-filtered",
+            &["reject-irrdb-prefix-filtered"][..],
         ),
         (
             "31.135.160.0/19",
             "42",
             "invalid",
             "reject",
-            "reject-irrdb-prefix-filtered",
+            &["reject-irrdb-prefix-filtered"][..],
         ),
         (
             "31.135.160.0/19",
             "42 43",
             "valid",
             "reject",
-            "reject-irrdb-origin-as-filtered",
+            &["reject-irrdb-origin-as-filtered"][..],
         ),
         (
             "31.135.128.0/19",
             "42",
             "not-found",
             "accept",
-            "accept-authorized",
+            &["info-rpki-unknown", "info-irrdb-valid", "accept-authorized"][..],
         ),
     ] {
         assert_eq!(
             matched_terms(client, "client-3", &case(prefix, path, rpki, verdict)),
-            [decided_by],
+            decided_by,
             "{prefix} {path} {rpki}"
         );
     }
@@ -447,6 +450,9 @@ fn rpki_valid_route_without_route_object_passes_the_irrdb_prefix_term() {
             "reject-first-as-not-peer-as",
             "reject-irrdb-origin-as-filtered",
             "reject-irrdb-prefix-filtered",
+            "info-rpki-valid",
+            "info-rpki-unknown",
+            "info-irrdb-valid",
             "accept-authorized",
         ],
     );
@@ -480,7 +486,7 @@ fn rpki_valid_route_without_route_object_passes_the_irrdb_prefix_term() {
     assert!(client.contains(
         "term reject-irrdb-prefix-filtered { if !(route.prefix in client-3-prefixes) { reject } }"
     ));
-    assert!(!client.contains("rpki"), "{client}");
+    assert!(!client.contains("route.rpki"), "{client}");
     assert_eq!(
         matched_terms(
             client,
@@ -489,6 +495,116 @@ fn rpki_valid_route_without_route_object_passes_the_irrdb_prefix_term() {
         ),
         ["reject-irrdb-prefix-filtered"]
     );
+}
+
+/// Load-bearing: IXP Manager v7.4 tags accepted routes with informational
+/// large communities (`neighbors.foil.php` 169-231, `rpki.foil.php` 40-58):
+/// `RS:1000:1` RPKI valid (accepted before the IRRDB prefix filter, so no
+/// `RS:1001:*`), `RS:1000:2` RPKI unknown, `RS:1000:3` RPKI not checked,
+/// `RS:1001:1` IRRDB valid, `RS:1001:2` IRRDB not checked. `f_export_as*`
+/// deletes `(RS, *, *)` toward members, as the rendered export scrub does.
+#[test]
+fn informational_communities_follow_ixp_manager_v7_4() {
+    let case = |slug: &str, datasets: &str, path: &str, rpki: &str, with: &str| {
+        format!(
+            "test info-case {{\n{datasets}    route {{ prefix 31.135.128.0/19; as-path \"{path}\"; rpki {rpki} }}\n    expect client-{slug} == accept{with}\n}}\n"
+        )
+    };
+    let irr =
+        "    dataset client-3-origins { 42 }\n    dataset client-3-prefixes { 31.135.128.0/19 }\n";
+    for (router_rpki, irr_filter, rpki, with, terms) in [
+        (
+            true,
+            true,
+            "valid",
+            " with large-community 65501:1000:1",
+            &["info-rpki-valid", "accept-authorized"][..],
+        ),
+        (
+            true,
+            true,
+            "not-found",
+            " with large-community 65501:1000:2, large-community 65501:1001:1",
+            &["info-rpki-unknown", "info-irrdb-valid", "accept-authorized"][..],
+        ),
+        (
+            false,
+            true,
+            "not-found",
+            " with large-community 65501:1000:3, large-community 65501:1001:1",
+            &[
+                "info-rpki-not-checked",
+                "info-irrdb-valid",
+                "accept-authorized",
+            ][..],
+        ),
+        (
+            true,
+            false,
+            "valid",
+            " with large-community 65501:1000:1",
+            &["info-rpki-valid", "accept-authorized"][..],
+        ),
+        (
+            true,
+            false,
+            "not-found",
+            " with large-community 65501:1000:2, large-community 65501:1001:2",
+            &[
+                "info-rpki-unknown",
+                "info-irrdb-not-checked",
+                "accept-authorized",
+            ][..],
+        ),
+        (
+            false,
+            false,
+            "not-found",
+            " with large-community 65501:1000:3, large-community 65501:1001:2",
+            &[
+                "info-rpki-not-checked",
+                "info-irrdb-not-checked",
+                "accept-authorized",
+            ][..],
+        ),
+    ] {
+        let mut input = value();
+        input["router"]["rpki"] = router_rpki.into();
+        input["clients"][0]["irr_filter"] = irr_filter.into();
+        if !irr_filter {
+            input["clients"][0]["origins"] = serde_json::json!([]);
+            input["clients"][0]["prefixes"] = serde_json::json!([]);
+        }
+        let files = rendered(&input).unwrap().files;
+        let client = &files["policy/client-3.rpol"];
+        let datasets = if irr_filter { irr } else { "" };
+        // `with` pins the added tags; the matched terms pin that nothing else
+        // informational fired (a valid route never reaches info-irrdb-*).
+        assert_eq!(
+            matched_terms(client, "client-3", &case("3", datasets, "42", rpki, with)),
+            terms,
+            "rpki={router_rpki} irr={irr_filter} {rpki}"
+        );
+        assert!(run_rpol_tests(client).unwrap().all_passed(), "{client}");
+        assert!(
+            files["policy/ixp-hygiene.rpol"].contains(
+                "term remove-own-as-large-communities { remove large-community 65501:*:* }"
+            )
+        );
+    }
+    let client = &rendered(&value()).unwrap().files["policy/client-3.rpol"];
+    assert!(client.contains(
+        "    term info-rpki-valid { if route.rpki == valid { add large-community 65501:1000:1 } }\n\
+         \x20   term info-rpki-unknown { if route.rpki == not-found { add large-community 65501:1000:2 } }\n\
+         \x20   term info-irrdb-valid { if route.rpki != valid { add large-community 65501:1001:1 } }\n\
+         \x20   term accept-authorized { accept }\n"
+    ), "{client}");
+    for test in [
+        "expect client-3 == accept with large-community 65501:1000:2, large-community 65501:1001:1\n",
+        "expect client-3 == accept with large-community 65501:1000:1\n",
+    ] {
+        assert!(client.contains(test), "generated test missing: {test}");
+    }
 }
 
 #[test]
@@ -574,7 +690,7 @@ fn v1_and_v2_dispatch_are_strict_and_v1_output_stays_schema_specific() {
         ),
         (
             "policy/client-3.rpol",
-            "864c34a5ec993f9c17c7786dba2aba589997576601b582a9c30f5d29f7c13482",
+            "e3acec09a0b49ea5485876c52229b9845965af0e2f02bb0168f08154701806cb",
         ),
         (
             "policy/ixp-hygiene.rpol",
@@ -656,7 +772,7 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
     let full = rendered_v2(&v2_value(V2_FILTERS)).unwrap().files;
     assert_eq!(
         content_digest(&full.values().map(String::as_str).collect::<String>()),
-        "18d694cbc250a566516b1e01bdbe90e3da72790e826778c7dfcde78f46df6c45"
+        "898f6dc4ced290ef3491adcbcf068000e7ca19a566200deca734464c6c13ef7b"
     );
     let import = &full["policy/client-1.rpol"];
     assert_terms(
@@ -668,6 +784,9 @@ fn v2_filter_policies_preserve_order_direction_and_reachability() {
             "reject-irrdb-prefix-filtered",
             "ui-advertise-31",
             "ui-advertise-33",
+            "info-rpki-valid",
+            "info-rpki-unknown",
+            "info-irrdb-valid",
             "accept-authorized",
         ],
     );
@@ -846,6 +965,9 @@ fn v2_all_action_variants_execute_with_exact_effects() {
             "ui-advertise-42",
             "ui-advertise-43",
             "ui-advertise-44",
+            "info-rpki-valid",
+            "info-rpki-unknown",
+            "info-irrdb-valid",
             "accept-authorized",
         ],
     );

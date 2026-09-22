@@ -92,6 +92,21 @@ routes without a route object are rejected until then; the table update
 refreshes sessions whose import policy reads RPKI state. Without `router.rpki`
 the prefix term is unconditional, as upstream.
 
+Accepted routes carry IXP Manager v7.4's informational large communities,
+added by `info-*` terms just before `accept-authorized`: `RS:1000:1` for an
+RPKI-valid route, `RS:1000:2` for RPKI not-found, `RS:1000:3` when the router
+has RPKI off, `RS:1001:1` for an IRRDB-valid prefix and `RS:1001:2` for a member
+with IRR filtering disabled, where `RS` is the router ASN. As upstream, an
+RPKI-valid route is accepted before the IRRDB prefix check, so it carries
+`RS:1000:1` and no `RS:1001:*` tag. IXP Manager's looking-glass route view
+shows these values as badges such as RPKI VALID and IRRDB VALID. The generated
+client tests pin them with `expect ... with large-community`. The export scrub
+removes them toward members, as IXP Manager's `f_export_as*` filter deletes
+`(RS, *, *)`. Rejected routes do
+not carry IXP Manager's filtered-route informational tags (`RS:1001:1000`,
+`RS:1001:1001`, `RS:1001:1002`); the Birdwatcher adapter reports their
+`RS:1101:*` reason instead.
+
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
 community and matching rules accumulate after hygiene and IRR checks. Receive

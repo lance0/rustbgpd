@@ -1078,12 +1078,13 @@ fn render_client(
             &format!("add large-community {router_asn}:{function}:{target}"),
         );
     }
+    render_informational_terms(&mut out, client.irr_filter, router_asn, rpki);
     out.push_str("    term accept-authorized { accept }\n}\n");
     if filters.is_empty() {
         if client.irr_filter {
-            render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+            render_ixp_client_tests(&mut out, slug, client.asn, router_asn, rpki);
         } else {
-            render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn);
+            render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn, router_asn, rpki);
         }
         return Ok(out);
     }
@@ -1172,21 +1173,65 @@ fn render_client(
     }
     out.push_str("    term accept-unmatched { accept }\n}\n");
     if client.irr_filter {
-        render_ixp_client_tests(&mut out, slug, client.asn, rpki);
+        render_ixp_client_tests(&mut out, slug, client.asn, router_asn, rpki);
     } else {
-        render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn);
+        render_ixp_irr_disabled_client_tests(&mut out, slug, client.asn, router_asn, rpki);
     }
     Ok(out)
 }
 
-fn render_ixp_client_tests(out: &mut String, slug: u64, peer_asn: u32, rpki: bool) {
+/// IXP Manager v7.4's informational large communities on accepted routes
+/// (`community-filtering-definitions.foil.php`, set in `neighbors.foil.php`
+/// and `rpki.foil.php`). An RPKI-valid route is accepted by `filter_rpki()`
+/// before the IRRDB prefix check, so it carries `RS:1000:1` and no `RS:1001:*`.
+/// The export scrub removes them toward members, as `f_export_as*` does.
+fn render_informational_terms(out: &mut String, irr_filter: bool, router_asn: u32, rpki: bool) {
+    let (irrdb, irrdb_value) = if irr_filter {
+        ("info-irrdb-valid", 1)
+    } else {
+        ("info-irrdb-not-checked", 2)
+    };
+    out.push_str("    # IXP Manager informational communities; the export scrub removes them.\n");
+    if rpki {
+        let _ = write!(
+            out,
+            "    term info-rpki-valid {{ if route.rpki == valid {{ add large-community {router_asn}:1000:1 }} }}\n\
+             \x20   term info-rpki-unknown {{ if route.rpki == not-found {{ add large-community {router_asn}:1000:2 }} }}\n\
+             \x20   term {irrdb} {{ if route.rpki != valid {{ add large-community {router_asn}:1001:{irrdb_value} }} }}\n"
+        );
+    } else {
+        let _ = write!(
+            out,
+            "    term info-rpki-not-checked {{ add large-community {router_asn}:1000:3 }}\n\
+             \x20   term {irrdb} {{ add large-community {router_asn}:1001:{irrdb_value} }}\n"
+        );
+    }
+}
+
+/// The informational communities an accepted RPKI-not-found (or unchecked)
+/// route carries, as an `expect ... with` list.
+fn informational_with(router_asn: u32, rpki: bool, irrdb_value: u8) -> String {
+    let rpki_value = if rpki { 2 } else { 3 };
+    format!(
+        "with large-community {router_asn}:1000:{rpki_value}, large-community {router_asn}:1001:{irrdb_value}"
+    )
+}
+
+fn render_ixp_client_tests(
+    out: &mut String,
+    slug: u64,
+    peer_asn: u32,
+    router_asn: u32,
+    rpki: bool,
+) {
+    let info = informational_with(router_asn, rpki, 1);
     let _ = write!(
         out,
         "\ntest client-{slug}-synthetic-authorized-route {{\n\
          \x20   dataset client-{slug}-origins {{ 64496 }}\n\
          \x20   dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}\n\
          \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64496\" }}\n\
-         \x20   expect client-{slug} == accept\n\
+         \x20   expect client-{slug} == accept {info}\n\
          }}\n\
          \ntest client-{slug}-synthetic-unregistered-origin {{\n\
          \x20   dataset client-{slug}-origins {{ 64498 }}\n\
@@ -1204,7 +1249,7 @@ fn render_ixp_client_tests(out: &mut String, slug: u64, peer_asn: u32, rpki: boo
          \x20   dataset client-{slug}-origins {{ 64496 }}\n\
          \x20   dataset client-{slug}-prefixes {{ 192.0.2.0/24 }}\n\
          \x20   route {{ prefix 198.51.100.0/24; as-path \"{peer_asn} 64496\"; rpki valid }}\n\
-         \x20   expect client-{slug} == accept\n\
+         \x20   expect client-{slug} == accept with large-community {router_asn}:1000:1\n\
          }}\n\
          \ntest client-{slug}-synthetic-rpki-not-found-without-route-object {{\n\
          \x20   dataset client-{slug}-origins {{ 64496 }}\n\
@@ -1221,19 +1266,35 @@ fn render_ixp_client_tests(out: &mut String, slug: u64, peer_asn: u32, rpki: boo
     );
 }
 
-fn render_ixp_irr_disabled_client_tests(out: &mut String, slug: u64, peer_asn: u32) {
+fn render_ixp_irr_disabled_client_tests(
+    out: &mut String,
+    slug: u64,
+    peer_asn: u32,
+    router_asn: u32,
+    rpki: bool,
+) {
     let wrong_asn = if peer_asn == 64496 { 64497 } else { 64496 };
+    let info = informational_with(router_asn, rpki, 2);
     let _ = write!(
         out,
         "\ntest client-{slug}-synthetic-unregistered-origin-accepted {{\n\
          \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64498\" }}\n\
-         \x20   expect client-{slug} == accept\n\
+         \x20   expect client-{slug} == accept {info}\n\
          }}\n\
          \ntest client-{slug}-synthetic-first-as-mismatch {{\n\
          \x20   route {{ prefix 192.0.2.0/24; as-path \"{wrong_asn} {peer_asn}\" }}\n\
          \x20   expect client-{slug} == reject\n\
          }}\n"
     );
+    if rpki {
+        let _ = write!(
+            out,
+            "\ntest client-{slug}-synthetic-rpki-valid-accepted {{\n\
+             \x20   route {{ prefix 192.0.2.0/24; as-path \"{peer_asn} 64498\"; rpki valid }}\n\
+             \x20   expect client-{slug} == accept with large-community {router_asn}:1000:1\n\
+             }}\n"
+        );
+    }
 }
 
 fn render_ixp_asn_dataset(origins: &[u32]) -> String {
