@@ -1425,9 +1425,9 @@ exactly under the floods these drops account for.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_rib_loc_prefixes{afi_safi}` | Loc-RIB size (best paths) per AFI/SAFI |
-| `bgp_rib_prefixes{peer,afi_safi}` | Adj-RIB-In size per peer + AFI/SAFI (received) |
-| `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer + AFI/SAFI (advertised) |
+| `bgp_rib_loc_prefixes{afi_safi}` | Loc-RIB size (best paths) per table; `afi_safi="all"` is IPv4 + IPv6 unicast, not a sum of the other values |
+| `bgp_rib_prefixes{peer,afi_safi}` | Adj-RIB-In size per peer (received), by table: `afi_safi="all"` is IPv4 + IPv6 unicast paths combined, each Add-Path path counted individually; `evpn` and `flowspec` are those tables. VPN, labeled-unicast, BGP-LS and RTC routes are not counted here |
+| `bgp_rib_adj_out_prefixes{peer,afi_safi}` | Adj-RIB-Out size per peer (advertised) per table; `afi_safi="all"` is IPv4 + IPv6 unicast, not a sum of the other values |
 | `bgp_dynamic_neighbor_slots_used` | Dynamic peers currently consuming the process-global admission limit, including retained disabled max-prefix recovery targets |
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |

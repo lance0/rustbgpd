@@ -990,7 +990,10 @@ impl BgpMetrics {
         let rib_prefixes = IntGaugeVec::new(
             Opts::new(
                 "bgp_rib_prefixes",
-                "Number of prefixes in Adj-RIB-In per peer and AFI/SAFI",
+                "Paths in a peer's Adj-RIB-In, by table. afi_safi=\"all\" is \
+                 IPv4 and IPv6 unicast combined, with each Add-Path path counted \
+                 individually; \"evpn\" and \"flowspec\" are those tables. Other \
+                 families are not counted.",
             ),
             &["peer", "afi_safi"],
         )
@@ -8024,18 +8027,18 @@ mod tests {
     #[test]
     fn rib_prefixes_gauge() {
         let m = BgpMetrics::new();
-        m.set_rib_prefixes("10.0.0.1", "ipv4_unicast", 42);
+        m.set_rib_prefixes("10.0.0.1", "all", 42);
 
         let val =
             m.0.rib_prefixes
-                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .with_label_values(&["10.0.0.1", "all"])
                 .get();
         assert_eq!(val, 42);
 
-        m.set_rib_prefixes("10.0.0.1", "ipv4_unicast", 0);
+        m.set_rib_prefixes("10.0.0.1", "all", 0);
         let val =
             m.0.rib_prefixes
-                .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+                .with_label_values(&["10.0.0.1", "all"])
                 .get();
         assert_eq!(val, 0);
     }

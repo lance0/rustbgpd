@@ -1589,6 +1589,9 @@ struct TypedTransactionFakeControl {
     drop_restore_ack: Arc<AtomicBool>,
     /// `StageTransactionConfig` commands received, answered or not.
     stage_calls: Arc<AtomicUsize>,
+    /// Drop the reply of every `PlanTransactionConfig` after the first plan
+    /// of either kind: the post-commit re-plan of a live policy-impact apply.
+    drop_replan_reply: Arc<AtomicBool>,
 }
 
 fn spawn_typed_transaction_manager_controlled(
@@ -1662,6 +1665,10 @@ async fn fake_typed_transaction_manager_actor(
                     .unwrap_or_else(|| response.clone());
                 let mut plan = attach_committed_candidate(response.clone(), &candidate_toml);
                 if plan_calls > 0 {
+                    if control.drop_replan_reply.load(Ordering::Relaxed) {
+                        drop(reply);
+                        continue;
+                    }
                     plan.runtime_snapshot_token =
                         response.post_commit_runtime_snapshot_token.clone();
                 }
@@ -2233,7 +2240,7 @@ fn peer_session_reshape_plan() -> RuntimeConfigTransactionPlan {
 async fn fake_live_policy_peer_manager(
     mut rx: mpsc::Receiver<PeerManagerCommand>,
     plan: RuntimeConfigTransactionPlan,
-    _snapshot_toml: Arc<Mutex<String>>,
+    snapshot_toml: Arc<Mutex<String>>,
     apply_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
     captured_priors: Arc<Mutex<VecDeque<Vec<ResolvedPeerPolicy>>>>,
     apply_calls: Arc<Mutex<Vec<Vec<ResolvedPeerPolicy>>>>,
@@ -2268,6 +2275,13 @@ async fn fake_live_policy_peer_manager(
             }
             PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
                 let _ = reply.send(());
+            }
+            PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                    toml: snapshot_toml.lock().await.clone(),
+                    rpol_files: Vec::new(),
+                    rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                }));
             }
             PeerManagerCommand::ApplyPolicyImpactSnapshot {
                 static_targets,
@@ -6227,6 +6241,157 @@ async fn apply_commits_live_policy_impact_after_persist_ack() {
         &[Vec::<DynamicRangeTarget>::new()],
         "static live-policy impact must not send dynamic selectors"
     );
+}
+
+/// Live policy-impact executor whose post-commit re-plan reply is dropped:
+/// the candidate is durably committed and live before the re-plan runs.
+fn replan_dropped_live_policy_fakes(
+    previous_toml: &str,
+    candidate_toml: &str,
+) -> (
+    mpsc::Sender<PeerManagerCommand>,
+    mpsc::Sender<InternalCommand>,
+    Arc<Mutex<String>>,
+) {
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.to_string()));
+    let internal_tx = spawn_typed_transaction_manager_controlled(
+        snapshot_toml.clone(),
+        live_impact_plan(),
+        TypedTransactionFakeControl {
+            drop_replan_reply: Arc::new(AtomicBool::new(true)),
+            ..TypedTransactionFakeControl::default()
+        },
+    );
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_live_policy_peer_manager(
+        peer_rx,
+        live_impact_plan(),
+        snapshot_toml.clone(),
+        Arc::new(Mutex::new(VecDeque::from([Ok(())]))),
+        Arc::new(Mutex::new(VecDeque::from([resolved_policy_targets(
+            candidate_toml,
+            previous_toml,
+        )]))),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    (peer_tx, internal_tx, snapshot_toml)
+}
+
+fn spawn_accepting_persister(mut config_rx: mpsc::Receiver<ConfigEvent>) {
+    tokio::spawn(async move {
+        while let Some(event) = config_rx.recv().await {
+            if let ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. } = event {
+                ack.accept().await;
+            }
+        }
+    });
+}
+
+#[tokio::test]
+async fn unconfirmed_live_policy_replan_loss_after_commit_is_not_a_clean_failure() {
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let (peer_tx, internal_tx, snapshot_toml) =
+        replan_dropped_live_policy_fakes(&previous_toml, &candidate_toml);
+    let (config_tx, config_rx) = mpsc::channel(8);
+    spawn_accepting_persister(config_rx);
+
+    let error = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(config_tx), Vec::new()),
+        proto::ApplyConfigTransactionRequest {
+            candidate_toml: candidate_toml.clone(),
+            expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+            client_request_id: String::new(),
+            comment: String::new(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        },
+        internal_tx,
+    )
+    .await
+    .expect_err("a lost post-commit re-plan cannot report success");
+
+    // The candidate committed before the re-plan ran; the outcome must be a
+    // recovery fence, never an error that reads as "nothing changed".
+    assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+    assert!(
+        matches!(
+            &error,
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                message,
+            } if message.contains("was committed")
+        ),
+        "post-commit re-plan loss must fence as known divergence, got: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn confirmed_live_policy_replan_loss_after_commit_retains_revert_authority() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let config_dir = root.path().join("config");
+    let state_dir = root.path().join("state");
+    for dir in [&config_dir, &state_dir] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let config_path = config_dir.join("rustbgpd.toml");
+    std::fs::write(&config_path, &previous_toml).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&config_path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted);
+    let (peer_tx, internal_tx, snapshot_toml) =
+        replan_dropped_live_policy_fakes(&previous_toml, &candidate_toml);
+    let (config_tx, config_rx) = mpsc::channel(8);
+    spawn_accepting_persister(config_rx);
+    let launch = crate::confirm_journal::v3::LaunchIdentity::resolve(&config_path).unwrap();
+    let locator = launch.locator_path();
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            confirm_journal_path: Some(state_dir.join(crate::confirm_journal::JOURNAL_FILE_NAME)),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_confirm_v3_launch(launch);
+
+    let error = controller
+        .clone()
+        .apply(confirmed_dynamic_request(
+            candidate_toml.clone(),
+            "live-policy-replan-lost",
+            60,
+        ))
+        .await
+        .expect_err("a lost post-commit re-plan cannot report success");
+
+    assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+    assert!(
+        locator.exists(),
+        "the revert authority must survive while the unconfirmed candidate is live"
+    );
+    assert!(
+        matches!(
+            error,
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::KnownDivergence,
+                ..
+            }
+        ),
+        "post-commit re-plan loss must fence as known divergence, got: {error:?}"
+    );
+    let state = controller.state.lock().await;
+    assert_eq!(
+        state.ambiguous_failure_confirm_id.as_deref(),
+        Some("live-policy-replan-lost")
+    );
+    assert!(state.pending.is_none());
 }
 
 #[tokio::test]

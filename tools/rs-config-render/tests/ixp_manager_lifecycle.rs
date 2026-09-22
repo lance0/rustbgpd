@@ -40,6 +40,17 @@ fn executable(path: &Path, contents: &str) {
     mode(path, 0o700);
 }
 
+/// Restore owner access to every directory under `dir` without following
+/// symlinks, so `TempDir` can remove a tree a test left unwritable.
+fn make_removable(dir: &Path) {
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            make_removable(&entry.path());
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Response {
     status: u16,
@@ -209,6 +220,14 @@ struct Rig {
     rbgp: PathBuf,
     activation: PathBuf,
     binding: Binding,
+}
+
+// A test that panics while `state` is `0o500` must not leave its rig, which
+// lives under the crate directory, behind in the source tree.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        make_removable(&self.root);
+    }
 }
 
 impl Rig {

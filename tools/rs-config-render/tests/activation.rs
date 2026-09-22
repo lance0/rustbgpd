@@ -27,8 +27,14 @@ bgp_sighup_reload_outcomes_total{outcome=\"rejected_no_effect\"} 0
 bgp_sighup_reload_outcomes_total{outcome=\"task_failed\"} 0
 ";
 const SETTLING: &str = "bgp_runtime_config_settlement_active{fence_reason=\"none\",kind=\"sighup_reload\",phase=\"mutating\",response_attached=\"detached\"} 1";
-/// Settle window every `Rig::run` activation is given.
-const SETTLE: Duration = Duration::from_secs(1);
+/// Settle window every `Rig::run` activation is given. The fake daemon
+/// settles on its first poll, so this only bounds a hang: one deadline covers
+/// the activation command, the health loop and `rbgp config diff`, a dozen or
+/// more `/bin/sh` spawns that a loaded host may not finish within the 1 s
+/// product minimum.
+const SETTLE: Duration = Duration::from_secs(30);
+/// The product minimum, for the test that must reach the settle deadline.
+const DEADLINE_SETTLE: Duration = Duration::from_secs(1);
 // Serialize the binary. `Command::spawn` in any thread copies every open
 // descriptor into its child until that child execs, and flock locks live on
 // the open file description: a host lock one test just dropped stays held by
@@ -62,6 +68,17 @@ fn assert_refused(result: Result<Status, Error>) {
     assert!(matches!(result, Err(Error::Refused(_))));
 }
 
+/// Restore owner access to every directory under `dir` without following
+/// symlinks, so `TempDir` can remove a tree a test left unwritable.
+fn make_removable(dir: &Path) {
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            make_removable(&entry.path());
+        }
+    }
+}
+
 struct Rig {
     _temp: tempfile::TempDir,
     root: PathBuf,
@@ -71,6 +88,14 @@ struct Rig {
     checker: PathBuf,
     rbgp: PathBuf,
     activation: PathBuf,
+}
+
+// A test that panics between a `chmod` and its restore must not leave its
+// rig, which lives under the crate directory, behind in the source tree.
+impl Drop for Rig {
+    fn drop(&mut self) {
+        make_removable(&self.root);
+    }
 }
 
 impl Rig {
@@ -264,6 +289,16 @@ exit 0
     }
 
     fn run(&self, candidate: &Path, initial: bool, command: &Path) -> Result<Status, Error> {
+        self.run_with_settle(candidate, initial, command, SETTLE)
+    }
+
+    fn run_with_settle(
+        &self,
+        candidate: &Path,
+        initial: bool,
+        command: &Path,
+        settle: Duration,
+    ) -> Result<Status, Error> {
         let args = Vec::new();
         activate(&Options {
             candidate,
@@ -271,7 +306,7 @@ exit 0
             checker: &self.checker,
             rbgp: &self.rbgp,
             rbgp_addr: self.binding(&self.state).rbgp_addr(),
-            settle: SETTLE,
+            settle,
             initial,
             activation_command: command,
             activation_args: &args,
@@ -568,7 +603,7 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         rig.set("activation-mode", mode_name);
         let started = Instant::now();
         assert_eq!(
-            rig.run(&candidate, false, &rig.activation),
+            rig.run_with_settle(&candidate, false, &rig.activation, DEADLINE_SETTLE),
             Err(Error::RecoveryRequired),
             "{mode_name}"
         );
@@ -578,12 +613,12 @@ fn started_failure_timeout_and_unsettled_retain_candidate_without_rollback() {
         // it, so those two are given the whole configured window and no more.
         if mode_name != "fail-once" {
             assert!(
-                elapsed >= SETTLE,
+                elapsed >= DEADLINE_SETTLE,
                 "{mode_name}: gave up before the settle window: {elapsed:?}"
             );
         }
         assert!(
-            elapsed < SETTLE + HANG_MARGIN,
+            elapsed < DEADLINE_SETTLE + HANG_MARGIN,
             "{mode_name}: ran past the settle deadline: {elapsed:?}"
         );
         let receipt = rig.receipt();
@@ -626,7 +661,7 @@ fn cli_activate(rig: &Rig, candidate: &Path, initial: bool) -> std::process::Out
         .arg(&rig.rbgp)
         .arg("--rbgp-addr")
         .arg(rig.binding(&rig.state).rbgp_addr())
-        .args(["--settle-seconds", "1", "--activation-command"])
+        .args(["--settle-seconds", "5", "--activation-command"])
         .arg(&rig.activation);
     if initial {
         command.arg("--initial");
@@ -935,6 +970,19 @@ fn refused_after_generation_copy_leaves_the_state_directory_unchanged() {
 }
 
 #[test]
+fn rig_drop_removes_a_tree_with_an_unwritable_directory() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let root = rig.root.clone();
+    let locked = rig.state.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("entry"), "cannot be unlinked while locked").unwrap();
+    mode(&locked, 0o500);
+    drop(rig);
+    assert!(!root.exists(), "{} outlived its rig", root.display());
+}
+
+#[test]
 fn every_activation_test_acquires_the_process_guard_first() {
     let _serial = activation_test_guard();
     let lines: Vec<_> = include_str!("activation.rs").lines().collect();
@@ -950,7 +998,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 17);
+    assert_eq!(tests, 18);
 }
 
 mod prune {
