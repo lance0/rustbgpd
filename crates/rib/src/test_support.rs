@@ -21,17 +21,22 @@ use rustbgpd_wire::{
 use crate::route::{FlowSpecRoute, Route, RouteOrigin};
 
 /// The BGP Identifier of the session peer at `peer`: the address itself
-/// for IPv4, its low 32 bits for IPv6. A session-learned route never
+/// for IPv4, its lowest nonzero 32-bit word for IPv6. A session route never
 /// carries the `0.0.0.0` injection sentinel, so these fixtures must not
 /// either — pairing `Ebgp` with the sentinel builds a route the daemon
 /// cannot, and decides the identifier step by a state it cannot reach.
 fn session_router_id(peer: IpAddr) -> Ipv4Addr {
     match peer {
         IpAddr::V4(addr) => addr,
-        IpAddr::V6(addr) => {
-            let [.., a, b, c, d] = addr.octets();
-            Ipv4Addr::new(a, b, c, d)
-        }
+        // The lowest nonzero 32-bit word, so a `::`-tailed peer does not
+        // project onto the sentinel; `::` itself is never a session peer.
+        IpAddr::V6(addr) => Ipv4Addr::from(
+            addr.octets()
+                .rchunks(4)
+                .map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
+                .find(|&w| w != 0)
+                .unwrap_or(1),
+        ),
     }
 }
 
@@ -156,6 +161,11 @@ mod tests {
             make_v6_route(
                 Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
                 "2001:db8::7".parse().unwrap(),
+            ),
+            // Low 32 bits all zero: must not project onto the sentinel.
+            make_v6_route(
+                Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
+                "2001:db8::".parse().unwrap(),
             ),
             make_route_with_lp(v4, peer, 100),
             make_route_with_path_id(Prefix::V4(v4), 1),
