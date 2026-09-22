@@ -14,9 +14,9 @@ Extended Messages (code 6, added in v4.7.0) and Enhanced Route Refresh (code
 (code 76) are absent. The latter two remain open upstream as
 [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244) and
 [osrg/gobgp#2786](https://github.com/osrg/gobgp/issues/2786), respectively,
-and the tag contains no ASPA implementation; v4.9.0 adds TCP-AO keychain
-configuration (API, server-side keychain management, config-file loading,
-HMAC-SHA256 profiles) per its release notes. Verified 2026-09-01. These are
+and the tag contains no ASPA implementation; v4.9.0 adds a TCP-AO keychain
+configuration API but binds no keychain to a BGP session (see the TCP-AO row
+below). Verified 2026-09-01; TCP-AO re-checked 2026-09-22. These are
 upstream capability claims, not rustbgpd interoperability receipts; receipts
 are identified explicitly where they exist.
 
@@ -169,7 +169,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | Yes (v4.9.0) | Partial live rotation | GoBGP v4.9.0 adds a TCP-AO keychain configuration API, server-side keychain management, config-file keychains, and HMAC-SHA256 profiles per its release notes (Linux implementation with a non-Linux stub; upstream support, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
+| TCP-AO (RFC 5925) | Keychain API only (v4.9.0) | Partial live rotation | GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) adds a TCP-AO keychain configuration API, server-side keychain management, config-file keychains, and HMAC-SHA256 profiles. At that tag no keychain reaches a session socket: the Linux helper `AddTCPAOKeysSockopt` (`internal/pkg/netutils/tcp_ao_linux.go`) is called only from its test file, and `pkg/server/server.go` installs TCP MD5 keys on listeners but no TCP-AO key. GoBGP master applies TCP-AO keys to peer sockets from commit [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834) (2026-09-15), unreleased when checked on 2026-09-22 (upstream source reading, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate the respective modes against FRR `bfdd`. Deferred: echo/demand, authentication, dynamic-neighbor BFD, and interface-neighbor autodiscovery |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
