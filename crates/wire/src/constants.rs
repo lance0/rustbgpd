@@ -178,7 +178,7 @@ pub mod attr_type {
     pub const COMMUNITY_CONTAINER: u8 = 34;
     /// RFC 9234 §5: Only-to-Customer (OTC).
     pub const ONLY_TO_CUSTOMER: u8 = 35;
-    /// D-PATH (draft-ietf-bess-evpn-ipvpn-interworking).
+    /// RFC 10039 §4: BGP Domain Path (D-PATH) attribute.
     pub const DOMAIN_PATH: u8 = 36;
     /// RFC 9015: Service Function Path attribute.
     pub const SFP: u8 = 37;
