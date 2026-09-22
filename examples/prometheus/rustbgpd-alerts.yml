@@ -186,8 +186,8 @@ groups:
 
       - alert: BgpPeerAdjRibInEmpty
         # At least one current scoped session is Established, but the
-        # peer-level Adj-RIB-In is empty across all families
-        # (afi_safi="all" is the aggregate series). Aggregating the
+        # peer's unicast Adj-RIB-In is empty (afi_safi="all" is IPv4 and
+        # IPv6 unicast combined, not every family). Aggregating the
         # session gauge by peer handles link-local siblings while the
         # join preserves native labels from the RIB series. Expected for
         # send-only peers — silence or drop this rule for those.
