@@ -39,6 +39,17 @@ grpc_list_best() {
     grpcurl_call \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
+grpc_add_path() {
+    grpcurl_call \
+        -d "$1" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath 2>/dev/null
+}
+
+grpc_delete_path() {
+    grpcurl_call \
+        -d "$1" \
+        "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
+}
 
 wait_established() {
     local peer_addr=$1
@@ -266,6 +277,76 @@ for r in data.get('routes', []):
         fi
     done
 }
+# ---------------------------------------------------------------------------
+# Test 7: Plain eBGP export strips non-transitive Extended Communities
+# ---------------------------------------------------------------------------
+test_export_strips_non_transitive_extended_communities() {
+    log "Test 7: Plain eBGP export strips non-transitive Extended Communities"
+
+    local transitive_ec="842127122628650"        # 0x0002_FDE9_0000_002A (RT:65001:42, transitive)
+    local non_transitive_ec="4827858800541171714" # 0x4300_0000_0000_0002 (OVS Invalid, non-transitive)
+
+    grpc_add_path "{
+        \"prefix\": \"10.99.0.0\",
+        \"prefix_length\": 24,
+        \"next_hop\": \"10.0.1.1\",
+        \"origin\": 0,
+        \"as_path\": [65001],
+        \"extended_communities\": [\"$transitive_ec\", \"$non_transitive_ec\"]
+    }"
+    ok "Injected 10.99.0.0/24 with transitive and non-transitive extended communities"
+
+    sleep 3
+
+    # Verify rustbgpd Loc-RIB retains both
+    local best
+    best=$(grpc_list_best)
+    if echo "$best" | grep -q "$transitive_ec" && echo "$best" | grep -q "$non_transitive_ec"; then
+        ok "rustbgpd Loc-RIB retains both transitive and non-transitive extended communities"
+    else
+        fail "rustbgpd Loc-RIB missing one or both extended communities"
+    fi
+
+    # Verify FRR-B receives the route
+    local frr_b_route
+    frr_b_route=$(docker exec "$FRR_B" vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json" 2>/dev/null)
+    if echo "$frr_b_route" | jq -e '.prefix == "10.99.0.0/24" and .pathCount >= 1' >/dev/null 2>&1; then
+        ok "FRR-B received 10.99.0.0/24 from rustbgpd"
+    else
+        fail "FRR-B did not receive 10.99.0.0/24"
+    fi
+
+    # FRR renders extended communities as text on the path, never as the
+    # 64-bit wire integer, so both assertions read the exact field rather than
+    # grepping the whole document. `//` is deliberate: a path with no extended
+    # community at all must read as the empty string and fail the transitive
+    # assertion, not skip it.
+    local frr_b_ec
+    frr_b_ec=$(echo "$frr_b_route" \
+        | jq -r '[.paths[]?.extendedCommunity.string // empty] | first // ""' 2>/dev/null)
+
+    # Transitive EC (RT:65001:42) must be preserved in FRR-B
+    case "$frr_b_ec" in
+        *"RT:65001:42"*)
+            ok "FRR-B received transitive extended community (RT:65001:42)" ;;
+        *)
+            fail "FRR-B missing transitive extended community RT:65001:42 (reported: '$frr_b_ec')" ;;
+    esac
+
+    # The non-transitive EC must NOT survive export, so the exact set FRR
+    # reports is the transitive one and nothing else. The injected
+    # 0x4300_0000_0000_0002 is the RFC 8097 origin-validation-state community,
+    # which FRR renders in this same field as "OVS:invalid" when it arrives.
+    if [ "$frr_b_ec" = "RT:65001:42" ]; then
+        ok "FRR-B export stripped non-transitive extended community (exact set: RT:65001:42)"
+    else
+        fail "FRR-B extended communities are '$frr_b_ec', want exactly 'RT:65001:42'"
+    fi
+
+    # Cleanup
+    grpc_delete_path '{"prefix": "10.99.0.0", "prefix_length": 24}'
+    sleep 2
+}
 
 # Use the robust `start_rustbgpd` from test-lib.sh (10 s poll loop
 # rather than a 3 s fixed sleep) — required under parallel CI load
@@ -298,6 +379,7 @@ main() {
     test_export_med
     test_export_as_path_prepend
 
+    test_export_strips_non_transitive_extended_communities
     echo ""
     log "Results: $pass passed, $fail failed"
     if [ "$fail" -gt 0 ]; then

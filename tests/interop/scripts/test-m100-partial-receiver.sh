@@ -337,10 +337,10 @@ classify_receiver() {
         '{receiver:$receiver,case:$case,outcome:$outcome,epoch_before:$epoch_before,epoch_after:$epoch_after,candidate_present:$candidate,survivor_present:$survivor,notification:$notification}'
 }
 
-# Save the current receiver's malformed-UPDATE counters for one case phase.
+# Save the current receiver's malformed-UPDATE and path-attribute-discard counters for one case phase.
 scrape_current_metrics() {
     local output=${1:?}
-    prom_scrape "$CURRENT" | grep '^bgp_update_malformed' >"$output"
+    prom_scrape "$CURRENT" | grep -E '^(bgp_update_malformed|bgp_path_attribute_discarded)' >"$output"
 }
 
 # A kept candidate is `attribute_discard` rather than `accepted` only when the
@@ -383,6 +383,13 @@ for case_name in "${CASES[@]}"; do
     scrape_current_metrics \
         "$ARTIFACT_DIR/observations/$case_name/baseline-rustbgpd_current.metrics.txt" \
         || die "rustbgpd_current/$case_name baseline metrics scrape failed"
+    if [ "$case_name" = "originator_id" ]; then
+        discarded_count=$(grep -E '^bgp_path_attribute_discarded_total\{.*type_code="9"\}' \
+            "$ARTIFACT_DIR/observations/$case_name/baseline-rustbgpd_current.metrics.txt" \
+            | awk '{print $2}' || echo 0)
+        [ "$discarded_count" = "1" ] \
+            || die "rustbgpd_current expected bgp_path_attribute_discarded_total{type_code=\"9\"} == 1, got '$discarded_count'"
+    fi
 
     docker exec "$RAW" touch "/tmp/m100-${case_name}-malformed"
     wait_until "$case_name malformed send" docker exec "$RAW" test -s "/tmp/m100-${case_name}-malformed.sent"

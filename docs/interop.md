@@ -294,7 +294,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | FRR (bgpd) | 10.7.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m11-gr-frr.clab.yml` | Tested (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m12-ec-frr.clab.yml` | Tested (M12) | Extended Communities (RFC 4360) | RT:65002:100 via route-map | — |
-| FRR (bgpd) | 10.7.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend | — |
+| FRR (bgpd) | 10.7.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend, and plain eBGP export stripping non-transitive Extended Communities | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m14-rr-frr.clab.yml` | Tested (M14) | Route Reflector (RFC 4456) | 3-node iBGP: RR + 2 clients | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16, hosted CI) | Dual-stack LLGR (RFC 9494) | Exact IPv4 2 + IPv6 1 inventory crosses fresh → GR-stale → LLGR-stale → fresh; structured MP/GR/LLGR timer and both-family EoR proof | — |
@@ -303,6 +303,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | BIRD 2 + GoBGP ×3 + arouteserver | BIRD 2.0.12, GoBGP 3.37.0, arouteserver 1.23.2 | `tests/interop/m90-differential.clab.yml` | Tested (M90, local) | ADR-0110 route-server filtering differential | One site input drives arouteserver/BIRD and `rs-config-render`/rustbgpd; 11/11 accept/reject verdicts and rustbgpd explain terms agree | Pinned arouteserver digest; 65/65, with a rust-only policy mutation making the differential red |
 | BIRD 2 + GoBGP ×3 + arouteserver | BIRD 2.0.12, GoBGP 3.37.0, arouteserver 1.23.2 | `tests/interop/m106-rs-white-list-control-differential.clab.yml` | Tested (M106, local) | IRR white lists and the daemon's control-community matrix rendered by `rs-config-render`, differential against arouteserver/BIRD | The M90 site plus `white_list_pref`/`white_list_asn`/`white_list_route` and the exact control matrix; 19/19 verdicts and explain terms agree, and eight export expectations (tagging, per-target suppression, announce-to-none override, prepending, scrubbing) hold at every member from both route servers | Pinned arouteserver digest; 142/142 plus the offline context proof at 24/24; M90 fixtures untouched |
 | GoBGP ×2 | GoBGP 4.8.0 | `tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml` | Tested (M107, hosted CI) | RFC 8950 uniform-fleet route server rendered by `rs-config-render` | Two members on an IPv6-only peering LAN carry IPv4 and IPv6 unicast over one IPv6 session each; the rendered sessions carry both families and `strict_peer`. Both members negotiate the exact (IPv4 unicast, IPv6 next hop) Extended Next Hop tuple; each member's IPv4 route with its own IPv6 next hop is accepted with the wire value kept; the same member's route carrying the other member's address is rejected before policy as `next_hop_ownership` / `foreign_next_hop` and never reaches the other member; transparent export hands the originator's IPv6 next hop on verbatim for IPv4 and IPv6 routes. 32/32 locally plus the offline context proof. | Checksum-pinned `gobgp:v4.8.0-m107` built from `Dockerfile.gobgp-v47`; the site is dumped by the pinned arouteserver 1.23.2 image (`prove-context-ingestion.sh`); mixed fleets are refused by the renderer (ADR-0128) and are not part of this lab |
+| GoBGP ×2 + FRR | GoBGP 4.8.0, FRR 10.7.1 | `tests/interop/m107-rs-rfc8950-non-enhe.clab.yml` | Tested (M107 sibling, hosted CI) | RFC 8950 route suppression to non-ENHE receiver | Route server with two ENHE-capable GoBGP members and one non-ENHE FRR member on an IPv6 peering LAN; GoBGP member1 announces IPv4 with IPv6 next-hop; capable member2 receives it; non-capable member3 has it withheld (paths=0) while still receiving IPv6 routes; re-enabling capability restores the route | Runs in the m107 job |
 | Raw BGP fixture | in-tree Python | `tests/interop/m91-rfc7606-malformed.clab.yml` | Tested (M91, hosted CI) | RFC 7606 revised UPDATE error handling | Malformed MED and AGGREGATOR inputs pin treat-as-withdraw, attribute-discard, session-reset, counters, and the §6 DEBUG capture | Runs in the combined cheap-protocol job |
 | GoBGP ×3 + BIRD 2 | GoBGP 4.7.0, BIRD 2.0.12 | `tests/interop/m92-gobgp-v47-rs-differential.clab.yml` | Tested (M92, Hosted CI) | Dual-stack route-server semantic differential | Exact source/target inventories and per-PDU EoRs authorize baseline/mutant/restore diffs; normal and negative-completeness proofs use separate deployments | Official amd64 release hash pinned; synthetic evidence only |
 | GoBGP ×3 + BIRD 2 | GoBGP 4.8.0, BIRD 2.0.12 | `tests/interop/m103-gobgp-v48-rs-differential.clab.yml` | Tested (M103, hosted CI) | GoBGP 4.7 → 4.8 dual-stack route-server differential revalidation | A sibling exact 56/0 baseline/mutant/restore proof plus separate 17/0 missing-EoR refusal reuse the five current M92 configs read-only. Every live 4.8 raw oracle must equal archived 4.7 after recursive deletion of only `age`; its separately versioned golden changes only header source/generation, with route records and trailer byte-identical. | Official amd64 release archive and both binary hashes pinned; M92 artifacts remain immutable; synthetic evidence only |
@@ -310,7 +311,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | rustbgpd + BIRD + OpenBGPD + GoBGP + FRR | rustbgpd 0.67.0, BIRD 3.3.2, OpenBGPD 9.2, GoBGP 4.8.0, FRR 10.3.1 | `tests/interop/m105-live-as-set.clab.yml` | Observed (M105, local; 2026-08-29) | [Live IPv4 AS_SET receiver matrix](../tests/interop/m105-live-as-set/README.md) | One raw route-server client sends an ordinary AS_SEQUENCE control accepted by all five, then a two-member AS_SET with receiver defaults unchanged: rustbgpd, BIRD, and OpenBGPD do not install it; GoBGP installs it in accepted Adj-RIB-In, and FRR installs it. All processes remain live and both prefixes disappear after withdrawal. Generated packet artifacts are local and not committed; this is an observation, not a conformance ranking, and absence does not distinguish policy rejection from treat-as-withdraw. | None; all five sessions remain Established |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m99-rfc9072-extended-open-frr.clab.yml` | Tested (M99, hosted CI) | RFC 9072 extended Optional Parameters framing | Two links to one digest-pinned FRR process: forced-small extended versus classic control. Host tshark exports only raw TCP payload and sequence metadata; an independent reassembler proves four gap-free directions, exact 348-byte/313-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, one OPEN per stream, and no NOTIFICATION. | FRR is passive on both links so capture is armed before the only connection attempt; the proof runs exactly once. |
 | Released rustbgpd + BIRD + OpenBGPD + FRR | rustbgpd 0.67.0, BIRD 2.19.2, OpenBGPD 9.2, FRR 10.3.1 | `tests/interop/m100-partial-receiver.clab.yml` | M100 hosted gate | Exact Partial-flag receiver differential | A raw source sends MED, ORIGINATOR_ID, CLUSTER_LIST, MP_REACH, and MP_UNREACH with exact flags `0xa0` to all four receivers while a separate session observes resulting route state. The exact 20-cell matrix pins accepts, same-session candidate withdrawal, treat-as-withdraw, and reset; every reset requires exact UPDATE `3/4` bytes followed by close and next-epoch re-establishment. The rustbgpd 0.67.0 column is a frozen historical receipt: it stays digest-pinned and keeps the outcomes that release produced. The `rustbgpd_current` row below is the receiver that follows the tree. | Digest-pinned released receiver images, checksum-staged BIRD source, exact runtime/config preflight, single attempt, and successful-run artifact; proof-only with no production or configuration changes. |
-| Current rustbgpd beside the frozen M100 receivers | rustbgpd built from the tree under test (`rustbgpd:dev`) | `tests/interop/m100-partial-receiver.clab.yml` (`rustbgpd-current` node) | M100 hosted gate | Partial-flag handling of the current daemon for an external neighbor | The same raw source sends the same five `0xa0` attribute byte strings to a fifth receiver, judged by its own `rustbgpd_current` rows: MED is treat-as-withdraw with the session kept, ORIGINATOR_ID and CLUSTER_LIST are attribute-discard with the route kept, and MP_REACH / MP_UNREACH reset the session with exact UPDATE `3/4` bytes. Each row also requires exactly one matching increment of `bgp_update_malformed_total` and `bgp_update_malformed_causes_total` for the source peer, which is what separates attribute-discard from plain acceptance. | Runs in the same deploy as the frozen matrix and is verified separately, so neither expectation set can satisfy the other. The raw peer is an eBGP route-server client; the iBGP branch of ORIGINATOR_ID / CLUSTER_LIST handling (treat-as-withdraw) cannot be driven with these byte strings and stays at unit coverage. |
+| Current rustbgpd beside the frozen M100 receivers | rustbgpd built from the tree under test (`rustbgpd:dev`) | `tests/interop/m100-partial-receiver.clab.yml` (`rustbgpd-current` node) | M100 hosted gate | Partial-flag handling of the current daemon for an external neighbor | The same raw source sends the same five `0xa0` attribute byte strings to a fifth receiver, judged by its own `rustbgpd_current` rows: MED is treat-as-withdraw with the session kept, ORIGINATOR_ID and CLUSTER_LIST are attribute-discard with the route kept, and MP_REACH / MP_UNREACH reset the session with exact UPDATE `3/4` bytes. Each row also requires exactly one matching increment of `bgp_update_malformed_total` and `bgp_update_malformed_causes_total` for the source peer, which is what separates attribute-discard from plain acceptance. Additionally, the well-formed baseline for ORIGINATOR_ID asserts `bgp_path_attribute_discarded_total{type_code="9"}` is exactly 1. The route projection carries no ORIGINATOR_ID field, so the attribute's absence from the installed route is not observed here; the discard counter is the whole claim. | Runs in the same deploy as the frozen matrix and is verified separately, so neither expectation set can satisfy the other. The raw peer is an eBGP route-server client; the iBGP branch of ORIGINATOR_ID / CLUSTER_LIST handling (treat-as-withdraw) cannot be driven with these byte strings and stays at unit coverage. |
 | BIRD + FRR | BIRD 3.3.2, FRR 10.3.1 | `tests/interop/m101-routeserver-bird332.clab.yml` | Tested (M101, hosted CI) | Real-speaker RFC 7606 attribute-discard at an IPv4-unicast route server | Both peer containers remain asleep until configured/local image identity, exact runtime versions, and both configs pass. Capture is armed before any BGP daemon starts. BIRD emits the exact optional-transitive-partial type-40 tuple `e0 28 01 00`; rustbgpd accepts the route after discarding only that attribute, preserves standard/Large Communities in post-policy Adj-RIB-In and on FRR, advances exactly `attribute_discard +1 / treat_as_withdraw +0 / session_reset +0`, and proves import plus member-scoped export denies with positive controls and explain/advertised surfaces. Deterministic withdrawal leaves both sessions Established with no flap delta. Exact 27/0; no Prefix-SID, labeled-unicast, SR, or AS_SET breadth is claimed. | BIRD source archive SHA-256 `21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c`; build with `docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop`. Pull the current reviewed FRR identity exactly with `docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c`. |
 | OpenBGPD + FRR | OpenBGPD 9.2, FRR 10.3.1 | `tests/interop/m102-routeserver-openbgpd92.clab.yml` | Tested (M102, hosted CI) | Dual-stack route-server member interoperability | Digest-pinned sleeping peers are identity-, runtime-, and config-preflighted before sidecar capture and daemon start. The exact 32/0 proof uses four-octet ASNs 4200000102/4200000201/4200000202 and enforced role, policy, AS4, and IPv4/IPv6 negotiation; proves bidirectional transparent AS_PATH plus standard/Large Communities; independently reassembles retransmitted TCP to decode AS_TRANS, capability 65, and exact IPv4 UPDATE fields (AS_PATH, NEXT_HOP, standard and Large Communities, and NLRI); covers explicit import/export policy; withdraws all four directional-family routes; and pins unchanged sessions/flap counters. Malformed Partial and AS_SET behavior are out of scope. | `docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9` |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
@@ -2099,6 +2100,58 @@ Prefixes) and latches the peer down.
 | Explicit recovery | PASS | After removal + Enable, Established with exactly 2 received prefixes |
 | FRR still operational | PASS | vtysh responds after Cease |
 | **Total** | **10/10** | |
+
+---
+
+## New-cell receipts (2026-09-22, FRR 10.7.1, GoBGP 4.8.0)
+
+Cells added after the dated receipts above. Their results are recorded here
+rather than folded into the historical tables, which describe what a specific
+older run on a specific release produced.
+
+### M26 Test 7b — administrative reset notification and backoff
+
+`rbgp`-equivalent `ResetNeighbor` with the RFC 9003 Shutdown Communication
+`planned maintenance`. Run against FRR 10.7.1 with the whole M26 driver:
+**54 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session established before reset | PASS | Established |
+| FRR received NOTIFICATION 06/04 | PASS | `lastErrorCodeSubcode = 0604` (Cease/Administrative Reset) |
+| FRR recorded the notification reason | PASS | `lastNotificationReason = "Cease/Administrative Reset"` |
+| FRR recorded the RFC 9003 text | PASS | `lastShutdownDescription = "planned maintenance"` |
+| Session dropped then recovered | PASS | Idle after the reset, Established again after backoff |
+
+### M13 Test 7 — plain eBGP export strips non-transitive Extended Communities
+
+Injects `10.99.0.0/24` carrying both `0x0002_FDE9_0000_002A` (RT:65001:42,
+transitive) and `0x4300_0000_0000_0002` (RFC 8097 origin validation state,
+non-transitive). Driver: **21 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| rustbgpd Loc-RIB retains both communities | PASS | Both values present before export |
+| FRR-B receives the transitive community | PASS | `RT:65001:42` |
+| FRR-B receives nothing else | PASS | Exact set is `RT:65001:42` |
+
+**Red proof.** Setting `send_non_transitive_extended_communities = true` on the
+FRR-B neighbor makes the exact-set assertion fail with FRR reporting
+`RT:65001:42 OVS:invalid`, so the cell distinguishes a stripped community from a
+preserved one rather than passing either way.
+
+### M107 sibling — RFC 8950 suppression to a non-ENHE receiver
+
+`tests/interop/m107-rs-rfc8950-non-enhe.clab.yml`: two ENHE-capable GoBGP
+members and one non-ENHE FRR member on one IPv6 peering LAN. Driver:
+**19 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Capable member receives the IPv4 route | PASS | `198.51.100.0/24` with next hop `2001:db8:107::11` |
+| Non-ENHE member is suppressed | PASS | `paths = 0` (RFC 8950), session stays up |
+| Non-ENHE member still receives IPv6 | PASS | `2001:db8:1::/48` unaffected |
+| Capability enabled restores the route | PASS | After negotiation, next hop preserved verbatim |
 
 ---
 

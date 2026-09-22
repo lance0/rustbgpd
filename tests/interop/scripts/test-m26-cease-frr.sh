@@ -50,6 +50,12 @@ grpc_enable_neighbor() {
         -d '{"address": "10.0.0.2"}' \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/EnableNeighbor >/dev/null
 }
+grpc_reset_neighbor() {
+    grpcurl_call \
+        -d "{\"address\": \"$1\", \"reason\": \"$2\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/ResetNeighbor >/dev/null
+}
+
 
 frr_state() {
     docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
@@ -431,6 +437,78 @@ test_frr_cease_subcode_acceptance() {
         fail "FRR not responding after Cease"
     fi
 }
+test_administrative_reset_notification_and_backoff() {
+    log "Test 7b: ResetNeighbor sends Cease/4 with RFC 9003 text and backs off"
+
+    assert_eq "Session established before reset" "Established" "$(frr_state)"
+
+    grpc_reset_neighbor "10.0.0.2" "planned maintenance"
+    ok "ResetNeighbor RPC issued with communication 'planned maintenance'"
+
+    # FRR 10.7.1 reports the last received NOTIFICATION as a four-hex-digit
+    # `lastErrorCodeSubcode` (code then subcode) plus a human reason, and the
+    # RFC 9003 Shutdown Communication as `lastShutdownDescription`. There is no
+    # `lastNotificationCode`/`lastNotificationSubcode` key. Poll rather than
+    # sleep: the notification lands asynchronously after the RPC returns.
+    local code_subcode="" reason="" shutdown=""
+    for _ in $(seq 1 30); do
+        local neighbor_json
+        neighbor_json=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
+        code_subcode=$(jq -r '."10.0.0.1".lastErrorCodeSubcode // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        reason=$(jq -r '."10.0.0.1".lastNotificationReason // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        shutdown=$(jq -r '."10.0.0.1".lastShutdownDescription // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        [ "$code_subcode" = "0604" ] && break
+        sleep 1
+    done
+
+    assert_eq "FRR received NOTIFICATION code/subcode 0604 (Cease/Administrative Reset)" \
+        "0604" "$code_subcode"
+    # FRR renders both fields as zero-padded hex, so the split halves are "06"
+    # and "04", never "6"/"4".
+    assert_eq "FRR received NOTIFICATION code 6 (Cease)" "06" "${code_subcode:0:2}"
+    assert_eq "FRR received NOTIFICATION subcode 4 (Administrative Reset)" "04" "${code_subcode:2:2}"
+    if echo "$reason" | grep -qi "administrative reset"; then
+        ok "FRR recorded notification reason Cease/Administrative Reset ($reason)"
+    else
+        fail "FRR notification reason unexpected: '$reason'"
+    fi
+    # RFC 9003 Shutdown Communication arrives as the shutdown description.
+    assert_eq "FRR recorded the RFC 9003 communication text" \
+        "planned maintenance" "$shutdown"
+
+    # Session dropped. FRR can still report Established for a moment while it
+    # processes the NOTIFICATION and tears the session down, so a single
+    # snapshot fails a correct reset under load. Poll for the drop the way the
+    # recovery check below polls; a session that never leaves Established
+    # within the bound still fails.
+    local dropped_state="Established"
+    for _ in $(seq 1 60); do
+        dropped_state=$(frr_state)
+        [ "$dropped_state" != "Established" ] && break
+        sleep 0.5
+    done
+    if [ "$dropped_state" != "Established" ]; then
+        ok "Session dropped from Established after administrative reset (state: $dropped_state)"
+    else
+        fail "Session stayed Established for 30s after administrative reset"
+    fi
+
+    # Wait for session to recover after backoff
+    local recovered=false
+    for _ in $(seq 1 30); do
+        if [ "$(frr_state)" = "Established" ]; then
+            recovered=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$recovered" = true ]; then
+        ok "Session re-established after administrative reset backoff"
+    else
+        fail "Session failed to re-establish after administrative reset backoff"
+    fi
+}
+
 
 test_block_action_withholds_and_recovers() {
     log "Test 8: block action withholds beyond the bound and recovers by one ROUTE-REFRESH"
@@ -607,6 +685,7 @@ main() {
     test_enable_while_over_limit_relatches
     test_recovery_requires_removal_and_enable
     test_frr_cease_subcode_acceptance
+    test_administrative_reset_notification_and_backoff
     test_block_action_withholds_and_recovers
     test_warning_action_reports_and_keeps_accepting
 
