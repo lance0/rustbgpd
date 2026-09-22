@@ -30,9 +30,9 @@ fn rust_log_env() -> Option<String> {
 /// covered by a per-peer directive.
 ///
 /// `RUST_LOG` is parsed one comma-separated directive at a time (the same
-/// split `EnvFilter` itself uses): valid directives are kept, and each
-/// unparseable one is returned as `` `directive`: parse error `` for the
-/// caller to report. `EnvFilter::try_from_default_env` would reject the whole
+/// split `EnvFilter` itself uses): valid directives are kept, and every
+/// unparseable one is named with its parse error in the returned one-line
+/// report for the caller to print. `EnvFilter::try_from_default_env` would reject the whole
 /// variable over one bad directive, and `parse_lossy` only prints the errors
 /// itself, so neither lets the caller report them. Blank pieces (an empty,
 /// whitespace-only or separator-only value) are skipped without a report.
@@ -42,8 +42,9 @@ fn rust_log_env() -> Option<String> {
 fn build_filter(
     rust_log: Option<&str>,
     extra_directives: &[String],
-) -> Result<(EnvFilter, Vec<String>), LoggingError> {
+) -> Result<(EnvFilter, Option<String>), LoggingError> {
     let mut rejected = Vec::new();
+    let mut fell_back = false;
     let base = match rust_log {
         None => EnvFilter::new("info"),
         Some(value) => {
@@ -59,6 +60,7 @@ fn build_filter(
                 })
                 .collect();
             if valid.is_empty() {
+                fell_back = true;
                 EnvFilter::new("info")
             } else {
                 // Every directive already parsed, so this drops nothing.
@@ -66,15 +68,18 @@ fn build_filter(
             }
         }
     };
-    Ok((append_directives(base, extra_directives)?, rejected))
-}
-
-/// One-line operator report for unparseable `RUST_LOG` directives.
-fn rejected_report(rejected: &[String]) -> String {
-    format!(
-        "ignoring unparseable RUST_LOG directive(s), keeping the valid ones: {}",
-        rejected.join("; ")
-    )
+    let report = (!rejected.is_empty()).then(|| {
+        let outcome = if fell_back {
+            "no valid directives remain; using info"
+        } else {
+            "keeping the valid ones"
+        };
+        format!(
+            "ignoring unparseable RUST_LOG directive(s), {outcome}: {}",
+            rejected.join("; ")
+        )
+    });
+    Ok((append_directives(base, extra_directives)?, report))
 }
 
 /// Append per-peer directives onto a base filter. Split out from
@@ -117,12 +122,12 @@ fn append_directives(
 /// valid directives are kept, and one warning line naming it and its parse
 /// error is printed to stderr.
 pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
-    let (filter, rejected) = build_filter(rust_log_env().as_deref(), extra_directives)?;
+    let (filter, report) = build_filter(rust_log_env().as_deref(), extra_directives)?;
     // Reported on stderr rather than as an event: a `warn` would pass
     // through the very filter being reported on, and a `RUST_LOG=error`
     // base would hide it.
-    if !rejected.is_empty() {
-        eprintln!("warning: {}", rejected_report(&rejected));
+    if let Some(report) = report {
+        eprintln!("warning: {report}");
     }
 
     let builder = fmt()
@@ -162,15 +167,19 @@ pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
 ///
 /// Returns [`LoggingError::InvalidDirective`] if a per-peer directive fails
 /// to parse (the live filter is left untouched). Unparseable `RUST_LOG`
-/// directives are dropped and reported as a `warn` event, not an error, or [`LoggingError::ReloadFailed`]
+/// directives are dropped and reported on stderr and as a `warn` event, not
+/// an error, or [`LoggingError::ReloadFailed`]
 /// if the subscriber was dropped. When no reloadable subscriber is
 /// installed (e.g. a test set its own, or `init_logging` was never called),
 /// this logs a warning and returns `Ok(())` — a reload with nowhere to go
 /// is a no-op, not a failure.
 pub fn reload_per_peer_directives(directives: &[String]) -> Result<(), LoggingError> {
-    let (filter, rejected) = build_filter(rust_log_env().as_deref(), directives)?;
-    if !rejected.is_empty() {
-        tracing::warn!("{}", rejected_report(&rejected));
+    let (filter, report) = build_filter(rust_log_env().as_deref(), directives)?;
+    // Also on stderr: the `warn` passes through the filter being reported
+    // on, so a `RUST_LOG=error` base would hide it.
+    if let Some(report) = report {
+        eprintln!("warning: {report}");
+        tracing::warn!("{report}");
     }
     if let Some(reload) = RELOAD_HANDLE.get() {
         reload(filter).map_err(LoggingError::ReloadFailed)
@@ -321,36 +330,48 @@ mod tests {
     /// error. The unbracketed span form was once the documented one.
     #[test]
     fn rust_log_keeps_valid_directives_and_reports_invalid_ones() {
-        let (filter, rejected) =
+        let (filter, report) =
             build_filter(Some("warn,peer{peer_addr=10.0.0.1}=debug"), &[]).expect("filter");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::WARN));
-        assert_eq!(rejected.len(), 1, "{rejected:?}");
-        assert!(
-            rejected[0].starts_with("`peer{peer_addr=10.0.0.1}=debug`: ")
-                && rejected[0].len() > "`peer{peer_addr=10.0.0.1}=debug`: ".len(),
-            "report names the directive and its parse error: {rejected:?}"
+        let bad = "peer{peer_addr=10.0.0.1}=debug";
+        let error = bad
+            .parse::<Directive>()
+            .expect_err("bad directive")
+            .to_string();
+        assert_eq!(
+            report.as_deref(),
+            Some(
+                format!(
+                    "ignoring unparseable RUST_LOG directive(s), keeping the valid ones: \
+                     `{bad}`: {error}"
+                )
+                .as_str()
+            )
         );
 
-        let (filter, rejected) =
+        let (filter, report) =
             build_filter(Some("info,peer{peer_addr=10.0.0.1}=debug"), &[]).expect("filter");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
-        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert!(
+            report.is_some_and(|r| r.contains("keeping the valid ones") && r.contains(bad)),
+            "bad directive reported"
+        );
     }
 
     /// A valid `RUST_LOG` (bracketed span form included) and an unset one
     /// report nothing; unset still defaults to `info`.
     #[test]
     fn valid_or_unset_rust_log_reports_nothing() {
-        let (filter, rejected) =
+        let (filter, report) =
             build_filter(Some("info,[peer{peer_addr=10.0.0.1}]=debug"), &[]).expect("filter");
-        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(report, None);
         assert!(
             filter.to_string().contains("peer_addr"),
             "span directive kept: {filter}"
         );
 
-        let (filter, rejected) = build_filter(None, &[]).expect("filter");
-        assert!(rejected.is_empty(), "{rejected:?}");
+        let (filter, report) = build_filter(None, &[]).expect("filter");
+        assert_eq!(report, None);
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
     }
 
@@ -360,8 +381,8 @@ mod tests {
     #[test]
     fn blank_rust_log_is_info_without_report() {
         for value in ["", " ", ",", " , "] {
-            let (filter, rejected) = build_filter(Some(value), &[]).expect("filter");
-            assert!(rejected.is_empty(), "{value:?}: {rejected:?}");
+            let (filter, report) = build_filter(Some(value), &[]).expect("filter");
+            assert_eq!(report, None, "{value:?}");
             assert_eq!(
                 filter.max_level_hint(),
                 Some(LevelFilter::INFO),
@@ -372,13 +393,21 @@ mod tests {
 
     /// A `RUST_LOG` with no valid directive falls back to `info` (as the
     /// old whole-variable rejection did) rather than an empty filter that
-    /// would disable all logging, and still reports what it dropped.
+    /// would disable all logging, reports what it dropped, and says it is
+    /// using `info` rather than claiming to keep valid directives.
     #[test]
     fn wholly_invalid_rust_log_falls_back_to_info_and_reports() {
-        let (filter, rejected) =
+        let (filter, report) =
             build_filter(Some("foo=notalevel,peer{peer_addr=10.0.0.1}=debug"), &[])
                 .expect("filter");
         assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
-        assert_eq!(rejected.len(), 2, "{rejected:?}");
+        let report = report.expect("report");
+        assert!(
+            report.starts_with(
+                "ignoring unparseable RUST_LOG directive(s), no valid directives remain; using info: "
+            ) && report.contains("`foo=notalevel`: ")
+                && report.contains("`peer{peer_addr=10.0.0.1}=debug`: "),
+            "{report}"
+        );
     }
 }
