@@ -4170,9 +4170,9 @@ message ListEvpnNexthopsRequest {}
 message ListEvpnNexthopsResponse {
   // One row per rustbgpd-owned FDB nexthop group.
   repeated EvpnFdbNexthopGroup groups = 1;
-  // Rustbgpd-tagged kernel nexthops discovered during startup
-  // adoption / drift recovery but not currently associated with an
-  // owned group. These are retained or cleaned by the reconciler
+  // Rustbgpd-tagged L2 FDB-NHG kernel nexthops discovered during
+  // startup adoption / drift recovery but not currently associated
+  // with an owned group. These are retained or cleaned by the reconciler
   // depending on live kernel FDB references.
   uint32 orphan_nexthops_count = 2;
   // L2 FDB-NHG tagged nexthop IDs queued for retry because kernel
