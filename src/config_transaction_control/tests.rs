@@ -2897,6 +2897,77 @@ async fn rollback_duration_reset_clears_overdue_wait_and_the_old_timer_cannot_re
 }
 
 #[tokio::test(start_paused = true)]
+async fn stale_auto_revert_waiter_does_not_revert_a_re_armed_transaction() {
+    let wait = overdue_auto_revert_wait().await;
+    let controller = &wait.controller;
+    assert_eq!(overdue_warnings(controller).await, 1);
+
+    // Re-arm for an hour while the old waiter stays queued (its timer task
+    // was aborted by the re-arm, but the detached acquisition lives on).
+    controller
+        .reset_rollback_duration_locked(
+            "deploy-1".to_string(),
+            3_600,
+            &RuntimeConfigMutationProgress::default(),
+        )
+        .await
+        .expect("reset must succeed");
+    let re_armed_deadline = controller
+        .status()
+        .await
+        .unwrap()
+        .confirmation
+        .unwrap()
+        .deadline_unix_seconds;
+    let re_armed_timer = controller.state.lock().await.timer.take().unwrap();
+    // Queue position between the stale waiter and the re-armed one: this
+    // acquisition observes the state right after the stale waiter releases.
+    let lock = controller.deps.lock.clone();
+    let observer = tokio::spawn(async move { lock.acquire().await });
+    tokio::task::yield_now().await;
+
+    // The holder outlives the re-armed deadline, so both waiters are queued.
+    tokio::time::advance(Duration::from_secs(3_600)).await;
+    tokio::task::yield_now().await;
+    drop(wait.owner);
+    let observer = tokio::time::timeout(Duration::from_secs(1), observer)
+        .await
+        .expect("stale waiter must release the coordinator")
+        .unwrap()
+        .expect("coordinator");
+    let status = controller.status().await.unwrap().confirmation.unwrap();
+    assert_eq!(
+        status.status,
+        proto::ConfigTransactionConfirmationStatus::Pending as i32,
+        "a waiter bound to the old deadline must not revert the re-armed transaction"
+    );
+    assert_eq!(status.deadline_unix_seconds, re_armed_deadline);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.candidate_toml);
+
+    // The re-armed waiter produces the one outcome.
+    drop(observer);
+    tokio::time::timeout(Duration::from_secs(1), re_armed_timer)
+        .await
+        .expect("re-armed timer must auto-revert")
+        .unwrap();
+    assert_eq!(
+        controller
+            .status()
+            .await
+            .unwrap()
+            .confirmation
+            .unwrap()
+            .status,
+        proto::ConfigTransactionConfirmationStatus::AutoReverted as i32
+    );
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "success", 1.0);
+    assert_config_transaction_lifecycle_metric(controller, "auto_revert", "failure", 0.0);
+    assert_snapshot_matches_config(&wait.snapshot_toml.lock().await, &wait.previous_toml);
+    wait.ack_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
 async fn apply_close_before_deadline_is_unavailable_without_mutation() {
     let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
     let _owner = coordinator.acquire().await.expect("coordinator owner");

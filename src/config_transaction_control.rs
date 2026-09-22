@@ -156,8 +156,8 @@ struct ConfirmedTransactionRecord {
 /// Identity of the confirm-window timer that fired: the transaction and the
 /// monotonic deadline it was armed with. A rollback-duration reset re-arms the
 /// timer with a new deadline, so a wait carrying the old one cannot mark the
-/// re-armed transaction overdue.
-#[derive(Debug)]
+/// re-armed transaction overdue, and a stale waiter cannot revert it.
+#[derive(Clone, Debug)]
 struct AutoRevertWait {
     confirm_id: String,
     deadline: tokio::time::Instant,
@@ -1832,13 +1832,16 @@ impl ConfigTransactionController {
         let confirm_id = wait.confirm_id.clone();
         self.execute_owned_operation(
             RuntimeConfigOperationKind::AutoRevert,
-            Some(wait),
+            Some(wait.clone()),
             OwnedRuntimeConfigRequestContext::detached(),
             "config transaction auto-revert rejected: daemon is shutting down",
             "config transaction auto-revert task did not complete",
             move |controller, operation| async move {
                 let progress = RuntimeConfigMutationProgress(operation);
-                let Some(pending) = controller.pending_for_timeout(&confirm_id).await else {
+                // Bound to the armed deadline: a waiter left over from before a
+                // rollback-duration reset owns nothing and steps aside for the
+                // re-armed timer's own waiter.
+                let Some(pending) = controller.pending_for_timeout(&wait).await else {
                     return Ok(());
                 };
                 if tokio::time::Instant::now() < pending.deadline {
@@ -1908,12 +1911,17 @@ impl ConfigTransactionController {
         Ok(pending.clone())
     }
 
-    async fn pending_for_timeout(&self, confirm_id: &str) -> Option<PendingConfirmedTransaction> {
+    async fn pending_for_timeout(
+        &self,
+        wait: &AutoRevertWait,
+    ) -> Option<PendingConfirmedTransaction> {
         let state = self.state.lock().await;
         state
             .pending
             .as_ref()
-            .filter(|pending| pending.confirm_id == confirm_id)
+            .filter(|pending| {
+                pending.confirm_id == wait.confirm_id && pending.deadline == wait.deadline
+            })
             .cloned()
     }
 
