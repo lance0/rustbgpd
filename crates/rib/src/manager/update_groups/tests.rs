@@ -5730,7 +5730,12 @@ fn clean_transition_source_flip_emits_one_structured_info_event() {
     );
     let captured = StdArc::new(Mutex::new(Vec::new()));
     tracing::subscriber::with_default(Capture(StdArc::clone(&captured)), || {
+        // Sibling tests may register this process-wide callsite without a
+        // subscriber. Warm it inside this scope, then refresh its cached
+        // interest before measuring the real degradation.
+        assert!(extend_inventory(&manager, &[key], &[]).is_none());
         tracing::callsite::rebuild_interest_cache();
+        captured.lock().unwrap().clear();
         assert!(extend_inventory(&manager, &[key], &[]).is_none());
     });
 

@@ -9563,17 +9563,20 @@ hold_time = 90
             .with_writer(move || writer_sink.clone())
             .finish();
         // A thread-local default is enough: the reload runs on this thread
-        // under the current-thread test runtime. Sibling tests can reach the
-        // restart-required callsites with no subscriber installed, which
-        // caches `Interest::never()` process-wide, so rebuild the cache
-        // against this subscriber before driving the reload.
+        // under the current-thread test runtime.
         let _guard = tracing::subscriber::set_default(subscriber);
-        tracing::callsite::rebuild_interest_cache();
 
         let desired = format!(
             "{}\n[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\n",
             baseline_toml()
         );
+        // Sibling tests may register the `[rpki]` restart-required callsite
+        // without a subscriber. Warm it inside this scope, then refresh its
+        // cached interest before measuring the real reload.
+        let _ = drive_reload(baseline_toml(), &desired).await;
+        tracing::callsite::rebuild_interest_cache();
+        sink.0.lock().unwrap().clear();
+
         let (returned, tags) = drive_reload(baseline_toml(), &desired).await;
         returned.expect("rpki-only reload must return the pinned runtime config");
         assert!(
