@@ -151,9 +151,12 @@ async fn handle(
             // The authoritative committed configuration is the source of truth for
             // configured tables: this ensures reads during apply-before-persist,
             // failed persistence, or transaction rollback expose only the coherent
-            // committed set, never an uncommitted candidate.
+            // committed set, never an uncommitted candidate. Clone only the table
+            // vector out of the borrow: an outstanding watch borrow holds a read
+            // lock that blocks the sender, so copying the whole configuration here
+            // would delay config publication for the length of the copy.
             let tables = match &deps.accepted_rx {
-                Some(rx) => rx.borrow().config().fib_tables.clone(),
+                Some(rx) => rx.borrow().config_ref().fib_tables.clone(),
                 None => deps.startup_tables.clone(),
             };
             Ok(proto::ListFibTablesResponse {
