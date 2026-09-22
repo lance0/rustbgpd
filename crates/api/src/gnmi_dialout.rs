@@ -23,6 +23,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use rustbgpd_telemetry::BgpMetrics;
@@ -246,7 +247,42 @@ pub fn endpoint_uri(address: &str, tls: bool) -> String {
 pub struct DialoutManager {
     service: GnmiService,
     metrics: BgpMetrics,
-    tasks: HashMap<String, (DialoutTarget, tokio::task::JoinHandle<()>)>,
+    tasks: HashMap<String, (DialoutTarget, tokio::task::JoinHandle<()>, TargetSeries)>,
+}
+
+/// One dial-out task's handle on its target's metric series. Removing a target
+/// reaps through the same lock, so a write already past the liveness check
+/// lands before the reap and any later write is dropped. Aborting the task is
+/// not enough: the transport polls the outbound stream, whose per-response
+/// writes would otherwise recreate a removed target's series.
+#[derive(Clone)]
+struct TargetSeries {
+    metrics: BgpMetrics,
+    target: String,
+    live: Arc<RwLock<bool>>,
+}
+
+impl TargetSeries {
+    fn new(metrics: BgpMetrics, target: &str) -> Self {
+        Self {
+            metrics,
+            target: target.to_string(),
+            live: Arc::new(RwLock::new(true)),
+        }
+    }
+
+    fn write(&self, update: impl FnOnce(&BgpMetrics, &str)) {
+        let live = self.live.read().unwrap_or_else(PoisonError::into_inner);
+        if *live {
+            update(&self.metrics, &self.target);
+        }
+    }
+
+    fn reap(&self) {
+        let mut live = self.live.write().unwrap_or_else(PoisonError::into_inner);
+        *live = false;
+        self.metrics.remove_gnmi_dialout_target(&self.target);
+    }
 }
 
 impl DialoutManager {
@@ -265,27 +301,27 @@ impl DialoutManager {
     /// changed ones, start added ones, and leave unchanged targets — and
     /// their live collector connections — untouched.
     pub fn apply(&mut self, targets: &[DialoutTarget]) {
-        let metrics = &self.metrics;
-        self.tasks.retain(|name, (spec, handle)| {
+        self.tasks.retain(|name, (spec, handle, series)| {
             let keep = targets
                 .iter()
                 .any(|target| &target.name == name && target == spec);
             if !keep {
                 handle.abort();
-                metrics.remove_gnmi_dialout_target(name);
+                series.reap();
                 info!(target = %name, "gNMI dial-out target stopped");
             }
             keep
         });
         for target in targets {
             if !self.tasks.contains_key(&target.name) {
+                let series = TargetSeries::new(self.metrics.clone(), &target.name);
                 let handle = tokio::spawn(run_target(
                     self.service.clone(),
-                    self.metrics.clone(),
+                    series.clone(),
                     target.clone(),
                 ));
                 self.tasks
-                    .insert(target.name.clone(), (target.clone(), handle));
+                    .insert(target.name.clone(), (target.clone(), handle, series));
             }
         }
     }
@@ -293,18 +329,20 @@ impl DialoutManager {
 
 /// One target's connect / stream / reconnect loop. Never returns under
 /// normal operation; the manager aborts it on removal or shutdown.
-async fn run_target(service: GnmiService, metrics: BgpMetrics, target: DialoutTarget) {
+async fn run_target(service: GnmiService, series: TargetSeries, target: DialoutTarget) {
     // Materialize both target series at 0 immediately so a collector that is
     // down at daemon startup is visible on /metrics before the first success.
-    metrics.set_gnmi_dialout_connected(&target.name, false);
+    series.write(|metrics, name| metrics.set_gnmi_dialout_connected(name, false));
     let mut backoff = target.backoff_initial.max(Duration::from_millis(1));
     let mut failure_announced = false;
     loop {
-        match publish_session(&service, &metrics, &target).await {
+        match publish_session(&service, &series, &target).await {
             Ok(()) => {
                 // Connected and then cleanly/abruptly disconnected.
-                metrics.record_gnmi_dialout_resync(&target.name);
-                metrics.set_gnmi_dialout_connected(&target.name, false);
+                series.write(|metrics, name| {
+                    metrics.record_gnmi_dialout_resync(name);
+                    metrics.set_gnmi_dialout_connected(name, false);
+                });
                 warn!(
                     target = %target.name,
                     endpoint = %target.endpoint,
@@ -372,12 +410,45 @@ fn refresh_queue_depth(
     metrics.set_gnmi_dialout_queue_depth(target, subscription_queue_depth(probe));
 }
 
+/// Test-only hold on the outbound stream's per-response metric writes, keyed by
+/// target so parallel tests never trip it. While armed for a target, the first
+/// response poll reports its entry, waits for release, and drops its `entered`
+/// sender only after the metric writes, so a test can place a reap between
+/// the poll and its writes.
+#[cfg(test)]
+struct OutboundPollGate {
+    target: String,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static OUTBOUND_POLL_GATE: std::sync::Mutex<Option<OutboundPollGate>> = std::sync::Mutex::new(None);
+
+/// Hold here if the gate is armed for `target`; the returned sender is the
+/// "writes finished" signal and must live until the writes are done.
+#[cfg(test)]
+fn outbound_poll_gate(target: &str) -> Option<std::sync::mpsc::Sender<()>> {
+    let gate = {
+        let mut armed = OUTBOUND_POLL_GATE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if armed.as_ref().is_none_or(|gate| gate.target != target) {
+            return None;
+        }
+        armed.take()?
+    };
+    let _ = gate.entered.send(());
+    let _ = gate.release.recv();
+    Some(gate.entered)
+}
+
 /// Dial the collector, run one Publish session to completion, and report
 /// how it ended. `Ok(())` means the stream was established (the gauge was
 /// raised) and later ended; the caller decides reconnect pacing.
 async fn publish_session(
     service: &GnmiService,
-    metrics: &BgpMetrics,
+    series: &TargetSeries,
     target: &DialoutTarget,
 ) -> Result<(), SessionError> {
     let channel = connect(target).await.map_err(SessionError::Connect)?;
@@ -392,17 +463,21 @@ async fn publish_session(
         .map_err(|status| SessionError::Fatal(status.message().to_string()))?;
     let queue_probe = subscription.queue_probe;
     let name = target.name.clone();
-    let publish_metrics = metrics.clone();
-    let publish_target = target.name.clone();
+    let publish_series = series.clone();
     let dequeue_probe = queue_probe.clone();
     let outbound = ReceiverStream::new(subscription.responses).map_while(move |item| match item {
         Ok(response) => {
-            refresh_queue_depth(&publish_metrics, &publish_target, &dequeue_probe);
-            publish_metrics.record_gnmi_dialout_publish(&publish_target);
+            #[cfg(test)]
+            let _writes_done = outbound_poll_gate(&publish_series.target);
+            publish_series.write(|metrics, target| {
+                refresh_queue_depth(metrics, target, &dequeue_probe);
+                metrics.record_gnmi_dialout_publish(target);
+            });
             Some(response)
         }
         Err(status) => {
-            refresh_queue_depth(&publish_metrics, &publish_target, &dequeue_probe);
+            publish_series
+                .write(|metrics, target| refresh_queue_depth(metrics, target, &dequeue_probe));
             // e.g. ON_CHANGE broadcast lag → DataLoss. End the stream so the
             // reconnect path resyncs from a fresh snapshot.
             debug!(
@@ -440,7 +515,7 @@ async fn publish_session(
         endpoint = %target.endpoint,
         "gNMI dial-out collector connected"
     );
-    metrics.set_gnmi_dialout_connected(&target.name, true);
+    series.write(|metrics, name| metrics.set_gnmi_dialout_connected(name, true));
 
     let mut queue_observation = tokio::time::interval(QUEUE_OBSERVATION_INTERVAL);
     queue_observation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -454,7 +529,7 @@ async fn publish_session(
     loop {
         tokio::select! {
             _ = queue_observation.tick() => {
-                refresh_queue_depth(metrics, &target.name, &queue_probe);
+                series.write(|metrics, name| refresh_queue_depth(metrics, name, &queue_probe));
             }
             _ = &mut ended_rx => {
                 debug!(
@@ -1091,6 +1166,54 @@ mod tests {
         assert_eq!(counter_value(&metrics, "collector-reap"), None);
         assert_eq!(queue_depth_value(&metrics, "collector-reap"), None);
         assert_eq!(last_publish_value(&metrics, "collector-reap"), None);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn removal_reap_is_final_across_an_in_flight_outbound_poll() {
+        // Load-bearing break: without the reap retiring the task's metric
+        // writes, the transport's outbound poll held across `apply(&[])`
+        // recreates the removed target's queue-depth series.
+        const TARGET: &str = "collector-reap-race";
+        let metrics = BgpMetrics::new();
+        let (reservation, addr) = reserve_port(None);
+        let (server, _received) = spawn_stub_collector(reservation);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *OUTBOUND_POLL_GATE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(OutboundPollGate {
+            target: TARGET.to_string(),
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let mut manager = DialoutManager::new(test_service(), metrics.clone());
+        manager.apply(&[test_target(TARGET, addr)]);
+
+        let entered_rx = tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("outbound poll never reached the gate");
+            entered_rx
+        })
+        .await
+        .unwrap();
+        manager.apply(&[]);
+        release_tx.send(()).unwrap();
+        let finished =
+            tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(30)))
+                .await
+                .unwrap();
+        assert_eq!(
+            finished,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "gated outbound poll never finished its metric writes"
+        );
+
+        assert_eq!(gauge_value(&metrics, TARGET), None);
+        assert_eq!(counter_value(&metrics, TARGET), None);
+        assert_eq!(queue_depth_value(&metrics, TARGET), None);
+        assert_eq!(last_publish_value(&metrics, TARGET), None);
         server.abort();
     }
 
