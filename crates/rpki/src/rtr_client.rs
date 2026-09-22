@@ -48,7 +48,7 @@ const MAX_PDU_LEN: usize = 65_535;
 // refresh/retry minimums are 1 s, which every non-zero value already
 // satisfies; an End of Data zero is handled as "not provided" (see
 // `apply_eod_timers`), and a configured zero is raised to the minimum
-// and a configured retry or expire capped at its maximum (see
+// and a configured retry or expire is capped at its maximum (see
 // `configured_interval` and `configured_expire`).
 const REFRESH_RETRY_MIN_SECS: u64 = 1;
 const REFRESH_MAX_SECS: u64 = 86_400;
