@@ -10,4 +10,4 @@
   without waiting on the FIB reconciler.
   **Operator-visible:** `rbgp fib-table list` no longer blocks concurrent
   config transactions or SIGHUP reloads, and in-flight uncommitted candidate
-  tables are never visible before durable persistence commit.
+  tables are never visible before accepted config publication.
