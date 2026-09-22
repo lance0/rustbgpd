@@ -1,6 +1,6 @@
-//! Route change events published by the RIB manager: prefix-keyed
-//! [`RouteEvent`]s and EVPN [`EvpnRouteEvent`]s that carry the full new and
-//! previous best route.
+//! Route change events published by the RIB manager. A [`RouteEvent`]
+//! identifies the changed prefix and the peers involved but carries no route;
+//! an [`EvpnRouteEvent`] carries the full new and previous best route.
 
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
