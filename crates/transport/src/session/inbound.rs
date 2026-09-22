@@ -124,6 +124,18 @@ fn otc_state(attrs: &[PathAttribute]) -> OtcState {
     }
     found
 }
+
+/// Announced NLRI of every family one `MP_REACH_NLRI` carries.
+fn mp_reach_announced_count(mp: &rustbgpd_wire::MpReachNlri) -> usize {
+    mp.announced.len()
+        + mp.flowspec_announced.len()
+        + mp.evpn_announced.len()
+        + mp.bgpls_announced.len()
+        + mp.vpn_announced.len()
+        + mp.labeled_announced.len()
+        + mp.rtc_announced.len()
+}
+
 fn bgpls_family_from_safi(safi: Safi) -> Option<BgpLsFamily> {
     match safi {
         Safi::BgpLs => Some(BgpLsFamily::LinkState),
@@ -1449,15 +1461,7 @@ impl PeerSession {
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
         let mp_reach_carries_nlri = parsed.attributes.iter().any(|a| match a {
-            PathAttribute::MpReachNlri(mp) => {
-                !mp.announced.is_empty()
-                    || !mp.flowspec_announced.is_empty()
-                    || !mp.evpn_announced.is_empty()
-                    || !mp.bgpls_announced.is_empty()
-                    || !mp.vpn_announced.is_empty()
-                    || !mp.labeled_announced.is_empty()
-                    || !mp.rtc_announced.is_empty()
-            }
+            PathAttribute::MpReachNlri(mp) => mp_reach_announced_count(mp) != 0,
             _ => false,
         });
         let has_body_nlri = !parsed.announced.is_empty();
@@ -1775,19 +1779,14 @@ impl PeerSession {
             }
         });
         if as_path_loop {
-            // Count rejected announced prefixes (body NLRI + MP_REACH_NLRI)
+            // Count every discarded announcement: body NLRI plus all
+            // MP_REACH_NLRI families.
             let rejected_count = parsed.announced.len()
                 + parsed
                     .attributes
                     .iter()
                     .filter_map(|a| match a {
-                        PathAttribute::MpReachNlri(mp) => Some(
-                            mp.announced.len()
-                                + mp.bgpls_announced.len()
-                                + mp.vpn_announced.len()
-                                + mp.labeled_announced.len()
-                                + mp.rtc_announced.len(),
-                        ),
+                        PathAttribute::MpReachNlri(mp) => Some(mp_reach_announced_count(mp)),
                         _ => None,
                     })
                     .sum::<usize>();

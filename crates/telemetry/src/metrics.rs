@@ -1818,7 +1818,7 @@ impl BgpMetrics {
         let as_path_loop_detected = IntCounterVec::new(
             Opts::new(
                 "bgp_as_path_loop_detected_total",
-                "Total prefixes rejected due to AS_PATH loop detection",
+                "Total announced NLRI of any address family rejected due to AS_PATH loop detection",
             ),
             &["peer"],
         )
@@ -4931,7 +4931,8 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.
+    /// Record `AS_PATH` loop detection: increment by the number of rejected
+    /// announced NLRI, across every address family.
     pub fn record_as_path_loop_detected(&self, peer: &str, count: u64) {
         self.0
             .as_path_loop_detected
@@ -8406,7 +8407,7 @@ mod tests {
     }
 
     #[test]
-    fn as_path_loop_detected_counter_increments_by_rejected_prefixes() {
+    fn as_path_loop_detected_counter_increments_by_rejected_nlri() {
         let m = BgpMetrics::new();
         m.record_as_path_loop_detected("10.0.0.1", 3);
         m.record_as_path_loop_detected("10.0.0.1", 2);
