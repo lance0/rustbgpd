@@ -84,9 +84,9 @@ applicable to the release diff actually ran before tagging.
 Before tagging, skim the release and tracking docs for the low-conflict
 convention in `CONTRIBUTING.md`:
 
-- [ ] `CHANGELOG.md` `[Unreleased]` entries are in the right subsections and
-      read as compact per-PR entries rather than broad rewrites of older
-      shipped text.
+- [ ] `CHANGELOG.md` `[Unreleased]` entries and the pending `changelog.d/`
+      fragments are in the right subsections and read as compact per-PR
+      entries rather than broad rewrites of older shipped text.
 - [ ] `docs/project/roadmap.md` has one row or checkbox per remaining concern; shipped
       slices say what landed and what remains.
 - [ ] Hot tracking docs such as `docs/how-to/evpn-alpha-soak.md` and
@@ -770,9 +770,19 @@ Before rolling any versions:
 - [ ] Preview the release workflow's extracted and reflowed GitHub release body
       and confirm it preserves the `### Upgrade notes` heading and its entries.
 
-1. Update `CHANGELOG.md` with the new version section (`## [X.Y.Z]`, without
-   a leading `v`) and the actual release date in UTC. Leave a fresh
-   `[Unreleased]` section above it.
+1. Assemble the pending release notes, then roll the heading:
+   - Run `python3 scripts/assemble-changelog.py` (`just assemble-changelog`).
+     It merges every `changelog.d/*.md` fragment into `[Unreleased]` after the
+     entries already there, in category order and by file name within a
+     category, and deletes the consumed fragments. It refuses a malformed
+     fragment or a duplicate bullet by name; fix the fragment and rerun.
+     Review the assembled `[Unreleased]` section and commit that result on
+     its own before touching the heading, so the reviewed notes are exactly
+     what the release publishes.
+   - Update `CHANGELOG.md` with the new version section (`## [X.Y.Z]`, without
+     a leading `v`) and the actual release date in UTC. Leave a fresh, empty
+     `[Unreleased]` section above it. `changelog.d/` holds only its README at
+     this point; `just gate-release --mode release` fails on any leftover.
 2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
    and confirm every user-visible change (features, fixes, interop suites) is
    listed under the new version — not misattributed to a prior release. Check
@@ -813,15 +823,17 @@ Before rolling any versions:
 6. Run `just gate-release --mode release` on the committed release candidate,
    then push it to `main`: `git push origin main`. The recipe runs the checks
    that otherwise first fail in hosted CI on the release commit, or only after
-   the tag: the metric release-note contract, the published-crate README
+   the tag: the metric release-note contract, the `changelog.d/` fragment
+   assembly (no fragment may remain), the published-crate README
    freshness gate, a dated `CHANGELOG.md` heading and released README wording
    for every crate whose manifest is ahead of
    `docs/reference/published-crate-versions.json`, and the root `## [X.Y.Z]`
    section that `release.yml` extracts. Run it before the push: the README
    comparison covers the commits `origin/main` does not have yet, and needs
    `--base <previous main SHA>` afterwards. Without `--mode release` the
-   recipe detects a release commit by its empty `[Unreleased]` section and
-   otherwise lists the release-only checks it skipped. `--heavy` adds
+   recipe detects a release commit by its empty `[Unreleased]` section with no
+   `changelog.d/` fragment pending, and otherwise lists the release-only
+   checks it skipped. `--heavy` adds
    `cargo audit`, the release build, and the multi-package publish dry-run.
 7. Wait for every applicable gate to pass on that exact final `main` SHA,
    including the `ci.yml` and `interop.yml` push runs and the stable-surface

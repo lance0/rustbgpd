@@ -57,18 +57,43 @@ class ReleasePreflightTests(unittest.TestCase):
     def test_release_tree_runs_every_fast_check(self):
         mode, statuses = self.statuses(self.tree(), "auto")
         self.assertEqual(mode, "release")
-        self.assertEqual(statuses, ["ok"] * 5 + ["skipped [--heavy]"] * 3)
+        self.assertEqual(statuses, ["ok"] * 6 + ["skipped [--heavy]"] * 3)
 
     def test_staging_tree_passes_and_reports_the_release_only_skips(self):
         mode, statuses = self.statuses(self.tree(**STAGING), "auto")
         self.assertEqual(mode, "staging")
         self.assertEqual(
-            statuses, ["ok"] * 3 + ["skipped [release-only]"] * 2 + ["skipped [--heavy]"] * 3
+            statuses, ["ok"] * 4 + ["skipped [release-only]"] * 2 + ["skipped [--heavy]"] * 3
         )
 
     def test_release_mode_does_not_relax_checks_for_a_staging_tree(self):
         _, statuses = self.statuses(self.tree(**STAGING), "release")
-        self.assertEqual(statuses[3:5], ["FAIL", "FAIL"])
+        self.assertEqual(statuses[4:6], ["FAIL", "FAIL"])
+
+    def test_pending_fragment_with_empty_unreleased_is_staging(self):
+        fragment = {"changelog.d/fixed-a.md": "### Fixed\n\n- Pending fix.\n"}
+        mode, statuses = self.statuses(self.tree(**fragment), "auto")
+        self.assertEqual(mode, "staging")
+        self.assertEqual(statuses[1], "ok")
+        self.assertEqual(check.detect_mode(self.tree()), "release")
+
+    def test_release_mode_refuses_a_leftover_fragment(self):
+        root = self.tree(**{"changelog.d/fixed-a.md": "### Fixed\n\n- Pending fix.\n"})
+        _, statuses = self.statuses(root, "release")
+        self.assertEqual(statuses[1], "FAIL")
+        errors = check.fragment_errors(root, release=True)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("still holds fixed-a.md", errors[0])
+        self.assertEqual(check.fragment_errors(root, release=False), [])
+
+    def test_malformed_fragment_fails_in_every_mode(self):
+        root = self.tree(**{"changelog.d/broken.md": "### Bogus\n\n- Bullet.\n"})
+        for release in (False, True):
+            with self.subTest(release=release):
+                errors = check.fragment_errors(root, release)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("changelog.d/broken.md: first line", errors[0])
+        self.assertEqual(check.detect_mode(root), "staging")
 
     def test_failing_metric_release_note_checker_fails(self):
         root = self.tree(**{"scripts/check_metric_release_notes.py": "raise SystemExit(1)\n"})

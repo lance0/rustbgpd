@@ -12,19 +12,23 @@ some of them only after the tag is pushed:
     `docs/reference/published-crate-versions.json`: its `CHANGELOG.md` must
     open with that version, and on a release commit the heading must be dated
     and the crate README must no longer call the version prepared;
+  - the changelog fragments under `changelog.d/`, which must assemble cleanly
+    and, on a release commit, must already have been assembled into the root
+    `CHANGELOG.md` by `scripts/assemble-changelog.py`;
   - on a release commit, the root `CHANGELOG.md` section that `release.yml`
     extracts for the workspace version.
 
 The mode is `release` when the root `[Unreleased]` section is empty (it was
-rolled into a version section) and `staging` otherwise; `--mode` overrides the
-detection. Release-only checks are reported as skipped in staging mode, never
-relaxed. `--heavy` adds the advisory audit, the release build, and the
+rolled into a version section) and no fragment is pending, and `staging`
+otherwise; `--mode` overrides the detection. Release-only checks are reported
+as skipped in staging mode, never relaxed. `--heavy` adds the advisory audit, the release build, and the
 multi-package publish dry-run.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
@@ -33,6 +37,11 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+ASSEMBLER_SPEC = importlib.util.spec_from_file_location(
+    "assemble_changelog", Path(__file__).with_name("assemble-changelog.py")
+)
+ASSEMBLER = importlib.util.module_from_spec(ASSEMBLER_SPEC)
+ASSEMBLER_SPEC.loader.exec_module(ASSEMBLER)
 RECORD = "docs/reference/published-crate-versions.json"
 # The two wordings the release checklist names for a not-yet-published version.
 PREPARED_PHRASES = ("prepared in the source checkout", "source checkout prepares")
@@ -61,8 +70,17 @@ def section_body(changelog: str, name: str) -> str | None:
     return rest if following is None else rest[: following.start()]
 
 
-def detect_mode(changelog: str) -> str:
-    return "staging" if (section_body(changelog, "Unreleased") or "").strip() else "release"
+def pending_fragments(root: Path) -> list[str]:
+    """Return the file names under `changelog.d/` other than its README, unparsed."""
+    directory = root / ASSEMBLER.FRAGMENT_DIR
+    if not directory.is_dir():
+        return []
+    return sorted(path.name for path in directory.iterdir() if path.name != ASSEMBLER.README)
+
+
+def detect_mode(root: Path) -> str:
+    unreleased = (section_body(read(root, "CHANGELOG.md"), "Unreleased") or "").strip()
+    return "staging" if unreleased or pending_fragments(root) else "release"
 
 
 def workspace_version(root: Path) -> str:
@@ -182,6 +200,21 @@ def crate_release_errors(root: Path, pending: dict[str, tuple[str, str]]) -> lis
     return errors
 
 
+def fragment_errors(root: Path, release: bool) -> list[str]:
+    """Fragments must assemble; on a release commit they must already be consumed."""
+    try:
+        ASSEMBLER.run(root, check=True)
+    except (OSError, ValueError) as error:
+        return [str(error)]
+    pending = pending_fragments(root)
+    if release and pending:
+        return [
+            f"changelog.d/ still holds {', '.join(pending)}; run "
+            "`python3 scripts/assemble-changelog.py` before rolling the changelog"
+        ]
+    return []
+
+
 def root_changelog_errors(root: Path) -> list[str]:
     version = workspace_version(root)
     body = section_body(read(root, "CHANGELOG.md"), version)
@@ -213,7 +246,7 @@ def preflight(
 ) -> tuple[str, list[tuple[str, str, list[str]]]]:
     """Return the resolved mode and one (status, check, errors) row per check."""
     if mode == "auto":
-        mode = detect_mode(read(root, "CHANGELOG.md"))
+        mode = detect_mode(root)
     release = mode == "release"
     pending = pending_crates(root)
     named = ", ".join(f"{crate} {meta[1]}" for crate, meta in pending.items()) or "none"
@@ -222,6 +255,11 @@ def preflight(
     span = "no commits to compare" if base == head else f"{base[:12]}...HEAD"
     checks = [
         ("metric release notes", True, lambda: metric_release_note_errors(root)),
+        (
+            f"changelog fragments ({len(pending_fragments(root))} pending)",
+            True,
+            lambda: fragment_errors(root, release),
+        ),
         (
             f"published-crate README freshness ({span})",
             True,
