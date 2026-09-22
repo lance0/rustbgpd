@@ -125,11 +125,14 @@ const BMP_CLIENT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 /// must not stall daemon exit.
 const GR_MARKER_IO_DEADLINE: Duration = Duration::from_secs(5);
 /// Bound on each shutdown wait for runtime-config work that no settlement
-/// owner holds: a coordinator permit taken outside the watchdog (a read), and
-/// the join of a SIGHUP task once the coordinator is quiet. An owned mutation
-/// is never subject to it; only the settlement watchdog ends that wait. What
-/// is left completes in one actor round trip, so the bound matches the
-/// five-second actor drains below rather than any mutation budget.
+/// owner holds: a coordinator permit whose holder has not registered its
+/// owner yet, and the join of a SIGHUP task once the coordinator is quiet.
+/// Every caller that takes the permit goes on to register an owner, so this
+/// covers only the window between `acquire()` and `register_owned()`, which
+/// the drain loop re-checks. An owned mutation is never subject to it; only
+/// the settlement watchdog ends that wait. What is left completes in one
+/// actor round trip, so the bound matches the five-second actor drains below
+/// rather than any mutation budget.
 const RUNTIME_CONFIG_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 static MARKER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static WARM_CHECKPOINT_REVISION: AtomicU64 = AtomicU64::new(0);

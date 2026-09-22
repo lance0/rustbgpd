@@ -670,8 +670,9 @@ pub(crate) async fn read_current_tables(
         return Ok(None);
     };
     let (reply_tx, reply_rx) = oneshot::channel();
-    // Every caller holds the runtime-config coordinator across this read, so a
-    // stalled reconciler must not park it forever. One deadline spans the send
+    // A mutation caller holds the runtime-config coordinator across this read,
+    // so a stalled reconciler must not park it forever. `List` holds no permit
+    // and the same deadline bounds the RPC itself. One deadline spans the send
     // and the reply: a read has no accepted-but-unanswered effect to classify.
     tokio::time::timeout(OWNED_FIB_ACTOR_TIMEOUT, async {
         tx.send(FibRuntimeCommand::GetTables { reply: reply_tx })
@@ -980,7 +981,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn stalled_fib_actor_bounds_list_and_releases_the_coordinator() {
+    async fn stalled_fib_actor_bounds_list_without_taking_the_coordinator() {
         let (fib_tx, mut fib_rx) = mpsc::channel(1);
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
         let coordinator = RuntimeConfigCoordinator::new();
