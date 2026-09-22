@@ -1495,6 +1495,7 @@ fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
     // discard the stage rather than publish it.
     lab.control.write_settings(SETUP_BUDGET);
     lab.control.release(STAGE_CHECKPOINT);
+    daemon.wait_log("discarding the staged config write", "");
 
     // A clean settlement arms no fatal clock: outlive the budget plus grace.
     while armed.elapsed() < STAGE_HOLD_BUDGET + GRACE + EXIT_JITTER {
