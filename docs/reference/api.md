@@ -1498,7 +1498,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListOrrStatus` | RFC 9107 ORR per-vantage status — configured vantages, their resolved topology nodes, and the peers bound to them |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
-| `ListFibTables` | List the configured `[[fib_tables]]` and whether the FIB reconciler is running (`sensitive_read`) |
+| `ListFibTables` | List the committed `[[fib_tables]]` and whether the FIB reconciler was started with an open command channel; `UNAVAILABLE` if that channel has closed. Served without querying the reconciler, so `runtime_available = true` is not a responsiveness guarantee (`sensitive_read`) |
 | `SetFibTable` | Create-or-replace a `[[fib_tables]]` entry by name (upsert; full definition, not a patch) at runtime; hot-applies through the reconciler and persists. Requires the reconciler running (≥1 table at startup) else `FAILED_PRECONDITION` (`mutating`) |
 | `DeleteFibTable` | Remove a `[[fib_tables]]` entry by name at runtime; `NOT_FOUND` if absent (`mutating`) |
 | `ListRouteEvents` | Recent unicast route add / withdraw / best-change / export-policy-filtered event history from the bounded in-memory RIB ring |
