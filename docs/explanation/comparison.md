@@ -204,7 +204,7 @@ IPv4/IPv6 `Prefix` routes.
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
-| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | Yes[^tcpao-gobgp] | No |
+| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | Keychain API only[^tcpao-gobgp] | No |
 | GTSM / TTL Security | Configurable hops[^gtsm-distance] | Yes | Yes | Yes | Yes |
 | eBGP multihop enablement | None needed[^multihop-rustbgpd] | Required[^multihop-frr] | Required[^multihop-bird] | Configurable[^multihop-gobgp] | Required[^multihop-openbgpd] |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
@@ -290,12 +290,20 @@ member individually.
 
 [^tcpao-gobgp]: GoBGP
     [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) (2026-09-01)
-    adds a TCP-AO keychain configuration API, keychain management in the
-    server, keychain loading from the configuration file, and HMAC-SHA256
-    profiles, per its release notes; the implementation is Linux-specific
-    with a stub elsewhere (`pkg/server/tcp_ao.go`,
-    `internal/pkg/netutils/tcp_ao_linux.go`). Upstream support per release
-    notes, not a rustbgpd/GoBGP interoperability receipt.
+    adds a TCP-AO keychain API: keychains from the API or the configuration
+    file are added, updated and deleted on the server object
+    ([`pkg/config/config.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/config/config.go#L439-L575),
+    `pkg/server/tcp_ao.go`). At that tag no keychain is bound to a BGP
+    session: the Linux socket helper `AddTCPAOKeysSockopt`
+    ([`internal/pkg/netutils/tcp_ao_linux.go`](https://github.com/osrg/gobgp/blob/v4.9.0/internal/pkg/netutils/tcp_ao_linux.go#L34))
+    is called only from its test file, and `pkg/server` installs TCP MD5
+    keys on listeners
+    ([`server.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/server/server.go#L3567),
+    [`server.go`](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/server/server.go#L3708)) but no TCP-AO key.
+    GoBGP master applies TCP-AO keys to peer sockets from commit
+    [`15e9be9`](https://github.com/osrg/gobgp/commit/15e9be9198ae51abad50b3d9b42aa63c3b462834)
+    (2026-09-15), which no release contained when checked on 2026-09-22.
+    Upstream source reading, not a rustbgpd/GoBGP interoperability receipt.
 
 [^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
     verification selected by BGP Roles, best-path preference, policy matching
@@ -311,9 +319,14 @@ member individually.
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
 | BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB)[^bmp-views] | Yes | No | No | No | No |
 | BMPv4 TLV framing (draft-21; Path Marking awaiting a non-colliding assignment) | Yes | No | No | No | No |
-| MRT dump (RFC 6396) | Yes | Yes | Yes | Yes | Yes |
+| MRT dump (RFC 6396) | Table dumps[^mrt-scope] | Yes | Yes | Yes | Yes |
 | Streaming route events | Yes | No | No | Yes | No |
 | OpenConfig/gNMI telemetry | Subset[^gnmi] | Partial | No | No | No |
+
+[^mrt-scope]: rustbgpd writes RFC 6396 `TABLE_DUMP_V2` RIB snapshots,
+    periodic and on demand. It has no `BGP4MP` writer, so it does not record
+    per-message UPDATE streams. The other columns record MRT support without
+    distinguishing table dumps from update dumps.
 
 [^bmp-views]: Checked 2026-09-09: FRR 10.7.1 and GoBGP 4.9.0 both emit
     Loc-RIB Route Monitoring with peer type 3
@@ -651,10 +664,9 @@ apt channel. Release
 [v26.8.5](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.5)
 (2026-08-28) added RFC 7947 route-server mode
 (`neighbor X route-server-client`) and RFC 9234 BGP Roles with
-Only-to-Customer;
-[v26.8.6](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.6)
-(2026-08-29) followed a day later, and the project tags releases
-several times a month.
+Only-to-Customer. The latest release when checked on 2026-09-22 was
+[v26.9.1](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.9.1)
+(2026-09-05), and the project tags releases several times a month.
 
 **Holo** (MIT) is a routing-protocol suite whose BGP is IPv4 and IPv6
 unicast. Its README at

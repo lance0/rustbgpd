@@ -14,7 +14,8 @@
 //! the target peer's ASN (standard forms exist only when both ASNs fit
 //! 16 bits; the large forms are the RFC 8195 idiom and work for 4-byte
 //! ASNs — extended-community control forms are deliberately not
-//! implemented, per draft-ietf-grow-ixp-ext-comms guidance):
+//! implemented; draft-ietf-grow-ixp-ext-comms, an expired WG draft, is
+//! retained as rationale, not as a normative requirement):
 //!
 //! | Action                     | Standard    | Large           |
 //! |----------------------------|-------------|-----------------|
