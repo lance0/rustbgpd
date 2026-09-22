@@ -1081,6 +1081,76 @@ role = "rs-client"
     );
 }
 
+/// The published role enum is exactly the set of spellings serde accepts,
+/// aliases included, and a misspelling fails both the schema and the parser.
+#[test]
+fn bgp_role_schema_enum_matches_accepted_spellings() {
+    use serde::Deserialize as _;
+    use serde::de::{self, Visitor};
+
+    /// Records the variant names serde passes to `deserialize_enum`; serde
+    /// includes every alias in that list.
+    struct VariantNames<'a>(&'a mut Vec<&'static str>);
+    impl<'de> de::Deserializer<'de> for VariantNames<'_> {
+        type Error = de::value::Error;
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("only enums are captured"))
+        }
+        fn deserialize_enum<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            variants: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.0.extend_from_slice(variants);
+            Err(de::Error::custom("captured"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct identifier ignored_any
+        }
+    }
+
+    let mut captured = Vec::new();
+    let _ = BgpRoleConfig::deserialize(VariantNames(&mut captured));
+    let accepted: std::collections::BTreeSet<String> =
+        captured.into_iter().map(str::to_string).collect();
+    assert!(accepted.contains("rs") && accepted.contains("rs-client"));
+
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let published: std::collections::BTreeSet<String> = schema["$defs"]["BgpRoleConfig"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(published, accepted);
+
+    // The canonical spelling is what the daemon serializes.
+    assert_eq!(
+        serde_json::to_value(BgpRoleConfig::RouteServer).unwrap(),
+        "route_server"
+    );
+    assert_eq!(
+        serde_json::to_value(BgpRoleConfig::RouteServerClient).unwrap(),
+        "route_server_client"
+    );
+
+    let neighbor_with_role = |role: &str| {
+        format!(
+            "{}\n[[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\nrole = \"{role}\"\n",
+            valid_toml()
+        )
+    };
+    for role in &published {
+        parse(&neighbor_with_role(role)).unwrap_or_else(|e| panic!("role {role:?}: {e}"));
+    }
+    let misspelled = "route-server";
+    assert!(!published.contains(misspelled));
+    assert!(parse(&neighbor_with_role(misspelled)).is_err());
+}
+
 #[test]
 fn strict_role_without_role_is_rejected() {
     let toml_str = format!(

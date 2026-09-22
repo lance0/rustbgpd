@@ -980,7 +980,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `next_hop_ownership`   | string   | no       | --      | ADR-0107 pre-policy NEXT_HOP ownership enforcement for route-server clients (RFC 7948 §4.8). `"strict_peer"` accepts a unicast announcement only when its complete wire next-hop identity is the advertising session's own address; non-conforming announcements are rejected before import policy (fail-closed, treat-as-withdraw). Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
 | `rs_control_communities` | bool   | no       | (derived) | Interpret RFC 7947 §2.3.2 / RFC 8195 route-server control communities set by this member: per-target announce suppression, announce-only overrides, and prepend toward a target, keyed on the *target* peer's ASN. Acted-on control communities are scrubbed from this session's outbound announcements. Default: `true` when `route_server_client = true`, `false` otherwise. Inherits from the peer-group; set explicitly to override either default (see below) |
-| `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, or `"peer"` (eBGP only) |
+| `role`                 | string   | no       | --      | Local BGP Role for RFC 9234 route-leak protection: `"provider"`, `"route_server"`, `"route_server_client"`, `"customer"`, or `"peer"` (eBGP only; `"rs"` and `"rs-client"` are accepted aliases) |
 | `strict_role`          | bool     | no       | false   | Require the peer to advertise a compatible BGP Role capability; only valid when `role` is set |
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
 | `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
@@ -2185,11 +2185,13 @@ role = "provider"
 strict_role = true
 ```
 
-Valid role values are `"provider"`, `"rs"`, `"rs-client"`, `"customer"`, and
-`"peer"`. The longer aliases `"route_server"` and `"route_server_client"` are
-also accepted. When `role` is configured, rustbgpd advertises the BGP Role
-capability and applies OTC rules based on the local role even if the peer does
-not advertise a Role. `strict_role = true` changes that compatibility behavior:
+Valid role values are `"provider"`, `"route_server"`, `"route_server_client"`,
+`"customer"`, and `"peer"`. The short aliases `"rs"` and `"rs-client"` are also
+accepted, and the published JSON Schema lists both spellings; the daemon writes
+the snake_case names when it saves a config. The gRPC API and `rbgp` output
+report the role as `"rs"` / `"rs-client"`. When `role` is configured, rustbgpd
+advertises the BGP Role capability and applies OTC rules based on the local
+role even if the peer does not advertise a Role. `strict_role = true` changes that compatibility behavior:
 the peer must advertise a compatible Role or the OPEN is rejected with Role
 Mismatch (NOTIFICATION 2/11).
 

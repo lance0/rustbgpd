@@ -338,13 +338,16 @@
       ]
     },
     "BgpRoleConfig": {
+      "description": "RFC 9234 BGP Role. The `snake_case` names are canonical (the daemon writes\nthem back); `rs` and `rs-client` are accepted short aliases of\n`route_server` and `route_server_client`.",
       "type": "string",
       "enum": [
         "provider",
         "route_server",
         "route_server_client",
         "customer",
-        "peer"
+        "peer",
+        "rs",
+        "rs-client"
       ]
     },
     "BmpCollector": {

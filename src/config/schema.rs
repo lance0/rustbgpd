@@ -2218,8 +2218,12 @@ pub(crate) fn validate_orr_vantage_address(
     Ok(())
 }
 
+/// RFC 9234 BGP Role. The `snake_case` names are canonical (the daemon writes
+/// them back); `rs` and `rs-client` are accepted short aliases of
+/// `route_server` and `route_server_client`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[schemars(transform = add_short_role_aliases)]
 pub enum BgpRoleConfig {
     Provider,
     #[serde(alias = "rs")]
@@ -2228,6 +2232,17 @@ pub enum BgpRoleConfig {
     RouteServerClient,
     Customer,
     Peer,
+}
+
+/// Publish the serde role aliases in the schema enum. schemars omits serde
+/// aliases, so schema validation would otherwise reject spellings the daemon
+/// accepts.
+fn add_short_role_aliases(schema: &mut Schema) {
+    schema
+        .get_mut("enum")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("BgpRoleConfig schema is a string enum")
+        .extend(["rs", "rs-client"].map(serde_json::Value::from));
 }
 
 impl BgpRoleConfig {
