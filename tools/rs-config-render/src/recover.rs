@@ -22,7 +22,7 @@ use serde_json::Value;
 use crate::Exit;
 use crate::ixp_manager_host::{self, Binding, Guard};
 use crate::ixp_manager_lifecycle::{self as lifecycle, Callback, Journal, Phase};
-use crate::{activation, activation::Health, activation::RuntimeDiff};
+use crate::{activation, activation::Health, activation::Republished, activation::RuntimeDiff};
 
 const ACTIVATION_RECEIPT: &str = "activation-receipt.json";
 /// rbgp gets this long per probe before `status` reports it as invalid.
@@ -791,7 +791,7 @@ impl Session<'_> {
                 let candidate = from
                     .strip_prefix("generations/")
                     .expect("current_target validated the prefix");
-                let settled = activation::republish(
+                let republished = activation::republish(
                     state,
                     to,
                     candidate,
@@ -808,12 +808,23 @@ impl Session<'_> {
                     activation::Error::Refused(reason) => Error::Refused(reason),
                     _ => Error::ManualRecovery("activation receipt could not be written"),
                 })?;
-                if settled {
-                    Ok(())
-                } else {
-                    Err(Error::ManualRecovery(
+                // A target provably not applied leaves every piece of state as
+                // it was, so it is a refusal (exit 2), not a success (the lock
+                // is still owed) and not manual recovery (nothing is uncertain).
+                match republished {
+                    Republished::Settled => Ok(()),
+                    Republished::NotApplied { started: true } => Err(Error::Refused(
+                        "daemon rejected the rollback reload without runtime effect; current restored, nothing changed; the daemon log names the reason",
+                    )),
+                    Republished::NotApplied { started: false } => Err(Error::Refused(
+                        "activation command did not start; current restored, nothing changed",
+                    )),
+                    Republished::Unsettled => Err(Error::ManualRecovery(
                         "rollback did not settle: current is re-pointed but the daemon did not prove it; inspect with status",
-                    ))
+                    )),
+                    Republished::RestoreUnproven => Err(Error::ManualRecovery(
+                        "rollback target was not applied, but restoring current could not be re-proven; inspect with status",
+                    )),
                 }
             }
             Step::Callback(callback) => {
