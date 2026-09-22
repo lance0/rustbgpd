@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::FibTableConfig;
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
@@ -94,6 +94,11 @@ pub struct FibTableControlDeps {
     /// rollback resolution); the config persister owns the writes. `None`
     /// disables history/rollback (unit tests and non-transaction consumers).
     pub config_history_dir: Option<std::path::PathBuf>,
+    /// Authoritative committed config snapshot watch. When present, `List` reads
+    /// the committed `[[fib_tables]]` from this source rather than from the
+    /// reconciler actor, so an uncommitted in-flight candidate (or a failed
+    /// mutation's temporary actor state) is never visible to operator reads.
+    pub accepted_rx: Option<watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>>,
 }
 
 struct OwnedFibControlError(FibTableControlError);
@@ -133,22 +138,23 @@ async fn handle(
 ) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
     match request {
         FibTableControlRequest::List => {
-            let _guard = deps
-                .lock
-                .acquire()
-                .await
-                .map_err(|_| FibTableControlError::Unavailable(COORDINATOR_CLOSED.into()))?;
-            // A running reconciler is the source of truth; otherwise fall back
-            // to the startup set so configured tables stay visible even when
-            // the actor failed to spawn (non-Linux / netlink failure).
-            let (tables, runtime_available) = match read_current_tables(
-                deps.fib_cmd_tx.as_ref(),
-                FibTableControlError::Unavailable,
-            )
-            .await?
-            {
-                Some(current) => (current, true),
-                None => (deps.startup_tables.clone(), false),
+            if deps.lock.is_closed() {
+                return Err(FibTableControlError::Unavailable(COORDINATOR_CLOSED.into()));
+            }
+            // Query the reconciler's running status without holding the exclusive
+            // mutation coordinator lock, so unrelated config mutations and SIGHUP
+            // reloads can proceed even while an actor read is in flight or stalled.
+            let runtime_available =
+                read_current_tables(deps.fib_cmd_tx.as_ref(), FibTableControlError::Unavailable)
+                    .await?
+                    .is_some();
+            // The authoritative committed configuration is the source of truth for
+            // configured tables: this ensures reads during apply-before-persist,
+            // failed persistence, or transaction rollback expose only the coherent
+            // committed set, never an uncommitted candidate.
+            let tables = match &deps.accepted_rx {
+                Some(rx) => rx.borrow().config().fib_tables.clone(),
+                None => deps.startup_tables.clone(),
             };
             Ok(proto::ListFibTablesResponse {
                 tables: tables.iter().map(config_to_proto).collect(),
@@ -800,6 +806,7 @@ mod tests {
     use tokio::sync::Mutex;
     use tonic::{Code, Request, Status};
 
+    use crate::config::{AcceptedConfigSnapshot, Config};
     use crate::test_support::basic_fib_table as table;
 
     #[derive(Clone, Copy)]
@@ -895,6 +902,7 @@ mod tests {
                 startup_tables,
                 confirm_journal_path: None,
                 config_history_dir: None,
+                accepted_rx: None,
             },
             RuntimeConfigSettlementWatchdog::new(),
             DaemonGate::new(),
@@ -921,6 +929,7 @@ mod tests {
             startup_tables: vec![table("edge", 1000)],
             confirm_journal_path: None,
             config_history_dir: None,
+            accepted_rx: None,
         });
 
         let settlement = || (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new());
@@ -985,6 +994,7 @@ mod tests {
             startup_tables: Vec::new(),
             confirm_journal_path: None,
             config_history_dir: None,
+            accepted_rx: None,
         });
         let list = tokio::spawn(handle(
             deps,
@@ -995,12 +1005,13 @@ mod tests {
         let Some(FibRuntimeCommand::GetTables { reply: _stalled }) = fib_rx.recv().await else {
             panic!("expected GetTables")
         };
-        assert!(
-            tokio::time::timeout(Duration::ZERO, coordinator.acquire())
-                .await
-                .is_err(),
-            "List holds the coordinator across the actor read"
-        );
+        // Mutation coordinator is NOT held while the actor is awaited — an unrelated
+        // config mutation can acquire ownership and complete without waiting on the FIB actor.
+        let permit = tokio::time::timeout(Duration::ZERO, coordinator.acquire())
+            .await
+            .expect("List must not hold the coordinator permit across the actor read")
+            .expect("coordinator must be open");
+        drop(permit);
 
         // Wall-clock oracle, deliberately not the implementation constant.
         tokio::time::advance(Duration::from_secs(599)).await;
@@ -1019,8 +1030,120 @@ mod tests {
         ));
         let _free = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
             .await
-            .expect("the timed-out List must release the coordinator")
+            .expect("the timed-out List must leave the coordinator open")
             .unwrap();
+    }
+    #[tokio::test]
+    async fn list_returns_committed_tables_not_in_flight_mutation_candidate() {
+        let original = table("edge", 1000);
+        let candidate = table("core", 1001);
+
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+"#;
+        let initial_config = Config::load_toml_with_diagnostics(initial_toml, "initial").unwrap();
+        let initial_snapshot = AcceptedConfigSnapshot::from_config_for_test(initial_config);
+        let (accepted_tx, accepted_rx) = watch::channel(initial_snapshot);
+
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let in_flight = candidate.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = fib_rx.recv().await {
+                match cmd {
+                    FibRuntimeCommand::GetTables { reply } => {
+                        // Actor has the in-flight candidate in its local state
+                        let _ = reply.send(vec![in_flight.clone()]);
+                    }
+                    FibRuntimeCommand::OwnedReplaceTables { reply, .. } => {
+                        let _ = reply.send(OwnedFibReplaceOutcome::Applied);
+                    }
+                }
+            }
+        });
+
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let deps = Arc::new(FibTableControlDeps {
+            fib_cmd_tx: Some(fib_tx),
+            peer_mgr_tx: peer_tx,
+            rib_tx: None,
+            config_tx: None,
+            lock: RuntimeConfigCoordinator::new(),
+            config_mutation_gate: None,
+            startup_tables: vec![original.clone()],
+            confirm_journal_path: None,
+            config_history_dir: None,
+            accepted_rx: Some(accepted_rx),
+        });
+
+        // Even though the actor currently reports `candidate` (simulating an in-flight
+        // uncommitted mutation before persistence settles), ListFibTables must expose
+        // only the committed configuration (`original`).
+        let resp = handle(
+            deps.clone(),
+            (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
+            FibTableControlRequest::List,
+        )
+        .await
+        .expect("List should succeed");
+
+        assert!(resp.runtime_available);
+        assert_eq!(resp.tables, vec![config_to_proto(&original)]);
+
+        // Now simulate a successful commit: the accepted watch advances to the new snapshot.
+        let committed_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+
+[[fib_tables]]
+name = "core"
+table_id = 1001
+metric = 200
+families = ["ipv4_unicast"]
+"#;
+        let committed_config =
+            Config::load_toml_with_diagnostics(committed_toml, "committed").unwrap();
+        let committed_snapshot = AcceptedConfigSnapshot::from_config_for_test(committed_config);
+        accepted_tx.send_replace(committed_snapshot);
+
+        // Subsequent List call now sees the newly committed table set.
+        let resp2 = handle(
+            deps,
+            (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
+            FibTableControlRequest::List,
+        )
+        .await
+        .expect("List should succeed");
+
+        assert!(resp2.runtime_available);
+        assert_eq!(
+            resp2.tables,
+            vec![config_to_proto(&original), config_to_proto(&candidate)]
+        );
     }
 
     #[tokio::test]
@@ -1127,6 +1250,7 @@ mod tests {
             startup_tables: vec![original.clone()],
             confirm_journal_path: None,
             config_history_dir: None,
+            accepted_rx: None,
         });
         let err = mutate(
             deps,

@@ -5297,6 +5297,7 @@ async fn run<T>(
                 // optional for the FIB-CRUD deps below and for embedders that
                 // run the control surface without persistence.
                 config_history_dir: Some(config_history::history_dir(&config.runtime_state_dir())),
+                accepted_rx: accepted_rx.clone(),
             },
             metrics.clone(),
             accepted_rx
@@ -5518,6 +5519,7 @@ async fn run<T>(
                 // history reads).
                 confirm_journal_path: None,
                 config_history_dir: None,
+                accepted_rx: accepted_rx.clone(),
             },
             runtime_config_settlement.clone(),
             daemon_gate.clone(),
