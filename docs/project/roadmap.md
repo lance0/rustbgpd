@@ -132,10 +132,11 @@ IRR-disabled members; it shipped the same way, and the flagship receipt still
 describes v0.70.0. v0.71.0 (2026-09-20) is a minor release adding per-member
 BFD attachments on SIGHUP and versioned `rbgp` JSON documents, with dynamic
 peer-group hot reloads and RIB readiness and distribution fixes; it ships on
-its per-change regression tests and main CI. A qualifying 24-hour
-management-load soak is queued on the v0.71.0 tag and has not run yet, so the
-published flagship receipt still describes v0.70.0 until that run is
-published. The
+its per-change regression tests and main CI. The
+[2026-09-21 run](../soaks/soak-rs-flagship-24h-2026-09-21.md) then qualified
+the v0.71.0 tag under the current gates (on-host verdict, no reanalysis; every
+gate passes, with the slowest `policy stats` read 31 ms inside its 2 s
+deadline), so the published flagship receipt now describes v0.71.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

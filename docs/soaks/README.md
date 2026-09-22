@@ -30,3 +30,4 @@ the run they describe.
 | [Route-server flagship 24-hour soak, 2026-09-11 (FAIL)](soak-rs-flagship-24h-2026-09-11.md) | Reload, maximum-prefix, and management-plane load; management read timeouts and missed metrics slots |
 | [Route-server flagship 24-hour soak, 2026-09-12 (FAIL)](soak-rs-flagship-24h-2026-09-12.md) | Reload, maximum-prefix, and management-plane load; missed metrics slots only |
 | [Route-server flagship 24-hour soak, 2026-09-14 (PASS on reanalysis)](soak-rs-flagship-24h-2026-09-14.md) | Qualifying run on v0.70.0; passes under the reload-window cadence rule; original verdict failed the zero-miss cadence rule only |
+| [Route-server flagship 24-hour soak, 2026-09-21 (PASS)](soak-rs-flagship-24h-2026-09-21.md) | Qualifying run on the v0.71.0 tag; every gate passes on the on-host verdict; slowest operator read 31 ms inside its 2 s deadline |
