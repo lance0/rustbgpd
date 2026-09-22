@@ -213,6 +213,18 @@ plan rejections, precondition failures, the acquisition timeout, and
 any failure before the first mutation are clean rejections — the
 daemon keeps running on the old config and an immediate retry is safe.
 
+That includes a config store that stalls before the first mutation. If
+the persister does not acknowledge the staged candidate, the owner stops
+waiting at its pre-effect deadline: the budget minus the smaller of 30
+seconds and a tenth of the budget, so 29.5 minutes by default. The
+mutation fails `UNAVAILABLE` with nothing applied, and the late stage is
+discarded rather than published. FIB-table CRUD bounds its table read and
+its peer-manager staging handoff by the same deadline, a config
+transaction bounds its persistence-slot reservation and, when it replaces
+FIB tables, its table read, and peer-group
+`Set` bounds its read of the existing group. Waits after the first
+runtime effect are still bounded only by the budget.
+
 ## The constants are fixed by design
 
 The 30-minute budget, five-second grace, and exit status 70 are fixed

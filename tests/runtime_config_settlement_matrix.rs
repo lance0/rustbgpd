@@ -1439,6 +1439,90 @@ fn shutdown_signal_escalation_rows() {
     escalation_row_already_fenced(106);
 }
 
+// Budget for the stalled-stage row: long enough that its 10% pre-effect
+// margin (300 ms) is observable, short enough that the unfixed failure mode,
+// fencing at the budget, lands inside the row's own waits.
+const STAGE_HOLD_BUDGET: Duration = Duration::from_secs(3);
+const STAGE_CHECKPOINT: &str = "stage_before_ack";
+const STAGE_TIMED_OUT: &str =
+    "config persistence did not stage the candidate in time; nothing was applied";
+
+/// A persister that never acknowledges a stage leaves a mutation that
+/// provably changed nothing. The owner must refuse it as UNAVAILABLE at its
+/// pre-effect deadline, before the budget, so the daemon stays up and ready
+/// instead of fencing `budget_expired` and exiting 70.
+#[test]
+fn stalled_stage_acknowledgement_settles_clean_before_the_budget() {
+    let _ = rbgp_binary();
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, 201).with_hold_budget(STAGE_HOLD_BUDGET);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let definition = lab.root.path().join("peer-group.json");
+    std::fs::write(
+        &definition,
+        r#"{"families":["ipv4_unicast"],"route_server_client":true}"#,
+    )
+    .unwrap();
+    let set = |name: &str| {
+        lab.command(&[
+            "peer-group",
+            "set",
+            name,
+            "--from-file",
+            definition.to_str().unwrap(),
+        ])
+    };
+
+    lab.control.arm(STAGE_CHECKPOINT);
+    let armed = Instant::now();
+    let request = set("matrix-peer-group");
+    lab.control
+        .wait_for_receipt(STAGE_CHECKPOINT, daemon.pid(), &mut daemon);
+    let output = request.wait_output(Duration::from_secs(15));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exited = daemon.process.try_wait();
+    assert!(
+        !output.status.success() && stderr.contains(STAGE_TIMED_OUT),
+        "stalled stage must be refused cleanly\nstderr:\n{stderr}\ndaemon exit: \
+         {exited:?}\ndaemon log:\n{}",
+        daemon.log()
+    );
+    daemon.assert_running();
+    assert_eq!(ready(daemon.metrics), Some(200), "{}", daemon.log());
+    wait_metrics_idle(daemon.metrics, &mut daemon);
+
+    // The persister answers late; the dropped commit makes the bridge
+    // discard the stage rather than publish it.
+    lab.control.write_settings(SETUP_BUDGET);
+    lab.control.release(STAGE_CHECKPOINT);
+    daemon.wait_log("discarding the staged config write", "");
+
+    // A clean settlement arms no fatal clock: outlive the budget plus grace.
+    while armed.elapsed() < STAGE_HOLD_BUDGET + GRACE + EXIT_JITTER {
+        daemon.assert_running();
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
+    assert_eq!(ready(daemon.metrics), Some(200), "{}", daemon.log());
+
+    // The config plane is free, and only the later mutation reaches disk.
+    let after = set("after-stall").wait_output(Duration::from_secs(15));
+    assert!(
+        after.status.success(),
+        "mutation after the stall failed\nstderr:\n{}",
+        String::from_utf8_lossy(&after.stderr)
+    );
+    lab.assert_disk("after-stall", true);
+    lab.assert_disk("matrix-peer-group", false);
+    assert!(
+        !lab.run(&["--json", "peer-group", "get", "matrix-peer-group"])
+            .status
+            .success()
+    );
+    daemon.sigterm();
+    daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
+}
+
 #[test]
 fn settlement_real_process_evidence_inventory_is_composed() {
     let matrix = include_str!("runtime_config_settlement_matrix.rs");

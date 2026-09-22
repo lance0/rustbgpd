@@ -10659,3 +10659,198 @@ async fn metadata_history_rollback_refuses_before_payload_planning_or_confirm_au
         if message == "cannot roll back: config history storage is unavailable or unsafe")
     );
 }
+
+/// Register a real settlement owner under the production budget.
+async fn register_test_owner() -> (
+    OwnedRuntimeConfigOperation,
+    rustbgpd_api::runtime_config_settlement::RuntimeConfigExecutorGuard,
+) {
+    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let permit = coordinator.acquire().await.unwrap();
+    RuntimeConfigSettlementWatchdog::new().register_owned(
+        RuntimeConfigOperationKind::Apply,
+        coordinator,
+        permit,
+        rustbgpd_api::health_probe::DaemonGate::new(),
+        None,
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_transaction_stage_acknowledgement_ends_clean_at_the_pre_effect_deadline() {
+    let (operation, executor_guard) = register_test_owner().await;
+    let deadline = operation.pre_effect_deadline();
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let config_permit = config_tx.reserve_owned().await.unwrap();
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let stage = tokio::spawn(async move {
+        stage_candidate_config(config_permit, String::new(), &progress)
+            .await
+            .map(|_| ())
+    });
+    // Handshake: the persister received the stage and never answers it.
+    let Some(ConfigEvent::ConfigTransactionCommitted {
+        ack: Some(ConfigPersistAck::Staged { staged, commit }),
+        ..
+    }) = config_rx.recv().await
+    else {
+        panic!("expected a staged transaction event")
+    };
+    tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+    assert!(!stage.is_finished(), "stage ended before its deadline");
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(1), stage)
+        .await
+        .expect("a stalled stage acknowledgement must end at the pre-effect deadline")
+        .unwrap()
+        .expect_err("a stalled stage must not return a commit handle");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(
+        failure.fence_reason.is_none(),
+        "a pre-effect timeout is clean"
+    );
+    assert!(
+        matches!(
+            failure.error,
+            ConfigTransactionApplyError::Unavailable(ref message)
+                if message.contains("did not stage the transaction candidate in time")
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert!(commit.await.is_err(), "commit channel must be dropped");
+    assert!(staged.send(Ok(())).is_err());
+    assert!(operation.try_settle());
+    drop(executor_guard);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_transaction_fib_read_ends_clean_at_the_pre_effect_deadline() {
+    let (operation, executor_guard) = register_test_owner().await;
+    let deadline = operation.pre_effect_deadline();
+    // Earlier waits consumed most of the budget, so the pre-effect deadline
+    // now falls inside the read's own ten-minute bound, as it always does
+    // under a short budget.
+    tokio::time::sleep(Duration::from_mins(25)).await;
+    let (fib_tx, mut fib_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let deps = deps(
+        Some(fib_tx),
+        mpsc::channel(1).0,
+        Some(config_tx.clone()),
+        Vec::new(),
+    );
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let commit = tokio::spawn(async move {
+        commit_fib_transaction(
+            &deps,
+            &internal_tx,
+            &config_tx,
+            "candidate".to_string(),
+            fib_config(&table("core", 1001)),
+            "next".to_string(),
+            proto::UpdateGroupImpactPlan::default(),
+            &progress,
+        )
+        .await
+        .map(|_| ())
+    });
+    // Handshake: the reconciler received the read and never answers it.
+    let Some(FibRuntimeCommand::GetTables { reply: _stalled }) = fib_rx.recv().await else {
+        panic!("expected GetTables")
+    };
+    tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+    assert!(!commit.is_finished(), "read ended before its deadline");
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(1), commit)
+        .await
+        .expect("a stalled FIB read must end at the pre-effect deadline")
+        .unwrap()
+        .expect_err("a stalled FIB read must not commit");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(
+        failure.fence_reason.is_none(),
+        "a pre-effect timeout is clean"
+    );
+    assert_eq!(
+        failure.error,
+        ConfigTransactionApplyError::Unavailable(
+            "FIB reconciler did not answer GetTables in time".to_string()
+        )
+    );
+    assert!(config_rx.try_recv().is_err(), "nothing was staged on disk");
+    assert!(internal_rx.try_recv().is_err(), "no snapshot was staged");
+    assert!(operation.try_settle());
+    drop(executor_guard);
+}
+
+#[tokio::test(start_paused = true)]
+async fn full_persistence_queue_ends_clean_at_the_pre_effect_deadline() {
+    let (operation, executor_guard) = register_test_owner().await;
+    let deadline = operation.pre_effect_deadline();
+    // Earlier waits consumed the budget down to half a second, inside the
+    // reservation's own two-second bound, as a short budget always is.
+    tokio::time::sleep_until(deadline - Duration::from_millis(500)).await;
+    let (fib_tx, mut fib_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    // The persistence queue is full for the whole attempt.
+    let _held = config_tx.clone().reserve_owned().await.unwrap();
+    let deps = deps(
+        Some(fib_tx),
+        mpsc::channel(1).0,
+        Some(config_tx.clone()),
+        Vec::new(),
+    );
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let commit = tokio::spawn(async move {
+        commit_fib_transaction(
+            &deps,
+            &internal_tx,
+            &config_tx,
+            "candidate".to_string(),
+            fib_config(&table("core", 1001)),
+            "next".to_string(),
+            proto::UpdateGroupImpactPlan::default(),
+            &progress,
+        )
+        .await
+        .map(|_| ())
+    });
+    tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+    assert!(
+        !commit.is_finished(),
+        "reservation ended before its deadline"
+    );
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(Duration::from_millis(100), commit)
+        .await
+        .expect("a full persistence queue must end at the pre-effect deadline")
+        .unwrap()
+        .expect_err("a full persistence queue must not commit");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(
+        failure.fence_reason.is_none(),
+        "a pre-effect timeout is clean"
+    );
+    assert_eq!(
+        failure.error,
+        ConfigTransactionApplyError::Unavailable(
+            "config persistence queue busy — refusing mutation to avoid drift".to_string()
+        )
+    );
+    assert!(
+        config_rx.try_recv().is_err(),
+        "nothing was sent to persistence"
+    );
+    assert!(fib_rx.try_recv().is_err(), "no FIB read or effect");
+    assert!(internal_rx.try_recv().is_err(), "no snapshot was staged");
+    assert!(operation.try_settle());
+    drop(executor_guard);
+}

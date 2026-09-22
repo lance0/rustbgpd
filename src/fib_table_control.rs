@@ -40,10 +40,12 @@ use rustbgpd_api::proto;
 use rustbgpd_api::rib_service::{
     FibTableControlError, FibTableControlFn, FibTableControlFuture, FibTableControlRequest,
 };
-use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
+use rustbgpd_api::runtime_config_settlement::{
+    RuntimeConfigFenceReason, before_pre_effect_deadline,
 };
 use rustbgpd_api::server::{
     ConfigMutationGateFn, RuntimeConfigCoordinator, RuntimeConfigCoordinatorClosed,
@@ -54,6 +56,8 @@ use rustbgpd_api::server::{
 const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNED_FIB_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 const COORDINATOR_CLOSED: &str = "runtime config coordinator is closed";
+const STAGE_TIMED_OUT: &str =
+    "config persistence did not stage the FIB-table candidate in time; nothing was applied";
 const FIB_CHANNEL_CLOSED: &str = "FIB reconciler command channel closed";
 
 /// Dependencies for the FIB-table control hook, wired from `main.rs`.
@@ -285,9 +289,13 @@ enum AcceptedDispatch<T, E> {
     AcceptedReplyLost(E),
 }
 
+/// Durably stage the candidate. The acknowledgement precedes every runtime
+/// effect, so it is bounded by the owner's pre-effect deadline; on expiry the
+/// dropped commit channel makes the config bridge discard the stage.
 async fn stage_fib_persistence(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     snapshots: Vec<FibTableSnapshot>,
+    pre_effect_deadline: Option<tokio::time::Instant>,
 ) -> Result<StagedFibPersistence, FibTableControlError> {
     let (staged_tx, staged_rx) = oneshot::channel();
     let (commit_tx, commit_rx) = oneshot::channel();
@@ -298,11 +306,14 @@ async fn stage_fib_persistence(
             commit: commit_rx,
         }),
     });
-    match staged_rx.await {
-        Ok(Ok(())) => Ok(StagedFibPersistence { commit: commit_tx }),
-        Ok(Err(error)) => Err(config_persist_error(error)),
-        Err(_) => Err(FibTableControlError::Internal(
+    match before_pre_effect_deadline(pre_effect_deadline, staged_rx).await {
+        Some(Ok(Ok(()))) => Ok(StagedFibPersistence { commit: commit_tx }),
+        Some(Ok(Err(error))) => Err(config_persist_error(error)),
+        Some(Err(_)) => Err(FibTableControlError::Internal(
             "config bridge dropped FIB-table staging acknowledgement".to_string(),
+        )),
+        None => Err(FibTableControlError::Unavailable(
+            STAGE_TIMED_OUT.to_string(),
         )),
     }
 }
@@ -325,13 +336,19 @@ fn config_persist_error(error: ConfigPersistError) -> FibTableControlError {
     }
 }
 
+/// Stage the candidate in the peer manager. Only the send half is capped at
+/// the pre-effect deadline: an unaccepted command has no effect, while an
+/// accepted one may, so its reply keeps the actor bound alone.
 async fn stage_pm_candidate(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     snapshots: Vec<FibTableSnapshot>,
+    pre_effect_deadline: Option<tokio::time::Instant>,
 ) -> AcceptedDispatch<Result<(), String>, FibTableControlError> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    match tokio::time::timeout(
-        OWNED_FIB_ACTOR_TIMEOUT,
+    let send_deadline = tokio::time::Instant::now() + OWNED_FIB_ACTOR_TIMEOUT;
+    let send_deadline = pre_effect_deadline.map_or(send_deadline, |cap| cap.min(send_deadline));
+    match tokio::time::timeout_at(
+        send_deadline,
         peer_mgr_tx.send(PeerManagerCommand::StageFibTables {
             tables: snapshots,
             reply: reply_tx,
@@ -520,12 +537,25 @@ async fn owned_fib_mutation_body(
             FibTableControlError::FailedPrecondition(error).into(),
         ));
     }
-    let previous =
-        match read_current_tables(Some(&fib_cmd_tx), FibTableControlError::Internal).await {
-            Ok(Some(tables)) => tables,
-            Ok(None) => Vec::new(),
-            Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
-        };
+    // Every wait before the peer manager accepts the candidate precedes
+    // any runtime effect, so each ends by this deadline and settles clean.
+    let pre_effect_deadline = owned
+        .as_ref()
+        .map(OwnedRuntimeConfigOperation::pre_effect_deadline);
+    let read = read_current_tables(Some(&fib_cmd_tx), FibTableControlError::Internal);
+    let previous = match before_pre_effect_deadline(pre_effect_deadline, read).await {
+        Some(Ok(Some(tables))) => tables,
+        Some(Ok(None)) => Vec::new(),
+        Some(Err(error)) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
+        None => {
+            return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
+                FibTableControlError::Unavailable(
+                    "FIB reconciler did not answer GetTables in time".to_string(),
+                )
+                .into(),
+            ));
+        }
+    };
     let candidate = match apply_mutation(previous.clone(), mutation) {
         Ok(candidate) => candidate,
         Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
@@ -536,11 +566,12 @@ async fn owned_fib_mutation_body(
     if let Some(operation) = &owned {
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
     }
-    let staged = match stage_fib_persistence(persist_permit, snapshots.clone()).await {
-        Ok(staged) => staged,
-        Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
-    };
-    match stage_pm_candidate(&peer_mgr_tx, snapshots).await {
+    let staged =
+        match stage_fib_persistence(persist_permit, snapshots.clone(), pre_effect_deadline).await {
+            Ok(staged) => staged,
+            Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
+        };
+    match stage_pm_candidate(&peer_mgr_tx, snapshots, pre_effect_deadline).await {
         AcceptedDispatch::NotAccepted(error) => {
             drop(staged);
             return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into()));
@@ -1345,7 +1376,7 @@ families = ["ipv4_unicast"]
                     )));
                 }
             });
-            let Err(error) = stage_fib_persistence(permit, Vec::new()).await else {
+            let Err(error) = stage_fib_persistence(permit, Vec::new(), None).await else {
                 panic!("stage failure must not return a commit handle");
             };
             assert!(matches!(error, FibTableControlError::InvalidArgument(_)) || drop_ack);
@@ -1360,7 +1391,7 @@ families = ["ipv4_unicast"]
         let (closed_tx, closed_rx) = mpsc::channel(1);
         drop(closed_rx);
         assert!(matches!(
-            stage_pm_candidate(&closed_tx, Vec::new()).await,
+            stage_pm_candidate(&closed_tx, Vec::new(), None).await,
             AcceptedDispatch::NotAccepted(_)
         ));
 
@@ -1377,7 +1408,7 @@ families = ["ipv4_unicast"]
                     let _ = reply.send(Err("candidate rejected".to_string()));
                 }
             });
-            let outcome = stage_pm_candidate(&tx, Vec::new()).await;
+            let outcome = stage_pm_candidate(&tx, Vec::new(), None).await;
             if drop_reply {
                 assert!(matches!(outcome, AcceptedDispatch::AcceptedReplyLost(_)));
             } else {
@@ -1616,6 +1647,157 @@ families = ["ipv4_unicast"]
             }
         ));
         assert_eq!(rollback, 1);
+    }
+
+    type OwnedFibResult = Result<proto::ListFibTablesResponse, OwnedFibControlError>;
+
+    /// Run a FIB Set through the shared executor under a real settlement
+    /// owner, and hand that owner back so a test can read its deadline.
+    async fn spawn_owned_fib_set(
+        fib_tx: mpsc::Sender<FibRuntimeCommand>,
+        peer_tx: mpsc::Sender<PeerManagerCommand>,
+        permit: mpsc::OwnedPermit<ConfigEvent>,
+    ) -> (
+        tokio::task::JoinHandle<OwnedFibResult>,
+        OwnedRuntimeConfigOperation,
+    ) {
+        let watchdog = RuntimeConfigSettlementWatchdog::new();
+        let (operation_tx, operation_rx) = oneshot::channel();
+        let (context, attachment) = OwnedRuntimeConfigRequestContext::unary();
+        let join = tokio::spawn(async move {
+            let _attachment = attachment;
+            watchdog
+                .execute_owned(
+                    RuntimeConfigOperationKind::FibSet,
+                    RuntimeConfigCoordinator::new(),
+                    DaemonGate::new(),
+                    context.response_attached(),
+                    move |operation| {
+                        let _ = operation_tx.send(operation.clone());
+                        owned_fib_mutation_body(
+                            Some(operation),
+                            None,
+                            "test FIB Set",
+                            fib_tx,
+                            peer_tx,
+                            Mutation::Upsert(table("core", 1001)),
+                            permit,
+                        )
+                    },
+                )
+                .await
+        });
+        (join, operation_rx.await.expect("owner registered"))
+    }
+
+    /// Await the owner at exactly `deadline`: unfinished 1 ms earlier, and
+    /// finished at `deadline` without any further time passing.
+    async fn settle_exactly_at(
+        join: tokio::task::JoinHandle<OwnedFibResult>,
+        deadline: tokio::time::Instant,
+    ) -> OwnedFibResult {
+        tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+        assert!(!join.is_finished(), "owner ended before its deadline");
+        tokio::time::sleep_until(deadline).await;
+        let at_deadline = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(1), join)
+            .await
+            .expect("a stalled pre-effect wait must end at the pre-effect deadline")
+            .expect("owner task completes");
+        assert_eq!(tokio::time::Instant::now(), at_deadline);
+        result
+    }
+
+    fn assert_clean_unavailable(result: OwnedFibResult, expected: &str) {
+        match result {
+            Err(OwnedFibControlError(FibTableControlError::Unavailable(message))) => {
+                assert_eq!(message, expected);
+            }
+            Err(OwnedFibControlError(other)) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("a stalled pre-effect wait must not succeed"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_fib_stage_acknowledgement_ends_clean_at_the_pre_effect_deadline() {
+        let (fib_tx, mut fib_rx) = mpsc::channel(2);
+        let (peer_tx, mut peer_rx) = mpsc::channel(2);
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let (join, operation) = spawn_owned_fib_set(fib_tx, peer_tx, permit).await;
+        let Some(FibRuntimeCommand::GetTables { reply }) = fib_rx.recv().await else {
+            panic!("expected GetTables")
+        };
+        reply.send(vec![table("edge", 1000)]).unwrap();
+        // Handshake: the persister received the stage and never answers it.
+        let Some(ConfigEvent::FibTablesReplaced {
+            ack: Some(ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected staged FIB event")
+        };
+
+        let result = settle_exactly_at(join, operation.pre_effect_deadline()).await;
+        assert_clean_unavailable(result, STAGE_TIMED_OUT);
+        assert_eq!(
+            operation.terminal(),
+            rustbgpd_api::runtime_config_settlement::RuntimeConfigSettlementTerminal::Settled
+        );
+        // The dropped commit channel makes the config bridge discard the
+        // stage once the persister answers.
+        assert!(commit.await.is_err(), "commit channel must be dropped");
+        assert!(staged.send(Ok(())).is_err());
+        assert!(peer_rx.try_recv().is_err(), "no peer-manager effect");
+        assert!(fib_rx.try_recv().is_err(), "no FIB effect");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fib_pre_effect_waits_share_one_deadline() {
+        let (fib_tx, mut fib_rx) = mpsc::channel(2);
+        // A full peer-manager queue: the candidate's send can only block.
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (filler_reply, _filler_rx) = oneshot::channel();
+        peer_tx
+            .try_send(PeerManagerCommand::SetFibTablesSnapshot {
+                tables: Vec::new(),
+                reply: filler_reply,
+            })
+            .unwrap();
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let (join, operation) = spawn_owned_fib_set(fib_tx, peer_tx, permit).await;
+
+        // Each wait stays inside its own bound, but the read, the stage and
+        // the send's own ten minutes together overrun the budget.
+        let Some(FibRuntimeCommand::GetTables { reply }) = fib_rx.recv().await else {
+            panic!("expected GetTables")
+        };
+        tokio::time::sleep(Duration::from_mins(9)).await;
+        reply.send(vec![table("edge", 1000)]).unwrap();
+        let Some(ConfigEvent::FibTablesReplaced {
+            ack: Some(ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected staged FIB event")
+        };
+        tokio::time::sleep(Duration::from_mins(15)).await;
+        staged.send(Ok(())).unwrap();
+
+        let result = settle_exactly_at(join, operation.pre_effect_deadline()).await;
+        assert_clean_unavailable(
+            result,
+            "peer manager FIB staging queue timed out before accepting command",
+        );
+        assert!(commit.await.is_err(), "commit channel must be dropped");
+        // Only the filler ever reached the peer manager.
+        assert!(matches!(
+            peer_rx.recv().await,
+            Some(PeerManagerCommand::SetFibTablesSnapshot { .. })
+        ));
+        assert!(peer_rx.try_recv().is_err(), "StageFibTables was delivered");
+        assert!(fib_rx.try_recv().is_err(), "no FIB effect");
     }
 
     #[test]

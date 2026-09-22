@@ -27,10 +27,12 @@ use rustbgpd_api::peer_types::{
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use rustbgpd_api::proto;
-use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
     RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
+use rustbgpd_api::runtime_config_settlement::{
+    RuntimeConfigFenceReason, before_pre_effect_deadline,
 };
 use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
@@ -258,6 +260,12 @@ impl RuntimeConfigMutationProgress {
         if let Some(operation) = &self.0 {
             operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
         }
+    }
+
+    fn pre_effect_deadline(&self) -> Option<tokio::time::Instant> {
+        self.0
+            .as_ref()
+            .map(OwnedRuntimeConfigOperation::pre_effect_deadline)
     }
 }
 
@@ -2848,17 +2856,26 @@ async fn commit_fib_transaction(
     let fib_cmd_tx = deps.fib_cmd_tx.clone().ok_or_else(|| {
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
     })?;
-    let permit = reserve_persist_permit(config_tx).await?;
-    let previous_tables = read_current_tables(
+    let permit = reserve_persist_permit(config_tx, progress).await?;
+    // The read precedes every runtime effect, so it ends by the owner's
+    // pre-effect deadline and settles clean rather than exhausting a short
+    // budget on its own ten-minute bound.
+    let read = read_current_tables(
         Some(&fib_cmd_tx),
         rustbgpd_api::rib_service::FibTableControlError::Internal,
-    )
-    .await
-    .map_err(fib_error_to_apply_error)?
-    .unwrap_or_default();
+    );
+    let previous_tables = before_pre_effect_deadline(progress.pre_effect_deadline(), read)
+        .await
+        .ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "FIB reconciler did not answer GetTables in time".to_string(),
+            )
+        })?
+        .map_err(fib_error_to_apply_error)?
+        .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3157,14 +3174,14 @@ async fn commit_candidate_snapshot_locked(
     candidate: &Config,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
-    let permit = reserve_persist_permit(config_tx).await?;
+    let permit = reserve_persist_permit(config_tx, progress).await?;
     progress.begin_mutation();
     #[cfg(debug_assertions)]
     rustbgpd_api::runtime_config_settlement::settlement_test_control::hold(
         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::TransactionAfterBeginMutation,
     )
     .await;
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3199,9 +3216,9 @@ async fn commit_dynamic_neighbors_locked(
     candidate: &Config,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
-    let permit = reserve_persist_permit(config_tx).await?;
+    let permit = reserve_persist_permit(config_tx, progress).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3248,9 +3265,9 @@ async fn commit_static_neighbors_locked(
     committed_sections: &[String],
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<(), ApplyFailure> {
-    let permit = reserve_persist_permit(config_tx).await?;
+    let permit = reserve_persist_permit(config_tx, progress).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3431,9 +3448,9 @@ async fn commit_peer_session_reshape_locked(
     candidate: &Config,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<PeerSessionReshapeCommit, ApplyFailure> {
-    let permit = reserve_persist_permit(config_tx).await?;
+    let permit = reserve_persist_permit(config_tx, progress).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3894,10 +3911,18 @@ async fn rollback_snapshot_after_error(
     }
 }
 
+/// Reserve a persistence slot. The reservation runs inside the owner and
+/// precedes every runtime effect, so it also ends by the owner's pre-effect
+/// deadline. Reservation is cancel-safe: a timed-out one sent nothing.
 async fn reserve_persist_permit(
     config_tx: &mpsc::Sender<ConfigEvent>,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<mpsc::OwnedPermit<ConfigEvent>, ConfigTransactionApplyError> {
-    tokio::time::timeout(PERSIST_RESERVE_TIMEOUT, config_tx.clone().reserve_owned())
+    let deadline = tokio::time::Instant::now() + PERSIST_RESERVE_TIMEOUT;
+    let deadline = progress
+        .pre_effect_deadline()
+        .map_or(deadline, |cap| cap.min(deadline));
+    tokio::time::timeout_at(deadline, config_tx.clone().reserve_owned())
         .await
         .map_err(|_| {
             ConfigTransactionApplyError::Unavailable(
@@ -3928,9 +3953,13 @@ struct StagedCandidateConfig {
 /// Durably stage `candidate_toml` through the config bridge and wait for the
 /// staging acknowledgement. Every failure here is a clean, unfenced refusal:
 /// nothing was published and nothing has been mutated.
+/// Durably stage the candidate before any runtime effect. The acknowledgement
+/// is bounded by the owner's pre-effect deadline; on expiry the dropped
+/// commit channel makes the config bridge discard the stage.
 async fn stage_candidate_config(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     candidate_toml: String,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<StagedCandidateConfig, ApplyFailure> {
     let (staged_tx, staged_rx) = oneshot::channel();
     let (commit_tx, commit_rx) = oneshot::channel();
@@ -3941,7 +3970,16 @@ async fn stage_candidate_config(
             commit: commit_rx,
         }),
     });
-    match staged_rx.await {
+    let Some(staged) = before_pre_effect_deadline(progress.pre_effect_deadline(), staged_rx).await
+    else {
+        return Err(ConfigTransactionApplyError::Unavailable(
+            "config persistence did not stage the transaction candidate in time; nothing was \
+             applied"
+                .to_string(),
+        )
+        .into());
+    };
+    match staged {
         Ok(Ok(())) => Ok(StagedCandidateConfig { commit: commit_tx }),
         // The persister could not stage the write, or the bridge could not
         // derive the candidate from the accepted snapshot. Either way the

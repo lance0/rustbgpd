@@ -786,6 +786,10 @@ impl StagedConfigWrite {
 /// Typed failure before any runtime mutation has been dispatched.
 pub(crate) enum RuntimeConfigStageError {
     AcknowledgementLost,
+    /// The stage acknowledgement did not arrive by the owner's pre-effect
+    /// deadline. The dropped commit channel makes the config bridge discard
+    /// the stage whenever the persister does answer.
+    TimedOut,
     Rejected(crate::peer_types::CatalogMutationError),
     Write(String),
 }
@@ -796,6 +800,7 @@ impl RuntimeConfigStageError {
             Self::AcknowledgementLost => {
                 Status::internal("config bridge dropped persistence acknowledgement")
             }
+            Self::TimedOut => Status::unavailable(STAGE_TIMED_OUT),
             Self::Rejected(error) => catalog_mutation_error_to_status(&error),
             Self::Write(message) => {
                 Status::failed_precondition(format!("config persistence failed: {message}"))
@@ -843,6 +848,9 @@ const COMMIT_LOST: &str = "config bridge dropped the staged config write after t
                            was applied (runtime and persisted config have drifted — SIGHUP or \
                            restart to reconcile)";
 
+const STAGE_TIMED_OUT: &str = "config persistence did not stage the candidate in time; nothing \
+                               was applied";
+
 /// Reserve the on-disk write for a runtime-config event *before* the caller
 /// mutates anything.
 ///
@@ -862,12 +870,19 @@ const COMMIT_LOST: &str = "config bridge dropped the staged config write after t
 /// stage/apply/commit window, so a SIGHUP reload cannot read a stale TOML in
 /// the middle of it.
 ///
+/// The stage acknowledgement precedes every runtime effect, so it is bounded
+/// by the owner's `pre_effect_deadline` (unbounded without an owner). A
+/// stalled persister then ends the mutation as a clean no-effect instead of
+/// consuming the settlement budget.
+///
 /// # Errors
 ///
-/// Returns a typed staging error when the candidate cannot be written. The
-/// caller has not mutated anything at that point, and must not.
+/// Returns a typed staging error when the candidate cannot be written or its
+/// acknowledgement misses the deadline. The caller has not mutated anything
+/// at that point, and must not.
 pub(crate) async fn stage_runtime_config_event_typed(
     permit: tokio::sync::mpsc::OwnedPermit<crate::peer_types::ConfigEvent>,
+    pre_effect_deadline: Option<tokio::time::Instant>,
     build_event: impl FnOnce(crate::peer_types::ConfigPersistAck) -> crate::peer_types::ConfigEvent,
 ) -> Result<StagedConfigWrite, RuntimeConfigStageError> {
     let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
@@ -876,8 +891,9 @@ pub(crate) async fn stage_runtime_config_event_typed(
         staged: staged_tx,
         commit: commit_rx,
     }));
-    staged_rx
+    crate::runtime_config_settlement::before_pre_effect_deadline(pre_effect_deadline, staged_rx)
         .await
+        .ok_or(RuntimeConfigStageError::TimedOut)?
         .map_err(|_| RuntimeConfigStageError::AcknowledgementLost)?
         .map_err(|error| match error {
             crate::peer_types::ConfigPersistError::Rejected(error) => {
@@ -4282,5 +4298,48 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "peer manager unavailable");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stage_acknowledgement_ends_clean_at_the_pre_effect_deadline() {
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        let stage = tokio::spawn(stage_runtime_config_event_typed(
+            permit,
+            Some(deadline),
+            |ack| crate::peer_types::ConfigEvent::FibTablesReplaced {
+                tables: Vec::new(),
+                ack: Some(ack),
+            },
+        ));
+        // Handshake: the persister received the stage and never answers it.
+        let Some(crate::peer_types::ConfigEvent::FibTablesReplaced {
+            ack: Some(crate::peer_types::ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected a staged event")
+        };
+        tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+        assert!(!stage.is_finished(), "stage ended before its deadline");
+        tokio::time::sleep_until(deadline).await;
+        let at_deadline = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(1), stage)
+            .await
+            .expect("a stalled stage acknowledgement must end at the pre-effect deadline")
+            .unwrap();
+        assert_eq!(tokio::time::Instant::now(), at_deadline);
+        let Err(error) = result else {
+            panic!("a stalled stage must not return a commit handle")
+        };
+        assert!(matches!(error, RuntimeConfigStageError::TimedOut));
+        let status = error.into_status();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), STAGE_TIMED_OUT);
+        // The dropped commit channel is what makes the bridge discard the
+        // stage once the persister answers.
+        assert!(commit.await.is_err(), "commit channel must be dropped");
+        assert!(staged.send(Ok(())).is_err());
     }
 }

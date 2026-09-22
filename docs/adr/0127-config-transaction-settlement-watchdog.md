@@ -4,7 +4,8 @@
 **Date:** 2026-08-11
 **Accepted:** 2026-08-13
 **Amended:** 2026-08-14 (Consequences: receipt-backed fail-stop session cost);
-2026-09-21 (a further termination signal during shutdown forces the fail-stop)
+2026-09-21 (a further termination signal during shutdown forces the fail-stop);
+2026-09-22 (waits before the first runtime effect end at a pre-effect deadline)
 
 ## Context
 
@@ -482,3 +483,48 @@ recovery from the persisted pending transaction. The settles-just-before-the-
 signal ordering is proven at unit level rather than in the matrix: once the
 owner settles the daemon finishes shutdown in milliseconds, leaving no
 deterministic window in which to deliver a further signal.
+
+## Amendment (2026-09-22): waits before the first runtime effect end at a pre-effect deadline
+
+The matrix row "stage failure or lost stage acknowledgement before runtime
+mutation: clean no effect" covered a stage that failed or whose
+acknowledgement channel closed. It did not cover a stage acknowledgement that
+never arrives. A hung or very slow config filesystem left the owner waiting on
+the persister until its budget expired, so a mutation that provably changed
+nothing fenced `budget_expired` and exited 70.
+
+Each owner now derives a pre-effect deadline from its registration: the
+settlement deadline minus `min(30 s, budget / 10)`, never earlier than
+registration. The margin scales down with short debug-control budgets so they
+still leave room to settle cleanly. Waits that precede the first runtime
+effect end by that deadline and settle clean no effect with `UNAVAILABLE`:
+
+- the stage acknowledgement in every staging path: FIB-table CRUD; neighbor,
+  peer-group and policy CRUD; and config transactions. The dropped commit
+  channel makes the config bridge discard the stage when the persister
+  eventually answers;
+- the current-table read in FIB-table CRUD and in config transactions that
+  replace FIB tables, and the send half of FIB-table CRUD's peer-manager
+  staging command;
+- the read of the existing group in peer-group Set;
+- the config-transaction persistence-slot reservation, which runs inside the
+  owner. FIB-table, neighbor, peer-group and policy CRUD reserve their slot
+  before registering, outside the budget.
+
+Only transport acceptance is capped on the peer-manager send. A command the
+actor has not accepted has no effect; an accepted one may, so its reply keeps
+its own bound under the aggregate watchdog. Nothing after the first runtime
+effect changes. Commit and post-accept replies stay under the watchdog alone,
+as the rejected alternative on independent timeouts around post-mutation
+oneshot replies requires, and no shared mutation timeout was shortened. An
+owner whose actors wedge after the first effect still fails stop.
+
+Evidence: controlled-time unit tests prove that each staging path ends clean
+at exactly its pre-effect deadline with the commit channel dropped. They also
+prove that FIB's read, stage and peer-manager send together end at that one
+deadline without delivering the staging command, and that the margin stays
+inside the budget at 250 ms and 30 min. A real-daemon settlement-matrix test
+holds the persister before it acknowledges a peer-group stage under a 3 s
+budget. The mutation returns `UNAVAILABLE`, readiness stays green, the daemon
+outlives the budget plus grace, and a later mutation succeeds. Without the
+deadline the same test fences `budget_expired` and exits 70.

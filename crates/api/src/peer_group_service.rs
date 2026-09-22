@@ -20,6 +20,7 @@ use crate::proto;
 use crate::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
     RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+    before_pre_effect_deadline,
 };
 use crate::server::{
     AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
@@ -447,6 +448,9 @@ async fn owned_peer_group_mutation_body(
     intent: PeerGroupMutationIntent,
     persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
 ) -> OwnedRuntimeConfigOutcome<(), Status> {
+    let pre_effect_deadline = owned
+        .as_ref()
+        .map(OwnedRuntimeConfigOperation::pre_effect_deadline);
     if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
         return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(format!(
             "{operation_name} rejected: daemon is shutting down"
@@ -464,16 +468,24 @@ async fn owned_peer_group_mutation_body(
             allow_passwordless_create,
         } => {
             if preserve_md5_password {
-                let prior = match peer_manager_request(&peer_mgr_tx, |reply| {
-                    PeerManagerCommand::GetPeerGroup {
+                // A read with no effect: the pre-effect deadline bounds it
+                // whole, so a slow actor cannot consume the budget before
+                // the stage.
+                let read =
+                    peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetPeerGroup {
                         name: name.clone(),
                         reply,
+                    });
+                let prior = match before_pre_effect_deadline(pre_effect_deadline, read).await {
+                    Some(Ok(prior)) => prior,
+                    Some(Err(error)) => {
+                        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error));
                     }
-                })
-                .await
-                {
-                    Ok(prior) => prior,
-                    Err(error) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
+                    None => {
+                        return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(
+                            "peer manager did not answer the peer-group read in time",
+                        )));
+                    }
                 };
                 match prior {
                     Some(prior) => definition.md5_password = prior.md5_password,
@@ -525,8 +537,10 @@ async fn owned_peer_group_mutation_body(
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
     }
     let staged = if let Some(permit) = persist_permit {
-        match stage_runtime_config_event_typed(permit, |ack| with_catalog_persist_ack(event, ack))
-            .await
+        match stage_runtime_config_event_typed(permit, pre_effect_deadline, |ack| {
+            with_catalog_persist_ack(event, ack)
+        })
+        .await
         {
             Ok(staged) => Some(staged),
             Err(error) => {
