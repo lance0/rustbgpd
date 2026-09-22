@@ -219,11 +219,13 @@ waiting at its pre-effect deadline: the budget minus the smaller of 30
 seconds and a tenth of the budget, so 29.5 minutes by default. The
 mutation fails `UNAVAILABLE` with nothing applied, and the late stage is
 discarded rather than published. FIB-table CRUD bounds its table read and
-its peer-manager staging handoff by the same deadline, a config
-transaction bounds its persistence-slot reservation and, when it replaces
-FIB tables, its table read, and peer-group
-`Set` bounds its read of the existing group. Waits after the first
-runtime effect are still bounded only by the budget.
+its peer-manager staging handoff by the same deadline. Neighbor,
+peer-group and policy CRUD bound their peer-manager handoff until the
+actor accepts the command. A config transaction bounds its
+persistence-slot reservation and, when it replaces FIB tables, its table
+read, and peer-group `Set` bounds its read of the existing group. Waits
+after the first runtime effect, including the reply to an accepted
+command, are still bounded only by the budget.
 
 ## The constants are fixed by design
 

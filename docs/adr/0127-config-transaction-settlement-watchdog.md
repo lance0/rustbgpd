@@ -528,3 +528,11 @@ holds the persister before it acknowledges a peer-group stage under a 3 s
 budget. The mutation returns `UNAVAILABLE`, readiness stays green, the daemon
 outlives the budget plus grace, and a later mutation succeeds. Without the
 deadline the same test fences `budget_expired` and exits 70.
+
+Addendum (2026-09-22): the send half of the neighbor, peer-group and policy
+CRUD peer-manager handoff is now capped at the same deadline. A command the
+actor never accepts settles clean no effect with `UNAVAILABLE` and the stage
+is discarded; the reply to an accepted command keeps its own bound.
+Controlled-time unit tests prove that each handoff ends at exactly its
+pre-effect deadline without delivering the command, and that an accepted
+command's reply still waits past that deadline.

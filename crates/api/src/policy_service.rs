@@ -542,7 +542,9 @@ async fn owned_policy_mutation_body(
     } else {
         None
     };
-    let dispatch = dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    let dispatch =
+        dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, pre_effect_deadline, mutation)
+            .await;
     match dispatch {
         OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
@@ -4876,5 +4878,106 @@ policy customer-in(peer_lp: u32) {
             "lost commit acknowledgement must never produce an RPC response"
         );
         call.abort();
+    }
+
+    fn owned_policy_delete_body(
+        peer_tx: mpsc::Sender<PeerManagerCommand>,
+        persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
+    ) -> impl FnOnce(
+        OwnedRuntimeConfigOperation,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = OwnedRuntimeConfigOutcome<(), Status>> + Send>,
+    > {
+        move |operation| {
+            Box::pin(owned_policy_mutation_body(
+                Some(operation),
+                None,
+                None,
+                "test policy delete",
+                peer_tx,
+                OWNED_POLICY_ACTOR_TIMEOUT,
+                OwnedCatalogMutation::DeletePolicy {
+                    name: "edge-policy".to_string(),
+                },
+                ConfigEvent::DeletePolicy {
+                    name: "edge-policy".to_string(),
+                    ack: None,
+                },
+                persist_permit,
+            ))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_policy_blocked_actor_send_ends_clean_at_the_pre_effect_deadline() {
+        use crate::test_support::{
+            assert_only_filler_delivered, full_peer_manager_queue, settle_exactly_at,
+            spawn_owned_body,
+        };
+        let (peer_tx, mut peer_rx) = full_peer_manager_queue();
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let (join, operation, _watchdog, terminal) = spawn_owned_body(
+            RuntimeConfigOperationKind::PolicyDelete,
+            owned_policy_delete_body(peer_tx, Some(permit)),
+        )
+        .await;
+        // Handshake: the stage is acknowledged, so the owner's remaining
+        // pre-effect wait is the send into the full peer-manager queue.
+        let Some(ConfigEvent::DeletePolicy {
+            ack: Some(crate::peer_types::ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected a staged policy delete")
+        };
+        staged.send(Ok(())).unwrap();
+
+        let error = settle_exactly_at(join, operation.pre_effect_deadline())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "peer manager mutation queue timed out before accepting command"
+        );
+        assert!(commit.await.is_err(), "the stage must be discarded");
+        assert_only_filler_delivered(&mut peer_rx);
+        assert!(terminal.try_recv().is_err(), "a clean owner never fences");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_policy_accepted_reply_outlives_the_pre_effect_deadline() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (join, operation, _watchdog, terminal) = crate::test_support::spawn_owned_body(
+            RuntimeConfigOperationKind::PolicyDelete,
+            owned_policy_delete_body(peer_tx, None),
+        )
+        .await;
+        // Handshake: the actor accepted the command, so it may have had an
+        // effect and its reply must keep the actor bound, not the cap.
+        let Some(PeerManagerCommand::OwnedCatalogMutation { reply, .. }) = peer_rx.recv().await
+        else {
+            panic!("expected the owned policy delete")
+        };
+        tokio::time::sleep_until(operation.pre_effect_deadline() + Duration::from_secs(1)).await;
+        assert!(
+            !reply.is_closed(),
+            "the owner must still await the accepted reply past the pre-effect deadline"
+        );
+        assert!(
+            !join.is_finished(),
+            "an accepted reply must not end at the pre-effect deadline"
+        );
+        reply.send(OwnedCatalogMutationOutcome::Success).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), join)
+            .await
+            .expect("the owner finishes once the actor replies")
+            .unwrap()
+            .expect("an accepted, answered mutation succeeds");
+        assert!(
+            terminal.try_recv().is_err(),
+            "a successful owner never fences"
+        );
     }
 }
