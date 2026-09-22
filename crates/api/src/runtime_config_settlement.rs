@@ -51,6 +51,7 @@ pub mod settlement_test_control {
         CatalogActorCommandAccepted,
         ReplaceBeforePublish,
         StagedCommitBeforePublish,
+        StageBeforeAck,
     }
 
     impl Checkpoint {
@@ -60,6 +61,7 @@ pub mod settlement_test_control {
                 Self::CatalogActorCommandAccepted => "catalog_actor_command_accepted",
                 Self::ReplaceBeforePublish => "replace_before_publish",
                 Self::StagedCommitBeforePublish => "staged_commit_before_publish",
+                Self::StageBeforeAck => "stage_before_ack",
             }
         }
 
@@ -69,6 +71,7 @@ pub mod settlement_test_control {
                 "catalog_actor_command_accepted" => Ok(Self::CatalogActorCommandAccepted),
                 "replace_before_publish" => Ok(Self::ReplaceBeforePublish),
                 "staged_commit_before_publish" => Ok(Self::StagedCommitBeforePublish),
+                "stage_before_ack" => Ok(Self::StageBeforeAck),
                 _ => Err(format!("unknown checkpoint {value:?}")),
             }
         }
@@ -462,6 +465,7 @@ pub mod settlement_test_control {
             assert!(!Checkpoint::CatalogActorCommandAccepted.allows_drop_ack());
             assert!(Checkpoint::ReplaceBeforePublish.allows_drop_ack());
             assert!(Checkpoint::StagedCommitBeforePublish.allows_drop_ack());
+            assert!(!Checkpoint::StageBeforeAck.allows_drop_ack());
             let settings = parse_settings(&format!(
                 "version={CONTROL_VERSION}\nbudget_ms=10000\ngrace_ms=5000\n"
             ))
@@ -482,6 +486,7 @@ pub mod settlement_test_control {
                 Checkpoint::CatalogActorCommandAccepted,
                 Checkpoint::ReplaceBeforePublish,
                 Checkpoint::StagedCommitBeforePublish,
+                Checkpoint::StageBeforeAck,
             ] {
                 for action in [Action::Hold, Action::DropAck] {
                     assert_eq!(
@@ -610,6 +615,31 @@ pub mod settlement_test_control {
 pub const OWNED_SETTLEMENT_BUDGET: Duration = Duration::from_mins(30);
 pub const AMBIGUITY_FENCE_GRACE: Duration = Duration::from_secs(5);
 pub const AMBIGUOUS_CONFIG_EXIT_STATUS: i32 = 70;
+/// Upper bound on the margin reserved between the pre-effect deadline and
+/// the settlement deadline.
+const PRE_EFFECT_MARGIN_CAP: Duration = Duration::from_secs(30);
+
+fn pre_effect_deadline(registered_at: Instant, deadline: Instant) -> tokio::time::Instant {
+    let budget = deadline.saturating_duration_since(registered_at);
+    let margin = PRE_EFFECT_MARGIN_CAP.min(budget / 10);
+    tokio::time::Instant::from_std(deadline.checked_sub(margin).unwrap_or(registered_at))
+}
+
+/// Await `wait`, which precedes any runtime effect, until `deadline`.
+///
+/// Returns `None` once the deadline passes; dropping the wait at that point
+/// must leave no effect behind, so only waits that provably precede the
+/// first runtime effect belong here. A `None` deadline means no settlement
+/// owner, and so no budget to protect: the wait is unbounded.
+pub async fn before_pre_effect_deadline<F: std::future::Future>(
+    deadline: Option<tokio::time::Instant>,
+    wait: F,
+) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, wait).await.ok(),
+        None => Some(wait.await),
+    }
+}
 
 /// Closed roster of runtime-config operations wired into settlement ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1215,6 +1245,17 @@ impl RuntimeConfigSettlementWatchdog {
         }
     }
 
+    /// Watchdog for other modules' crate tests. Its terminal action reports
+    /// on the returned receiver instead of exiting the test process.
+    #[cfg(test)]
+    pub(crate) fn for_crate_test(budget: Duration) -> (Self, std::sync::mpsc::Receiver<i32>) {
+        let (terminal, receiver) = std::sync::mpsc::channel();
+        (
+            Self::start(budget, AMBIGUITY_FENCE_GRACE, terminal),
+            receiver,
+        )
+    }
+
     /// Register scrape-time settlement metrics in the daemon's private registry.
     ///
     /// # Panics
@@ -1591,6 +1632,19 @@ impl OwnedRuntimeConfigOperation {
     #[must_use]
     pub fn deadline(&self) -> Instant {
         self.inner.deadline
+    }
+
+    /// Instant by which every wait before the first runtime effect must end.
+    ///
+    /// A stalled wait that precedes any runtime effect, such as a stage
+    /// acknowledgement from a hung config filesystem, can still end as a
+    /// provable clean no-effect. Past the budget it would instead fence as
+    /// `budget_expired`. The margin, `min(30 s, budget / 10)`, leaves room
+    /// to settle cleanly before the watchdog deadline and scales down with
+    /// short debug-control budgets.
+    #[must_use]
+    pub fn pre_effect_deadline(&self) -> tokio::time::Instant {
+        pre_effect_deadline(self.inner.registered_at, self.inner.deadline)
     }
 
     #[must_use]
@@ -3392,6 +3446,39 @@ mod tests {
                 "self.commit_staged()",
                 "if !drop_ack",
             ],
+        );
+        ordered(
+            persister
+                .split_once("StageConfigAck(new_config, ack)")
+                .unwrap()
+                .1,
+            &["Checkpoint::StageBeforeAck", "self.stage(new_config)"],
+        );
+    }
+
+    #[test]
+    fn pre_effect_deadline_margin_scales_with_the_budget() {
+        let registered_at = Instant::now();
+        for (budget, margin) in [
+            (Duration::from_millis(250), Duration::from_millis(25)),
+            (Duration::from_mins(30), Duration::from_secs(30)),
+        ] {
+            let deadline = registered_at + budget;
+            let pre_effect = pre_effect_deadline(registered_at, deadline);
+            let (registered_at, deadline) = (
+                tokio::time::Instant::from_std(registered_at),
+                tokio::time::Instant::from_std(deadline),
+            );
+            assert!(
+                registered_at <= pre_effect && pre_effect < deadline,
+                "{budget:?}"
+            );
+            assert_eq!(deadline - pre_effect, margin, "{budget:?}");
+        }
+        // A zero budget leaves no margin and no earlier deadline.
+        assert_eq!(
+            pre_effect_deadline(registered_at, registered_at),
+            tokio::time::Instant::from_std(registered_at)
         );
     }
 }

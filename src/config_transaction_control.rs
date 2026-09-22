@@ -27,10 +27,12 @@ use rustbgpd_api::peer_types::{
     RuntimeConfigTransactionPlanError, RuntimeConfigTransactionStatus,
 };
 use rustbgpd_api::proto;
-use rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason;
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOperation, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
     RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+};
+use rustbgpd_api::runtime_config_settlement::{
+    RuntimeConfigFenceReason, before_pre_effect_deadline,
 };
 use rustbgpd_api::server::{
     ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
@@ -258,6 +260,12 @@ impl RuntimeConfigMutationProgress {
         if let Some(operation) = &self.0 {
             operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
         }
+    }
+
+    fn pre_effect_deadline(&self) -> Option<tokio::time::Instant> {
+        self.0
+            .as_ref()
+            .map(OwnedRuntimeConfigOperation::pre_effect_deadline)
     }
 }
 
@@ -2846,7 +2854,7 @@ async fn commit_fib_transaction(
     .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3152,7 +3160,7 @@ async fn commit_candidate_snapshot_locked(
         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::TransactionAfterBeginMutation,
     )
     .await;
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3189,7 +3197,7 @@ async fn commit_dynamic_neighbors_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3238,7 +3246,7 @@ async fn commit_static_neighbors_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3421,7 +3429,7 @@ async fn commit_peer_session_reshape_locked(
 ) -> Result<PeerSessionReshapeCommit, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3916,9 +3924,13 @@ struct StagedCandidateConfig {
 /// Durably stage `candidate_toml` through the config bridge and wait for the
 /// staging acknowledgement. Every failure here is a clean, unfenced refusal:
 /// nothing was published and nothing has been mutated.
+/// Durably stage the candidate before any runtime effect. The acknowledgement
+/// is bounded by the owner's pre-effect deadline; on expiry the dropped
+/// commit channel makes the config bridge discard the stage.
 async fn stage_candidate_config(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     candidate_toml: String,
+    progress: &RuntimeConfigMutationProgress,
 ) -> Result<StagedCandidateConfig, ApplyFailure> {
     let (staged_tx, staged_rx) = oneshot::channel();
     let (commit_tx, commit_rx) = oneshot::channel();
@@ -3929,7 +3941,16 @@ async fn stage_candidate_config(
             commit: commit_rx,
         }),
     });
-    match staged_rx.await {
+    let Some(staged) = before_pre_effect_deadline(progress.pre_effect_deadline(), staged_rx).await
+    else {
+        return Err(ConfigTransactionApplyError::Unavailable(
+            "config persistence did not stage the transaction candidate in time; nothing was \
+             applied"
+                .to_string(),
+        )
+        .into());
+    };
+    match staged {
         Ok(Ok(())) => Ok(StagedCandidateConfig { commit: commit_tx }),
         // The persister could not stage the write, or the bridge could not
         // derive the candidate from the accepted snapshot. Either way the

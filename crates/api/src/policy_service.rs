@@ -514,6 +514,9 @@ async fn owned_policy_mutation_body(
     event: ConfigEvent,
     persist_permit: Option<mpsc::OwnedPermit<ConfigEvent>>,
 ) -> OwnedRuntimeConfigOutcome<(), Status> {
+    let pre_effect_deadline = owned
+        .as_ref()
+        .map(OwnedRuntimeConfigOperation::pre_effect_deadline);
     if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
         return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(format!(
             "{operation_name} rejected: daemon is shutting down"
@@ -526,8 +529,10 @@ async fn owned_policy_mutation_body(
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
     }
     let staged = if let Some(permit) = persist_permit {
-        match stage_runtime_config_event_typed(permit, |ack| with_catalog_persist_ack(event, ack))
-            .await
+        match stage_runtime_config_event_typed(permit, pre_effect_deadline, |ack| {
+            with_catalog_persist_ack(event, ack)
+        })
+        .await
         {
             Ok(staged) => Some(staged),
             Err(error) => {
@@ -4770,6 +4775,50 @@ policy customer-in(peer_lp: u32) {
         let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
             .await
             .expect("compensated policy mutation must release the coordinator")
+            .expect("coordinator must remain open");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_policy_stalled_stage_acknowledgement_is_clean_unavailable() {
+        let (watchdog, terminal) =
+            crate::runtime_config_settlement::RuntimeConfigSettlementWatchdog::for_crate_test(
+                Duration::from_secs(60),
+            );
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = PolicyService::with_runtime_config_coordinator(
+            AccessMode::ReadWrite,
+            peer_tx,
+            Some(config_tx),
+            None,
+            coordinator.clone(),
+        )
+        .with_runtime_config_settlement(watchdog, DaemonGate::new());
+        // Handshake: the persister received the stage and never answers it.
+        let (call, ack) = staged_policy_delete(svc, &mut config_rx).await;
+        let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {
+            panic!("expected staged persistence")
+        };
+        // The 60 s budget leaves a 6 s margin; the bound here is only a
+        // hang guard for a regression, which would otherwise wait forever.
+        let error = tokio::time::timeout(Duration::from_secs(120), call)
+            .await
+            .expect("a stalled stage acknowledgement must end the owner cleanly")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "config persistence did not stage the candidate in time; nothing was applied"
+        );
+        assert!(commit.await.is_err(), "commit channel must be dropped");
+        assert!(staged.send(Ok(())).is_err());
+        assert!(peer_rx.try_recv().is_err(), "no actor command may follow");
+        assert!(terminal.try_recv().is_err(), "a clean owner never fences");
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("a clean stage timeout must release the coordinator")
             .expect("coordinator must remain open");
     }
 

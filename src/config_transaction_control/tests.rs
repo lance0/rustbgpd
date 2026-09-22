@@ -10418,3 +10418,62 @@ async fn metadata_history_rollback_refuses_before_payload_planning_or_confirm_au
         if message == "cannot roll back: config history storage is unavailable or unsafe")
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn stalled_transaction_stage_acknowledgement_ends_clean_at_the_pre_effect_deadline() {
+    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let permit = coordinator.acquire().await.unwrap();
+    let (operation, executor_guard) = RuntimeConfigSettlementWatchdog::new().register_owned(
+        RuntimeConfigOperationKind::Apply,
+        coordinator,
+        permit,
+        rustbgpd_api::health_probe::DaemonGate::new(),
+        None,
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    );
+    let deadline = operation.pre_effect_deadline();
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let config_permit = config_tx.reserve_owned().await.unwrap();
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let stage = tokio::spawn(async move {
+        stage_candidate_config(config_permit, String::new(), &progress)
+            .await
+            .map(|_| ())
+    });
+    // Handshake: the persister received the stage and never answers it.
+    let Some(ConfigEvent::ConfigTransactionCommitted {
+        ack: Some(ConfigPersistAck::Staged { staged, commit }),
+        ..
+    }) = config_rx.recv().await
+    else {
+        panic!("expected a staged transaction event")
+    };
+    tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+    assert!(!stage.is_finished(), "stage ended before its deadline");
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(1), stage)
+        .await
+        .expect("a stalled stage acknowledgement must end at the pre-effect deadline")
+        .unwrap()
+        .expect_err("a stalled stage must not return a commit handle");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(
+        failure.fence_reason.is_none(),
+        "a pre-effect timeout is clean"
+    );
+    assert!(
+        matches!(
+            failure.error,
+            ConfigTransactionApplyError::Unavailable(ref message)
+                if message.contains("did not stage the transaction candidate in time")
+        ),
+        "{:?}",
+        failure.error
+    );
+    assert!(commit.await.is_err(), "commit channel must be dropped");
+    assert!(staged.send(Ok(())).is_err());
+    assert!(operation.try_settle());
+    drop(executor_guard);
+}

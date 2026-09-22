@@ -320,6 +320,9 @@ async fn owned_neighbor_mutation_body<B>(
 where
     B: FnOnce(crate::peer_types::ConfigPersistAck) -> ConfigEvent,
 {
+    let pre_effect_deadline = owned
+        .as_ref()
+        .map(OwnedRuntimeConfigOperation::pre_effect_deadline);
     if daemon_gate.is_some_and(|gate| gate.is_shutting_down()) {
         return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(Status::unavailable(format!(
             "{operation_name} rejected: daemon is shutting down"
@@ -332,7 +335,7 @@ where
         operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
     }
     let staged = if let Some(permit) = persist_permit {
-        match stage_runtime_config_event_typed(permit, build_event).await {
+        match stage_runtime_config_event_typed(permit, pre_effect_deadline, build_event).await {
             Ok(staged) => Some(staged),
             Err(error) => {
                 return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into_status()));

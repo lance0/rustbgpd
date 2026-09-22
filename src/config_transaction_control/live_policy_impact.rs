@@ -33,7 +33,7 @@ pub(super) async fn commit_live_policy_impact_locked(
 ) -> Result<usize, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
-    let staged = stage_candidate_config(permit, candidate_toml).await?;
+    let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),

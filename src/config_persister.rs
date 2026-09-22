@@ -171,6 +171,11 @@ impl ConfigPersister {
                     }
                 }
                 ConfigMutation::StageConfigAck(new_config, ack) => {
+                    #[cfg(debug_assertions)]
+                    rustbgpd_api::runtime_config_settlement::settlement_test_control::hold(
+                        rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::StageBeforeAck,
+                    )
+                    .await;
                     let _ = ack.send(self.stage(new_config).map_err(|e| e.to_string()));
                 }
                 ConfigMutation::CommitStagedConfig(ack) => {
