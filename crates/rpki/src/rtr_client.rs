@@ -48,7 +48,8 @@ const MAX_PDU_LEN: usize = 65_535;
 // refresh/retry minimums are 1 s, which every non-zero value already
 // satisfies; an End of Data zero is handled as "not provided" (see
 // `apply_eod_timers`), and a configured zero is raised to the minimum
-// (see `configured_interval` and `configured_expire`).
+// and a configured retry or expire capped at its maximum (see
+// `configured_interval` and `configured_expire`).
 const REFRESH_RETRY_MIN_SECS: u64 = 1;
 const REFRESH_MAX_SECS: u64 = 86_400;
 const RETRY_MAX_SECS: u64 = 7_200;
@@ -188,9 +189,10 @@ pub struct RtrClientConfig {
     /// Seconds between Serial Query polls. Values below the RFC 8210 §6
     /// minimum of 1 second are raised to 1 second with a warning.
     pub refresh_interval: u64,
-    /// Seconds before retrying after a failed connection. Values below the
-    /// RFC 8210 §6 minimum of 1 second are raised to 1 second with a
-    /// warning.
+    /// Seconds before retrying after a failed connection. Bounded to the
+    /// RFC 8210 §6 range of 1 to 7200 seconds with a warning: zero is
+    /// raised to 1 second and a value above 7200 seconds is clamped down
+    /// to it.
     pub retry_interval: u64,
     /// Seconds after which cached VRPs are considered stale, until the
     /// cache's End of Data supplies its own expire. Zero is raised to the
@@ -251,19 +253,23 @@ pub struct RtrClient {
     dialer: Option<RtrDialer>,
 }
 
-/// Raise a configured refresh/retry interval to the §6 minimum, warning
-/// with both values: zero would poll or reconnect with no delay.
-fn configured_interval(server: SocketAddr, timer: &'static str, value: u64) -> Duration {
-    if value < REFRESH_RETRY_MIN_SECS {
+/// Bound a configured refresh/retry interval to the §6 minimum and the
+/// given maximum, warning with both values. Zero would poll or reconnect
+/// with no delay. A retry above its maximum would, before any End of Data
+/// has lowered it, park the reconnect sleep at tokio's far-future deadline
+/// so the client never retried.
+fn configured_interval(server: SocketAddr, timer: &'static str, value: u64, max: u64) -> Duration {
+    let bounded = value.clamp(REFRESH_RETRY_MIN_SECS, max);
+    if bounded != value {
         warn!(
             server = %server,
             timer,
             value,
-            raised = REFRESH_RETRY_MIN_SECS,
-            "RTR configured timer below the §6 minimum, raised"
+            bounded,
+            "RTR configured timer outside the §6 range, bounded"
         );
     }
-    Duration::from_secs(value.max(REFRESH_RETRY_MIN_SECS))
+    Duration::from_secs(bounded)
 }
 
 /// Bound a configured expire interval or ceiling to the §6 range,
@@ -309,8 +315,20 @@ impl RtrClient {
             .map(|max| configured_expire(server, "max_expire", max));
         let expire = configured_expire(server, "expire", config.expire_interval);
         Self {
-            refresh_interval: configured_interval(server, "refresh", config.refresh_interval),
-            retry_interval: configured_interval(server, "retry", config.retry_interval),
+            // No refresh ceiling: refresh is first used after an End of
+            // Data, which keeps it below the bounded expire.
+            refresh_interval: configured_interval(
+                server,
+                "refresh",
+                config.refresh_interval,
+                u64::MAX,
+            ),
+            retry_interval: configured_interval(
+                server,
+                "retry",
+                config.retry_interval,
+                RETRY_MAX_SECS,
+            ),
             expire_interval: Duration::from_secs(
                 config
                     .max_expire_interval
@@ -3813,6 +3831,89 @@ mod tests {
             intervals(60, 5),
             (Duration::from_secs(60), Duration::from_secs(5))
         );
+    }
+
+    /// §6 maximum Retry Interval is 7200 s. Retry is consumed before any
+    /// End of Data can lower it, so a larger configured value would park
+    /// the reconnect sleep at tokio's far-future deadline and the client
+    /// would never retry. It is clamped down with a warning naming both
+    /// values; the maximum itself is kept silently.
+    #[test]
+    fn configured_retry_is_capped_at_the_section_6_maximum() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata, Subscriber};
+
+        #[derive(Default)]
+        struct Fields(Vec<(String, String)>);
+        impl Visit for Fields {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0.push((field.name().to_owned(), format!("{value:?}")));
+            }
+        }
+        struct Capture(Arc<Mutex<Vec<Fields>>>);
+        impl Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                self.0.lock().unwrap().push(fields);
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let retry = |secs| {
+            RtrClient::new(test_config(addr, 60, secs, 3600), mpsc::channel(1).0).retry_interval
+        };
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let capped = tracing::subscriber::with_default(Capture(Arc::clone(&captured)), || {
+            // Sibling tests reach the same warn! callsite on threads with no
+            // subscriber, which can cache it as disabled process-wide. Warm
+            // it here and rebuild its interest against this subscriber.
+            retry(0);
+            tracing::callsite::rebuild_interest_cache();
+            captured.lock().unwrap().clear();
+            retry(10_000_000_000)
+        });
+        assert_eq!(capped, Duration::from_secs(7_200));
+        let events = captured.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let has =
+            |name: &str, value: &str| events[0].0.iter().any(|(n, v)| n == name && v == value);
+        assert!(has("timer", "\"retry\""));
+        assert!(has("value", "10000000000"));
+        assert!(has("bounded", "7200"));
+
+        assert_eq!(retry(7_200), Duration::from_secs(7_200));
+        assert_eq!(retry(7_201), Duration::from_secs(7_200));
+        assert_eq!(retry(u64::MAX), Duration::from_secs(7_200));
+    }
+
+    /// Guard, not a regression test: refresh has no configured ceiling
+    /// because it is first used after an End of Data, and End of Data
+    /// lowers it below the bounded expire even when the cache omits every
+    /// timer. That ordering is what keeps the refresh deadline addition
+    /// from overflowing; set the field directly so the guard holds even if
+    /// construction ever bounds refresh too.
+    #[test]
+    fn unbounded_refresh_is_lowered_below_expire_at_end_of_data() {
+        let addr: SocketAddr = "127.0.0.1:323".parse().unwrap();
+        let mut client = RtrClient::new(test_config(addr, u64::MAX, 600, 3600), mpsc::channel(1).0);
+        client.refresh_interval = Duration::from_secs(u64::MAX);
+        client.apply_eod_timers(0, 0, 0);
+        assert!(client.refresh_interval < client.expire_interval);
+        assert_eq!(client.refresh_interval, Duration::from_secs(3_599));
+        let _ = TokioInstant::now() + client.refresh_interval;
     }
 
     /// A configured expire of zero is raised to the §6 minimum of 600 s:

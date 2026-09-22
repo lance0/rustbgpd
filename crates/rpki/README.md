@@ -43,6 +43,9 @@ eBGP context construction. These additive helpers preserve verifier behavior.
   kept, because expiring early is safe. Earlier releases used these values
   as given: a zero refresh or retry polled or reconnected with no delay, and a
   zero expire could expire the table at the End of Data that delivered it.
+  Starting with `0.3.2`, a `retry_interval` above the §6 maximum of 7200
+  seconds is also capped there; earlier releases could otherwise leave a cache
+  that was down at startup without any reconnect attempt.
 - **ASPA path verification** — a synchronous `AspaTable` plus role-aware path
   verification.
 - **Multi-cache merge** — a `VrpManager` that merges retained contributions
