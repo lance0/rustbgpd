@@ -3202,6 +3202,7 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   with `interface`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = add_legacy_recovery_delay_secs_property)]
 pub struct EthernetSegmentConfig {
     /// 10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`).
     pub esi: String,
@@ -3239,6 +3240,26 @@ pub struct EthernetSegmentConfig {
     )]
     #[schemars(range(max = 3600))]
     pub recovery_delay_seconds: Option<u64>,
+}
+
+/// Publish the `recovery_delay_secs` serde alias as a deprecated schema
+/// property with the canonical key's bounds. schemars omits serde aliases,
+/// so without this `additionalProperties: false` flags existing configs
+/// that the daemon still accepts.
+fn add_legacy_recovery_delay_secs_property(schema: &mut Schema) {
+    let properties = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("EthernetSegmentConfig schema has properties");
+    let mut legacy = properties
+        .get("recovery_delay_seconds")
+        .cloned()
+        .expect("EthernetSegmentConfig schema has recovery_delay_seconds");
+    legacy["description"] =
+        "Deprecated spelling of `recovery_delay_seconds`, still accepted. Set only one of the two."
+            .into();
+    legacy["deprecated"] = true.into();
+    properties.insert("recovery_delay_secs".to_string(), legacy);
 }
 
 fn default_df_preference() -> u32 {

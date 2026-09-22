@@ -612,6 +612,17 @@
           "maximum": 3600,
           "minimum": 0
         },
+        "recovery_delay_secs": {
+          "description": "Deprecated spelling of `recovery_delay_seconds`, still accepted. Set only one of the two.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "deprecated": true,
+          "maximum": 3600,
+          "minimum": 0
+        },
         "redundancy_mode": {
           "description": "Redundancy mode string. Default `\"all-active\"`.",
           "type": "string",
