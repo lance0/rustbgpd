@@ -2,8 +2,30 @@
 
 set -euo pipefail
 
-readonly GOBGP_VERSION="3.37.0"
-readonly GOBGP_SHA256="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
+GOBGP_VERSION="3.37.0"
+GOBGP_SHA256="e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
+# The defaults are the gobgp:interop (Dockerfile.gobgp) pin. The 4.x lab images
+# (Dockerfile.gobgp-v47) pass their own exact version and release checksum.
+while [[ ${1:-} == --version || ${1:-} == --sha256 ]]; do
+    [[ $# -ge 2 ]] || {
+        echo "install-gobgp: $1 requires a value" >&2
+        exit 2
+    }
+    case "$1" in
+        --version) GOBGP_VERSION=$2 ;;
+        --sha256) GOBGP_SHA256=$2 ;;
+    esac
+    shift 2
+done
+[[ $GOBGP_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "install-gobgp: invalid GoBGP version: ${GOBGP_VERSION}" >&2
+    exit 2
+}
+[[ $GOBGP_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
+    echo "install-gobgp: invalid GoBGP SHA-256" >&2
+    exit 2
+}
+readonly GOBGP_VERSION GOBGP_SHA256
 readonly GOBGP_ASSET="gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz"
 readonly GOBGP_URL="https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${GOBGP_ASSET}"
 readonly GOBGP_ATTEMPTS=3
@@ -49,9 +71,9 @@ stage_archive() (
     local stage_dir=${3:?stage directory}
     local staged_target
 
-    # This path is deliberately offline. Only the producer may fetch the
-    # release archive; consumers re-verify the same-run artifact before the
-    # gobgp image build context sees any bytes. The archive itself is staged
+    # This path is deliberately offline. Only prepare_archive may fetch the
+    # release archive; staging re-verifies the restored or fetched bytes before
+    # the gobgp image build context sees them. The archive itself is staged
     # (not extracted): Dockerfile.gobgp re-verifies the checksum and both
     # binary versions inside the build.
     verify_archive_contents "$sha256" "$archive" || return 1
@@ -67,9 +89,12 @@ download_archive_once() {
     local url=${1:?url}
     local destination=${2:?destination}
 
+    # Second retry layer under the caller's verified attempt loop: a brief
+    # release-host 5xx is retried in place, bounded to a 30-second window.
     curl -fsSL \
         --connect-timeout 10 \
         --max-time 120 \
+        --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 30 \
         --output "$destination" \
         "$url"
 }
@@ -247,7 +272,7 @@ EOF
 )
 
 usage() {
-    echo "usage: $0 --prepare-archive ARCHIVE | --stage-archive ARCHIVE STAGE_DIR | --self-test" >&2
+    echo "usage: $0 [--version VERSION --sha256 SHA256] (--prepare-archive ARCHIVE | --stage-archive ARCHIVE STAGE_DIR | --self-test)" >&2
     return 2
 }
 

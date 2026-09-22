@@ -7683,6 +7683,80 @@ async fn live_policy_impact_mid_fanout_failure_rolls_back_snapshot() {
 }
 
 #[tokio::test]
+async fn live_policy_impact_apply_reply_loss_is_not_a_clean_failure() {
+    let previous_toml = live_policy_toml("permit");
+    let candidate_toml = live_policy_toml("deny");
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let internal_tx = spawn_typed_transaction_manager(snapshot_toml.clone(), live_impact_plan());
+    let (fake_tx, fake_rx) = mpsc::channel(8);
+    tokio::spawn(fake_live_policy_peer_manager(
+        fake_rx,
+        live_impact_plan(),
+        snapshot_toml,
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    ));
+    // The peer manager accepts the mutating apply and drops its reply; every
+    // other command (including any restore) is served normally, so a clean
+    // error could only come from misclassifying the lost acknowledgement.
+    let accepted_applies = Arc::new(AtomicUsize::new(0));
+    let (peer_tx, mut peer_rx) = mpsc::channel(8);
+    let accepted = accepted_applies.clone();
+    tokio::spawn(async move {
+        while let Some(cmd) = peer_rx.recv().await {
+            if let PeerManagerCommand::ApplyPolicyImpactSnapshot { reply, .. } = cmd {
+                accepted.fetch_add(1, Ordering::SeqCst);
+                drop(reply);
+            } else if fake_tx.send(cmd).await.is_err() {
+                break;
+            }
+        }
+    });
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(8);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
+
+    let err = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(config_tx), Vec::new()),
+        proto::ApplyConfigTransactionRequest {
+            candidate_toml,
+            expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+            client_request_id: String::new(),
+            comment: String::new(),
+            confirm_id: String::new(),
+            confirm_timeout_seconds: 0,
+        },
+        internal_tx,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(accepted_applies.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            &err,
+            ConfigTransactionApplyError::RecoveryRequired {
+                reason: RuntimeConfigFenceReason::AcknowledgementLost,
+                message,
+            } if message.contains("policy-impact")
+        ),
+        "an accepted live policy apply with a lost reply must fence, got: {err:?}"
+    );
+    bridge.await.unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded)
+    );
+}
+
+#[tokio::test]
 async fn live_policy_impact_compound_rollback_failure_reports_internal() {
     let previous_toml = live_policy_toml("permit");
     let candidate_toml = live_policy_toml("deny");

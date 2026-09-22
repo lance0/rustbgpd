@@ -180,127 +180,6 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/classify_heavy_ci_paths.py
 
-  grpcurl_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact grpcurl archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore, prepare, and upload exact grpcurl archive
-        uses: ./.github/actions/prepare-grpcurl-artifact
-
-  gnmic_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact gnmic archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore exact gnmic archive cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
-          key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
-      - name: Prepare exact gnmic archive
-        run: |
-          .github/scripts/install-gnmic.sh \
-            --prepare-archive \
-            "$RUNNER_TEMP/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz"
-      - name: Upload verified gnmic archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: gnmic-v0.46.0-linux-x86_64
-          path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-  gobgp_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact gobgp archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore, prepare, and upload exact gobgp archive
-        uses: ./.github/actions/prepare-gobgp-artifact
-
-  bird2192_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact BIRD 2.19.2 archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore exact BIRD 2.19.2 archive cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/bird2192-cache/bird-2.19.2.tar.gz
-          key: bird2192-v2.19.2-source-aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
-      - name: Prepare exact BIRD 2.19.2 archive
-        run: |
-          set -euo pipefail
-          .github/scripts/install-bird3.sh \
-            --version 2.19.2 \
-            --sha256 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660 \
-            --coverage-label "M83 BIRD 2.19.2 image blocked" \
-            --prepare-archive \
-            "$RUNNER_TEMP/bird2192-cache/bird-2.19.2.tar.gz"
-      - name: Upload verified BIRD 2.19.2 archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: bird2192-v2.19.2-source
-          path: ${{ runner.temp }}/bird2192-cache/bird-2.19.2.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-  bird332_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact BIRD 3.3.2 archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore exact BIRD 3.3.2 archive cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
-          key: bird3-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
-      - name: Prepare exact BIRD 3.3.2 archive
-        run: |
-          set -euo pipefail
-          .github/scripts/install-bird3.sh \
-            --version 3.3.2 \
-            --sha256 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c \
-            --coverage-label "M101 BIRD 3.3.2 image blocked" \
-            --prepare-archive \
-            "$RUNNER_TEMP/bird3-cache/bird-3.3.2.tar.gz"
-      - name: Upload verified BIRD 3.3.2 archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: bird332-v3.3.2-source
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -320,7 +199,7 @@ jobs:
         uses: ./.github/actions/prime-rustbgpd-dev-cache
 
   m1:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M1 — basic session + UPDATE (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -353,7 +232,7 @@ jobs:
           script: tests/interop/scripts/test-m1-frr.sh
 
   m13:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M13 — Policy Engine (FRR 10.7.1, 3-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -386,7 +265,7 @@ jobs:
           script: tests/interop/scripts/test-m13-policy-frr.sh
 
   m80:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M80 — rpol policy parity (ADR-0096, FRR 10.7.1, 4-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -425,7 +304,7 @@ jobs:
           script: tests/interop/scripts/test-m80-rpol-policy-parity-frr.sh
 
   m15:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -458,7 +337,7 @@ jobs:
           script: tests/interop/scripts/test-m15-rr-frr.sh
 
   m10:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M10/M16 — IPv6 MP-BGP + dual-stack LLGR (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -498,7 +377,7 @@ jobs:
           script: tests/interop/scripts/test-m16-llgr-frr.sh
 
   m14:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M14 — Route Reflector (FRR 10.7.1, 3-node iBGP)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -531,7 +410,7 @@ jobs:
           script: tests/interop/scripts/test-m14-rr-frr.sh
 
   m17:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M17/M89 — Add-Path + experimental Paths-Limit (FRR 10.7.1, M89 on 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -575,7 +454,7 @@ jobs:
           script: tests/interop/scripts/test-m89-paths-limit-frr.sh
 
   m73:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M73/M87 — GoBGP BGP-LS + exact-export/BIRD
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -604,8 +483,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.6.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.6.0"
+          sha256: 6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+
       - name: Build gobgp:bgpls
-        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.6.0
+          --build-arg GOBGP_SHA256=6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+          -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
@@ -625,7 +514,7 @@ jobs:
           script: tests/interop/scripts/test-m87-exact-export-rejection.sh
 
   m74:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M74 — VPNv4/VPNv6 reflection (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -668,7 +557,7 @@ jobs:
           script: tests/interop/scripts/test-m74-vpnv4-reflection-gobgp.sh
 
   m75:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M75 — RT-Constrain VPNv4 filtering (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -711,7 +600,7 @@ jobs:
           script: tests/interop/scripts/test-m75-rtc-vpnv4-filter-gobgp.sh
 
   m76:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M76 — ORR divergent-best (GoBGP 4.8.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -740,6 +629,12 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+
       - name: Build gobgp:v4.8.0-m76
         run: |
           docker build --build-arg TARGETARCH=amd64 \
@@ -755,7 +650,7 @@ jobs:
           script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh
 
   m77:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -784,6 +679,12 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+
       - name: Build gobgp:v4.8.0-m77
         run: |
           docker build --build-arg TARGETARCH=amd64 \
@@ -799,7 +700,7 @@ jobs:
           script: tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
 
   m78:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M78 — Multi-cluster ORR + inter-RR Add-Path (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -828,8 +729,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.6.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.6.0"
+          sha256: 6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+
       - name: Build gobgp:bgpls
-        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.6.0
+          --build-arg GOBGP_SHA256=6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+          -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M78 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -839,7 +750,7 @@ jobs:
           script: tests/interop/scripts/test-m78-multicluster-orr-gobgp.sh
 
   m79:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M79 — Labeled-unicast route reflection + GR (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -868,8 +779,18 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.6.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.6.0"
+          sha256: 6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+
       - name: Build gobgp:bgpls
-        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.6.0
+          --build-arg GOBGP_SHA256=6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c
+          -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M79 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
@@ -879,7 +800,7 @@ jobs:
           script: tests/interop/scripts/test-m79-labeled-reflection-gobgp.sh
 
   m22:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M22 — FlowSpec (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -919,7 +840,7 @@ jobs:
           script: tests/interop/scripts/test-m22-flowspec-frr.sh
 
   m24:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M24 — BMP (FRR 10.7.1, Python receiver)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -952,7 +873,7 @@ jobs:
           script: tests/interop/scripts/test-m24-bmp-frr.sh
 
   m81:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M81 — BMP trio + BMPv4 receipt (pmacct + gobmp + tshark)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1002,7 +923,7 @@ jobs:
           script: tests/interop/scripts/test-m81-bmp-trio-gobgp.sh
 
   m82:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     # Synthetic leg only. The SR Linux vendor leg
     # (m82-evpn-bundle-srlinux.clab.yml) stays local: the NOS image is
     # ~750 MB compressed / 3.2 GB on disk and boots a full chassis sim —
@@ -1050,7 +971,7 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
-    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1085,7 +1006,6 @@ jobs:
         with:
           version: "2.19.2"
           sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
-          artifact-name: bird2192-v2.19.2-source
 
       - name: Build bird:v2.19.2-m83
         # BIRD 2.19.2 + tshark: the member stack that carries the byte-level
@@ -1098,6 +1018,12 @@ jobs:
           tags: bird:v2.19.2-m83
           cache-from: type=gha,scope=bird2192-m83
           cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true
+
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
 
       - name: Build gobgp:v4.8.0-m83
         run: >-
@@ -1126,7 +1052,7 @@ jobs:
           retention-days: 14
 
   m85:
-    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.2
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1161,7 +1087,6 @@ jobs:
         with:
           version: "2.19.2"
           sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
-          artifact-name: bird2192-v2.19.2-source
 
       - name: Build bird:v2.19.2-m85
         uses: docker/build-push-action@v7
@@ -1199,7 +1124,7 @@ jobs:
           script: tests/interop/scripts/test-m95-rfc8212-presence.sh
 
   m94:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M94 — RFC 6793 AS4 migration against OLD speakers
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1242,7 +1167,7 @@ jobs:
           script: tests/interop/scripts/test-m94-as4-migration-exabgp.sh
 
   m86:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M86 — RR core reflection + GR truth against OpenBGPD 9.1 clients
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1309,7 +1234,7 @@ jobs:
           script: tests/interop/scripts/test-m86-rr-openbgpd.sh
 
   m25:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M25 — TCP MD5 + GTSM (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1342,7 +1267,7 @@ jobs:
           script: tests/interop/scripts/test-m25-md5-gtsm-frr.sh
 
   m29:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M29 — EVPN cap negotiation (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1386,7 +1311,7 @@ jobs:
           script: tests/interop/scripts/test-m29-evpn-rr-frr.sh
 
   m30:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M30 — EVPN Type 2 reflection (FRR 10.7.1, kernel VXLAN)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1426,7 +1351,7 @@ jobs:
           script: tests/interop/scripts/test-m30-evpn-type2-frr.sh
 
   m34:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M34 — SIGHUP policy soft-reset (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1465,7 +1390,7 @@ jobs:
           script: tests/interop/scripts/test-m34-policy-soft-reset-frr.sh
 
   m35:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M35 — RFC 8326 Graceful Shutdown (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1504,7 +1429,7 @@ jobs:
           script: tests/interop/scripts/test-m35-graceful-shutdown-frr.sh
 
   m35b:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M35b — RFC 8326 GShut FlowSpec (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1543,7 +1468,7 @@ jobs:
           script: tests/interop/scripts/test-m35b-graceful-shutdown-flowspec-frr.sh
 
   m35c:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M35c — RFC 8326 GShut EVPN (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1581,7 +1506,7 @@ jobs:
           script: tests/interop/scripts/test-m35c-graceful-shutdown-evpn-frr.sh
 
   m41:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M41 — RFC 7999 BLACKHOLE (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1621,7 +1546,7 @@ jobs:
           script: tests/interop/scripts/test-m41-blackhole-frr.sh
 
   m44:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M44 — ADR-0064 gRPC tier authorization (mTLS)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1661,7 +1586,7 @@ jobs:
           script: tests/interop/scripts/test-m44-grpc-tier-authz.sh
 
   m54:
-    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M54 — ADR-0070 gNMI / OpenConfig over mTLS
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1706,7 +1631,7 @@ jobs:
           script: tests/interop/scripts/test-m54-gnmi-openconfig.sh
 
   m55:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M55 — ADR-0071 BGP Roles + OTC (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1743,7 +1668,7 @@ jobs:
           script: tests/interop/scripts/test-m55-bgp-roles-otc-frr.sh
 
   m56:
-    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M56 — gNMI Subscribe ON_CHANGE (ADR-0070 deferral resolved)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1787,7 +1712,7 @@ jobs:
           script: tests/interop/scripts/test-m56-gnmi-onchange-frr.sh
 
   m45:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M45 — EVPN Type 5 injection (gRPC → FRR)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1820,7 +1745,7 @@ jobs:
           script: tests/interop/scripts/test-m45-evpn-type5-injection.sh
 
   m57:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M57 — Outbound Route Filtering (RFC 5291/5292, FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1859,7 +1784,7 @@ jobs:
           script: tests/interop/scripts/test-m57-orf-frr.sh
 
   m63:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M63 — ADR-0078 stalled-RIB hold-timer survival (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -1899,7 +1824,7 @@ jobs:
           script: tests/interop/scripts/test-m63-stalled-rib-hold-timer.sh
 
   m64:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1939,7 +1864,7 @@ jobs:
           script: tests/interop/scripts/test-m64-ipv6-only.sh
 
   m26_m27_m28_m59_m91:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M26/M27/M28/M59/M91 — cheap protocol interop (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2004,7 +1929,7 @@ jobs:
           script: tests/interop/scripts/test-m91-rfc7606-malformed.sh
 
   m92:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M92 — GoBGP 4.7 route-server differential
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -2036,6 +1961,12 @@ jobs:
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
 
+      - name: Stage verified GoBGP 4.7.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.7.0"
+          sha256: 05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0
+
       - name: Build gobgp:v4.7.0-m92
         run: docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
@@ -2056,7 +1987,7 @@ jobs:
           script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh
 
   m84:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M84 — multi-cache RTR/ASPA epoch conformance (FRR + Routinator + StayRTR)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2093,7 +2024,7 @@ jobs:
           script: tests/interop/scripts/test-m84-rtr-multicache.sh
 
   m99:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M99 — RFC 9072 extended OPEN against FRR 10.3.1
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2137,7 +2068,7 @@ jobs:
           max_attempts: "1"
 
   m100:
-    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M100 — released-daemon Partial-flag receiver differential
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2168,7 +2099,6 @@ jobs:
         with:
           version: "2.19.2"
           sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
-          artifact-name: bird2192-v2.19.2-source
 
       - name: Build bird:v2.19.2-m100
         uses: docker/build-push-action@v7
@@ -2212,7 +2142,7 @@ jobs:
           retention-days: 14
 
   m101:
-    needs: [grpcurl_archive, bird332_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M101 — BIRD 3.3.2 real-wire attribute discard at a route server
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2246,7 +2176,6 @@ jobs:
         with:
           version: "3.3.2"
           sha256: 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
-          artifact-name: bird332-v3.3.2-source
 
       - name: Build checksum-pinned BIRD 3.3.2 image
         uses: docker/build-push-action@v7
@@ -2270,7 +2199,7 @@ jobs:
           max_attempts: "1"
 
   m102:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M102 — OpenBGPD 9.2 route-server member proof
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2332,7 +2261,7 @@ jobs:
           max_attempts: "1"
 
   m103:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M103 — GoBGP 4.8 route-server differential
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -2363,6 +2292,12 @@ jobs:
 
       - name: Build bird:2-bookworm
         run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
 
       - name: Build gobgp:v4.8.0-m103
         run: >-
@@ -2409,7 +2344,7 @@ jobs:
           retention-days: 14
 
   m104:
-    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M104 — current ARouteServer route-server differential
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2469,7 +2404,6 @@ jobs:
         with:
           version: "2.19.2"
           sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
-          artifact-name: bird2192-v2.19.2-source
 
       - name: Build bird:v2.19.2-m104
         uses: docker/build-push-action@v7
@@ -2480,6 +2414,12 @@ jobs:
           tags: bird:v2.19.2-m104
           cache-from: type=gha,scope=bird2192-m104
           cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true
+
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
 
       - name: Build gobgp:v4.8.0-m104
         run: >-
@@ -2513,7 +2453,7 @@ jobs:
           max_attempts: "1"
 
   m107:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M107 — RFC 8950 uniform-fleet route server
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -2544,6 +2484,12 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified GoBGP 4.8.0 archive
+        uses: ./.github/actions/stage-gobgp-artifact
+        with:
+          version: "4.8.0"
+          sha256: 43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+
       - name: Build gobgp:v4.8.0-m107
         run: >-
           docker build --build-arg TARGETARCH=amd64
@@ -2570,8 +2516,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, gnmic_archive, gobgp_archive, bird2192_archive,
-      bird332_archive, prime_dev_image, m1,
+    needs: [classify_changes, prime_dev_image, m1,
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
@@ -2579,8 +2524,7 @@ jobs:
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive gnmic_archive gobgp_archive bird2192_archive
-        bird332_archive prime_dev_image
+        classify_changes prime_dev_image
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57

@@ -59,6 +59,7 @@ pub(super) async fn commit_live_policy_impact_locked(
         Err(error) => {
             // The peer-manager command self-heals its live mutations on a
             // mid-fanout failure, so only the staged snapshot needs rollback.
+            // A lost reply is fenced instead: its live mutations are unknown.
             progress.begin_settling();
             return Err(rollback_snapshot_after_error(
                 peer_mgr_internal_tx,
@@ -189,10 +190,9 @@ async fn send_apply_policy_impact_snapshot(
         })?;
     reply_rx
         .await
-        .map_err(|_| {
-            ConfigTransactionApplyError::Unavailable(
-                "peer manager dropped policy-impact reply".to_string(),
-            )
+        .map_err(|_| ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            message: "peer manager accepted policy-impact apply but dropped its reply".to_string(),
         })?
         .map_err(ConfigTransactionApplyError::Internal)
 }

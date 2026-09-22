@@ -17,7 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# CI stages the same-run, checksum- and version-verified source archive here
+# CI stages the cache-restored or upstream-fetched, checksum- and
+# version-verified source archive here
 # (.github/actions/stage-bird3-artifact) so hosted builds never contact the
 # upstream download site; the committed directory is empty, which keeps cold
 # local builds on the bounded in-build fetch below.

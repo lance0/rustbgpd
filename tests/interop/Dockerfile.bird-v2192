@@ -19,8 +19,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
         tshark \
     && rm -rf /var/lib/apt/lists/*
 
-# Hosted CI stages a checksum- and version-verified same-run artifact before
-# this build. The absent-archive branch is only for cold local builds and is
+# Hosted CI stages a checksum- and version-verified archive (restored from its
+# cache entry or fetched upstream) before this build. The absent-archive branch is only for cold local builds and is
 # bounded to three 60-second attempts per checksum-verified source.
 COPY bird3-archive/ /tmp/bird-archive/
 

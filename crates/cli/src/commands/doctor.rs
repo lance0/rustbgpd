@@ -2179,9 +2179,9 @@ fn upgrade_transaction_check(
         Confirmation::Pending => (
             CheckStatus::Fail,
             format!(
-                "confirmed transaction {id} is pending until unix {}: confirm it (`rbgp config \
-                 confirm {id}`) or abort it (`rbgp config abort {id}`) before the coordinated \
-                 stop; {never_mutates}",
+                "confirmed transaction {id} is pending until unix {}: {human} Confirm it (`rbgp \
+                 config confirm {id}`) or abort it (`rbgp config abort {id}`) before the \
+                 coordinated stop; {never_mutates}",
                 confirmation.deadline_unix_seconds
             ),
         ),
@@ -6644,13 +6644,32 @@ paths = ["x"]
             assert_detail_mentions(&check, &[fragment, "not a fence"]);
         }
         // Red: every nonterminal state names the exact operator action.
-        let cases: [(Result<_, tonic::Status>, &[&str]); 6] = [
+        let cases: [(Result<_, tonic::Status>, &[&str]); 7] = [
             (
                 status_response(S::Pending, "deploy-1", 1800, "awaiting confirmation"),
                 &[
                     "pending until unix 1800",
+                    "awaiting confirmation",
                     "rbgp config confirm deploy-1",
                     "rbgp config abort deploy-1",
+                    "never confirms, aborts, or rewrites",
+                ],
+            ),
+            (
+                status_response(
+                    S::Pending,
+                    "deploy-1",
+                    1800,
+                    "Confirmed config transaction timed out at unix 1800; its automatic \
+                     rollback is waiting for the runtime-config coordinator and runs as soon \
+                     as the current owner finishes, with no action required. A confirm or \
+                     abort issued now waits behind it for the same owner and may time out as \
+                     coordinator busy.",
+                ),
+                &[
+                    "pending until unix 1800",
+                    "waiting for the runtime-config coordinator",
+                    "rbgp config confirm deploy-1",
                     "never confirms, aborts, or rewrites",
                 ],
             ),

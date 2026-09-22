@@ -1,15 +1,34 @@
-name: "Install verified gnmic artifact"
+name: "Install verified gnmic"
 description: >-
-  Download the same-run gnmic archive, verify its immutable checksum and
-  version offline, and install it on the hosted runner.
+  Restore the exact gnmic archive from its content-addressed cache entry,
+  falling back to a retried, checksum-verified upstream fetch on a miss, then
+  verify its immutable checksum and version and install it on the hosted
+  runner. No same-run producer or artifact service is involved: a cache outage
+  degrades to a miss, and a bad cache hit is discarded before any bytes are used.
 runs:
   using: "composite"
   steps:
-    - name: Download verified gnmic archive
-      uses: actions/download-artifact@v8
+    - name: Restore exact gnmic archive cache
+      id: cache
+      uses: actions/cache/restore@v6
       with:
-        name: gnmic-v0.46.0-linux-x86_64
-        path: ${{ runner.temp }}/gnmic-artifact
+        path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
+        key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
+
+    - name: Verify cached gnmic archive or fetch it upstream
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/install-gnmic.sh \
+          --prepare-archive \
+          "$RUNNER_TEMP/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz"
+
+    - name: Save verified gnmic archive cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz
+        key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e
 
     - name: Install exact gnmic offline
       shell: bash
@@ -17,5 +36,5 @@ runs:
         set -euo pipefail
         .github/scripts/install-gnmic.sh \
           --install-archive \
-          "$RUNNER_TEMP/gnmic-artifact/gnmic_0.46.0_Linux_x86_64.tar.gz" \
+          "$RUNNER_TEMP/gnmic-cache/gnmic_0.46.0_Linux_x86_64.tar.gz" \
           /usr/local/bin
