@@ -607,16 +607,18 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
         (aspath_peer, vec![65001, 65002], 200),
         (lp_peer, vec![65001], 100),
     ];
+    // Parallel sessions from one neighbor router: every candidate carries
+    // the same BGP Identifier, so RFC 4271 §9.1.2.2 step (f) ties and the
+    // peer address separates the twins.
+    let shared_router_id = winner_peer;
     let all: Vec<Route> = routes
         .iter()
-        .map(|(peer, asns, lp)| make_multipath_route(prefix, *peer, asns.clone(), *lp))
+        .map(|(peer, asns, lp)| {
+            let mut route = make_multipath_route(prefix, *peer, asns.clone(), *lp);
+            route.peer_router_id = shared_router_id;
+            route
+        })
         .collect();
-    // Every candidate carries the same peer BGP Identifier, so RFC 4271
-    // §9.1.2.2 step (f) ties and the peer address separates the twins.
-    assert!(
-        all.iter()
-            .all(|r| r.peer_router_id == all[0].peer_router_id)
-    );
     for route in &all {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,

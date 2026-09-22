@@ -598,7 +598,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
-        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        peer_router_id: session_router_id(source),
         is_stale: false,
         is_llgr_stale: false,
         path_id: 0,

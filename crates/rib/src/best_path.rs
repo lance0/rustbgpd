@@ -736,7 +736,7 @@ mod tests {
             ]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
-            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            peer_router_id: crate::test_support::session_router_id(IpAddr::V4(peer)),
             is_stale: false,
             is_llgr_stale: false,
             path_id: 0,
@@ -895,8 +895,11 @@ mod tests {
 
     #[test]
     fn lower_peer_addr_tiebreaks() {
-        let a = base_route(Ipv4Addr::new(1, 0, 0, 1));
-        let b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        // Parallel sessions to one neighbor router share its BGP
+        // Identifier, so step (f) ties and the peer address decides.
+        let shared = Ipv4Addr::new(9, 9, 9, 9);
+        let a = with_router_id(base_route(Ipv4Addr::new(1, 0, 0, 1)), shared);
+        let b = with_router_id(base_route(Ipv4Addr::new(1, 0, 0, 2)), shared);
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
     }
 
@@ -926,7 +929,8 @@ mod tests {
         let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
         Arc::make_mut(&mut a.attributes).retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
         let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
-        // Same local_pref, same as_path, same origin, no MED → peer tiebreak
+        // Same local_pref, same as_path, same origin, no MED → a later
+        // tiebreak (the lower BGP Identifier) decides
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
     }
 
@@ -945,7 +949,7 @@ mod tests {
     fn ebgp_ibgp_same_both_ebgp_falls_through() {
         let a = base_route(Ipv4Addr::new(1, 0, 0, 1));
         let b = base_route(Ipv4Addr::new(1, 0, 0, 2));
-        // Both eBGP — falls through to peer tiebreaker
+        // Both eBGP — falls through to the later tiebreakers
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
     }
 
@@ -990,12 +994,15 @@ mod tests {
 
     #[test]
     fn shorter_cluster_list_wins() {
+        // One route reflected along two paths: the shared ORIGINATOR_ID
+        // ties step 5.5, so CLUSTER_LIST is the first step to differ.
+        let originator = Ipv4Addr::new(10, 0, 0, 9);
         let a = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 2)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1)],
         );
         let b = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 1)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
         );
         // a has shorter CLUSTER_LIST, wins despite higher peer address
@@ -1371,12 +1378,16 @@ mod tests {
             ),
             ("ebgp", base_route(p1), ebgp_b, BestPathReason::EbgpOverIbgp),
             (
+                // A shared ORIGINATOR_ID ties step 5.5 so CLUSTER_LIST decides.
                 "cluster",
                 with_cluster_list(
-                    base_route(p1),
+                    with_originator_id(base_route(p1), Ipv4Addr::new(10, 0, 0, 9)),
                     vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
                 ),
-                with_cluster_list(base_route(p2), vec![Ipv4Addr::new(10, 0, 0, 1)]),
+                with_cluster_list(
+                    with_originator_id(base_route(p2), Ipv4Addr::new(10, 0, 0, 9)),
+                    vec![Ipv4Addr::new(10, 0, 0, 1)],
+                ),
                 BestPathReason::ShorterClusterList,
             ),
             (
@@ -1506,12 +1517,15 @@ mod tests {
         // Equal known costs — and both-unknown — fall through to the
         // CLUSTER_LIST step: the shorter list wins despite a's higher
         // peer address.
+        // One route reflected along two paths: the shared ORIGINATOR_ID
+        // ties step 5.5, so CLUSTER_LIST is the first step to differ.
+        let originator = Ipv4Addr::new(10, 0, 0, 9);
         let a = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 2)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1)],
         );
         let b = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 1)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
         );
         assert_eq!(best_path_cmp_orr(&a, &b, Some(7), Some(7)), Ordering::Less);
@@ -1557,12 +1571,15 @@ mod tests {
     fn orr_with_reason_cost_tie_falls_through_to_next_step() {
         // Equal (and both-unknown) costs fall through to CLUSTER_LIST —
         // the same next step the plain ladder would use.
+        // One route reflected along two paths: the shared ORIGINATOR_ID
+        // ties step 5.5, so CLUSTER_LIST is the first step to differ.
+        let originator = Ipv4Addr::new(10, 0, 0, 9);
         let a = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 2)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1)],
         );
         let b = with_cluster_list(
-            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            with_originator_id(base_route(Ipv4Addr::new(1, 0, 0, 1)), originator),
             vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
         );
         let (ord, reason) = best_path_cmp_orr_with_reason(&a, &b, Some(7), Some(7));
@@ -1598,13 +1615,20 @@ mod tests {
                 with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200),
                 with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100),
             ),
+            // A shared ORIGINATOR_ID keeps step 5.5 tied so CLUSTER_LIST decides.
             (
                 with_cluster_list(
-                    base_route(Ipv4Addr::new(1, 0, 0, 2)),
+                    with_originator_id(
+                        base_route(Ipv4Addr::new(1, 0, 0, 2)),
+                        Ipv4Addr::new(10, 0, 0, 9),
+                    ),
                     vec![Ipv4Addr::new(10, 0, 0, 1)],
                 ),
                 with_cluster_list(
-                    base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                    with_originator_id(
+                        base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                        Ipv4Addr::new(10, 0, 0, 9),
+                    ),
                     vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
                 ),
             ),
