@@ -2688,10 +2688,15 @@ message ListFibTablesResponse {
   // For Set/Delete: the full accepted runtime table set after the operation.
   // For List: the current configured set.
   repeated FibTableConfig tables = 1;
-  // True when the FIB reconciler is running and can hot-apply table edits.
-  // False on List means edits are restart-required: either no table was
-  // present at startup (the reconciler isn't spawned) or the runtime is
-  // unavailable (non-Linux platform / netlink setup failure).
+  // True when the FIB reconciler was started and its command channel is open,
+  // so table edits are routed to it for hot-apply. On List this is a channel
+  // check, not a responsiveness guarantee: it does not prove the reconciler
+  // will answer or that a later edit will apply. The Set/Delete response and
+  // ListFibRoutes report actual apply outcome. False on List means edits are
+  // restart-required: either no table was present at startup (the reconciler
+  // isn't spawned) or the runtime is unavailable (non-Linux platform / netlink
+  // setup failure). List returns UNAVAILABLE instead when the reconciler's
+  // command channel has closed.
   bool runtime_available = 2;
 }
 
