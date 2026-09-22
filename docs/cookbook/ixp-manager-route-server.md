@@ -253,9 +253,14 @@ RPKI on, the member's IRR prefix term passes an RPKI-valid route whose origin
 is in the member's AS-SET, as IXP Manager's own BIRD templates do, so a member
 with a ROA but no IRR route object keeps that route after cutover. Until the
 RTR cache's first End of Data every route reads `not-found`, so such routes
-are rejected until the cache syncs and the daemon refreshes the sessions. Every
-export chain ends with `ixp-manager-own-as-export-scrub`, which removes
-large communities under the router ASN and preserves everyone else's.
+are rejected until the cache syncs and the daemon refreshes the sessions.
+Accepted routes carry IXP Manager's informational large communities where its
+BIRD templates add them: `RS:1000:1` RPKI valid, `RS:1000:2` RPKI unknown,
+`RS:1000:3` RPKI not checked, `RS:1001:1` IRRDB valid, and `RS:1001:2` IRRDB
+not checked, where `RS` is the router ASN. An RPKI-valid route skips the IRRDB
+prefix check upstream, so it carries only `RS:1000:1`. Every export chain ends
+with `ixp-manager-own-as-export-scrub`, which removes large communities under
+the router ASN, informational ones included, and preserves everyone else's.
 `ebgp_requires_policy = true` makes deleting a chain fail closed. The
 gRPC socket and `runtime_state_dir` are fixed under the handle's directory;
 the candidate is mode 0600 because it carries the members' MD5 secrets.
@@ -667,6 +672,15 @@ and the adapter at this commit:
   `SIGHUP`; the activation publishes the new file atomically with the
   daemon generation. Direct `--protocol-alias` values remain startup-only.
   Nothing signals the adapter automatically.
+- **Informational communities on accepted routes only.** Accepted routes
+  carry the `RS:1000:*` and `RS:1001:*` informational tags IXP Manager
+  v7.4's templates set on them, so its looking-glass badges (RPKI VALID,
+  IRRDB VALID and the rest) match. A rejected route carries only the
+  adapter's `RS:1101:*` reject reason: IXP Manager also tags filtered routes
+  with `RS:1001:1000`/`1001`/`1002` (IRRDB filtered loose/strict, prefix
+  empty) and keeps any informational tag set before the rejecting check, and
+  rustbgpd does not reproduce those tags. `RS:1001:1200` (same-AS next hop)
+  is covered by the next-hop item below.
 - **The bounded UI-filter subset.** Advertise actions and ordered receive
   AS_IS/deny/PREPEND, including reachable overlap compiled into at most
   4096 disjoint cells, 256 rows per client, 4096 total; 255 prepends

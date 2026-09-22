@@ -1414,7 +1414,8 @@ test outside-window-is-not-white-listed {
     let origin = client.find("term reject-irrdb-origin-as-filtered").unwrap();
     assert!(white < origin, "{client}");
 
-    // Without tag_as_set nothing is tagged and nothing needs scrubbing.
+    // Without tag_as_set nothing is tagged, but the configured tag is still
+    // scrubbed on entry, as arouteserver's scrub_communities_in() does.
     let mut untagged = white_listed_value();
     set_path(
         &mut untagged,
@@ -1425,7 +1426,9 @@ test outside-window-is-not-white-listed {
     assert!(rendered.files["policy/client-as4242-1.rpol"].contains(
         "term accept-white-list-route-1 { if route.prefix in client-as4242-1-white-list-route-1 { accept } }"
     ));
-    assert!(!rendered.files["policy/rs-hygiene.rpol"].contains("scrub-white-list-tag"));
+    assert!(rendered.files["policy/rs-hygiene.rpol"].contains(
+        "    term scrub-white-list-tag { remove community 65530:2; remove large-community 65500:65530:2 }\n"
+    ));
 
     for (tag, marker) in [
         (
@@ -1445,6 +1448,79 @@ test outside-window-is-not-white-listed {
         );
         let items = refusals(render(&to_yaml(&value), &rtr_options()));
         assert!(items.iter().any(|i| i == marker), "{items:?}");
+    }
+}
+
+#[test]
+/// Load-bearing: arouteserver 1.23.2 `scrub_communities_in()`
+/// (`templates/bird/common.j2` 131-136) removes every configured outbound
+/// `*_validated_*` tag on receipt, whether or not `tag_as_set` is on or the
+/// feature that sets it is enabled, so a member cannot pass a lookalike tag
+/// through to other clients. Making the scrub conditional again fails here.
+fn validation_tags_are_scrubbed_whether_or_not_they_are_set() {
+    let mut value = healthy_value();
+    set_path(
+        &mut value,
+        &["cfg", "filtering", "irrdb", "tag_as_set"],
+        false.into(),
+    );
+    for (name, std) in [
+        ("route_validated_via_white_list", "65530:2"),
+        ("prefix_validated_via_rpki_roas", "65530:3"),
+        ("prefix_validated_via_arin_whois_db_dump", "65530:4"),
+        ("prefix_validated_via_registrobr_whois_db_dump", "65530:5"),
+    ] {
+        let lrg = format!("65500:{}", std);
+        set_general_community(
+            &mut value,
+            name,
+            yaml(&format!("{{std: '{std}', lrg: '{lrg}', ext: null}}")),
+        );
+    }
+    let rendered = render(&to_yaml(&value), &rtr_options()).unwrap();
+    let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+    assert!(
+        hygiene.contains(
+            "    # The white-list tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-white-list-tag { remove community 65530:2; remove large-community 65500:65530:2 }\n\
+             \x20   # The ROA tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-rpki-roa-tag { remove community 65530:3; remove large-community 65500:65530:3 }\n\
+             \x20   # The ARIN whois tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-arin-whois-tag { remove community 65530:4; remove large-community 65500:65530:4 }\n\
+             \x20   # The registro.br whois tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-registrobr-whois-tag { remove community 65530:5; remove large-community 65500:65530:5 }\n"
+        ),
+        "{hygiene}"
+    );
+    assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    // Nothing is tagged: the client policies never add a validation tag.
+    for (path, content) in &rendered.files {
+        if path.starts_with("policy/client-") {
+            assert!(!content.contains("add community 65530:"), "{path}");
+        }
+    }
+    // A form the renderer cannot scrub is refused rather than passed through.
+    for name in [
+        "prefix_validated_via_arin_whois_db_dump",
+        "prefix_validated_via_registrobr_whois_db_dump",
+    ] {
+        for (tag, marker) in [
+            (
+                "{std: null, lrg: null, ext: 'rt:65530:4'}",
+                "ext is unsupported",
+            ),
+            ("{std: 'rs_as:4', lrg: null, ext: null}", "is malformed"),
+        ] {
+            let mut value = healthy_value();
+            set_general_community(&mut value, name, yaml(tag));
+            let items = refusals(render(&to_yaml(&value), &rtr_options()));
+            let expected = if marker.starts_with("ext") {
+                format!("communities.{name}.{marker}")
+            } else {
+                format!("communities.{name} {marker}")
+            };
+            assert!(items.contains(&expected), "{items:?}");
+        }
     }
 }
 
@@ -1620,7 +1696,9 @@ fn rpki_roas_as_route_objects_accept_valid_routes_without_route_objects() {
     assert!(untagged.files["policy/client-as4242-1.rpol"].contains(
         "term accept-rpki-roa-as-route-object { if route.origin-as in client-as4242-1-origins && route.rpki == valid { accept } }"
     ));
-    assert!(!untagged.files["policy/rs-hygiene.rpol"].contains("scrub-rpki-roa-tag"));
+    assert!(untagged.files["policy/rs-hygiene.rpol"].contains(
+        "    term scrub-rpki-roa-tag { remove community 65530:3; remove large-community 65500:65530:3 }\n"
+    ));
     for (tag, marker) in [
         (
             "{std: null, lrg: null, ext: 'rt:65530:3'}",

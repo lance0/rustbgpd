@@ -46,6 +46,8 @@ cfg:
     blackholing: {std: null, lrg: null, ext: null}
     do_not_announce_to_any: {std: null, lrg: null, ext: null}
     do_not_announce_to_peers_with_rtt_lower_than: {std: null, lrg: null, ext: null}
+    # Configured but never set (the ARIN whois source is not rendered): still scrubbed.
+    prefix_validated_via_arin_whois_db_dump: {std: '65530:4', lrg: '65500:65530:4', ext: null}
   filtering:
     next_hop:
       policy: strict

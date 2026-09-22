@@ -121,6 +121,16 @@ drift (exit 4) aborts the whole render and leaves the previous
 configuration running. The full refused-knob table and failure policy
 are in the [renderer README](../../tools/rs-config-render/README.md).
 
+Shared hygiene scrubs every configured arouteserver `*_validated_*` tag
+(white list, RPKI ROAs, ARIN and registro.br whois dumps) from received
+routes, whether or not the site tags routes with it, as arouteserver's
+`scrub_communities_in()` does. A member therefore cannot pass a lookalike
+validation tag through to other clients. Upstream's inbound scrub also removes
+the internal `rpki_bgp_origin_validation_valid`/`unknown`/`invalid`
+communities and any `custom_communities`. The renderer neither sets nor
+scrubs those, so a member-sent value in those ranges reaches other clients
+unchanged.
+
 ### Try it from this repository
 
 The renderer's checked-in test fixture is a three-client context whose
