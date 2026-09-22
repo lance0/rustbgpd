@@ -393,6 +393,8 @@ struct Cfg {
     rtt_thresholds: Option<serde_yaml::Value>,
     #[serde(default)]
     communities: BTreeMap<String, CommunityValues>,
+    #[serde(default)]
+    custom_communities: BTreeMap<String, CommunityValues>,
     filtering: Filtering,
 }
 
@@ -587,6 +589,8 @@ struct ClientCfg {
     blackhole_filtering: BlackholeFiltering,
     #[serde(default)]
     filtering: ClientFiltering,
+    #[serde(default)]
+    attach_custom_communities: Option<serde_yaml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1586,19 +1590,16 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         }
     }
     check_control_communities(cfg, &mut refusals);
-    for (name, _, _) in VALIDATION_TAGS {
-        let Some(tag) = cfg.communities.get(name) else {
-            continue;
-        };
+    for (section, name, tag) in scrubbed_communities(cfg) {
         if tag.ext.is_some() {
-            refusals.push(format!("communities.{name}.ext is unsupported"));
+            refusals.push(format!("{section}.{name}.ext is unsupported"));
         }
         for (value, parts, max) in [
             (tag.std.as_deref(), 2, u16::MAX as u64),
             (tag.lrg.as_deref(), 3, u32::MAX as u64),
         ] {
             if value.is_some_and(|value| !valid_reject_community(value, parts, max, false)) {
-                refusals.push(format!("communities.{name} is malformed"));
+                refusals.push(format!("{section}.{name} is malformed"));
             }
         }
     }
@@ -1787,6 +1788,13 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 client.id
             ));
         }
+        if value_present(client.cfg.attach_custom_communities.as_ref()) {
+            refusals.push(format!(
+                "client {}: attach_custom_communities is not rendered; the attached \
+                 communities would be silently dropped",
+                client.id
+            ));
+        }
     }
 
     if refusals.is_empty() {
@@ -1832,6 +1840,50 @@ const VALIDATION_TAGS: [(&str, &str, &str); 4] = [
         "registro.br whois",
     ),
 ];
+
+/// arouteserver's internal RPKI origin-validation communities as
+/// `(key, scrub term)`. The renderer never sets them (the daemon tags RFC 8097
+/// extended communities instead), and `scrub_communities_in()` removes them on
+/// receipt, so a member-sent copy must not reach other clients.
+const RPKI_OV_COMMUNITIES: [(&str, &str); 3] = [
+    ("rpki_bgp_origin_validation_valid", "scrub-rpki-ov-valid"),
+    (
+        "rpki_bgp_origin_validation_unknown",
+        "scrub-rpki-ov-unknown",
+    ),
+    (
+        "rpki_bgp_origin_validation_invalid",
+        "scrub-rpki-ov-invalid",
+    ),
+];
+
+/// Every configured community `scrub_communities_in()` removes on receipt that
+/// shared hygiene scrubs, as `(section, key, values)`: the outbound
+/// `*_validated_*` tags, the internal RPKI origin-validation and
+/// `reject_cause_map_*` communities, and every `custom_communities` entry.
+/// `reject_cause` is internal too, but its `dyn_val` form has no rpol
+/// removal pattern.
+fn scrubbed_communities(cfg: &Cfg) -> Vec<(&'static str, &str, &CommunityValues)> {
+    let fixed = VALIDATION_TAGS
+        .iter()
+        .map(|(name, _, _)| *name)
+        .chain(RPKI_OV_COMMUNITIES.iter().map(|(name, _)| *name))
+        .filter_map(|name| Some((name, cfg.communities.get(name)?)));
+    let reject_cause_map = cfg
+        .communities
+        .iter()
+        .filter(|(name, _)| name.starts_with("reject_cause_map_"))
+        .map(|(name, values)| (name.as_str(), values));
+    fixed
+        .chain(reject_cause_map)
+        .map(|(name, values)| ("communities", name, values))
+        .chain(
+            cfg.custom_communities
+                .iter()
+                .map(|(name, values)| ("custom_communities", name.as_str(), values)),
+        )
+        .collect()
+}
 
 /// The daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control matrix
 /// (`rs_control` in the RIB crate), as arouteserver spells it after
@@ -1934,9 +1986,14 @@ fn irrdb_tag(ctx: &Context, name: &str) -> Vec<(CommunityKind, String)> {
 
 /// The configured standard and large forms of community `name`.
 fn configured_tag(ctx: &Context, name: &str) -> Vec<(CommunityKind, String)> {
-    let Some(values) = ctx.cfg.communities.get(name) else {
-        return Vec::new();
-    };
+    ctx.cfg
+        .communities
+        .get(name)
+        .map_or_else(Vec::new, tag_forms)
+}
+
+/// The standard and large forms of one community's values.
+fn tag_forms(values: &CommunityValues) -> Vec<(CommunityKind, String)> {
     [
         (CommunityKind::Standard, &values.std),
         (CommunityKind::Large, &values.lrg),
@@ -2896,6 +2953,51 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
             let _ = writeln!(
                 terms,
                 "    # The {label} tag is set by the route server only; members cannot pre-tag.\n\
+                 \x20   term {term} {{ {} }}",
+                community_actions("remove", &tag)
+            );
+        }
+    }
+    for (name, term) in RPKI_OV_COMMUNITIES {
+        let tag = configured_tag(ctx, name);
+        if !tag.is_empty() {
+            let _ = writeln!(
+                terms,
+                "    # arouteserver's internal {name} community; members cannot send it.\n\
+                 \x20   term {term} {{ {} }}",
+                community_actions("remove", &tag)
+            );
+        }
+    }
+    let reject_cause_map = ctx
+        .cfg
+        .communities
+        .iter()
+        .filter(|(name, _)| name.starts_with("reject_cause_map_"))
+        .map(|(_, values)| values);
+    for (values, term, comment) in [
+        (
+            reject_cause_map.collect::<Vec<_>>(),
+            "scrub-reject-cause-map",
+            "arouteserver's internal reject_cause_map_* communities",
+        ),
+        (
+            ctx.cfg.custom_communities.values().collect(),
+            "scrub-custom-communities",
+            "arouteserver custom_communities are attached by the route server only",
+        ),
+    ] {
+        // Reject-cause maps may share a value; remove each form once.
+        let mut seen = BTreeSet::new();
+        let tag = values
+            .into_iter()
+            .flat_map(tag_forms)
+            .filter(|(kind, value)| seen.insert((community_field(*kind), value.clone())))
+            .collect::<Vec<_>>();
+        if !tag.is_empty() {
+            let _ = writeln!(
+                terms,
+                "    # {comment}; members cannot send them.\n\
                  \x20   term {term} {{ {} }}",
                 community_actions("remove", &tag)
             );

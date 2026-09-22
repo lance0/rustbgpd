@@ -1524,6 +1524,118 @@ fn validation_tags_are_scrubbed_whether_or_not_they_are_set() {
     }
 }
 
+#[test]
+/// Load-bearing: arouteserver 1.23.2 `scrub_communities_in()`
+/// (`templates/bird/common.j2` 131-153) also removes every configured
+/// internal community and every `custom_communities` entry on receipt
+/// (`config/general.py` 42-87 classes the types). The renderer never sets
+/// them, so an rpol `with` assertion cannot see the removal; the exact term
+/// text pins it.
+fn internal_and_custom_communities_are_scrubbed_without_being_set() {
+    let mut value = healthy_value();
+    for (name, std) in [
+        ("rpki_bgp_origin_validation_valid", "65530:30"),
+        ("rpki_bgp_origin_validation_unknown", "65530:31"),
+        ("rpki_bgp_origin_validation_invalid", "65530:32"),
+        ("reject_cause_map_3", "65530:40"),
+        // A shared value is removed once.
+        ("reject_cause_map_4", "65530:40"),
+        ("reject_cause_map_5", "65530:41"),
+    ] {
+        set_general_community(
+            &mut value,
+            name,
+            yaml(&format!("{{std: '{std}', lrg: '65500:{std}', ext: null}}")),
+        );
+    }
+    set_path(
+        &mut value,
+        &["cfg", "custom_communities"],
+        yaml(
+            "{location_ams: {std: '65530:100', lrg: null, ext: null}, \
+              location_fra: {std: null, lrg: '65500:65530:101', ext: null}}",
+        ),
+    );
+    let rendered = render(&to_yaml(&value), &rtr_options()).unwrap();
+    let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+    assert!(
+        hygiene.contains(
+            "    # arouteserver's internal rpki_bgp_origin_validation_valid community; members cannot send it.\n\
+             \x20   term scrub-rpki-ov-valid { remove community 65530:30; remove large-community 65500:65530:30 }\n\
+             \x20   # arouteserver's internal rpki_bgp_origin_validation_unknown community; members cannot send it.\n\
+             \x20   term scrub-rpki-ov-unknown { remove community 65530:31; remove large-community 65500:65530:31 }\n\
+             \x20   # arouteserver's internal rpki_bgp_origin_validation_invalid community; members cannot send it.\n\
+             \x20   term scrub-rpki-ov-invalid { remove community 65530:32; remove large-community 65500:65530:32 }\n\
+             \x20   # arouteserver's internal reject_cause_map_* communities; members cannot send them.\n\
+             \x20   term scrub-reject-cause-map { remove community 65530:40; remove large-community 65500:65530:40; remove community 65530:41; remove large-community 65500:65530:41 }\n\
+             \x20   # arouteserver custom_communities are attached by the route server only; members cannot send them.\n\
+             \x20   term scrub-custom-communities { remove community 65530:100; remove large-community 65500:65530:101 }\n"
+        ),
+        "{hygiene}"
+    );
+    assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    // Nothing sets them: no client policy adds any of these values.
+    for (path, content) in &rendered.files {
+        if path.starts_with("policy/client-") {
+            assert!(!content.contains("add community 65530:"), "{path}");
+            assert!(!content.contains("add large-community 65500:"), "{path}");
+        }
+    }
+
+    // A form the renderer cannot scrub is refused rather than passed through.
+    for (section, name) in [
+        ("communities", "rpki_bgp_origin_validation_invalid"),
+        ("communities", "reject_cause_map_3"),
+        ("custom_communities", "location_ams"),
+    ] {
+        for (tag, expected) in [
+            (
+                "{std: null, lrg: null, ext: 'rt:65530:4'}",
+                format!("{section}.{name}.ext is unsupported"),
+            ),
+            (
+                "{std: 'rs_as:4', lrg: null, ext: null}",
+                format!("{section}.{name} is malformed"),
+            ),
+        ] {
+            let mut value = healthy_value();
+            value["cfg"][section]
+                .as_mapping_mut()
+                .unwrap()
+                .insert(name.into(), yaml(tag));
+            let items = refusals(render(&to_yaml(&value), &rtr_options()));
+            assert!(items.contains(&expected), "{items:?}");
+        }
+    }
+
+    // Attaching a custom community is not rendered; dropping it is refused.
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "attach_custom_communities"],
+        yaml("[location_ams]"),
+    );
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items.contains(
+            &"client AS4242_1: attach_custom_communities is not rendered; the attached \
+              communities would be silently dropped"
+                .to_owned()
+        ),
+        "{items:?}"
+    );
+    // The null a real template-context carries is not a request.
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "attach_custom_communities"],
+        serde_yaml::Value::Null,
+    );
+    render(&to_yaml(&value), &rtr_options()).unwrap();
+}
+
 fn yaml(text: &str) -> serde_yaml::Value {
     serde_yaml::from_str(text).unwrap()
 }
