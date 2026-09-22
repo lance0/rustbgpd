@@ -1519,6 +1519,11 @@ duplicate_mac_detection = {{ {field} = {value} }}
         assert_eq!(properties[field]["minimum"], min, "{field} schema minimum");
         if let Some(max) = max {
             assert_eq!(properties[field]["maximum"], max, "{field} schema maximum");
+        } else {
+            assert!(
+                properties[field].get("maximum").is_none(),
+                "{field} has no validator maximum, so the schema must not publish one"
+            );
         }
 
         let mut rejected = vec![min - 1];
