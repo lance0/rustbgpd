@@ -831,7 +831,7 @@ fn diverse_unicast_route(index: usize, med: u32) -> Route {
 
 fn diverse_injected_route(index: usize, med: u32) -> Route {
     let mut route = diverse_unicast_route(index, med);
-    route.peer = LOCAL_PEER;
+    set_peer(&mut route, LOCAL_PEER);
     route.origin_type = crate::route::RouteOrigin::Local;
     route
 }

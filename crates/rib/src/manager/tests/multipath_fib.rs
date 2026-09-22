@@ -2120,9 +2120,9 @@ async fn fib_install_candidates_dedupes_same_next_hop_before_cap() {
     let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
     let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
     let mut r1 = make_route(prefix, shared_nh);
-    r1.peer = peer1;
+    set_peer(&mut r1, peer1);
     let mut r2 = make_route(prefix, shared_nh);
-    r2.peer = peer2;
+    set_peer(&mut r2, peer2);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer1,

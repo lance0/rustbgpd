@@ -3224,7 +3224,7 @@ mod cancellation_tests {
                     u8::try_from(index % 256).unwrap(),
                 ),
             );
-            route.peer = peer;
+            crate::test_support::set_peer(&mut route, peer);
             route.path_id = u32::try_from(index + 1).unwrap();
             rib.insert(route);
         }
