@@ -1132,12 +1132,7 @@ fn render_inner(
     let mut files = BTreeMap::new();
     files.insert(
         "policy/rs-hygiene.rpol".to_owned(),
-        render_hygiene(
-            &ctx,
-            &white_list_tag,
-            rpki_roa_tag.as_deref(),
-            &found_fingerprint,
-        ),
+        render_hygiene(&ctx, &found_fingerprint),
     );
     for rc in &resolved {
         files.insert(
@@ -1591,7 +1586,7 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         }
     }
     check_control_communities(cfg, &mut refusals);
-    for name in [WHITE_LIST_TAG, RPKI_ROA_TAG] {
+    for (name, _, _) in VALIDATION_TAGS {
         let Some(tag) = cfg.communities.get(name) else {
             continue;
         };
@@ -1819,6 +1814,25 @@ fn community_configured(value: &CommunityValues) -> bool {
 const WHITE_LIST_TAG: &str = "route_validated_via_white_list";
 const RPKI_ROA_TAG: &str = "prefix_validated_via_rpki_roas";
 
+/// arouteserver's outbound `*_validated_*` tags as `(key, scrub term, label)`.
+/// Its `scrub_communities_in()` (`templates/bird/common.j2`) removes every
+/// configured outbound tag on receipt, whether or not the site tags, so a
+/// member cannot pass a lookalike tag through to other clients.
+const VALIDATION_TAGS: [(&str, &str, &str); 4] = [
+    (WHITE_LIST_TAG, "scrub-white-list-tag", "white-list"),
+    (RPKI_ROA_TAG, "scrub-rpki-roa-tag", "ROA"),
+    (
+        "prefix_validated_via_arin_whois_db_dump",
+        "scrub-arin-whois-tag",
+        "ARIN whois",
+    ),
+    (
+        "prefix_validated_via_registrobr_whois_db_dump",
+        "scrub-registrobr-whois-tag",
+        "registro.br whois",
+    ),
+];
+
 /// The daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control matrix
 /// (`rs_control` in the RIB crate), as arouteserver spells it after
 /// expanding `rs_as`: `(key, std, lrg)`. Standard forms that embed the
@@ -1915,6 +1929,11 @@ fn irrdb_tag(ctx: &Context, name: &str) -> Vec<(CommunityKind, String)> {
     if !ctx.cfg.filtering.irrdb.tag_as_set {
         return Vec::new();
     }
+    configured_tag(ctx, name)
+}
+
+/// The configured standard and large forms of community `name`.
+fn configured_tag(ctx: &Context, name: &str) -> Vec<(CommunityKind, String)> {
     let Some(values) = ctx.cfg.communities.get(name) else {
         return Vec::new();
     };
@@ -2847,12 +2866,7 @@ fn render_prefix_set(
     out.push_str("}\n");
 }
 
-fn render_hygiene(
-    ctx: &Context,
-    white_list_tag: &[(CommunityKind, String)],
-    rpki_roa_tag: Option<&[(CommunityKind, String)]>,
-    fingerprint: &str,
-) -> String {
+fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     let filtering = &ctx.cfg.filtering;
     let mut out = generated_header("Shared import hygiene", fingerprint);
     out.push_str(
@@ -2876,21 +2890,16 @@ fn render_hygiene(
         "test as-set-path-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333 {65010 65011}\" }\n    expect rs-hygiene == reject\n}\n",
     );
 
-    if !white_list_tag.is_empty() {
-        let _ = writeln!(
-            terms,
-            "    # The white-list tag is set by the route server only; members cannot pre-tag.\n\
-             \x20   term scrub-white-list-tag {{ {} }}",
-            community_actions("remove", white_list_tag)
-        );
-    }
-    if let Some(tag) = rpki_roa_tag.filter(|tag| !tag.is_empty()) {
-        let _ = writeln!(
-            terms,
-            "    # The ROA tag is set by the route server only; members cannot pre-tag.\n\
-             \x20   term scrub-rpki-roa-tag {{ {} }}",
-            community_actions("remove", tag)
-        );
+    for (name, term, label) in VALIDATION_TAGS {
+        let tag = configured_tag(ctx, name);
+        if !tag.is_empty() {
+            let _ = writeln!(
+                terms,
+                "    # The {label} tag is set by the route server only; members cannot pre-tag.\n\
+                 \x20   term {term} {{ {} }}",
+                community_actions("remove", &tag)
+            );
+        }
     }
 
     if filtering.reject_invalid_as_in_as_path {

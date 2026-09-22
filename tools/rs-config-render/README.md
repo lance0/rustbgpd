@@ -437,7 +437,7 @@ and against a live run of the pinned arouteserver image by
 | File | Contents |
 |---|---|
 | `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
-| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub the rendered `route_validated_via_white_list` and `prefix_validated_via_rpki_roas` tags, invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
+| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub every configured `*_validated_*` tag (`route_validated_via_white_list`, `prefix_validated_via_rpki_roas`, `prefix_validated_via_arin_whois_db_dump`, `prefix_validated_via_registrobr_whois_db_dump`) whether or not the render sets it, invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, an RPKI-valid accept term bound to the origin dataset when `irrdb.use_rpki_roas_as_route_objects` is enabled, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
 | `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members plus `white_list_pref` entries (subtree unless bounded, as arouteserver reads them), one canonical entry per line |
@@ -587,8 +587,11 @@ carries `asn` and limited to the session's family. Shared hygiene still
 runs first, so a white list never bypasses bogon, black-list, length, or
 path checks. When the site configures `route_validated_via_white_list`
 (standard and/or large forms) and `irrdb.tag_as_set` is on, the accept
-term adds the tag and the hygiene policy scrubs it on entry so members
-cannot pre-tag their own routes.
+term adds the tag. The hygiene policy scrubs every configured `*_validated_*`
+tag on entry, whether or not `tag_as_set` is on or the feature that sets it is
+enabled, as arouteserver's `scrub_communities_in()` does, so members cannot
+pre-tag their own routes or pass a lookalike tag through to other clients. An
+`ext` form or a malformed value of any of these tags is refused.
 The renderer refuses configured `origin_present_in_as_set`,
 `origin_not_present_in_as_set`, `prefix_present_in_as_set`, and
 `prefix_not_present_in_as_set` result communities even when `tag_as_set` is
@@ -604,10 +607,10 @@ is enabled, each client policy gets
 `term accept-rpki-roa-as-route-object { if route.origin-as in client-<id>-origins && route.rpki == valid { accept } }`
 after the blackhole terms and, as in arouteserver, ahead of the white list and
 IRR enforcement. With `tag_as_set` on and `prefix_validated_via_rpki_roas`
-configured (standard and/or large), the term adds that tag and shared hygiene
-scrubs it on entry. The daemon reads ROAs only over RTR, so the flag emits
-`[rpki]` and requires `--rtr-cache` even with origin validation disabled; the
-context's `rpki_roas` source settings are not used. The flag also requires
+configured (standard and/or large), the term adds that tag. Shared hygiene
+scrubs a configured tag on entry either way. The daemon reads ROAs only over
+RTR, so the flag emits `[rpki]` and requires `--rtr-cache` even with origin
+validation disabled; the context's `rpki_roas` source settings are not used. The flag also requires
 `irrdb.enforce_origin_in_as_set`, because the acceptance is bound to the origin
 dataset. Before the cache's first End of Data every route reads `not-found`,
 so the ROA exception cannot accept a route yet. Such a route is rejected only

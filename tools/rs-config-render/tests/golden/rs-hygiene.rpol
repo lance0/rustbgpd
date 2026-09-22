@@ -28,6 +28,8 @@ prefix-set rs-v6-len-outside-window {
 policy rs-hygiene {
     # AS_SET segments render in braces ("65001 {65002 65003}").
     term reject-as-set { if route.as-path matches "\\{" { reject } }
+    # The ARIN whois tag is set by the route server only; members cannot pre-tag.
+    term scrub-arin-whois-tag { remove community 65530:4; remove large-community 65500:65530:4 }
     # 0, AS_TRANS, 16-bit doc/private/reserved (64496-65551), and the
     # 32-bit private+reserved range (any 10-digit "42..." ASN in u32).
     term reject-invalid-asn { if route.as-path matches "_(0|23456|6449[6-9]|64[5-9][0-9][0-9]|65[0-4][0-9][0-9]|655[0-4][0-9]|6555[01]|42[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])_" { reject } }
