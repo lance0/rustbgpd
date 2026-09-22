@@ -4066,11 +4066,19 @@ mod tests {
         }
     }
 
+    /// Hang preventer for waits on something that must eventually happen: a
+    /// Subscribe response, a terminal status, a fixture or task finishing. It
+    /// is not a latency bound. `ON_CHANGE` fixtures ride a real SQLite commit
+    /// whose storage thread fsyncs, so this has to outlast fsync latency on a
+    /// loaded host. The module's `SAMPLE` cadence windows are timing properties
+    /// and keep their own bounds; those tests have no storage on their path.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
     /// Load-bearing hang guard: removing a timer or terminal status makes callers red.
     async fn next_bounded(
         stream: &mut tonic::Streaming<gnmi::SubscribeResponse>,
     ) -> Result<Option<gnmi::SubscribeResponse>, Status> {
-        tokio::time::timeout(Duration::from_secs(2), stream.message())
+        tokio::time::timeout(HANG_GUARD, stream.message())
             .await
             .expect("Subscribe response timed out")
     }
@@ -4119,7 +4127,7 @@ mod tests {
             Err(status) => status,
             Ok(response) => {
                 let mut stream = response.into_inner();
-                match tokio::time::timeout(Duration::from_secs(2), stream.message()).await {
+                match tokio::time::timeout(HANG_GUARD, stream.message()).await {
                     Ok(Err(status)) => status,
                     Ok(Ok(Some(response))) => {
                         panic!("actor outage emitted a Subscribe response: {response:?}")
@@ -4345,7 +4353,7 @@ mod tests {
         )
         .with_event_history(Some(manager.handle()));
         assert_peer_snapshot_outage(service, "peer manager dropped reply").await;
-        tokio::time::timeout(Duration::from_secs(2), actor)
+        tokio::time::timeout(HANG_GUARD, actor)
             .await
             .expect("peer-manager fixture did not finish")
             .expect("peer-manager fixture failed");
@@ -5199,7 +5207,7 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert_eq!(error.message(), "peer manager dropped reply");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
-        tokio::time::timeout(Duration::from_secs(2), actor)
+        tokio::time::timeout(HANG_GUARD, actor)
             .await
             .unwrap()
             .unwrap();
@@ -5251,7 +5259,7 @@ mod tests {
     async fn next_on_change(
         rx: &mut tokio::sync::mpsc::Receiver<Result<gnmi::SubscribeResponse, Status>>,
     ) -> Result<gnmi::SubscribeResponse, Status> {
-        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        tokio::time::timeout(HANG_GUARD, rx.recv())
             .await
             .expect("ON_CHANGE response timed out")
             .expect("ON_CHANGE stream closed without status")
@@ -5587,7 +5595,7 @@ mod tests {
         ));
         state.record_loss();
         assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(HANG_GUARD, task)
             .await
             .expect("ON_CHANGE stream did not terminate after producer loss")
             .unwrap();
@@ -5597,7 +5605,7 @@ mod tests {
     #[tokio::test]
     async fn on_change_loss_preempts_a_blocked_initial_snapshot() {
         // Load-bearing break: subscribing after or not racing the snapshot lets
-        // the two-second guard expire without a terminal status.
+        // the hang guard expire without a terminal status.
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let snapshot_entered = Arc::clone(&entered);
@@ -5620,14 +5628,14 @@ mod tests {
         .unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(SUBSCRIBE_CHANNEL_DEPTH);
         let task = tokio::spawn(service.run_on_change(plan, tx));
-        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(HANG_GUARD, entered.notified())
             .await
             .expect("initial snapshot did not start");
 
         state.record_loss();
         assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
         release.notify_waiters();
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(HANG_GUARD, task)
             .await
             .expect("ON_CHANGE stream did not terminate after snapshot loss")
             .unwrap();
@@ -5659,7 +5667,7 @@ mod tests {
         ));
         let task = tokio::spawn(run);
         assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(HANG_GUARD, task)
             .await
             .expect("ON_CHANGE stream did not terminate after blocked sync loss")
             .unwrap();
@@ -5697,7 +5705,7 @@ mod tests {
             .unwrap();
         // EHM rides a real SQLite commit whose storage thread still fsyncs
         // under NORMAL, so this is a generous hang guard, not a latency bound.
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(HANG_GUARD, async {
             while state.latest_event_id() == 0 {
                 tokio::task::yield_now().await;
             }
@@ -5718,7 +5726,7 @@ mod tests {
         ));
         let task = tokio::spawn(run);
         assert_on_change_loss(&next_on_change(&mut rx).await.unwrap_err());
-        tokio::time::timeout(Duration::from_secs(2), task)
+        tokio::time::timeout(HANG_GUARD, task)
             .await
             .expect("ON_CHANGE stream did not terminate after blocked live loss")
             .unwrap();
@@ -6216,7 +6224,7 @@ mod tests {
             1
         );
         assert_sync(&mut stream).await;
-        tokio::time::timeout(Duration::from_secs(2), render_started.notified())
+        tokio::time::timeout(HANG_GUARD, render_started.notified())
             .await
             .expect("heartbeat snapshot did not start");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -6230,7 +6238,7 @@ mod tests {
         // The event must remain deliverable while the actor-backed heartbeat
         // snapshot is deliberately held. EHM rides a real SQLite commit, so
         // this is a generous hang guard rather than a latency assertion.
-        let response = tokio::time::timeout(Duration::from_secs(30), stream.message())
+        let response = tokio::time::timeout(HANG_GUARD, stream.message())
             .await
             .expect("ON_CHANGE Update did not arrive (hang guard)")
             .unwrap()
