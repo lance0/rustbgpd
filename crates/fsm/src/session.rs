@@ -668,31 +668,7 @@ mod tests {
     use rustbgpd_wire::{Afi, Capability, Safi};
 
     use super::*;
-
-    fn test_config() -> PeerConfig {
-        PeerConfig {
-            local_asn: 65001,
-            remote_asn: 65002,
-            local_router_id: Ipv4Addr::new(10, 0, 0, 1),
-            hold_time: 90,
-            min_hold_time: None,
-            send_hold_time: crate::config::default_send_hold_time(90),
-            connect_retry_secs: 30,
-            families: vec![(Afi::Ipv4, Safi::Unicast)],
-            required_families: Vec::new(),
-            graceful_restart: false,
-            gr_restart_time: 120,
-            llgr_stale_time: 0,
-            add_path_receive: false,
-            add_path_send: false,
-            add_path_send_max: 0,
-            paths_limit_receive_max: 0,
-            local_role: None,
-            strict_role: false,
-            prefix_orf_receive: false,
-            disable_ipv4_unicast: false,
-        }
-    }
+    use crate::config::test_support::test_config;
 
     fn peer_open() -> OpenMessage {
         OpenMessage {

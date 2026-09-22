@@ -393,10 +393,11 @@ impl PeerConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
-    fn test_config() -> PeerConfig {
+    /// Plain IPv4-unicast eBGP peer config shared by the crate's unit tests.
+    pub(crate) fn test_config() -> PeerConfig {
         PeerConfig {
             local_asn: 65001,
             remote_asn: 65002,
@@ -420,6 +421,12 @@ mod tests {
             disable_ipv4_unicast: false,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::test_config;
+    use super::*;
 
     #[test]
     fn local_capabilities_includes_families_rr_ext_msg_and_four_octet() {
