@@ -405,8 +405,8 @@ correctness reference if you suspect the daemon path itself.
 
 For live systems, `rbgp evpn nexthops` shows the reconciler's
 owned FDB-NHG view: per-VNI groups, member nexthop IDs, MAC refs,
-orphan tagged nexthop count, pending-delete count, and drift-recovery
-state. Use it before falling back to raw `ip nexthop show` / `bridge
+orphan tagged nexthop and pending-delete counts (L2, plus separate L3
+counts for all-active Type 5 nexthops), and drift-recovery state. Use it before falling back to raw `ip nexthop show` / `bridge
 fdb show` output.
 
 ### Stale tagged FDB rows after `apply_aliasing_ecmp` restart-flip

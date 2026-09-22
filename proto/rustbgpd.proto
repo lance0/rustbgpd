@@ -4016,10 +4016,9 @@ service EvpnService {
   // when no FDB-NHG state is installed (RR-only deployment,
   // single-homed VTEP, or every multi-homed VNI flipped to
   // `apply_aliasing_ecmp = false`) or when the dataplane actor is
-  // not running. The top-level `orphan_nexthops_count`,
-  // `pending_delete_count`, and `drift_recovery_disabled` fields
-  // are always populated and may be non-zero / `true` even when
-  // `groups` is empty.
+  // not running. The top-level count fields and
+  // `drift_recovery_disabled` are always populated and may be
+  // non-zero / `true` even when `groups` is empty.
   rpc ListEvpnNexthops(ListEvpnNexthopsRequest) returns (ListEvpnNexthopsResponse);
   // ADR-0083/0085 — list configured Ethernet Segments joined with
   // current multi-homing runtime state: composed drain reasons,
@@ -4176,13 +4175,20 @@ message ListEvpnNexthopsResponse {
   // owned group. These are retained or cleaned by the reconciler
   // depending on live kernel FDB references.
   uint32 orphan_nexthops_count = 2;
-  // Tagged nexthop IDs queued for retry because kernel deletion
-  // failed during teardown / GC.
+  // L2 FDB-NHG tagged nexthop IDs queued for retry because kernel
+  // deletion failed during teardown / GC.
   uint32 pending_delete_count = 3;
   // True after steady-state RTM_GETNEXTHOP drift recovery latched off
   // due to a permanent dump failure. Normal apply paths may still
   // work; this only describes the periodic drift-recovery loop.
   bool drift_recovery_disabled = 4;
+  // L3 (all-active Type 5 FDB nexthop) counterpart of
+  // `orphan_nexthops_count`: adopted tagged L3 nexthops not yet
+  // associated with an owned L3 group.
+  uint32 l3_orphan_nexthops_count = 5;
+  // L3 counterpart of `pending_delete_count`: tagged L3 nexthop IDs
+  // queued for delete retry.
+  uint32 l3_pending_delete_count = 6;
 }
 
 message EvpnFdbNexthopGroup {

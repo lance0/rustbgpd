@@ -3925,10 +3925,15 @@ async fn l3_nhg_failed_member_delete_retries_on_next_pass() {
         report.fdb_nexthops.pending_delete_count, 0,
         "the L2 FDB nexthop status must not count L3 retries"
     );
+    assert_eq!(
+        report.fdb_nexthops.l3_pending_delete_count, 1,
+        "a stuck L3 delete must be visible on the status surface"
+    );
 
     // Next pass: the new member must not take the still-live ID, and
     // the post-apply retry deletes the orphan.
-    send_l3_all_active(&mut h, 3, &["10.0.0.2", "10.0.0.3", "10.0.0.5"]).await;
+    let report = send_l3_all_active(&mut h, 3, &["10.0.0.2", "10.0.0.3", "10.0.0.5"]).await;
+    assert_eq!(report.fdb_nexthops.l3_pending_delete_count, 0);
     assert_ne!(member_nh_id(&h.handle, "10.0.0.5"), Some(stale));
     assert!(
         !h.handle.nexthop_ops().contains_key(&stale),

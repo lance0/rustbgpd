@@ -2805,7 +2805,7 @@ semantics used by both `ApplyEvpnRuntime` and SIGHUP reload.
 |-----|-------------|
 | `GetEvpnRuntime` | Return the committed EVPN runtime generation, lifecycle, mutation state, configured EVI/IP-VRF/ES counts, and a concise status message |
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, optional bridge, optional local `bridge_vlan`, advertise_svi_mac flag, originated_local_macs_count, L2 dataplane `readiness_state`, and `not_ready_reason` when NotReady) |
-| `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
+| `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level L2 and L3 orphan-NH and pending-delete counts and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListEthernetSegments` | List configured Ethernet Segments sorted by ESI, joined with live multi-homing state: composed drain reasons, per-member DF role and BUM forwarding action, same-ESI local-bias eligibility, whole-port AC-gate state/interface, and matching FDB-NHG group / MAC-ref counts — read-only ADR-0083/0085 diagnose visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, resolved route_targets including any auto-derived RT, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count, remote_prefix_drop_counts) — Gate 9 / ADR-0058 |
 | `ListManagedNetdevs` | List configured ADR-0091 managed EVPN bridge, fixed-VNI VXLAN, SVD / collect-metadata VXLAN, VLAN upper, VRF, and L3VXLAN rows joined with the latest Linux link snapshot, plus rustbgpd-stamped orphan/unsafe rows for the configured owner. Reports class, name, desired flag, ownership stamp, state (`desired-absent`, `owned-safe`, `foreign-present`, `owned-unsafe`, `orphaned`, or `unknown`), observed ifindex, bridge `vlan_filtering`, VXLAN/SVD/L3VXLAN `vni` / `local` / `dstport` / `learning` / `collect-metadata` / `vnifilter` / master attributes, VLAN upper `vlan`, VRF `table_id`, L3VXLAN `router_mac`, observed rustbgpd ownership stamps, and reason text. Bridge, fixed-VNI VXLAN, SVD VXLAN, VLAN upper, VRF, and L3VXLAN lifecycle execution is active in the dataplane actor; this RPC remains read-only status. |
@@ -2908,7 +2908,11 @@ reconciler's owned FDB nexthop-group state: one row per group with
 VNI, ESI, Ethernet Tag, kernel group ID, per-VTEP member nexthop IDs,
 and MAC refs. The response also includes orphan tagged nexthop count,
 pending-delete count, and whether periodic drift recovery latched off
-after a permanent dump failure.
+after a permanent dump failure. `orphan_nexthops_count` and
+`pending_delete_count` cover L2 FDB-NHG nexthops;
+`l3_orphan_nexthops_count` and `l3_pending_delete_count` report the same
+state for L3 (all-active Type 5) FDB nexthops, which share the retry
+queue.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -2924,8 +2928,8 @@ rbgp evpn nexthops --json   # JSON output
 
 An empty `groups` list is normal on RR-only deployments, single-homed
 VTEPs, or multi-homed VNIs with `apply_aliasing_ecmp = false` — the
-top-level `orphan_nexthops_count`, `pending_delete_count`, and
-`drift_recovery_disabled` fields are always populated regardless.
+top-level count fields and `drift_recovery_disabled` are always
+populated regardless.
 
 ### List Ethernet Segments / multi-homing state
 

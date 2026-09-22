@@ -6479,19 +6479,25 @@ fn build_fdb_nexthop_status(state: &ActorState) -> FdbNexthopDataplaneStatus {
         .collect();
     groups.sort_by_key(|g| (g.vni, g.esi, g.ethernet_tag, g.group_id));
 
-    FdbNexthopDataplaneStatus {
-        groups,
-        orphan_nexthops_count: u32::try_from(state.adopted_unreferenced.len()).unwrap_or(u32::MAX),
-        // L2 only, like `orphan_nexthops_count`: this surface reports
-        // ADR-0059 FDB-NHG state, and the shared queue also holds L3 IDs.
-        pending_delete_count: u32::try_from(
+    // The retry queue is shared by L2 and L3 IDs; report each layer
+    // in its own field.
+    let pending = |is_layer: fn(u32) -> bool| {
+        u32::try_from(
             state
                 .pending_deletes
                 .iter()
-                .filter(|id| crate::nh_id_alloc::NhIdAllocator::is_l2_ours(**id))
+                .filter(|id| is_layer(**id))
                 .count(),
         )
-        .unwrap_or(u32::MAX),
+        .unwrap_or(u32::MAX)
+    };
+    FdbNexthopDataplaneStatus {
+        groups,
+        orphan_nexthops_count: u32::try_from(state.adopted_unreferenced.len()).unwrap_or(u32::MAX),
+        pending_delete_count: pending(crate::nh_id_alloc::NhIdAllocator::is_l2_ours),
+        l3_orphan_nexthops_count: u32::try_from(state.adopted_l3_unreferenced.len())
+            .unwrap_or(u32::MAX),
+        l3_pending_delete_count: pending(crate::nh_id_alloc::NhIdAllocator::is_l3_ours),
         drift_recovery_disabled: state.drift_disabled,
     }
 }
@@ -9280,6 +9286,36 @@ mod l3_delete_bookkeeping_tests {
         .await
         .unwrap();
         f.actor.state.l3_groups.group(&key()).unwrap().id
+    }
+
+    #[test]
+    fn fdb_nexthop_status_counts_each_layer_separately() {
+        use crate::nh_id_alloc::{L3_NHG_TAG, L3_VTEP_NH_TAG, NHG_TAG, VTEP_NH_TAG};
+        let mut state = fixture().actor.state;
+        let member = |id| KernelNexthop {
+            id,
+            kind: KernelNexthopKind::Member {
+                gateway: members()[0],
+            },
+        };
+        state.pending_deletes.extend([
+            NHG_TAG | 1,
+            L3_NHG_TAG | 1,
+            L3_VTEP_NH_TAG | 1,
+            L3_VTEP_NH_TAG | 2,
+        ]);
+        for id in [VTEP_NH_TAG | 7, VTEP_NH_TAG | 8] {
+            state.adopted_unreferenced.insert(id, member(id));
+        }
+        for id in [L3_VTEP_NH_TAG | 7, L3_VTEP_NH_TAG | 8, L3_VTEP_NH_TAG | 9] {
+            state.adopted_l3_unreferenced.insert(id, member(id));
+        }
+
+        let status = build_fdb_nexthop_status(&state);
+        assert_eq!(status.pending_delete_count, 1);
+        assert_eq!(status.l3_pending_delete_count, 3);
+        assert_eq!(status.orphan_nexthops_count, 2);
+        assert_eq!(status.l3_orphan_nexthops_count, 3);
     }
 
     fn is_group(handle: &InMemoryHandle, id: u32) -> bool {

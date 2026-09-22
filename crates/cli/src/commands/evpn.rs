@@ -1192,11 +1192,13 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         // running at all, so a derived "enabled" label would
         // misrepresent those cases.
         outln!(
-            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={}",
+            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={} l3-orphan-nexthops={} l3-pending-deletes={}",
             resp.groups.len(),
             resp.orphan_nexthops_count,
             resp.pending_delete_count,
             resp.drift_recovery_disabled,
+            resp.l3_orphan_nexthops_count,
+            resp.l3_pending_delete_count,
         )?;
         if resp.groups.is_empty() {
             outln!("No owned FDB nexthop groups")?;
@@ -1250,6 +1252,8 @@ fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_
         "groups": groups,
         "orphan_nexthops_count": resp.orphan_nexthops_count,
         "pending_delete_count": resp.pending_delete_count,
+        "l3_orphan_nexthops_count": resp.l3_orphan_nexthops_count,
+        "l3_pending_delete_count": resp.l3_pending_delete_count,
         "drift_recovery_disabled": resp.drift_recovery_disabled,
     })
 }
@@ -1931,6 +1935,8 @@ mod tests {
             orphan_nexthops_count: 102,
             pending_delete_count: 103,
             drift_recovery_disabled: true,
+            l3_orphan_nexthops_count: 105,
+            l3_pending_delete_count: 106,
         };
         assert_eq!(
             super::fdb_nexthops_to_json(&response),
@@ -1954,6 +1960,8 @@ mod tests {
               ],
               "orphan_nexthops_count": 102,
               "pending_delete_count": 103,
+              "l3_orphan_nexthops_count": 105,
+              "l3_pending_delete_count": 106,
               "drift_recovery_disabled": true
             })
         );
@@ -2833,11 +2841,15 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             }],
             orphan_nexthops_count: 2,
             pending_delete_count: 1,
+            l3_orphan_nexthops_count: 4,
+            l3_pending_delete_count: 3,
             drift_recovery_disabled: true,
         });
 
         assert_eq!(value["orphan_nexthops_count"], 2);
         assert_eq!(value["pending_delete_count"], 1);
+        assert_eq!(value["l3_orphan_nexthops_count"], 4);
+        assert_eq!(value["l3_pending_delete_count"], 3);
         assert_eq!(value["drift_recovery_disabled"], true);
         assert_eq!(value["groups"][0]["vni"], 100);
         assert_eq!(value["groups"][0]["esi"], "03:00:00:00:00:00:00:00:00:07");

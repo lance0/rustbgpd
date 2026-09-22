@@ -513,6 +513,8 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             groups,
             orphan_nexthops_count: snapshot.orphan_nexthops_count,
             pending_delete_count: snapshot.pending_delete_count,
+            l3_orphan_nexthops_count: snapshot.l3_orphan_nexthops_count,
+            l3_pending_delete_count: snapshot.l3_pending_delete_count,
             drift_recovery_disabled: snapshot.drift_recovery_disabled,
         }))
     }
@@ -1641,6 +1643,8 @@ mod tests {
                 }],
                 orphan_nexthops_count: 2,
                 pending_delete_count: 1,
+                l3_orphan_nexthops_count: 4,
+                l3_pending_delete_count: 3,
                 drift_recovery_disabled: true,
             }),
         );
@@ -1662,6 +1666,8 @@ mod tests {
         assert_eq!(group.ref_macs.len(), 2);
         assert_eq!(resp.orphan_nexthops_count, 2);
         assert_eq!(resp.pending_delete_count, 1);
+        assert_eq!(resp.l3_orphan_nexthops_count, 4);
+        assert_eq!(resp.l3_pending_delete_count, 3);
         assert!(resp.drift_recovery_disabled);
     }
 
@@ -1713,9 +1719,7 @@ mod tests {
                     MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02]),
                 ],
             }],
-            orphan_nexthops_count: 0,
-            pending_delete_count: 0,
-            drift_recovery_disabled: false,
+            ..Default::default()
         };
         let bum_snapshot = bum.clone();
         let bias_snapshot = bias.clone();
