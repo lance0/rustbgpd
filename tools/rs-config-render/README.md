@@ -105,7 +105,9 @@ removes them toward members, as IXP Manager's `f_export_as*` filter deletes
 `(RS, *, *)`. Rejected routes do
 not carry IXP Manager's filtered-route informational tags (`RS:1001:1000`,
 `RS:1001:1001`, `RS:1001:1002`); the Birdwatcher adapter reports their
-`RS:1101:*` reason instead.
+`RS:1101:*` reason instead. The divergence is deliberate; the
+[IXP Manager cookbook](../../docs/cookbook/ixp-manager-route-server.md#the-boundary)
+gives the reason.
 
 `ixp-manager-v2` preserves ordered UI-filter rows. Advertise AS_IS is a no-op;
 deny and prepend actions add the exact IXP Manager route-server control large
