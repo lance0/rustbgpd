@@ -1,3 +1,7 @@
+//! The RIB manager's message surface: [`RibUpdate`] from sessions, the API
+//! and other daemon tasks, the separate readiness and summary query lanes,
+//! and the query, explain, paging and update-group planning types they carry.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};

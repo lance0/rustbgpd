@@ -1,3 +1,7 @@
+//! Adj-RIB-In: the routes received from one peer, per address family,
+//! before best-path selection. Unicast routes are keyed by
+//! `(Prefix, path_id)` for Add-Path, and LLGR stale tagging is tracked here.
+
 use std::net::IpAddr;
 use std::sync::Arc;
 

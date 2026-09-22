@@ -1,3 +1,8 @@
+//! Route types stored in the RIB: unicast [`Route`], per-family route types
+//! (`FlowSpec`, EVPN, BGP-LS, VPN, labeled unicast, RTC) with their RIB keys
+//! (EVPN uses the wire `EvpnRouteKey`), and the FIB install candidates
+//! derived from best-path selection.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;

@@ -183,7 +183,7 @@ pub struct SessionNotificationEvent {
     pub description: String,
     /// Session role (`primary` / `inbound_candidate`) for this event.
     pub session_role: Option<String>,
-    /// RFC 8203 shutdown communication reason, when present.
+    /// RFC 9003 shutdown communication reason, when present.
     pub shutdown_reason: Option<String>,
     /// Operator-facing reason/summary.
     pub reason: String,
@@ -899,7 +899,7 @@ pub enum PeerManagerCommand {
     /// The dynamic counterpart of [`PeerManagerCommand::ApplyPeerReshapeSnapshot`]:
     /// an accepted dynamic peer cannot be delete/re-added (it exists only
     /// because the remote dialed in), so a peer-group session reshape reaches
-    /// it by sending a graceful stop (Cease NOTIFICATION with an RFC 8203
+    /// it by sending a graceful stop (Cease NOTIFICATION with an RFC 9003
     /// shutdown communication). The normal `BackToIdle` auto-removal then
     /// reaps the `ManagedPeer` and frees its `dynamic_neighbor_limit` slot,
     /// and the remote's reconnect is re-accepted through `handle_inbound`,
@@ -998,7 +998,7 @@ pub enum PeerManagerCommand {
     DisablePeer {
         /// Peer identity to disable.
         peer: PeerKey,
-        /// RFC 8203 shutdown communication reason (pre-encoded).
+        /// RFC 9003 shutdown communication reason (pre-encoded).
         reason: Option<Bytes>,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,

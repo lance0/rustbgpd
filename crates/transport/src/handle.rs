@@ -208,7 +208,7 @@ pub struct SessionNotificationEvent {
     pub subcode: u8,
     /// Human-readable code/subcode description.
     pub description: String,
-    /// RFC 8203 shutdown communication reason, when present.
+    /// RFC 9003 shutdown communication reason, when present.
     pub shutdown_reason: Option<String>,
     /// Bounded local failure cause; present only on locally sent Cease/8.
     pub failure_cause: Option<SessionFailureCause>,
@@ -462,7 +462,7 @@ pub enum PeerCommand {
     /// Start the BGP session (`ManualStart`).
     Start,
     /// Gracefully tear down the session (`ManualStop`).
-    /// Optional reason is included in the Cease NOTIFICATION (RFC 8203).
+    /// Optional reason is included in the Cease NOTIFICATION (RFC 9003).
     Stop {
         /// Shutdown communication reason (pre-encoded), or None.
         reason: Option<Bytes>,
@@ -1713,7 +1713,7 @@ impl PeerHandle {
 
     /// Send a Stop command for graceful teardown.
     ///
-    /// The optional `reason` is included in the Cease NOTIFICATION (RFC 8203).
+    /// The optional `reason` is included in the Cease NOTIFICATION (RFC 9003).
     ///
     /// # Errors
     ///

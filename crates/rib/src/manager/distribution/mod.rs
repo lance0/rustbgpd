@@ -1,3 +1,8 @@
+//! Outbound distribution: evaluates export policy and the export gates for
+//! changed routes, stages per-peer and update-group Adj-RIB-Out changes, and
+//! commits the resulting payloads to sessions. Per-family walks live in the
+//! submodules.
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
