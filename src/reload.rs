@@ -3375,7 +3375,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     .map(config::FieldChange::render)
                     .collect();
                 info!(
-                    address = %n.address,
+                    peer = %n.address,
                     changes = %changes.join(", "),
                     apply = if hot { "hot-apply in place" } else { "session rebuild" },
                     "neighbor changed"
@@ -3390,10 +3390,10 @@ pub(crate) async fn reload_config_with_tcp_ao(
             "reconciling neighbors after config reload"
         );
         for n in &diff.added {
-            info!(address = %n.address, asn = n.remote_asn, "neighbor added");
+            info!(peer = %n.address, asn = n.remote_asn, "neighbor added");
         }
         for addr in &diff.removed {
-            info!(address = %addr, "neighbor removed");
+            info!(peer = %addr, "neighbor removed");
         }
 
         // Only actual additions/rebuilds need newly resolved socket identity.
@@ -3488,7 +3488,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             {
                 *entry = n.clone();
             }
-            info!(address = %n.address, "reload: neighbor hot-applied in place");
+            info!(peer = %n.address, "reload: neighbor hot-applied in place");
         }
 
         let needs_rebuild_pass =

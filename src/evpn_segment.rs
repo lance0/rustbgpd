@@ -565,14 +565,14 @@ fn build_segment_state(
 ) -> Option<SegmentState> {
     let Some(reference_vni) = seg.member_vnis.iter().copied().next() else {
         warn!(
-            esi = ?seg.esi.octets(),
+            esi = %seg.esi,
             "ethernet_segments entry has no member_vnis — skipping"
         );
         return None;
     };
     let Some(inst) = runtime.instances.get(reference_vni) else {
         warn!(
-            esi = ?seg.esi.octets(),
+            esi = %seg.esi,
             vni = reference_vni.as_u32(),
             "ethernet_segments entry references unknown VNI — skipping"
         );
@@ -588,7 +588,7 @@ fn build_segment_state(
         Ok(label) => label,
         Err(e) => {
             warn!(
-                esi = ?seg.esi.octets(),
+                esi = %seg.esi,
                 error = %e,
                 "ESI label allocator exhausted — skipping segment"
             );
@@ -607,7 +607,7 @@ fn build_segment_state(
     for &v in &seg.member_vnis {
         let Some(inst) = runtime.instances.get(v) else {
             warn!(
-                esi = ?seg.esi.octets(),
+                esi = %seg.esi,
                 vni = v.as_u32(),
                 "ethernet_segments entry references unknown VNI — skipping"
             );
@@ -779,7 +779,7 @@ async fn apply_drained_esi_snapshot(
         let Some(state) = by_esi.get_mut(esi) else {
             continue;
         };
-        info!(esi = %format_esi(*esi), "EVPN segment: draining Ethernet Segment (operator)");
+        info!(esi = %esi, "EVPN segment: draining Ethernet Segment (operator)");
         drain_segment_state(runtime, state, pending).await;
         changed = true;
     }
@@ -787,7 +787,7 @@ async fn apply_drained_esi_snapshot(
         let Some(state) = by_esi.get_mut(esi) else {
             continue;
         };
-        info!(esi = %format_esi(*esi), "EVPN segment: undraining Ethernet Segment (operator)");
+        info!(esi = %esi, "EVPN segment: undraining Ethernet Segment (operator)");
         startup_segment_state(runtime, state, pending).await;
         changed = true;
     }
@@ -861,7 +861,7 @@ async fn run_election_for(
     let candidates = match gather_candidates(state, &runtime.rib_tx).await {
         Ok(c) => c,
         Err(e) => {
-            warn!(esi = ?state.config.esi.octets(), error = %e, "EVPN segment: candidate gather failed");
+            warn!(esi = %state.config.esi, error = %e, "EVPN segment: candidate gather failed");
             return;
         }
     };
@@ -895,7 +895,7 @@ async fn run_election_with_candidates(
         Ok(r) => r,
         Err(e) => {
             warn!(
-                esi = ?state.config.esi.octets(),
+                esi = %state.config.esi,
                 error = %e,
                 "EVPN segment: DF election failed"
             );
@@ -1300,7 +1300,7 @@ fn gather_candidates_from_routes(
         }
         if !has_matching_es_import_rt(&r.attributes, state.config.esi) {
             debug!(
-                esi = %format_esi(state.config.esi),
+                esi = %state.config.esi,
                 originator_ip = %es.originator_ip,
                 "EVPN segment: ignoring Type 4 ES route without matching ES-Import RT"
             );

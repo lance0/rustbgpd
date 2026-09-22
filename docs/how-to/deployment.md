@@ -1578,7 +1578,7 @@ documented in
 [`OPERATIONS.md`](../reference/operations.md#per-peer-log-filtering):
 
 ```ini
-Environment=RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug
+Environment=RUST_LOG=info,[peer{peer_addr=10.0.0.1}]=debug
 ```
 
 Per-peer verbosity also comes from `[[neighbors]] log_level = "debug"`.

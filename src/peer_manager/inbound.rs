@@ -188,7 +188,7 @@ impl PeerManager {
             .get(&peer_key)
             .is_some_and(|m| m.pending_inbound.is_some())
         {
-            info!(%peer_addr, "dropping extra inbound connection while collision candidate is pending");
+            info!(peer = %peer_addr, "dropping extra inbound connection while collision candidate is pending");
             return false;
         }
 
@@ -208,7 +208,7 @@ impl PeerManager {
                 Ok(Some(keyring)) => transport_config.tcp_ao = Some(keyring),
                 Ok(None) => {}
                 Err(error) => {
-                    warn!(%peer_addr, error, "rejecting desired-generation TCP-AO collision candidate without an exact deletion projection");
+                    warn!(peer = %peer_addr, error, "rejecting desired-generation TCP-AO collision candidate without an exact deletion projection");
                     return false;
                 }
             }
@@ -235,7 +235,7 @@ impl PeerManager {
         );
 
         if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
-            warn!(%peer_addr, error = %e, "failed to start inbound collision candidate");
+            warn!(peer = %peer_addr, error = %e, "failed to start inbound collision candidate");
             let _ = self
                 .shutdown_handle_bounded(peer_addr, "inbound candidate start failure", handle)
                 .await;
@@ -253,7 +253,7 @@ impl PeerManager {
             "PeerManager is a single-task actor; starting a candidate must not reenter handlers"
         );
         if managed.pending_inbound.is_some() {
-            info!(%peer_addr, "collision candidate appeared while starting another, dropping newer inbound");
+            info!(peer = %peer_addr, "collision candidate appeared while starting another, dropping newer inbound");
             let _ = self
                 .shutdown_handle_bounded(peer_addr, "inbound candidate duplicate", handle)
                 .await;
@@ -305,7 +305,7 @@ impl PeerManager {
         ) {
             if tcp_ao_info.is_some() {
                 warn!(
-                    %peer_ip,
+                    peer = %peer_ip,
                     accepted_generation = tcp_ao_generation.map(TcpAoRotationGeneration::as_u64),
                     desired_generation = self.tcp_ao_rotation.desired.as_u64(),
                     applied_generation = self.tcp_ao_rotation.applied.as_u64(),
@@ -313,7 +313,7 @@ impl PeerManager {
                     "rejecting protected inbound connection outside the valid TCP-AO generation fence"
                 );
             } else {
-                warn!(%peer_ip, "rejecting inbound connection with inconsistent TCP-AO generation metadata");
+                warn!(peer = %peer_ip, "rejecting inbound connection with inconsistent TCP-AO generation metadata");
             }
             return;
         }
@@ -323,7 +323,7 @@ impl PeerManager {
         if peer_key.is_none() {
             if self.config_snapshot_staged {
                 warn!(
-                    %peer_ip,
+                    peer = %peer_ip,
                     "dropping dynamic inbound connection while a config transaction snapshot is staged"
                 );
                 return;
@@ -341,7 +341,7 @@ impl PeerManager {
                 self.metrics
                     .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
                 warn!(
-                    %peer_addr,
+                    peer = %peer_addr,
                     "inbound IPv6 link-local connection did not match a configured scoped neighbor; dynamic acceptance of link-local peers is not supported, dropping"
                 );
                 return;
@@ -359,7 +359,7 @@ impl PeerManager {
                     .record_inbound_connection_drop(InboundConnectionDropReason::RateLimited);
                 if let Some(suppressed) = suppressed {
                     warn!(
-                        %peer_ip,
+                        peer = %peer_ip,
                         suppressed,
                         "inbound accept rate exceeded for source aggregate, dropping connection"
                     );
@@ -373,7 +373,7 @@ impl PeerManager {
                     self.metrics
                         .record_inbound_connection_drop(InboundConnectionDropReason::DynamicLimit);
                     warn!(
-                        %peer_ip,
+                        peer = %peer_ip,
                         limit = self.dynamic_neighbor_limit,
                         "dynamic neighbor limit reached, dropping inbound connection"
                     );
@@ -383,7 +383,7 @@ impl PeerManager {
                 // Look up the peer group to build the config
                 let Some(group) = self.current_config.peer_groups.get(&range.peer_group) else {
                     warn!(
-                        %peer_ip,
+                        peer = %peer_ip,
                         peer_group = %range.peer_group,
                         "dynamic neighbor peer_group not found, dropping"
                     );
@@ -415,7 +415,7 @@ impl PeerManager {
                     Ok(r) => r,
                     Err(e) => {
                         warn!(
-                            %peer_ip,
+                            peer = %peer_ip,
                             error = %e,
                             "failed to resolve dynamic neighbor config, dropping"
                         );
@@ -435,7 +435,7 @@ impl PeerManager {
                 let tcp_ao_protected = tcp_ao_info.is_some();
                 if tcp_ao_protected != accepted_tcp_ao_keyring.is_some() {
                     warn!(
-                        %peer_ip,
+                        peer = %peer_ip,
                         "dynamic inbound TCP-AO socket protection differs from its explicit selected-owner keyring, dropping"
                     );
                     return;
@@ -447,7 +447,7 @@ impl PeerManager {
                         Ok(None) => {}
                         Err(error) => {
                             warn!(
-                                %peer_ip,
+                                peer = %peer_ip,
                                 error,
                                 "rejecting desired-generation dynamic TCP-AO accept without an exact deletion projection"
                             );
@@ -468,7 +468,7 @@ impl PeerManager {
                         tcp_ao_info.as_ref(),
                     ) else {
                         warn!(
-                            %peer_ip,
+                            peer = %peer_ip,
                             "protected dynamic TCP-AO accept lacks selected-owner metadata, dropping"
                         );
                         return;
@@ -477,7 +477,7 @@ impl PeerManager {
                         reconcile_selected_owner_metadata(keyring, selected_owner, accepted)
                     {
                         warn!(
-                            %peer_ip,
+                            peer = %peer_ip,
                             error,
                             "failed to reconcile protected dynamic TCP-AO accept, dropping"
                         );
@@ -588,7 +588,7 @@ impl PeerManager {
                     .and_then(|managed| managed.accepted_dynamic_range.as_ref())
                 {
                     info!(
-                        %peer_ip,
+                        peer = %peer_ip,
                         accepted_prefix = %format_args!("{}/{}", accepted.addr, accepted.prefix_len),
                         accepted_peer_group = %accepted.peer_group,
                         "accepted dynamic neighbor from configured range"
@@ -601,7 +601,7 @@ impl PeerManager {
             self.metrics
                 .record_inbound_connection_drop(InboundConnectionDropReason::Unconfigured);
             warn!(
-                %peer_ip,
+                peer = %peer_ip,
                 hint = %format_args!(
                     "to accept: rbgp neighbor {peer_ip} add --asn <REMOTE_ASN>"
                 ),
@@ -624,12 +624,12 @@ impl PeerManager {
         // normally; the hold's eventual release starts the session via the
         // normal up→start path.
         let Some(peer_key) = peer_key else {
-            warn!(%peer_ip, "inbound peer lookup missing before BFD gate, dropping");
+            warn!(peer = %peer_ip, "inbound peer lookup missing before BFD gate, dropping");
             return;
         };
         let peer_addr = peer_key.address;
         if self.bfd_withholding(&peer_addr) {
-            info!(%peer_addr, "BFD — dropping inbound connection while BGP is held");
+            info!(peer = %peer_addr, "BFD — dropping inbound connection while BGP is held");
             return;
         }
 
@@ -638,7 +638,7 @@ impl PeerManager {
         };
 
         if !managed.enabled {
-            info!(%peer_addr, "inbound connection for disabled peer, dropping");
+            info!(peer = %peer_addr, "inbound connection for disabled peer, dropping");
             return;
         }
         let queried_session_id = managed.session_id;
@@ -667,7 +667,7 @@ impl PeerManager {
             StateQueryOutcome::SessionGone => None,
             StateQueryOutcome::TimedOut => {
                 info!(
-                    %peer_addr,
+                    peer = %peer_addr,
                     "session state query timed out during inbound handling; keeping the existing session and dropping the inbound connection (remote will retry)"
                 );
                 return;
@@ -690,7 +690,7 @@ impl PeerManager {
                     managed.enabled && managed.session_id == queried_session_id
                 }) {
                     info!(
-                        %peer_addr,
+                        peer = %peer_addr,
                         "peer ownership or admin state changed during inbound Idle query; dropping connection"
                     );
                     return;
@@ -706,13 +706,13 @@ impl PeerManager {
             }
             SessionState::Established => {
                 // Already established — drop inbound (no collision)
-                info!(%peer_addr, "inbound connection for established peer, dropping");
+                info!(peer = %peer_addr, "inbound connection for established peer, dropping");
             }
             SessionState::Connect | SessionState::Active | SessionState::OpenSent => {
                 // Start a live inbound candidate. Parking the raw socket here
                 // deadlocks simultaneous active-open: both outbound sessions
                 // wait for OPEN while both accepted inbound sockets sit inert.
-                info!(%peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
+                info!(peer = %peer_addr, state = fsm_state.as_str(), "starting inbound collision candidate");
                 self.spawn_pending_inbound(
                     peer_key.clone(),
                     stream,
@@ -742,7 +742,7 @@ impl PeerManager {
                 } else {
                     // Shouldn't happen; the live candidate can still notify
                     // us once it receives the peer OPEN.
-                    warn!(%peer_addr, "OpenConfirm but no negotiated peer identity, waiting for inbound candidate notification");
+                    warn!(peer = %peer_addr, "OpenConfirm but no negotiated peer identity, waiting for inbound candidate notification");
                 }
             }
         }
@@ -769,7 +769,7 @@ impl PeerManager {
             std::cmp::Ordering::Greater => {
                 // We win — keep existing session, drop inbound
                 info!(
-                    %peer_addr,
+                    peer = %peer_addr,
                     local_id = %self.router_id,
                     remote_id = %remote_router_id,
                     self.local_asn,
@@ -795,7 +795,7 @@ impl PeerManager {
             std::cmp::Ordering::Less => {
                 // Remote wins — dump existing, accept inbound
                 info!(
-                    %peer_addr,
+                    peer = %peer_addr,
                     local_id = %self.router_id,
                     remote_id = %remote_router_id,
                     self.local_asn,
@@ -830,7 +830,7 @@ impl PeerManager {
                 // Equal iBGP identifiers are rejected during OPEN negotiation.
                 // If inconsistent metadata reaches here, do not promote it.
                 warn!(
-                    %peer_addr,
+                    peer = %peer_addr,
                     router_id = %self.router_id,
                     self.local_asn,
                     peer_asn,
@@ -960,7 +960,7 @@ impl PeerManager {
             match self.deletion_accept_keyring(&peer_key, is_dynamic, tcp_ao_generation) {
                 Ok(projected) => projected,
                 Err(error) => {
-                    warn!(%peer_addr, error, "rejecting desired-generation TCP-AO replacement without an exact deletion projection");
+                    warn!(peer = %peer_addr, error, "rejecting desired-generation TCP-AO replacement without an exact deletion projection");
                     return;
                 }
             }
@@ -1029,7 +1029,7 @@ impl PeerManager {
             return;
         };
         if !managed.enabled {
-            info!(%peer_addr, "inbound replacement remains stopped by terminal peer latch");
+            info!(peer = %peer_addr, "inbound replacement remains stopped by terminal peer latch");
             return;
         }
         if let Err(e) = managed
@@ -1037,9 +1037,9 @@ impl PeerManager {
             .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
         {
-            warn!(%peer_addr, error = %e, "failed to start inbound session");
+            warn!(peer = %peer_addr, error = %e, "failed to start inbound session");
         } else {
-            info!(%peer_addr, "inbound session started");
+            info!(peer = %peer_addr, "inbound session started");
         }
     }
 }

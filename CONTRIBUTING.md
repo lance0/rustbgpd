@@ -353,6 +353,34 @@ in `src/config/tests/mod.rs`. They check command and configuration syntax only,
 not daemon output, direction or policy intent, log literals, or protocol
 behavior.
 
+### Logging style
+
+Log event field names are an operator interface: JSON log pipelines and
+dashboards key on them. Renaming a field needs a `changelog.d/` fragment that
+names the old and new field.
+
+- Name a BGP peer's address `peer` in every event about that peer, inside or
+  outside its session span: `info!(peer = %address, "peer deleted")`. Do not
+  add `address`, `peer_addr` or `peer_ip` event fields. The session span keeps
+  its own `peer_addr` field, which operators use in `RUST_LOG` span filters.
+  Give other endpoints their own names, such as `client` for gRPC and metrics
+  connections, `collector` for BMP and `server` for RTR.
+- Use `%` (Display) for values that have an operator-facing text form, such as
+  addresses, prefixes, ESIs and errors. Use `?` (Debug) only for types without
+  one.
+- Record an error as a field, `error = %e`, instead of interpolating it into
+  the message. Keep the message fixed and put variable values in fields, so
+  the message can be searched for.
+- Pick the level by what the operator should do:
+  - `error`: the daemon or a subsystem cannot do what it is configured to do
+    and needs operator action.
+  - `warn`: something was rejected, degraded or deferred, and the operator may
+    need to act.
+  - `info`: an expected state change, such as a session transition, a peer
+    added or removed, or a reload applied.
+  - `debug`: detail for diagnosing one peer or code path.
+  - `trace`: per-message or per-route detail.
+
 ### Postmortem artifacts
 
 Any postmortem doc that cites raw data — soak runs, scale tests,

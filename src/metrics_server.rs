@@ -68,7 +68,7 @@ pub async fn serve_metrics(
         let readiness_probe = readiness_probe.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, &metrics, &readiness_probe).await {
-                debug!(%peer, error = %e, "metrics connection error");
+                debug!(client = %peer, error = %e, "metrics connection error");
             }
             drop(permit);
         });

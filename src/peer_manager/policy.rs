@@ -3471,7 +3471,7 @@ impl PeerManager {
         };
         let import_apply_failed = if let Err(error) = &import_apply_result {
             warn!(
-                %address,
+                peer = %address,
                 error = %error,
                 "failed to hot-apply import policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
@@ -3513,7 +3513,7 @@ impl PeerManager {
         };
         let export_apply_failed = if let Err(error) = &export_apply_result {
             warn!(
-                %address,
+                peer = %address,
                 error = %error,
                 "failed to hot-apply export policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
@@ -3755,7 +3755,7 @@ impl PeerManager {
                     if is_rollback && is_known_non_established =>
                 {
                     info!(
-                        %address,
+                        peer = %address,
                         %error,
                         "policy rollback found no RIB outbound registration; the restored session policy will be authoritative on PeerUp"
                     );
@@ -3843,7 +3843,7 @@ impl PeerManager {
                             managed.pending_refresh = true;
                         }
                         warn!(
-                            %address,
+                            peer = %address,
                             error = %error,
                             "route refresh failed during policy rollback; armed pending_refresh"
                         );
@@ -3853,7 +3853,7 @@ impl PeerManager {
                             managed.pending_refresh = pending_refresh;
                         }
                         warn!(
-                            %address,
+                            peer = %address,
                             error = %error,
                             "route refresh failed while restoring a failed policy apply; restored prior pending_refresh state"
                         );
@@ -4376,7 +4376,7 @@ impl PeerManager {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
-                        %address,
+                        peer = %address,
                         error = %e,
                         "honor_graceful_shutdown: failed to resolve effective chain — skipping peer"
                     );
@@ -4400,7 +4400,7 @@ impl PeerManager {
                 .await
             {
                 warn!(
-                    %address,
+                    peer = %address,
                     error = %e,
                     "honor_graceful_shutdown: failed to hot-apply on peer — desired snapshot \
                      advances anyway; bail-and-carry will retry on next policy edit"
@@ -4473,7 +4473,7 @@ impl PeerManager {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
-                        %address,
+                        peer = %address,
                         error = %e,
                         "honor_blackhole: failed to resolve effective chain — skipping peer"
                     );
@@ -4497,7 +4497,7 @@ impl PeerManager {
                 .await
             {
                 warn!(
-                    %address,
+                    peer = %address,
                     error = %e,
                     "honor_blackhole: failed to hot-apply on peer — desired snapshot \
                      advances anyway; bail-and-carry will retry on next policy edit"
