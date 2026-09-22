@@ -47,6 +47,10 @@ topology:
         - mkdir -p /etc/rustbgpd /var/lib/rustbgpd
       env:
         RUST_LOG: info
+        # The config enables `[security.grpc] enforcement = "tier"`, so the
+        # in-container `rbgp` used by the readiness poll and every assertion
+        # must present the same test-only operator token the daemon accepts.
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
 
     member1:
       kind: linux
@@ -74,6 +78,10 @@ topology:
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m107-member3.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints "Can't open configuration file
+        # /etc/frr/vtysh.conf" on stdout and every `... json | jq` scrape in
+        # the driver fails to parse. Same bind as M100/M101/M102/M89/M99.
+        - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
         - ip -6 addr add 2001:db8:107::13/64 dev eth1
         - ip link set eth1 up

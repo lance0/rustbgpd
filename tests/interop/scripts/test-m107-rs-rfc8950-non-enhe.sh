@@ -25,13 +25,31 @@ source "$SCRIPT_DIR/test-lib.sh"
 
 RS_ADDR="2001:db8:107::9"
 MEMBER1_ADDR="2001:db8:107::11"
-MEMBER2_ADDR="2001:db8:107::12"
-MEMBER3_ADDR="2001:db8:107::13"
 
 FRR_M3="clab-${TOPO}-member3"
 
+# One variable for both the start redirect and the failure tail, so the two
+# can never drift apart.
+RS_LOG="/var/log/rustbgpd.log"
+
 rs_ctl() {
     docker exec "$RUSTBGPD" rbgp -s unix:///var/lib/rustbgpd/grpc.sock "$@" 2>/dev/null
+}
+
+# Everything the readiness poll hides. `rs_ctl` discards stderr, so an
+# authentication or connection error from `rbgp` never reaches the job log;
+# the unredirected call below is what names the actual reason.
+dump_rs_diagnostics() {
+    printf '%s\n' "--- rustbgpd processes in $RUSTBGPD ---" >&2
+    docker exec "$RUSTBGPD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' >&2 || true
+    printf '%s\n' "--- $RS_LOG (tail 60) ---" >&2
+    docker exec "$RUSTBGPD" sh -c \
+        "tail -n 60 '$RS_LOG' 2>&1 || echo '(no daemon log at $RS_LOG)'" >&2 || true
+    printf '%s\n' "--- rbgp global, stderr kept ---" >&2
+    docker exec "$RUSTBGPD" rbgp -s unix:///var/lib/rustbgpd/grpc.sock global >&2 || true
+    printf '%s\n' "--- foreground start, 3 s capture ---" >&2
+    docker exec "$RUSTBGPD" sh -c \
+        'timeout 3 /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml 2>&1 || true' >&2 || true
 }
 
 member_container() { echo "clab-${TOPO}-${1:?}"; }
@@ -71,6 +89,18 @@ member_next_hop_from_rs() {
 }
 member_has_from_rs() { [ -n "$(member_next_hop_from_rs "$1" "$2" "$3")" ]; }
 
+# FRR reports `extendedNexthop` in BOTH directions, so the key is present even
+# when the capability is not negotiated: "received" means the route server
+# advertised it and member3 did not (the non-ENHE state this cell needs), while
+# "advertisedAndReceived" means it IS negotiated. Asserting on the key rather
+# than its value cannot distinguish the two and can never fail.
+member3_extended_next_hop_state() {
+    docker exec "$FRR_M3" vtysh -c "show bgp neighbors $RS_ADDR json" 2>/dev/null \
+        | jq -r --arg rs "$RS_ADDR" \
+            '.[$rs].neighborCapabilities.extendedNexthop // "absent"' 2>/dev/null \
+        || echo "unreadable"
+}
+
 member_negotiated_extended_next_hop() {
     docker exec "$(member_container "${1:?}")" gobgp neighbor "$RS_ADDR" -j 2>/dev/null \
         | jq -e '
@@ -83,9 +113,9 @@ member_negotiated_extended_next_hop() {
 start_daemons() {
     log "Starting rustbgpd..."
     docker exec -d "$RUSTBGPD" sh -c \
-        '/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml >>/var/log/rustbgpd.log 2>&1'
+        "/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml >>'$RS_LOG' 2>&1"
     poll 20 1 "rustbgpd gRPC (UDS) ready" rs_ctl global \
-        || { docker exec "$RUSTBGPD" tail -40 /var/log/rustbgpd.log >&2 || true; exit 1; }
+        || { dump_rs_diagnostics; exit 1; }
 
     log "Starting GoBGP members..."
     for m in member1 member2; do
@@ -105,12 +135,12 @@ start_daemons() {
             || docker exec "$(member_container "$m")" gobgp neighbor "$RS_ADDR" -j >&2 || true
     done
 
-    local m3_caps
-    m3_caps=$(docker exec "$FRR_M3" vtysh -c "show bgp neighbors $RS_ADDR json" 2>/dev/null || true)
-    if echo "$m3_caps" | grep -qi "extendedNexthop"; then
-        fail "member3 unexpectedly negotiated extended-nexthop"
+    local m3_enhe
+    m3_enhe=$(member3_extended_next_hop_state)
+    if [ "$m3_enhe" = "received" ]; then
+        ok "member3 (FRR) did NOT negotiate extended-nexthop (capability state: received)"
     else
-        ok "member3 (FRR) did NOT negotiate extended-nexthop capability"
+        fail "member3 extended-nexthop capability state is '$m3_enhe', want 'received'"
     fi
 }
 
@@ -138,8 +168,16 @@ assert_ownership() {
     local nh4 nh6
     nh4=$(rs_received_next_hop "$MEMBER1_ADDR" ipv4 198.51.100.0/24)
     nh6=$(rs_received_next_hop "$MEMBER1_ADDR" ipv6 2001:db8:1::/48)
-    [ "$nh4" = "$MEMBER1_ADDR" ] && ok "RS preserved wire IPv6 next-hop $nh4 on IPv4 route" || fail "RS next-hop $nh4 != $MEMBER1_ADDR"
-    [ "$nh6" = "$MEMBER1_ADDR" ] && ok "RS preserved wire IPv6 next-hop $nh6 on IPv6 route" || fail "RS next-hop $nh6 != $MEMBER1_ADDR"
+    if [ "$nh4" = "$MEMBER1_ADDR" ]; then
+        ok "RS preserved wire IPv6 next-hop $nh4 on IPv4 route"
+    else
+        fail "RS IPv4 next-hop '$nh4' != $MEMBER1_ADDR"
+    fi
+    if [ "$nh6" = "$MEMBER1_ADDR" ]; then
+        ok "RS preserved wire IPv6 next-hop $nh6 on IPv6 route"
+    else
+        fail "RS IPv6 next-hop '$nh6' != $MEMBER1_ADDR"
+    fi
 }
 
 assert_rfc8950_suppression() {
@@ -186,6 +224,14 @@ assert_rfc8950_suppression() {
 
     poll 20 2 "member3 re-established with extended-nexthop enabled" \
         bash -c "docker exec '$FRR_M3' vtysh -c 'show bgp neighbors $RS_ADDR json' 2>/dev/null | jq -e '.\"$RS_ADDR\".bgpState == \"Established\"'"
+
+    local m3_enhe_after
+    m3_enhe_after=$(member3_extended_next_hop_state)
+    if [ "$m3_enhe_after" = "advertisedAndReceived" ]; then
+        ok "member3 now negotiates extended-nexthop (capability state: advertisedAndReceived)"
+    else
+        fail "member3 extended-nexthop capability state is '$m3_enhe_after', want 'advertisedAndReceived'"
+    fi
 
     poll 15 2 "member3 receives 198.51.100.0/24 after enabling extended-nexthop" \
         bash -c "docker exec '$FRR_M3' vtysh -c 'show bgp ipv4 unicast 198.51.100.0/24 json' 2>/dev/null | jq -e '(.paths | length) > 0'"

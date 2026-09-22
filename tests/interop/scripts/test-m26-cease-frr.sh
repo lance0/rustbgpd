@@ -445,31 +445,36 @@ test_administrative_reset_notification_and_backoff() {
     grpc_reset_neighbor "10.0.0.2" "planned maintenance"
     ok "ResetNeighbor RPC issued with communication 'planned maintenance'"
 
-    sleep 1
+    # FRR 10.7.1 reports the last received NOTIFICATION as a four-hex-digit
+    # `lastErrorCodeSubcode` (code then subcode) plus a human reason, and the
+    # RFC 9003 Shutdown Communication as `lastShutdownDescription`. There is no
+    # `lastNotificationCode`/`lastNotificationSubcode` key. Poll rather than
+    # sleep: the notification lands asynchronously after the RPC returns.
+    local code_subcode="" reason="" shutdown=""
+    for _ in $(seq 1 30); do
+        local neighbor_json
+        neighbor_json=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
+        code_subcode=$(jq -r '."10.0.0.1".lastErrorCodeSubcode // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        reason=$(jq -r '."10.0.0.1".lastNotificationReason // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        shutdown=$(jq -r '."10.0.0.1".lastShutdownDescription // ""' <<<"$neighbor_json" 2>/dev/null || echo "")
+        [ "$code_subcode" = "0604" ] && break
+        sleep 1
+    done
 
-    # FRR must observe the Cease/4 notification
-    local neighbor_json code subcode reason
-    neighbor_json=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
-    code=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationCode // 0' 2>/dev/null || echo 0)
-    subcode=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationSubcode // 0' 2>/dev/null || echo 0)
-    reason=$(echo "$neighbor_json" | jq -r '."10.0.0.1".lastNotificationReason // ""' 2>/dev/null || echo "")
-
-    assert_eq "FRR received Notification code 6 (Cease)" "6" "$code"
-    assert_eq "FRR received Notification subcode 4 (Administrative Reset)" "4" "$subcode"
+    assert_eq "FRR received NOTIFICATION code/subcode 0604 (Cease/Administrative Reset)" \
+        "0604" "$code_subcode"
+    # FRR renders both fields as zero-padded hex, so the split halves are "06"
+    # and "04", never "6"/"4".
+    assert_eq "FRR received NOTIFICATION code 6 (Cease)" "06" "${code_subcode:0:2}"
+    assert_eq "FRR received NOTIFICATION subcode 4 (Administrative Reset)" "04" "${code_subcode:2:2}"
     if echo "$reason" | grep -qi "administrative reset"; then
-        ok "FRR recorded notification reason Cease/administrative reset ($reason)"
+        ok "FRR recorded notification reason Cease/Administrative Reset ($reason)"
     else
         fail "FRR notification reason unexpected: '$reason'"
     fi
-    # Verify FRR recorded the RFC 9003 communication text
-    local frr_log frr_vtysh_log
-    frr_log=$(docker logs "$FRR" 2>&1 || true)
-    frr_vtysh_log=$(docker exec "$FRR" vtysh -c "show logging" 2>/dev/null || true)
-    if echo "$frr_log" "$frr_vtysh_log" | grep -qi "planned maintenance"; then
-        ok "FRR logged RFC 9003 communication text 'planned maintenance'"
-    else
-        fail "FRR did not log RFC 9003 communication text 'planned maintenance'"
-    fi
+    # RFC 9003 Shutdown Communication arrives as the shutdown description.
+    assert_eq "FRR recorded the RFC 9003 communication text" \
+        "planned maintenance" "$shutdown"
 
     # Session dropped
     local dropped_state
