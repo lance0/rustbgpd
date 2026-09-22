@@ -454,7 +454,7 @@ and against a live run of the pinned arouteserver image by
 | File | Contents |
 |---|---|
 | `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
-| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub every configured `*_validated_*` tag (`route_validated_via_white_list`, `prefix_validated_via_rpki_roas`, `prefix_validated_via_arin_whois_db_dump`, `prefix_validated_via_registrobr_whois_db_dump`) whether or not the render sets it, and every configured internal `rpki_bgp_origin_validation_valid`/`unknown`/`invalid` and `reject_cause_map_*` community and `custom_communities` entry, which the render never sets, invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
+| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub every configured `*_validated_*` tag (`route_validated_via_white_list`, `prefix_validated_via_rpki_roas`, `prefix_validated_via_arin_whois_db_dump`, `prefix_validated_via_registrobr_whois_db_dump`) whether or not the renderer sets it, and every configured internal `rpki_bgp_origin_validation_valid`/`unknown`/`invalid` or `reject_cause_map_*` community and every `custom_communities` entry (the renderer sets none of these); reject invalid/private/reserved ASNs in the path, transit-free ASNs (only when `transit_free.action` is `reject`; a null or absent action disables the filter, as in arouteserver) and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, an RPKI-valid accept term bound to the origin dataset when `irrdb.use_rpki_roas_as_route_objects` is enabled, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
 | `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members plus `white_list_pref` entries (subtree unless bounded, as arouteserver reads them), one canonical entry per line |
@@ -575,9 +575,11 @@ prefix-reject terms plus `birdwatcher-reject-communities.json`. The startup
 artifact contains only effective tag-and-reject peer addresses and configured
 standard/large dynamic and cause-map values; absent families stay absent. The
 adapter validates it strictly, refuses files over 1 MiB or 4096 unique peers,
-and never silently downgrades an invalid artifact. Extended communities and
-`rejected_route_announced_by` remain refused because the retained route lacks
-authoritative data to reproduce them.
+and never silently downgrades an invalid artifact. Extended communities
+remain refused because the retained route lacks authoritative data to
+reproduce them. `rejected_route_announced_by` is refused under every
+`reject_policy`: the retained route lacks the announcer data, and rpol cannot
+scrub its `dyn_val` range as arouteserver does on receipt.
 
 Control communities are rendered by fidelity, not by translation: the
 daemon enforces a fixed RFC 7947 §2.3.2 / RFC 8195 matrix (`0:PEER`,

@@ -555,6 +555,28 @@ fn tag_and_reject_refuses_malformed_extended_announcer_and_invalid_causes() {
 }
 
 #[test]
+/// arouteserver scrubs `rejected_route_announced_by` on receipt over its whole
+/// `dyn_val` range, which rpol cannot remove, so a configured value is refused
+/// under plain `reject` too, not only when a client uses `tag_and_reject`.
+fn rejected_route_announced_by_is_refused_under_plain_reject() {
+    let mut value = healthy_value();
+    set_general_community(
+        &mut value,
+        "rejected_route_announced_by",
+        yaml("{std: null, lrg: '65500:65524:dyn_val', ext: null}"),
+    );
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items.contains(
+            &"communities.rejected_route_announced_by requires authoritative announcer data, \
+              and its dyn_val range cannot be scrubbed"
+                .to_owned()
+        ),
+        "{items:?}"
+    );
+}
+
+#[test]
 fn rpki_not_performed_community_refuses_configured_forms() {
     for (kind, marker) in [
         ("std", "65000:1"),
@@ -1526,11 +1548,11 @@ fn validation_tags_are_scrubbed_whether_or_not_they_are_set() {
 
 #[test]
 /// Load-bearing: arouteserver 1.23.2 `scrub_communities_in()`
-/// (`templates/bird/common.j2` 131-153) also removes every configured
-/// internal community and every `custom_communities` entry on receipt
-/// (`config/general.py` 42-85 and 324-330 class the types). The renderer never sets
-/// them, so an rpol `with` assertion cannot see the removal; the exact term
-/// text pins it.
+/// (`templates/bird/common.j2` 131-157) also removes every configured
+/// internal community and every `custom_communities` entry on receipt;
+/// `config/general.py` 42-85 and 324-330 assign the community types. The
+/// renderer never sets these communities, so an rpol `with` assertion cannot
+/// observe their removal; the exact term text pins it instead.
 fn internal_and_custom_communities_are_scrubbed_without_being_set() {
     let mut value = healthy_value();
     for (name, std) in [

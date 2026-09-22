@@ -1590,6 +1590,19 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
         }
     }
     check_control_communities(cfg, &mut refusals);
+    // Internal, and scrubbed upstream over its whole dyn_val range, which rpol
+    // cannot remove; nothing rendered sets it, so refuse it in every mode.
+    if cfg
+        .communities
+        .get("rejected_route_announced_by")
+        .is_some_and(community_configured)
+    {
+        refusals.push(
+            "communities.rejected_route_announced_by requires authoritative announcer data, \
+             and its dyn_val range cannot be scrubbed"
+                .to_owned(),
+        );
+    }
     for (section, name, tag) in scrubbed_communities(cfg) {
         if tag.ext.is_some() {
             refusals.push(format!("{section}.{name}.ext is unsupported"));
@@ -2145,17 +2158,6 @@ fn render_reject_communities(
         if value.is_some_and(|value| !valid_reject_community(value, parts, max, true)) {
             refusals.push("communities.reject_cause must place dyn_val exactly last".to_owned());
         }
-    }
-    if ctx
-        .cfg
-        .communities
-        .get("rejected_route_announced_by")
-        .is_some_and(community_configured)
-    {
-        refusals.push(
-            "communities.rejected_route_announced_by requires authoritative announcer data"
-                .to_owned(),
-        );
     }
     for (name, values) in ctx
         .cfg

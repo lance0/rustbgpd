@@ -132,6 +132,8 @@ upstream's inbound list that has a fixed value: the internal
 renderer sets none of these, so the scrub only removes member-sent copies.
 An `ext` form or a malformed value is refused, and so is a client's
 `attach_custom_communities`, which the renderer does not reproduce.
+`rejected_route_announced_by`, the other internal community with a `dyn_val`
+range, is refused whenever it is configured.
 
 One internal community is not scrubbed: `reject_cause`. Upstream removes
 its whole `dyn_val` range, and rpol has no removal pattern for that form, so
