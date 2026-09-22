@@ -15,6 +15,11 @@
 # from updates here because they're path-only deps managed by the
 # release process. Other deps land as one PR per group when
 # possible to keep review surface small.
+#
+# Manual bumps: after `cargo update -p <crate>`, review the whole
+# Cargo.lock diff, revert unrelated dependency-edge rewrites, and
+# confirm with `cargo metadata --locked`. Do not run a lockfile-wide
+# `cargo update`.
 
 version: 2
 updates:
@@ -73,6 +78,13 @@ updates:
       # Workspace-internal crates are path deps; updates land via the
       # release process, not Dependabot.
       - dependency-name: "rustbgpd-*"
+      # bgpkit-parser is the differential-test oracle
+      # (tests/bgpkit_differential.rs) and keeps an exact `=` pin so it
+      # cannot drift silently. Dependabot edits only Cargo.lock, which
+      # contradicts that pin and fails every `--locked` check. Bumps are
+      # a deliberate manual act: move the manifest pin, update the lock,
+      # and run the differential tests.
+      - dependency-name: "bgpkit-parser"
 
   # Independent scale workspace, including profiling and load harnesses.
   - package-ecosystem: "cargo"
