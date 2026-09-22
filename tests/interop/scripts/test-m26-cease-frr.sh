@@ -52,7 +52,7 @@ grpc_enable_neighbor() {
 }
 grpc_reset_neighbor() {
     grpcurl_call \
-        -d "{\"address\": \"$1\", \"communication\": \"$2\"}" \
+        -d "{\"address\": \"$1\", \"reason\": \"$2\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/ResetNeighbor >/dev/null
 }
 
@@ -460,6 +460,15 @@ test_administrative_reset_notification_and_backoff() {
         ok "FRR recorded notification reason Cease/administrative reset ($reason)"
     else
         fail "FRR notification reason unexpected: '$reason'"
+    fi
+    # Verify FRR recorded the RFC 9003 communication text
+    local frr_log frr_vtysh_log
+    frr_log=$(docker logs "$FRR" 2>&1 || true)
+    frr_vtysh_log=$(docker exec "$FRR" vtysh -c "show logging" 2>/dev/null || true)
+    if echo "$frr_log" "$frr_vtysh_log" | grep -qi "planned maintenance"; then
+        ok "FRR logged RFC 9003 communication text 'planned maintenance'"
+    else
+        fail "FRR did not log RFC 9003 communication text 'planned maintenance'"
     fi
 
     # Session dropped

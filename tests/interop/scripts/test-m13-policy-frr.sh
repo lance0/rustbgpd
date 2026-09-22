@@ -283,8 +283,8 @@ for r in data.get('routes', []):
 test_export_strips_non_transitive_extended_communities() {
     log "Test 7: Plain eBGP export strips non-transitive Extended Communities"
 
-    local transitive_ec="844433100869674"        # 0x0002_FDE9_0000_002A (RT:65001:42, transitive)
-    local non_transitive_ec="4827503716943822850" # 0x4300_0000_0000_0002 (OVS Invalid, non-transitive)
+    local transitive_ec="842127122628650"        # 0x0002_FDE9_0000_002A (RT:65001:42, transitive)
+    local non_transitive_ec="4827858800541171714" # 0x4300_0000_0000_0002 (OVS Invalid, non-transitive)
 
     grpc_add_path "{
         \"prefix\": \"10.99.0.0\",

@@ -196,73 +196,6 @@ for path in data.get('paths', []):
     fi
 }
 # ---------------------------------------------------------------------------
-# Test 6: RFC 8950 route suppression to non-ENHE peer (IPv4 route with IPv6 NH withheld)
-# ---------------------------------------------------------------------------
-test_suppression_to_non_enhe_peer() {
-    log "Test 6: RFC 8950 suppression: IPv4 route with IPv6 next-hop is withheld from non-ENHE peer"
-
-    # Disable extended-nexthop capability on FRR
-    docker exec "$FRR" vtysh \
-        -c "configure terminal" \
-        -c "router bgp 65002" \
-        -c "no neighbor 10.0.0.1 capability extended-nexthop" >/dev/null 2>&1
-    docker exec "$FRR" vtysh -c "clear bgp 10.0.0.1" >/dev/null 2>&1
-
-    wait_established || fail "Session did not re-establish after disabling extended-nexthop"
-    sleep 3
-
-    # Verify extended-nexthop capability was NOT negotiated
-    local neighbor_json
-    neighbor_json=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
-    if echo "$neighbor_json" | grep -qi "extendedNexthop"; then
-        fail "FRR still negotiated extended-nexthop after removal"
-    else
-        ok "Extended-nexthop capability is absent on non-ENHE peer session"
-    fi
-
-    # The IPv4 route with IPv6 next-hop (10.99.0.0/24 with fd00::1) must be WITHHELD
-    local frr_routes
-    frr_routes=$(docker exec "$FRR" vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json" 2>/dev/null || true)
-    local paths_count
-    paths_count=$(echo "$frr_routes" | jq '.paths | length' 2>/dev/null || echo 0)
-    if [ "$paths_count" -eq 0 ] || [ -z "$frr_routes" ]; then
-        ok "IPv4 route 10.99.0.0/24 with IPv6 next-hop is withheld from non-ENHE peer (paths=0)"
-    else
-        fail "IPv4 route with IPv6 next-hop was unexpectedly exported to non-ENHE peer: $frr_routes"
-    fi
-
-    # IPv6 routes are STILL received by the non-ENHE peer (the session is dual-stack)
-    local v6_routes
-    v6_routes=$(docker exec "$FRR" vtysh -c "show bgp ipv6 unicast json" 2>/dev/null || true)
-    local v6_count
-    v6_count=$(echo "$v6_routes" | jq '.routes | length' 2>/dev/null || echo 0)
-    if [ "$v6_count" -gt 0 ]; then
-        ok "IPv6 routes are still received normally by non-ENHE peer ($v6_count routes)"
-    else
-        fail "IPv6 routes were unexpectedly lost on non-ENHE peer"
-    fi
-
-    # Re-enable capability on FRR and verify route restoration
-    docker exec "$FRR" vtysh \
-        -c "configure terminal" \
-        -c "router bgp 65002" \
-        -c "neighbor 10.0.0.1 capability extended-nexthop" >/dev/null 2>&1
-    docker exec "$FRR" vtysh -c "clear bgp 10.0.0.1" >/dev/null 2>&1
-
-    wait_established || fail "Session did not re-establish after re-enabling extended-nexthop"
-    sleep 3
-
-    local restored_routes
-    restored_routes=$(docker exec "$FRR" vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json" 2>/dev/null || true)
-    if echo "$restored_routes" | grep -q "fd00::1"; then
-        ok "IPv4 route restored to peer with IPv6 next-hop fd00::1 after re-enabling extended-nexthop"
-    else
-        fail "IPv4 route not restored to peer after re-enabling extended-nexthop: $restored_routes"
-    fi
-}
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 main() {
@@ -280,7 +213,6 @@ main() {
     test_ipv6_routes_received
     test_injected_route_reaches_frr
     test_ipv6_nexthop_on_frr
-    test_suppression_to_non_enhe_peer
 
     echo ""
     log "Results: $pass passed, $fail failed"

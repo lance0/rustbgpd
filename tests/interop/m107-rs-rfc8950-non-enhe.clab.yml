@@ -1,0 +1,85 @@
+# Containerlab topology: RFC 8950 non-ENHE receiver sibling (M107 sibling)
+#
+# One IPv6-only IXP peering LAN (2001:db8:107::/64) bridged through a
+# switch node, carrying:
+#   - rustbgpd route server  2001:db8:107::9
+#   - member1: GoBGP (AS64500, 2001:db8:107::11) — RFC 8950 member (capable of ENHE)
+#   - member2: GoBGP (AS64501, 2001:db8:107::12) — RFC 8950 member (capable of ENHE)
+#   - member3: FRR   (AS64502, 2001:db8:107::13) — non-ENHE member (no capability extended-nexthop)
+#
+# Proves:
+#   - member2 (capable) receives IPv4 routes with IPv6 next-hops from member1
+#   - member3 (non-ENHE) has IPv4 routes with IPv6 next-hops withheld (RFC 8950 suppression)
+#   - member3 still receives IPv6 routes normally
+#   - Enabling the capability on member3 restores the withheld IPv4 routes
+
+name: m107-rs-rfc8950-non-enhe
+
+topology:
+  nodes:
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m107-non-enhe.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::9/64 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/rustbgpd /var/lib/rustbgpd
+      env:
+        RUST_LOG: info
+
+    member1:
+      kind: linux
+      image: gobgp:v4.8.0-m107
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m107-member1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::11/64 dev eth1
+        - ip link set eth1 up
+
+    member2:
+      kind: linux
+      image: gobgp:v4.8.0-m107
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m107-member2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::12/64 dev eth1
+        - ip link set eth1 up
+
+    member3:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m107-member3.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::13/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "member1:eth1"]
+    - endpoints: ["switch:eth3", "member2:eth1"]
+    - endpoints: ["switch:eth4", "member3:eth1"]

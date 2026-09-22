@@ -2558,6 +2558,13 @@ jobs:
           topology: tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
           script: tests/interop/scripts/test-m107-rs-rfc8950-uniform-fleet.sh
 
+      - name: Run M107 sibling (RFC 8950 suppression to non-ENHE receiver)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M107-sibling
+          topology: tests/interop/m107-rs-rfc8950-non-enhe.clab.yml
+          script: tests/interop/scripts/test-m107-rs-rfc8950-non-enhe.sh
+
   check:
     name: check
     runs-on: ubuntu-latest
