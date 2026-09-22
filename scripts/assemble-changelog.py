@@ -64,7 +64,7 @@ def parse_fragment(name: str, text: str) -> Fragment:
     if CONFLICT_MARKER.search(text):
         raise ValueError(f"{name}: unresolved merge-conflict marker")
     lines = text.split("\n")
-    heading = lines[0].rstrip()
+    heading = lines[0].rstrip("\r")
     category = heading[4:] if heading.startswith("### ") else None
     if category not in CATEGORIES:
         raise ValueError(

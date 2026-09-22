@@ -142,6 +142,7 @@ class AssembleChangelogTests(unittest.TestCase):
     def test_malformed_fragments_are_refused_by_name(self):
         cases = {
             "bad-heading.md": ("### Bogus\n\n- Bullet.\n", "bad-heading.md: first line"),
+            "trailing-space.md": ("### Fixed \n\n- Bullet.\n", "trailing-space.md: first line"),
             "no-heading.md": ("- Bullet.\n", "no-heading.md: first line"),
             "empty.md": ("### Fixed\n\n\n", "empty.md: no bullet"),
             "blank.md": ("", "blank.md: first line"),
