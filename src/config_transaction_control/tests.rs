@@ -528,7 +528,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         (transaction, ".execute_owned_operation(", 5),
         (settlement, "let coordinator_permit = coordinator.acquire().await?;", 1),
         (settlement, "watchdog.register_owned(", 1),
-        (fib, ".acquire()", 1),
+        (fib, ".acquire()", 0),
         (neighbor, "self.execute_owned_neighbor_mutation(", 4),
         (neighbor, "reserve_config_event_slot(self.config_tx.clone()).await?", 4),
         (server, "runtime_config_lock.acquire()", 0),
@@ -2328,6 +2328,7 @@ fn deps_value(
         startup_tables,
         confirm_journal_path: None,
         config_history_dir: None,
+        accepted_rx: None,
     }
 }
 
@@ -4143,6 +4144,7 @@ families = ["ipv4_unicast"]
             startup_tables: vec![original],
             confirm_journal_path: Some(journal.clone()),
             config_history_dir: None,
+            accepted_rx: None,
         },
         BgpMetrics::new(),
         accepted_rx,

@@ -800,12 +800,13 @@ Coordinated shutdown closes new SIGHUP and runtime-mutation admission first.
 It does not abort an already-owned reload: the daemon waits for its typed
 settlement before taking the warm checkpoint or tearing down required actors.
 That wait belongs to the settlement watchdog alone. A coordinator permit that
-no settlement owner holds (a read that is still waiting on an actor) and the
-join of a SIGHUP task with no owner each get five seconds; on expiry the daemon
-logs `runtime config coordinator permit is still held outside settlement
-ownership` or `SIGHUP reload task is still running with no settlement owner`
-at ERROR, skips the optional warm checkpoint because its coordinator fence is
-missing, and continues teardown. The exit status is unchanged.
+no settlement owner holds (a holder that has taken the permit but has not
+registered its owner yet) and the join of a SIGHUP task with no owner each get
+five seconds; on expiry the daemon logs `runtime config coordinator permit is
+still held outside settlement ownership` or `SIGHUP reload task is still
+running with no settlement owner` at ERROR, skips the optional warm checkpoint
+because its coordinator fence is missing, and continues teardown. The exit
+status is unchanged.
 
 A further SIGINT or SIGTERM after coordinated shutdown has begun (including
 the first signal after a `Shutdown` RPC) means "stop waiting". With no

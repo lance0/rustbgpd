@@ -102,8 +102,9 @@ A clean settlement instead disarms the fatal boundary and lets coordinated
 teardown continue.
 
 Only an owner gets that wait. If the coordinator permit is still held once no
-owner is registered, the holder is outside the watchdog (a read such as
-`ListFibTables` waiting on its actor), and shutdown gives it five seconds
+owner is registered, the holder is outside the watchdog (defense-in-depth:
+in normal operation every coordinator acquirer is an owned mutation, as
+`ListFibTables` no longer holds the permit), and shutdown gives it five seconds
 before logging an error, skipping the warm checkpoint, and continuing. No
 mutation can start behind that abandoned wait: an operation that obtains the
 permit only after shutdown has begun is refused as `UNAVAILABLE` (`runtime
