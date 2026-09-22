@@ -2861,7 +2861,7 @@ async fn commit_fib_transaction(
     // pre-effect deadline and settles clean rather than exhausting a short
     // budget on its own ten-minute bound.
     let read = read_current_tables(
-        Some(&fib_cmd_tx),
+        &fib_cmd_tx,
         rustbgpd_api::rib_service::FibTableControlError::Internal,
     );
     let previous_tables = before_pre_effect_deadline(progress.pre_effect_deadline(), read)
@@ -2871,8 +2871,7 @@ async fn commit_fib_transaction(
                 "FIB reconciler did not answer GetTables in time".to_string(),
             )
         })?
-        .map_err(fib_error_to_apply_error)?
-        .unwrap_or_default();
+        .map_err(fib_error_to_apply_error)?;
     let staged_tables = candidate.fib_tables.clone();
     progress.begin_mutation();
     let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
