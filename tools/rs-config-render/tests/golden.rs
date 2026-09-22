@@ -1528,7 +1528,7 @@ fn validation_tags_are_scrubbed_whether_or_not_they_are_set() {
 /// Load-bearing: arouteserver 1.23.2 `scrub_communities_in()`
 /// (`templates/bird/common.j2` 131-153) also removes every configured
 /// internal community and every `custom_communities` entry on receipt
-/// (`config/general.py` 42-87 classes the types). The renderer never sets
+/// (`config/general.py` 42-85 and 324-330 class the types). The renderer never sets
 /// them, so an rpol `with` assertion cannot see the removal; the exact term
 /// text pins it.
 fn internal_and_custom_communities_are_scrubbed_without_being_set() {
