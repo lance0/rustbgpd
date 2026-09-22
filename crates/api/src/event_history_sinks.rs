@@ -461,6 +461,12 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
+    /// Hang preventer, not a timing property. Each wait below guards a state
+    /// assertion on a committed event, and every commit fsyncs under
+    /// `SynchronousMode::Full`, so this has to outlast fsync latency on a
+    /// loaded host.
+    const TEST_BACKSTOP: Duration = Duration::from_secs(60);
+
     fn sample_route_event(event_type: RouteEventType, path_id: u32) -> RouteEvent {
         let policy_filtered = event_type == RouteEventType::PolicyFiltered;
         RouteEvent {
@@ -695,9 +701,9 @@ mod tests {
         let after_ns = timestamp_ns_now();
 
         for (index, expected_payload) in expected_payloads.iter().enumerate() {
-            let committed = tokio::time::timeout(Duration::from_secs(5), committed_rx.recv())
+            let committed = tokio::time::timeout(TEST_BACKSTOP, committed_rx.recv())
                 .await
-                .expect("commit within 5s")
+                .expect("commit backstop elapsed")
                 .expect("broadcast open");
             assert_eq!(
                 committed.event_id,
@@ -753,9 +759,9 @@ mod tests {
             metrics.clone(),
         ));
 
-        let committed = tokio::time::timeout(Duration::from_secs(5), committed_rx.recv())
+        let committed = tokio::time::timeout(TEST_BACKSTOP, committed_rx.recv())
             .await
-            .expect("commit within 5s")
+            .expect("commit backstop elapsed")
             .expect("broadcast open");
         assert!(
             committed.envelope.timestamp_ns >= before_ns
@@ -912,9 +918,9 @@ mod tests {
         stage.shutdown().await;
 
         for index in 0..16u64 {
-            let committed = tokio::time::timeout(Duration::from_secs(5), committed_rx.recv())
+            let committed = tokio::time::timeout(TEST_BACKSTOP, committed_rx.recv())
                 .await
-                .expect("accepted-before-shutdown event commits within 5s")
+                .expect("accepted-before-shutdown commit backstop elapsed")
                 .expect("broadcast open");
             assert_eq!(committed.event_id, index + 1);
         }
@@ -1047,9 +1053,9 @@ mod tests {
 
         // The EHM actor commits in batches of 1 with a 10ms interval;
         // wait for the first event to land on the broadcast.
-        let committed = tokio::time::timeout(Duration::from_secs(2), broadcast_rx.recv())
+        let committed = tokio::time::timeout(TEST_BACKSTOP, broadcast_rx.recv())
             .await
-            .expect("EHM broadcast did not deliver within 2s")
+            .expect("EHM broadcast backstop elapsed")
             .expect("EHM broadcast closed before delivery");
 
         assert_eq!(committed.envelope.category, Category::Policy);

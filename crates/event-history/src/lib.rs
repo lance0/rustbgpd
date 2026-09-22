@@ -1083,8 +1083,15 @@ impl EventHistoryManager {
     /// producer admission.
     ///
     /// One five-second deadline bounds drain and storage finalization.
-    pub async fn shutdown(mut self) {
-        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+    pub async fn shutdown(self) {
+        self.shutdown_within(SHUTDOWN_TIMEOUT).await;
+    }
+
+    /// [`Self::shutdown`] with the shared deadline as a parameter. Real-time
+    /// tests pass one longer than a loaded host's drain, so a correct drain
+    /// slowed by fsync latency is not mistaken for one that hit the deadline.
+    async fn shutdown_within(mut self, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
         self.sender.queue_depths.close();
         let _ = self.shutdown_tx.send(Some(deadline));
         if let Some(mut actor) = self.actor.take() {
@@ -1568,6 +1575,13 @@ mod tests {
     /// to be large enough that a loaded box never reaches it.
     const TEST_BACKSTOP: Duration = Duration::from_secs(60);
 
+    /// Shutdown deadline for real-time tests that assert a drain completes.
+    /// The production five seconds is a wall clock that SQLite fsync latency
+    /// alone can exceed on a loaded host. Kept below [`TEST_BACKSTOP`] so a
+    /// drain that really waits out its deadline trips the deadline counter
+    /// rather than the backstop.
+    const TEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
     fn test_config(path: PathBuf, batch_size: usize) -> EventHistoryConfig {
         EventHistoryConfig {
             path,
@@ -1986,8 +2000,9 @@ mod tests {
         // Load-bearing breaks: the old batch_size*2 cap loses five events;
         // omitting the receiver close leaves the drain with nothing to end
         // it but the shared deadline, which the expiry count catches on
-        // either arm of that race — without timing the drain, so a slow
-        // box cannot fail a correct drain.
+        // either arm of that race — without timing the drain. The injected
+        // deadline keeps a correct drain slowed by fsync latency from
+        // reaching the production five seconds.
         let dir = tempfile::tempdir().unwrap();
         let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 4))
             .await
@@ -2007,9 +2022,12 @@ mod tests {
                 .unwrap();
         }
 
-        tokio::time::timeout(TEST_BACKSTOP, manager.shutdown())
-            .await
-            .expect("shutdown never returned");
+        tokio::time::timeout(
+            TEST_BACKSTOP,
+            manager.shutdown_within(TEST_SHUTDOWN_TIMEOUT),
+        )
+        .await
+        .expect("shutdown never returned");
         assert_eq!(
             progress.deadline_expiries.load(Ordering::Acquire),
             0,
@@ -2054,7 +2072,7 @@ mod tests {
         });
         wait_for_producer_pause(&sender, ProducerPausePoint::Reserved).await;
 
-        let shutdown = tokio::spawn(manager.shutdown());
+        let shutdown = tokio::spawn(manager.shutdown_within(TEST_SHUTDOWN_TIMEOUT));
         wait_for_ledger_close(&sender, Category::Route).await;
         sender.producer_pause.release();
         assert_eq!(producer.join().unwrap(), Some(vec![41]));
@@ -2086,7 +2104,7 @@ mod tests {
         wait_for_producer_pause(&sender, ProducerPausePoint::Accepted).await;
         assert_eq!(sender.queue_depths.depth(Category::Session), 1);
 
-        let shutdown = tokio::spawn(manager.shutdown());
+        let shutdown = tokio::spawn(manager.shutdown_within(TEST_SHUTDOWN_TIMEOUT));
         wait_for_ledger_close(&sender, Category::Session).await;
         assert_eq!(sender.queue_depths.depth(Category::Session), 1);
         sender.producer_pause.release();
@@ -2308,7 +2326,7 @@ mod tests {
             .unwrap();
         wait_for_store(&store, Append).await;
 
-        let shutdown = tokio::spawn(manager.shutdown());
+        let shutdown = tokio::spawn(manager.shutdown_within(TEST_SHUTDOWN_TIMEOUT));
         tokio::task::yield_now().await;
         store.test_release(Append);
         tokio::time::timeout(TEST_BACKSTOP, shutdown)
