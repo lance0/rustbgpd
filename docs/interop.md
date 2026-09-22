@@ -314,7 +314,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | Current rustbgpd beside the frozen M100 receivers | rustbgpd built from the tree under test (`rustbgpd:dev`) | `tests/interop/m100-partial-receiver.clab.yml` (`rustbgpd-current` node) | M100 hosted gate | Partial-flag handling of the current daemon for an external neighbor | The same raw source sends the same five `0xa0` attribute byte strings to a fifth receiver, judged by its own `rustbgpd_current` rows: MED is treat-as-withdraw with the session kept, ORIGINATOR_ID and CLUSTER_LIST are attribute-discard with the route kept, and MP_REACH / MP_UNREACH reset the session with exact UPDATE `3/4` bytes. Each row also requires exactly one matching increment of `bgp_update_malformed_total` and `bgp_update_malformed_causes_total` for the source peer, which is what separates attribute-discard from plain acceptance. Additionally, the well-formed baseline for ORIGINATOR_ID asserts `bgp_path_attribute_discarded_total{type_code="9"}` is exactly 1. The route projection carries no ORIGINATOR_ID field, so the attribute's absence from the installed route is not observed here; the discard counter is the whole claim. | Runs in the same deploy as the frozen matrix and is verified separately, so neither expectation set can satisfy the other. The raw peer is an eBGP route-server client; the iBGP branch of ORIGINATOR_ID / CLUSTER_LIST handling (treat-as-withdraw) cannot be driven with these byte strings and stays at unit coverage. |
 | BIRD + FRR | BIRD 3.3.2, FRR 10.3.1 | `tests/interop/m101-routeserver-bird332.clab.yml` | Tested (M101, hosted CI) | Real-speaker RFC 7606 attribute-discard at an IPv4-unicast route server | Both peer containers remain asleep until configured/local image identity, exact runtime versions, and both configs pass. Capture is armed before any BGP daemon starts. BIRD emits the exact optional-transitive-partial type-40 tuple `e0 28 01 00`; rustbgpd accepts the route after discarding only that attribute, preserves standard/Large Communities in post-policy Adj-RIB-In and on FRR, advances exactly `attribute_discard +1 / treat_as_withdraw +0 / session_reset +0`, and proves import plus member-scoped export denies with positive controls and explain/advertised surfaces. Deterministic withdrawal leaves both sessions Established with no flap delta. Exact 27/0; no Prefix-SID, labeled-unicast, SR, or AS_SET breadth is claimed. | BIRD source archive SHA-256 `21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c`; build with `docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop`. Pull the current reviewed FRR identity exactly with `docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c`. |
 | OpenBGPD + FRR | OpenBGPD 9.2, FRR 10.3.1 | `tests/interop/m102-routeserver-openbgpd92.clab.yml` | Tested (M102, hosted CI) | Dual-stack route-server member interoperability | Digest-pinned sleeping peers are identity-, runtime-, and config-preflighted before sidecar capture and daemon start. The exact 32/0 proof uses four-octet ASNs 4200000102/4200000201/4200000202 and enforced role, policy, AS4, and IPv4/IPv6 negotiation; proves bidirectional transparent AS_PATH plus standard/Large Communities; independently reassembles retransmitted TCP to decode AS_TRANS, capability 65, and exact IPv4 UPDATE fields (AS_PATH, NEXT_HOP, standard and Large Communities, and NLRI); covers explicit import/export policy; withdraws all four directional-family routes; and pins unchanged sessions/flap counters. Malformed Partial and AS_SET behavior are out of scope. | `docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9` |
-| FRR (bgpd) | 10.7.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
+| FRR (bgpd) | 10.7.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) capability advertisement | IPv4-transport session: FRR receives rustbgpd's capability but advertises its own only over IPv6 transport, so it is not negotiated and IPv4 routes keep an IPv4 next hop. Negotiated ENHE is covered by M53 and M107 | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
 | FRR + StayRTR | 10.7.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |
 | FRR (bgpd) | 10.7.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
@@ -1768,16 +1768,24 @@ M18 Extended Next-Hop (dual-stack):
        └─────────── eth1 ────────────────┘
 ```
 
-Both sides negotiate Extended Next-Hop capability. rustbgpd has
-`families = ["ipv4_unicast", "ipv6_unicast"]` and `local_ipv6_nexthop = "fd00::1"`.
+The session runs over IPv4 transport. rustbgpd has
+`families = ["ipv4_unicast", "ipv6_unicast"]` and `local_ipv6_nexthop = "fd00::1"`,
+so it advertises Extended Next-Hop for IPv4 unicast. FRR has
+`capability extended-nexthop`, but FRR advertises the capability only on
+sessions over IPv6 transport, so it is received and not negotiated. Negotiated
+Extended Next-Hop is exercised against FRR by M53 (IPv6 link-local transport)
+and against GoBGP by M107.
 
-FRR has `capability extended-nexthop` and advertises:
+FRR advertises:
 - IPv4: 192.168.1.0/24, 192.168.2.0/24
 - IPv6: 2001:db8:1::/48
 
 ### Test 1: Session with Extended Next-Hop Capability
 
-Verify session reaches Established and Extended Next-Hop capability is negotiated.
+Verify the session reaches Established and FRR's
+`neighborCapabilities.extendedNexthop` is exactly `received` with
+`extendedNexthopFamililesByPeer.ipv4Unicast` (FRR's spelling) present: rustbgpd
+advertised the capability for IPv4 unicast and FRR did not.
 
 ### Test 2: IPv4 Routes Received
 
@@ -1791,10 +1799,11 @@ Verify the IPv6 prefix is received via MP_REACH_NLRI.
 
 Inject 10.99.0.0/24 via gRPC `AddPath` and verify FRR receives it.
 
-### Test 5: Extended Next-Hop Negotiation Succeeded
+### Test 5: IPv4 Next Hop Without Negotiated Extended Next-Hop
 
-Verify FRR receives the injected route (proves outbound encoding works with
-Extended Next-Hop negotiated).
+Verify FRR's only next hop for the injected route is exactly IPv4 `10.0.0.1`.
+Because FRR did not advertise the capability, rustbgpd must not send the
+configured IPv6 next hop `fd00::1` for IPv4 NLRI.
 
 ### Automated Test Script
 
@@ -1819,6 +1828,30 @@ Automated test: `bash tests/interop/scripts/test-m18-extnexthop-frr.sh` — **9 
 | IPv6 2001:db8:1:: received | PASS | Via MP_REACH_NLRI |
 | Injected route reaches FRR | PASS | 10.99.0.0/24 via AddPath |
 | Extended NH negotiation works | PASS | Route received with valid next-hop |
+
+**Note (2026-09-22):** the two Extended Next-Hop rows above are not supported
+by the driver as it stood on 2026-03-07. Both assertions reported PASS on
+every branch, including when the capability was missing or the next hop was
+IPv4. On an IPv4-transport session FRR does not advertise Extended Next-Hop,
+so the capability was never negotiated in this lab. See the 2026-09-22 results
+below for what the driver now asserts.
+
+## M18 Extended Next-Hop FRR Test Results (2026-09-22, FRR 10.7.1)
+
+Automated test: `bash tests/interop/scripts/test-m18-extnexthop-frr.sh` — **10 passed, 0 failed**
+on a fresh deploy.
+
+| Test | Result | Details |
+|------|--------|---------|
+| Extended Next-Hop capability advertised by rustbgpd | PASS | FRR `extendedNexthop` = `received`, `extendedNexthopFamililesByPeer.ipv4Unicast` present; not negotiated |
+| IPv4 next hop without negotiation | PASS | FRR's only next hop for 10.99.0.0/24 is `ipv4` / `10.0.0.1` |
+| Remaining rows | PASS | Session, 3 received routes, both IPv4 prefixes, IPv6 prefix, injected route |
+
+Removing `ipv6_unicast` from rustbgpd's neighbor families (which stops it
+advertising Extended Next-Hop) turns the capability row red (`extendedNexthop`
+absent). Removing `capability extended-nexthop` from the FRR neighbor leaves
+FRR's view unchanged (`received`), confirming FRR does not advertise it over
+IPv4 transport.
 
 ---
 
