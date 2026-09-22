@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 # M18 interop test — Extended Next-Hop (RFC 8950)
 #
-# Validates: IPv4 unicast routes exchanged with IPv6 next-hop when
-# extended-nexthop capability is negotiated.
+# Validates: rustbgpd advertises the RFC 8950 Extended Next Hop capability
+# for IPv4 unicast, and does not use an IPv6 next hop when the peer does not
+# reciprocate.
 #
-# Topology: rustbgpd (AS 65001) ↔ FRR (AS 65002) on dual-stack link
+# Topology: rustbgpd (AS 65001) ↔ FRR (AS 65002) on dual-stack link, one
+# session over IPv4 transport (10.0.0.1 ↔ 10.0.0.2).
+#
+# FRR advertises Extended Next Hop only on sessions over IPv6 transport; its
+# `neighbor ... capability extended-nexthop` line has no effect on this IPv4
+# session. The capability is therefore received by FRR but NOT negotiated,
+# and rustbgpd must send IPv4 routes in the IPv4 body with an IPv4 next hop.
+# Negotiated-ENHE behaviour against FRR is covered by M53 (IPv6 link-local
+# transport) and against GoBGP by M107.
 #
 # Key proof points:
-#   - Extended-nexthop capability negotiated (both families configured)
+#   - FRR receives rustbgpd's Extended Next Hop capability for IPv4 unicast
+#     and does not advertise its own (exact `extendedNexthop` value)
 #   - IPv4 + IPv6 routes exchanged over single IPv4 session
-#   - rustbgpd outbound IPv4 uses MP_REACH_NLRI with IPv6 NH (fd00::1)
-#   - FRR receives IPv4 routes with IPv6 next-hop
+#   - rustbgpd's injected IPv4 route reaches FRR with IPv4 next hop 10.0.0.1,
+#     not the configured IPv6 next hop fd00::1
 #
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m18-extnexthop-frr.clab.yml
@@ -95,17 +105,23 @@ test_session_established() {
         fail "Session not Established"
     fi
 
-    # Check extended-nexthop capability was negotiated
-    if echo "$neighbor_json" | grep -qi "extendedNexthop"; then
-        ok "Extended next-hop capability present in neighbor info"
+    # FRR reports `neighborCapabilities.extendedNexthop` as "advertised",
+    # "received" or "advertisedAndReceived", so the key alone proves nothing.
+    # On this IPv4-transport session FRR does not advertise the capability,
+    # so the exact expected value is "received": rustbgpd sent it, FRR did
+    # not, and it is not negotiated. `extendedNexthopFamililesByPeer` (FRR's
+    # spelling) lists the NLRI families FRR received with an IPv6 next hop.
+    local enhe enhe_ipv4
+    enhe=$(printf '%s\n' "$neighbor_json" \
+        | jq -r '."10.0.0.1".neighborCapabilities.extendedNexthop // "absent"' 2>/dev/null \
+        || echo "unreadable")
+    enhe_ipv4=$(printf '%s\n' "$neighbor_json" \
+        | jq -r '."10.0.0.1".neighborCapabilities.extendedNexthopFamililesByPeer.ipv4Unicast // "absent"' 2>/dev/null \
+        || echo "unreadable")
+    if [ "$enhe" = "received" ] && [ "$enhe_ipv4" = "recieved" ]; then
+        ok "FRR received rustbgpd's Extended Next Hop capability for IPv4 unicast (not negotiated: FRR does not advertise it over IPv4 transport)"
     else
-        # Some FRR versions report this differently; check for capability code 5
-        if echo "$neighbor_json" | grep -q '"capabilityCode":5'; then
-            ok "Extended next-hop capability code 5 present"
-        else
-            log "WARNING: Could not confirm extended-nexthop in FRR JSON (may be FRR version-dependent)"
-            ok "Session established with both families (capability exchange succeeded)"
-        fi
+        fail "Expected FRR extendedNexthop=received with ipv4Unicast=recieved, got extendedNexthop=$enhe ipv4Unicast=$enhe_ipv4"
     fi
 }
 
@@ -144,10 +160,10 @@ test_ipv6_routes_received() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 4: Injected IPv4 route arrives at FRR (proves outbound MP_REACH works)
+# Test 4: Injected IPv4 route arrives at FRR
 # ---------------------------------------------------------------------------
 test_injected_route_reaches_frr() {
-    log "Test 4: Injected IPv4 route reaches FRR (proves outbound encoding)"
+    log "Test 4: Injected IPv4 route reaches FRR"
 
     grpc_inject_route "10.99.0.0" 24 "10.0.0.1"
     sleep 3
@@ -163,36 +179,28 @@ test_injected_route_reaches_frr() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 5: FRR sees IPv6 next-hop on IPv4 routes from rustbgpd
+# Test 5: Without negotiated Extended Next Hop, FRR sees an IPv4 next hop
 # ---------------------------------------------------------------------------
-test_ipv6_nexthop_on_frr() {
-    log "Test 5: FRR sees IPv6 next-hop on IPv4 routes from rustbgpd"
+test_ipv4_nexthop_without_enhe() {
+    log "Test 5: IPv4 route from rustbgpd carries IPv4 next hop (Extended Next Hop not negotiated)"
 
     local route_json
     route_json=$(docker exec "$FRR" vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json" 2>/dev/null)
 
-    # With extended-nexthop, rustbgpd should send its IPv6 NH (fd00::1)
-    if echo "$route_json" | grep -q "fd00::1"; then
-        ok "FRR sees IPv6 next-hop fd00::1 on IPv4 route"
+    # FRR did not advertise Extended Next Hop (Test 1), so RFC 8950 forbids an
+    # IPv6 next hop for IPv4 NLRI. rustbgpd's eBGP export sets the next hop to
+    # its local IPv4 session address (10.0.0.1, which is also the injected next
+    # hop), so FRR must see exactly ipv4/10.0.0.1.
+    # Seeing the configured `local_ipv6_nexthop` (fd00::1) here would mean the
+    # export ignored the peer's missing capability.
+    local nh
+    nh=$(printf '%s\n' "$route_json" \
+        | jq -r '[.paths[0].nexthops[]? | "\(.afi)/\(.ip)"] | join(",")' 2>/dev/null \
+        || echo "unreadable")
+    if [ "$nh" = "ipv4/10.0.0.1" ]; then
+        ok "FRR sees IPv4 next-hop 10.0.0.1 on 10.99.0.0/24 (no IPv6 next hop without negotiated Extended Next Hop)"
     else
-        # May still work with IPv4 NH if extended-nexthop encoding is transparent
-        local nh
-        nh=$(echo "$route_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for path in data.get('paths', []):
-    for nh in path.get('nexthops', []):
-        print(nh.get('ip', ''))
-        break
-    break
-" 2>/dev/null || echo "unknown")
-        log "Next-hop on FRR for injected route: $nh"
-        if [ "$nh" = "fd00::1" ]; then
-            ok "IPv6 next-hop fd00::1 confirmed"
-        else
-            # IPv4 NH is also valid — extended-nexthop doesn't mandate IPv6 NH
-            ok "Route received (next-hop=$nh; extended-nexthop negotiation succeeded)"
-        fi
+        fail "Expected exactly IPv4 next-hop 10.0.0.1 on 10.99.0.0/24, FRR shows '${nh}'"
     fi
 }
 # ---------------------------------------------------------------------------
@@ -212,7 +220,7 @@ main() {
     test_ipv4_routes_received
     test_ipv6_routes_received
     test_injected_route_reaches_frr
-    test_ipv6_nexthop_on_frr
+    test_ipv4_nexthop_without_enhe
 
     echo ""
     log "Results: $pass passed, $fail failed"

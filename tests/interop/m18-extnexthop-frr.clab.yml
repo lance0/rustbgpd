@@ -1,11 +1,12 @@
 # Containerlab topology: rustbgpd ↔ FRR (M18 — Extended Next-Hop, RFC 8950)
 #
-# Validates: IPv4 unicast routes exchanged with IPv6 next-hop via MP_REACH_NLRI.
+# Validates: rustbgpd advertises Extended Next Hop for IPv4 unicast and, when
+# the peer does not reciprocate, sends IPv4 routes with an IPv4 next hop.
 #
-# Dual-stack link: IPv4 (10.0.0.0/24) + IPv6 (fd00::/64)
-# FRR (AS 65002) advertises: IPv4 routes with IPv6 next-hop via route-map
-# rustbgpd (AS 65001) receives IPv4 routes with IPv6 NH, and sends IPv4 routes
-# with IPv6 NH when extended-nexthop is negotiated.
+# Dual-stack link: IPv4 (10.0.0.0/24) + IPv6 (fd00::/64); the one BGP session
+# runs over IPv4 transport. FRR advertises Extended Next Hop only over IPv6
+# transport, so it receives rustbgpd's capability without advertising its own
+# and the capability is not negotiated (see the driver header).
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m18-extnexthop-frr.clab.yml
@@ -36,6 +37,10 @@ topology:
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m18-extnexthop.conf:/etc/frr/frr.conf:ro
+        # Without this, vtysh prints "Can't open configuration file
+        # /etc/frr/vtysh.conf" on stdout and the driver's `json | jq`
+        # scrapes fail to parse.
+        - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
         - ip -6 addr add fd00::2/64 dev eth1
