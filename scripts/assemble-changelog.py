@@ -12,7 +12,9 @@ version section that `release.yml` extracts.
 
 A fragment is `### <Category>` on its first line, then one or more `- ` bullets
 in the changelog's hard-wrapped style; continuation lines are indented by two
-spaces and are kept byte-for-byte. `changelog.d/README.md` documents the format.
+spaces and are kept byte-for-byte, except that a link target written relative
+to `changelog.d/` (`](../docs/...)`) loses its leading `../` so it resolves from
+the root `CHANGELOG.md`. `changelog.d/README.md` documents the format.
 
 The script refuses, naming the file, a fragment whose first line is not a known
 category, an empty fragment, a body line that is neither a bullet, a
@@ -52,6 +54,8 @@ CATEGORIES = (
 SECTION = re.compile(r"(?m)^## \[[^\]\n]+\][^\n]*$")
 SUBSECTION = re.compile(r"(?m)^### [^\n]*$")
 CONFLICT_MARKER = re.compile(r"(?m)^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)")
+# A link target relative to `changelog.d/`, which becomes root-relative.
+FRAGMENT_RELATIVE_LINK = re.compile(r"\]\(\.\./")
 
 
 class Fragment(NamedTuple):
@@ -83,7 +87,7 @@ def parse_fragment(name: str, text: str) -> Fragment:
                 f"{name}:{number}: expected a `- ` bullet or an indented "
                 f"continuation line, got {line!r}"
             )
-    return Fragment(name, category, body + "\n")
+    return Fragment(name, category, FRAGMENT_RELATIVE_LINK.sub("](", body) + "\n")
 
 
 def load_fragments(root: Path) -> list[Fragment]:

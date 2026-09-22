@@ -113,6 +113,25 @@ class AssembleChangelogTests(unittest.TestCase):
         self.assertIn(MULTILINE[len("### Fixed\n\n") :], text)
         self.assertEqual(text.count("### Fixed"), 1)
 
+    def test_fragment_relative_link_targets_become_root_relative(self):
+        fragment = """### Fixed
+
+- See the [guide](../docs/x.md#anchor), the
+  [upstream](https://example.org/../a.md), and [below](#local-anchor).
+  The path ../docs/y.md and [a label](plain text) stay as written.
+"""
+        root = self.tree(**{"fixed-links.md": fragment})
+        assemble.run(root, check=False)
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            """- See the [guide](docs/x.md#anchor), the
+  [upstream](https://example.org/../a.md), and [below](#local-anchor).
+  The path ../docs/y.md and [a label](plain text) stay as written.
+""",
+            text,
+        )
+        self.assertNotIn("](../", text)
+
     def test_second_assembly_with_no_fragments_changes_nothing(self):
         root = self.tree(**{"fixed-a.md": "### Fixed\n\n- Fragment fix A.\n"})
         assemble.run(root, check=False)
