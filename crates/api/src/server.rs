@@ -2815,6 +2815,15 @@ mod tests {
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
+    /// Serializes this binary's only fork, the umask re-exec below, against
+    /// tests whose assertions need a dropped descriptor to be closed. Until
+    /// it execs, a forked child holds a copy of every open descriptor, even a
+    /// `CLOEXEC` one: a dropped listener still accepts the liveness probe,
+    /// and a released directory `flock` stays held. The forking test holds
+    /// the write guard until its child has exited.
+    #[cfg(target_os = "linux")]
+    static FORK_DESCRIPTOR_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
     #[cfg(target_os = "linux")]
     fn uds_test_directory() -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -2940,6 +2949,11 @@ mod tests {
     async fn uds_rejects_ambiguous_paths_and_preserves_non_socket_entries() {
         use std::os::unix::fs::symlink;
 
+        // Repeated binds in one directory need each released flock closed.
+        let _descriptors = FORK_DESCRIPTOR_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let temp = uds_test_directory();
         for path in [
             PathBuf::from("relative.sock"),
@@ -2978,6 +2992,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn uds_preserves_live_socket_and_replaces_confirmed_stale_socket() {
+        // The stale half needs `original` and the first bind's flock closed.
+        let _descriptors = FORK_DESCRIPTOR_LOCK
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = uds_test_directory();
         let path = temp.path().join("grpc.sock");
         let original = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -3111,6 +3129,9 @@ mod tests {
         if std::env::var_os(CHILD_ENV).is_none() {
             // umask is process-wide: alter it only in a dedicated invocation
             // with this one test, never in the shared test process.
+            let _fork = FORK_DESCRIPTOR_LOCK
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
