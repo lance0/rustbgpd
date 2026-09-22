@@ -315,7 +315,7 @@ where
                             warn!(
                                 vni = vni.as_u32(),
                                 mac = %mac,
-                                esi = ?route.esi,
+                                esi = %route.esi,
                                 ethernet_tag = ?route.ethernet_tag,
                                 primary_vtep_ip = %route.next_hop,
                                 dropped_vtep_ip = %alias_ip,

@@ -876,7 +876,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             }
                             Err(e) => {
                                 tracing::warn!(
-                                    ?e,
+                                    error = %e,
                                     id = nh.id,
                                     "adoption: reserve failed; ignoring"
                                 );
@@ -950,7 +950,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 }
                                 Err(e) => {
                                     tracing::warn!(
-                                        ?e,
+                                        error = %e,
                                         id = nh.id,
                                         "adoption: L3 reserve failed; ignoring"
                                     );
@@ -1455,7 +1455,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 self.state.l3_adoption_since_report.routes_adopted += 1;
                                 tracing::info!(
                                     vrf_id = vrf_id.as_u32(),
-                                    ?prefix,
+                                    %prefix,
                                     next_hop = %route.next_hop,
                                     "adopted proto-bgp onlink VRF route from a previous daemon lifetime"
                                 );
@@ -2246,7 +2246,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     tracing::debug!(id, "pending_deletes: drained on retry");
                 }
                 Err(e) => {
-                    tracing::trace!(?e, id, "pending_deletes: still failing");
+                    tracing::trace!(error = %e, id, "pending_deletes: still failing");
                 }
             }
         }
@@ -2394,7 +2394,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        ?e,
+                        error = %e,
                         id,
                         "adoption cleanup: del_nexthop failed; leaving reserved for next pass"
                     );
@@ -2587,7 +2587,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        ?e,
+                        error = %e,
                         id,
                         "L3 adoption cleanup: del_nexthop failed; leaving reserved for next pass"
                     );
@@ -2984,7 +2984,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     // surface in operator runs instead of silently
                     // hanging around in the kernel forever.
                     tracing::warn!(
-                        ?e,
+                        error = %e,
                         id,
                         "drift: untracked tagged NHID could not be reserved; \
                          operator intervention may be required (rustbgpd cannot \
@@ -3080,7 +3080,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        ?e,
+                        error = %e,
                         id,
                         "drift: untracked L3 tagged NHID could not be reserved"
                     );
@@ -3235,7 +3235,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             self.state.foreign_since_report.owned_relinquished += 1;
             tracing::warn!(
                 vrf_id = key.0.as_u32(),
-                prefix = ?key.1,
+                prefix = %key.1,
                 "owned VRF route was replaced by a foreign entry; relinquishing ownership \
                  (foreign row preserved)"
             );
@@ -3562,7 +3562,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     self.state.l3_adoption_since_report.routes_reaped += 1;
                     tracing::info!(
                         vrf_id = vrf_id.as_u32(),
-                        ?prefix,
+                        %prefix,
                         "reaped adopted VRF route that no Type 5 re-claimed"
                     );
                 }
@@ -3570,7 +3570,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     tracing::warn!(
                         error = %e,
                         vrf_id = vrf_id.as_u32(),
-                        ?prefix,
+                        %prefix,
                         "failed to reap adopted VRF route; will retry next pass"
                     );
                 }
@@ -6520,7 +6520,7 @@ fn note_single_active_swap(
         state.single_active_since_report.backup_swaps += 1;
         tracing::info!(
             vni = group_key.vni.as_u32(),
-            esi = ?group_key.esi,
+            esi = %group_key.esi,
             ethernet_tag = ?group_key.ethernet_tag,
             old_pe = %old_pe,
             new_pe = %new_pe,
@@ -7218,7 +7218,7 @@ where
                 state.single_active_since_report.teardowns += 1;
                 tracing::info!(
                     vni = group_key.vni.as_u32(),
-                    esi = ?group_key.esi,
+                    esi = %group_key.esi,
                     ethernet_tag = ?group_key.ethernet_tag,
                     "ADR-0083 single-active group teardown: MAC rows \
                      removed before the group; standby GC'd with the \

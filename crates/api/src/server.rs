@@ -91,7 +91,7 @@ fn log_tls_client_expiry(
         .and_then(crate::credentials::certificate_not_after);
     info!(
         event = "grpc_tls_client_certificate",
-        peer_addr = ?tcp.peer_addr().ok(),
+        client = tcp.peer_addr().ok().map(tracing::field::display),
         certificate_not_after_seconds,
         "accepted gRPC mTLS client certificate"
     );
@@ -104,7 +104,7 @@ fn log_tls_client_expiry(
     }) {
         warn!(
             event = "grpc_tls_client_certificate_expiry",
-            peer_addr = ?tcp.peer_addr().ok(),
+            client = tcp.peer_addr().ok().map(tracing::field::display),
             certificate_not_after_seconds,
             tls_expiry_warning_seconds = warning_seconds,
             "observed gRPC client leaf notAfter is within the configured warning window"

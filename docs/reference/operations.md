@@ -153,8 +153,35 @@ log_level = "debug"
 Or filter via `RUST_LOG` using the per-peer tracing span:
 
 ```bash
-RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug rustbgpd /etc/rustbgpd/config.toml
+RUST_LOG='info,[peer{peer_addr=10.0.0.1}]=debug' rustbgpd /etc/rustbgpd/config.toml
 ```
+
+The span directive needs the square brackets. `RUST_LOG` is parsed as a
+whole, so one directive that does not parse, such as the unbracketed
+`peer{peer_addr=10.0.0.1}=debug`, makes the daemon ignore `RUST_LOG`
+entirely and log at `info`.
+
+The span directive and `log_level` select events emitted inside that peer's
+session span: the BGP session task, its connect path, and its socket writer.
+They do not select events about the peer that other components emit outside
+the span: the TCP listener, the peer manager (lifecycle, inbound
+connections, policy apply, snapshots), reload, the RIB, BFD, and the
+blackhole route installer.
+`tracing` filter directives cannot match an event field's value, so select
+those events in the JSON log instead. Daemon events about a BGP peer name
+its address in the `peer` event field, and session-span events also carry
+the span's `peer_addr`:
+
+```bash
+jq -c 'select(.fields.peer == "10.0.0.1"
+  or any(.spans[]?; .peer_addr == "10.0.0.1"))' rustbgpd.log
+```
+
+Events about a link-local peer configured with an interface show either the
+bare address or the scoped label, such as `fe80::1%eth0`, so match both.
+Raise the global level, or the level of the emitting target (for
+example `rustbgpd::peer_manager=debug`), when the out-of-span events you
+need are below `info`.
 
 ---
 

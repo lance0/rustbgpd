@@ -87,7 +87,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{Instrument, debug, warn};
 
 /// Why the writer task ended, beyond a clean both-senders-dropped exit.
 #[derive(Debug)]
@@ -234,7 +234,7 @@ pub(super) fn spawn(
         peer_label,
         send_hold_time,
     };
-    let join = tokio::spawn(task.run());
+    let join = tokio::spawn(task.run().in_current_span());
     WriterHandle {
         bulk_tx,
         completed,

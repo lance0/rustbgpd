@@ -2203,7 +2203,7 @@ impl PeerManager {
                                     error!(%error, "peer shutdown worker failed");
                                 }
                                 shutdowns.spawn(async move {
-                                    debug!(%addr, "shutting down peer");
+                                    debug!(peer = %addr, "shutting down peer");
                                     if let Some(pending) = managed.pending_inbound.take() {
                                         let _ = Self::shutdown_handle_bounded_owned(
                                             addr.address,
@@ -2220,7 +2220,7 @@ impl PeerManager {
                                     .await
                                     .joined()
                                     {
-                                        debug!(%addr, "peer shut down");
+                                        debug!(peer = %addr, "peer shut down");
                                     }
                                 });
                             }

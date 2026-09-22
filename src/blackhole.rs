@@ -454,7 +454,7 @@ async fn run_loop<F>(
                     Some(event) => {
                         if kernel_route_drift_wakes(&event, &state.owned) {
                             debug!(
-                                prefix = ?event.prefix,
+                                prefix = event.prefix.map(tracing::field::display),
                                 "kernel route drift on the BLACKHOLE discard surface; \
                                  coalesced reconcile follows"
                             );

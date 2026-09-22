@@ -10,6 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
+use tracing::Instrument;
 
 const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -454,7 +455,7 @@ impl PeerSession {
         let config = self.config.clone();
         let peer_label = self.peer_label.clone();
         debug!(peer = %peer_label, addr = %config.remote_addr, "connecting");
-        self.connect_task = Some(tokio::spawn(async move {
+        let connect = async move {
             match tokio::time::timeout(
                 config.connect_timeout,
                 create_and_connect(config.clone(), peer_label.clone()),
@@ -467,7 +468,9 @@ impl PeerSession {
                     format!("TCP connect to {} timed out", config.remote_addr),
                 )),
             }
-        }));
+        };
+        // Keep the peer span on connect-path events (TCP-AO and socket setup).
+        self.connect_task = Some(tokio::spawn(connect.in_current_span()));
     }
 
     /// Tear the session down because the writer's bulk channel

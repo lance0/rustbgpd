@@ -105,7 +105,7 @@ impl PeerManager {
                 peer_asn,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
-                    debug!(%peer_addr, session_id, ?role, "ignoring notification for unknown peer session");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring notification for unknown peer session");
                     return;
                 };
                 let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
@@ -115,7 +115,7 @@ impl PeerManager {
                             .is_some_and(|p| p.session_id == session_id)
                 });
                 if !matches_current {
-                    debug!(%peer_addr, session_id, ?role, "ignoring stale OpenReceived notification");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring stale OpenReceived notification");
                     return;
                 }
                 self.learn_dynamic_remote_asn(&peer_key, peer_asn);
@@ -134,7 +134,7 @@ impl PeerManager {
                 peer_addr,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
-                    debug!(%peer_addr, session_id, ?role, "ignoring BackToIdle for unknown peer session");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring BackToIdle for unknown peer session");
                     return;
                 };
                 let pending = self.peers.get_mut(&peer_key).and_then(|m| {
@@ -148,7 +148,7 @@ impl PeerManager {
                     }
                 });
                 if let Some(pending) = pending {
-                    debug!(%peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
+                    debug!(peer = %peer_addr, session_id, ?role, "inbound collision candidate went idle, dropping");
                     let _ = self
                         .quiesce_retiring_session(
                             &peer_key,
@@ -166,7 +166,7 @@ impl PeerManager {
                     .get(&peer_key)
                     .is_some_and(|m| m.session_id == session_id);
                 if !current_primary {
-                    debug!(%peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
                     return;
                 }
                 // Auto-remove dynamic peers when they go idle (no reconnect).
@@ -184,7 +184,7 @@ impl PeerManager {
                     // [[dynamic_neighbors]] range) inherits the retry
                     // when handle_inbound recreates the ManagedPeer.
                     self.dead_letter_pending_for(peer_addr);
-                    info!(%peer_addr, "dynamic peer session went idle, removing");
+                    info!(peer = %peer_addr, "dynamic peer session went idle, removing");
                     if let Some(mut managed) = self.peers.remove(&peer_key) {
                         let primary_session_id = managed.session_id;
                         self.retiring_sessions
@@ -238,7 +238,7 @@ impl PeerManager {
                             self.register_session(session_id, &peer_key);
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
-                            info!(%peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
+                            info!(peer = %peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
                         } else {
                             // Auto-removal is authoritative when no terminal
                             // breach was discovered during the join barrier.
@@ -260,7 +260,7 @@ impl PeerManager {
                         // Existing primary failed — promote the already-running
                         // inbound candidate if one exists.
                         if self.promote_pending_inbound(&peer_key).await {
-                            info!(%peer_addr, "existing session went idle, promoting inbound collision candidate");
+                            info!(peer = %peer_addr, "existing session went idle, promoting inbound collision candidate");
                         }
                     } else if let Some(pending) = self
                         .peers
@@ -277,7 +277,7 @@ impl PeerManager {
                             )
                             .await;
                         if withheld {
-                            info!(%peer_addr, "BFD withholding — dropped inbound collision candidate instead of promoting");
+                            info!(peer = %peer_addr, "BFD withholding — dropped inbound collision candidate instead of promoting");
                         }
                     }
                 }
@@ -294,7 +294,7 @@ impl PeerManager {
                 // Informational: nothing is latched. One durable session event
                 // per crossing so operators can alert on it without a log tail.
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
-                    debug!(%peer_addr, session_id, ?role, "ignoring max-prefix warning from unknown session");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring max-prefix warning from unknown session");
                     return;
                 };
                 let currently_owned = self.peers.get(&peer_key).is_some_and(|managed| {
@@ -305,7 +305,7 @@ impl PeerManager {
                             .is_some_and(|pending| pending.session_id == session_id)
                 });
                 if !currently_owned {
-                    debug!(%peer_addr, session_id, ?role, "ignoring stale max-prefix warning notification");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring stale max-prefix warning notification");
                     return;
                 }
                 let rendered_peer = peer_key.label();
@@ -332,7 +332,7 @@ impl PeerManager {
                 received,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
-                    debug!(%peer_addr, session_id, ?role, "ignoring max-prefix latch from unknown session");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring max-prefix latch from unknown session");
                     return;
                 };
                 // SessionRole describes how the task was spawned and remains
@@ -350,7 +350,7 @@ impl PeerManager {
                     .get(&session_id)
                     .is_some_and(|owner| owner == &peer_key);
                 if !currently_owned && !retiring_owned {
-                    debug!(%peer_addr, session_id, ?role, "ignoring stale max-prefix latch notification");
+                    debug!(peer = %peer_addr, session_id, ?role, "ignoring stale max-prefix latch notification");
                     return;
                 }
 
@@ -395,7 +395,7 @@ impl PeerManager {
                         .await
                 {
                     warn!(
-                        %peer_addr,
+                        peer = %peer_addr,
                         session_id,
                         error = %stop_error,
                         "failed to stop primary after max-prefix breach"
@@ -414,16 +414,16 @@ impl PeerManager {
                 }
                 if installed {
                     if let Some(seconds) = restart_seconds {
-                        info!(%peer_addr, %error, seconds, "peer latched disabled after max-prefix breach; one automatic restart scheduled");
+                        info!(peer = %peer_addr, %error, seconds, "peer latched disabled after max-prefix breach; one automatic restart scheduled");
                     } else {
-                        info!(%peer_addr, %error, "peer latched disabled after max-prefix breach; explicit enable required");
+                        info!(peer = %peer_addr, %error, "peer latched disabled after max-prefix breach; explicit enable required");
                     }
                 } else {
                     let original_session_id = self
                         .max_prefix_latches
                         .get(&peer_key)
                         .map(|latch| latch.source_session_id);
-                    debug!(%peer_addr, session_id, original_session_id, "duplicate max-prefix terminal notice kept the original latch deadline");
+                    debug!(peer = %peer_addr, session_id, original_session_id, "duplicate max-prefix terminal notice kept the original latch deadline");
                 }
             }
         }
@@ -468,7 +468,7 @@ impl PeerManager {
         new: SessionState,
     ) {
         let Some(peer_key) = self.peer_key_for_session(session_id) else {
-            debug!(%peer_addr, session_id, ?role, "ignoring lifecycle notification for unknown peer session");
+            debug!(peer = %peer_addr, session_id, ?role, "ignoring lifecycle notification for unknown peer session");
             return;
         };
         let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
@@ -478,7 +478,7 @@ impl PeerManager {
                     .is_some_and(|p| p.session_id == session_id)
         });
         if !matches_current {
-            debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
+            debug!(peer = %peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
         }
         if let Some(peer_asn) = peer_asn {

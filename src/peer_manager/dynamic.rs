@@ -543,7 +543,7 @@ impl PeerManager {
             while let Some(victim) = self.dead_lettered_pending_order.pop_front() {
                 if self.dead_lettered_pending.remove(&victim).is_some() {
                     warn!(
-                        %peer_addr,
+                        peer = %peer_addr,
                         evicted = %victim,
                         cap,
                         "dead-letter pending table at cap, evicting oldest existing entry — \
@@ -578,7 +578,7 @@ impl PeerManager {
         managed.pending_export_apply = prev.export_apply;
         managed.advertise_graceful_shutdown = prev.graceful_shutdown;
         info!(
-            %peer_addr,
+            peer = %peer_addr,
             pending_refresh = prev.refresh,
             pending_export_apply = prev.export_apply,
             advertise_graceful_shutdown = prev.graceful_shutdown,

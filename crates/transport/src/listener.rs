@@ -1039,7 +1039,7 @@ impl BgpListener {
                     Ok((stream, peer_addr)) => {
                         accept_backoff = ACCEPT_BACKOFF_INITIAL;
                         let peer_ip = peer_addr.ip();
-                        debug!(%peer_ip, "inbound TCP connection");
+                        debug!(peer = %peer_ip, "inbound TCP connection");
                         // GTSM before any byte of this connection is handed
                         // to the peer manager. The shared listener socket
                         // cannot carry per-peer IP_MINTTL, so the accepted

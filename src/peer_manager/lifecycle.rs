@@ -340,7 +340,7 @@ impl PeerManager {
                     SessionLifecycleEventType::PeerEnabled,
                     format!("peer {address} max-prefix hold-down expired; waiting for BFD"),
                 );
-                info!(%address, "max-prefix hold-down expired; strict BFD still withholds BGP until BFD Up");
+                info!(peer = %address, "max-prefix hold-down expired; strict BFD still withholds BGP until BFD Up");
                 continue;
             }
             let commands = self
@@ -382,7 +382,7 @@ impl PeerManager {
                             "peer {address} automatically restarted after max-prefix hold-down"
                         ),
                     );
-                    info!(%address, "peer automatically restarted after max-prefix hold-down");
+                    info!(peer = %address, "peer automatically restarted after max-prefix hold-down");
                 }
                 Err(error) => {
                     if let Some(latch) = self.max_prefix_latches.get_mut(&peer) {
@@ -391,7 +391,7 @@ impl PeerManager {
                             peer.label()
                         );
                     }
-                    warn!(%address, %error, "automatic max-prefix restart attempt failed; peer remains latched disabled");
+                    warn!(peer = %address, %error, "automatic max-prefix restart attempt failed; peer remains latched disabled");
                 }
             }
         }
@@ -444,16 +444,16 @@ impl PeerManager {
         {
             Ok(Ok(())) => PeerShutdownOutcome::Joined,
             Ok(Err(e)) => {
-                warn!(%address, %context, error = %e, "peer shutdown returned transport error");
+                warn!(peer = %address, %context, error = %e, "peer shutdown returned transport error");
                 PeerShutdownOutcome::Joined
             }
             Err(rustbgpd_transport::PeerShutdownError::Join(e)) => {
-                error!(%address, %context, error = %e, "peer task join error during shutdown");
+                error!(peer = %address, %context, error = %e, "peer task join error during shutdown");
                 PeerShutdownOutcome::Joined
             }
             Err(rustbgpd_transport::PeerShutdownError::TimedOut { .. }) => {
                 warn!(
-                    %address,
+                    peer = %address,
                     %context,
                     timeout_ms = %PEER_LIFECYCLE_COMMAND_TIMEOUT.as_millis(),
                     "peer shutdown timed out; aborted session task and continuing without parking PeerManager"
@@ -752,7 +752,7 @@ impl PeerManager {
                 PeerLifecycleError::Internal(format!("failed to start peer: {error}"))
             })?;
 
-        info!(%address, %remote_asn, "peer added dynamically");
+        info!(peer = %address, %remote_asn, "peer added dynamically");
         let tcp_ao_protected = transport.tcp_ao.is_some();
         self.peers.insert(
             peer_key.clone(),
@@ -810,7 +810,7 @@ impl PeerManager {
             // the withhold via the normal up→start path.
             if withhold {
                 self.mark_bfd_withheld(address);
-                info!(%address, "strict BFD — withholding BGP establishment until BFD is Up");
+                info!(peer = %address, "strict BFD — withholding BGP establishment until BFD is Up");
             }
         } else {
             // A disabled re-add is a live config object only; keep BGP stopped
@@ -1235,7 +1235,7 @@ impl PeerManager {
                     // peer not yet Established — the next PeerUp emits from
                     // the updated config.
                     debug!(
-                        %addr, error = %error,
+                        peer = %addr, error = %error,
                         "RIB declined export-knob refresh (peer likely not yet Established)"
                     );
                 }
@@ -1830,7 +1830,7 @@ impl PeerManager {
             self.remove_max_prefix_latch(&peer);
         }
         if shutdown.joined() {
-            info!(%address, "peer deleted");
+            info!(peer = %address, "peer deleted");
         }
 
         let peer_for_reap = peer.clone();
@@ -1919,9 +1919,9 @@ impl PeerManager {
         self.set_bfd_peer_disabled(address, false);
         if withhold {
             self.mark_bfd_withheld(address);
-            info!(%address, "strict BFD — withholding BGP until BFD Up (re-enable)");
+            info!(peer = %address, "strict BFD — withholding BGP until BFD Up (re-enable)");
         }
-        info!(%address, "peer enabled");
+        info!(peer = %address, "peer enabled");
         Ok(())
     }
 
@@ -1970,7 +1970,7 @@ impl PeerManager {
         );
         // ADR-0067 step 4: drain this peer's BFD session (published disabled).
         self.set_bfd_peer_disabled(address, true);
-        info!(%address, "peer disabled");
+        info!(peer = %address, "peer disabled");
         Ok(())
     }
 
@@ -2018,7 +2018,7 @@ impl PeerManager {
             .administrative_reset_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
             .map_err(|e| PeerLifecycleError::Internal(format!("failed to reset peer: {e}")))?;
-        info!(%address, "peer reset");
+        info!(peer = %address, "peer reset");
         Ok(())
     }
 
@@ -2087,7 +2087,7 @@ impl PeerManager {
                     .await
             {
                 warn!(
-                    %addr,
+                    peer = %addr,
                     enabled,
                     error = %e,
                     "failed to toggle graceful-shutdown on live peer session — \
@@ -2107,7 +2107,7 @@ impl PeerManager {
                 .await
             {
                 Err(error) => {
-                    warn!(%addr, %error, "RIB refresh failed after gshut toggle");
+                    warn!(peer = %addr, %error, "RIB refresh failed after gshut toggle");
                     failures.push(format!("{addr}: {error}"));
                 }
                 Ok(Err(e)) => {
@@ -2115,7 +2115,7 @@ impl PeerManager {
                     // expected for peers not yet Established — log at
                     // debug, not as a failure.
                     debug!(
-                        %addr, error = %e,
+                        peer = %addr, error = %e,
                         "RIB declined refresh (peer likely not yet Established) — \
                          desired state stored, will apply on next PeerUp"
                     );
@@ -2321,7 +2321,7 @@ impl PeerManager {
                 // errors: the caller named it, so it deserves the answer.
                 Err(PeerCommandError::FamilyNotNegotiated { .. }) if refresh_all => {}
                 Err(e) => {
-                    warn!(%address, error = %e, "failed to send route refresh");
+                    warn!(peer = %address, error = %e, "failed to send route refresh");
                     // Conservative by construction: an already-accepted family
                     // is delivery, and so is a reply we never got. Only a
                     // definite session-side rejection on the very first family
@@ -2343,7 +2343,7 @@ impl PeerManager {
             }
         }
 
-        info!(%address, families = ?refreshed, "soft reset in requested");
+        info!(peer = %address, families = ?refreshed, "soft reset in requested");
         Ok(())
     }
 }

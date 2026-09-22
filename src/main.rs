@@ -3867,7 +3867,7 @@ async fn run<T>(
     // roster up front; discovering peers incrementally after the first EoR
     // can release selection prematurely in a multi-peer topology.
     let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
-        error!("invalid policy configuration: {e}");
+        error!(error = %e, "invalid policy configuration");
         process::exit(1);
     });
 
@@ -3875,7 +3875,7 @@ async fn run<T>(
     // teardown-owned actor starts. A second failure after config validation is
     // a programming error, but remains daemon-fatal instead of dropping state.
     let _ = config.export_chain().unwrap_or_else(|e| {
-        error!("invalid global export policy: {e}");
+        error!(error = %e, "invalid global export policy");
         process::exit(1);
     });
     let evpn_instances = std::sync::Arc::new(config.resolve_evpn_instances().unwrap_or_else(|e| {
@@ -5605,7 +5605,7 @@ async fn run<T>(
         let export_policy = neighbor.export_policy;
         let peer_group = neighbor.peer_group;
         info!(
-            peer = %transport_config.remote_addr,
+            peer = %transport_config.remote_addr.ip(),
             label = %label,
             remote_asn = transport_config.peer.remote_asn,
             "adding peer from config"
@@ -5728,7 +5728,7 @@ async fn run<T>(
             // instead of admitting a session into teardown.
             if listener_gate.is_shutting_down() {
                 info!(
-                    peer = %conn.peer_addr,
+                    peer = %conn.peer_addr.ip(),
                     "rejecting inbound BGP connection: daemon is shutting down"
                 );
                 continue;
