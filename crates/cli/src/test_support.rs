@@ -1633,6 +1633,8 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
             }],
             orphan_nexthops_count: 1,
             pending_delete_count: 0,
+            l3_orphan_nexthops_count: 0,
+            l3_pending_delete_count: 0,
             drift_recovery_disabled: false,
         }))
     }

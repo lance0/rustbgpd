@@ -619,14 +619,18 @@ pub struct SingleActiveCounters {
 pub struct FdbNexthopDataplaneStatus {
     /// One row per owned FDB nexthop group.
     pub groups: Vec<FdbNexthopGroupStatus>,
-    /// Count of rustbgpd-tagged kernel nexthops discovered during
-    /// startup adoption / drift recovery but not yet associated with
-    /// a live owned group. These are retained or cleaned by the
+    /// Count of rustbgpd-tagged L2 FDB-NHG kernel nexthops discovered
+    /// during startup adoption / drift recovery but not yet associated
+    /// with a live owned group. These are retained or cleaned by the
     /// reconciler depending on current kernel FDB references.
     pub orphan_nexthops_count: u32,
-    /// Count of tagged nexthop IDs queued for retry because a kernel
-    /// delete failed during GC / teardown.
+    /// Count of L2 FDB-NHG tagged nexthop IDs queued for retry because
+    /// a kernel delete failed during GC / teardown.
     pub pending_delete_count: u32,
+    /// L3 (all-active Type 5) counterpart of `orphan_nexthops_count`.
+    pub l3_orphan_nexthops_count: u32,
+    /// L3 (all-active Type 5) counterpart of `pending_delete_count`.
+    pub l3_pending_delete_count: u32,
     /// `true` when steady-state `RTM_GETNEXTHOP` drift recovery was
     /// disabled for this daemon instance after a permanent dump
     /// failure. Normal FDB-NHG apply paths can still work.

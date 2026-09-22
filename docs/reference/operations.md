@@ -3801,9 +3801,10 @@ This is the rustbgpd-owned view of ADR-0059 aliasing-ECMP state —
 distinct from the RIB above. Compare its `group-id`, member
 `nh_id`s, and `mac-refs` against `ip nexthop show` / `bridge fdb
 show` when debugging multi-homed Type 2 forwarding. The top-line
-header reports `orphan-nexthops`, `pending-deletes`, and
-`drift-recovery-disabled` so the periodic drift-recovery latch and
-allocator GC backlog are visible without log scraping.
+header reports `orphan-nexthops`, `pending-deletes`,
+`drift-recovery-disabled`, `l3-orphan-nexthops`, and `l3-pending-deletes`
+so the periodic drift-recovery latch and the L2 and L3 (all-active
+Type 5) allocator GC backlog are visible without log scraping.
 
 #### Inject a route from a controller
 

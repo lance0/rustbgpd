@@ -1191,13 +1191,7 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         // non-Linux build, pre-first-report) where no drift loop is
         // running at all, so a derived "enabled" label would
         // misrepresent those cases.
-        outln!(
-            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={}",
-            resp.groups.len(),
-            resp.orphan_nexthops_count,
-            resp.pending_delete_count,
-            resp.drift_recovery_disabled,
-        )?;
+        outln!("{}", fdb_nexthops_header(&resp))?;
         if resp.groups.is_empty() {
             outln!("No owned FDB nexthop groups")?;
         } else {
@@ -1226,6 +1220,18 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
     Ok(())
 }
 
+fn fdb_nexthops_header(resp: &crate::proto::ListEvpnNexthopsResponse) -> String {
+    format!(
+        "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={} l3-orphan-nexthops={} l3-pending-deletes={}",
+        resp.groups.len(),
+        resp.orphan_nexthops_count,
+        resp.pending_delete_count,
+        resp.drift_recovery_disabled,
+        resp.l3_orphan_nexthops_count,
+        resp.l3_pending_delete_count,
+    )
+}
+
 fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_json::Value {
     let groups: Vec<serde_json::Value> = resp
         .groups
@@ -1250,6 +1256,8 @@ fn fdb_nexthops_to_json(resp: &crate::proto::ListEvpnNexthopsResponse) -> serde_
         "groups": groups,
         "orphan_nexthops_count": resp.orphan_nexthops_count,
         "pending_delete_count": resp.pending_delete_count,
+        "l3_orphan_nexthops_count": resp.l3_orphan_nexthops_count,
+        "l3_pending_delete_count": resp.l3_pending_delete_count,
         "drift_recovery_disabled": resp.drift_recovery_disabled,
     })
 }
@@ -1931,6 +1939,8 @@ mod tests {
             orphan_nexthops_count: 102,
             pending_delete_count: 103,
             drift_recovery_disabled: true,
+            l3_orphan_nexthops_count: 105,
+            l3_pending_delete_count: 106,
         };
         assert_eq!(
             super::fdb_nexthops_to_json(&response),
@@ -1954,6 +1964,8 @@ mod tests {
               ],
               "orphan_nexthops_count": 102,
               "pending_delete_count": 103,
+              "l3_orphan_nexthops_count": 105,
+              "l3_pending_delete_count": 106,
               "drift_recovery_disabled": true
             })
         );
@@ -2818,6 +2830,23 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
     }
 
     #[test]
+    fn fdb_nexthops_header_appends_l3_counts() {
+        let header = super::fdb_nexthops_header(&crate::proto::ListEvpnNexthopsResponse {
+            groups: Vec::new(),
+            orphan_nexthops_count: 2,
+            pending_delete_count: 1,
+            l3_orphan_nexthops_count: 4,
+            l3_pending_delete_count: 3,
+            drift_recovery_disabled: true,
+        });
+        assert_eq!(
+            header,
+            "FDB nexthop groups: 0 orphan-nexthops=2 pending-deletes=1 \
+             drift-recovery-disabled=true l3-orphan-nexthops=4 l3-pending-deletes=3"
+        );
+    }
+
+    #[test]
     fn fdb_nexthops_json_shape_is_stable() {
         let value = super::fdb_nexthops_to_json(&crate::proto::ListEvpnNexthopsResponse {
             groups: vec![crate::proto::EvpnFdbNexthopGroup {
@@ -2833,11 +2862,15 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             }],
             orphan_nexthops_count: 2,
             pending_delete_count: 1,
+            l3_orphan_nexthops_count: 4,
+            l3_pending_delete_count: 3,
             drift_recovery_disabled: true,
         });
 
         assert_eq!(value["orphan_nexthops_count"], 2);
         assert_eq!(value["pending_delete_count"], 1);
+        assert_eq!(value["l3_orphan_nexthops_count"], 4);
+        assert_eq!(value["l3_pending_delete_count"], 3);
         assert_eq!(value["drift_recovery_disabled"], true);
         assert_eq!(value["groups"][0]["vni"], 100);
         assert_eq!(value["groups"][0]["esi"], "03:00:00:00:00:00:00:00:00:07");
