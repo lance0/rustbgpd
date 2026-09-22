@@ -4794,7 +4794,7 @@ policy customer-in(peer_lp: u32) {
             None,
             coordinator.clone(),
         )
-        .with_runtime_config_settlement(watchdog, DaemonGate::new());
+        .with_runtime_config_settlement(watchdog.clone(), DaemonGate::new());
         // Handshake: the persister received the stage and never answers it.
         let (call, ack) = staged_policy_delete(svc, &mut config_rx).await;
         let crate::peer_types::ConfigPersistAck::Staged { staged, commit } = ack else {

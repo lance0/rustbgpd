@@ -1246,12 +1246,15 @@ impl RuntimeConfigSettlementWatchdog {
     }
 
     /// Watchdog for other modules' crate tests. Its terminal action reports
-    /// on the returned receiver instead of exiting the test process.
+    /// on the returned receiver instead of exiting the test process, and the
+    /// returned guard stops and joins its threads on drop.
     #[cfg(test)]
-    pub(crate) fn for_crate_test(budget: Duration) -> (Self, std::sync::mpsc::Receiver<i32>) {
+    pub(crate) fn for_crate_test(
+        budget: Duration,
+    ) -> (TestWatchdog, std::sync::mpsc::Receiver<i32>) {
         let (terminal, receiver) = std::sync::mpsc::channel();
         (
-            Self::start(budget, AMBIGUITY_FENCE_GRACE, terminal),
+            TestWatchdog(Self::start(budget, AMBIGUITY_FENCE_GRACE, terminal)),
             receiver,
         )
     }
@@ -2014,6 +2017,34 @@ fn run_terminal_action(registry: &Registry) {
     thread::park();
 }
 
+/// Test watchdog guard. Dropping it stops and joins the observer and
+/// fatal-clock threads, so a test leaks neither.
+#[cfg(test)]
+pub(crate) struct TestWatchdog(RuntimeConfigSettlementWatchdog);
+
+#[cfg(test)]
+impl std::ops::Deref for TestWatchdog {
+    type Target = RuntimeConfigSettlementWatchdog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestWatchdog {
+    fn drop(&mut self) {
+        self.registry.stopping.store(true, Ordering::Release);
+        self.registry.current.store(None);
+        self.registry.wake_threads();
+        for thread in self.0.threads.lock().unwrap().drain(..) {
+            thread
+                .join()
+                .expect("watchdog test thread must stop cleanly");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2051,29 +2082,6 @@ mod tests {
             codes.len()
         );
         assert!(rendered.iter().all(|code| code.starts_with("policy_")));
-    }
-
-    struct TestWatchdog(RuntimeConfigSettlementWatchdog);
-
-    impl std::ops::Deref for TestWatchdog {
-        type Target = RuntimeConfigSettlementWatchdog;
-
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    impl Drop for TestWatchdog {
-        fn drop(&mut self) {
-            self.registry.stopping.store(true, Ordering::Release);
-            self.registry.current.store(None);
-            self.registry.wake_threads();
-            for thread in self.0.threads.lock().unwrap().drain(..) {
-                thread
-                    .join()
-                    .expect("watchdog test thread must stop cleanly");
-            }
-        }
     }
 
     fn test_watchdog(

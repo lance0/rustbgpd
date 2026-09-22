@@ -10,8 +10,9 @@
   `UNAVAILABLE`, the late stage is discarded, and the daemon keeps running.
   This covers the stage acknowledgement in FIB-table, neighbor, peer-group
   and policy CRUD and config transactions, the FIB-table read in FIB-table
-  CRUD and in config transactions, the FIB-table CRUD peer-manager handoff,
-  and the peer-group `Set` read.
+  CRUD and in config transactions, the config-transaction persistence-slot
+  reservation, the FIB-table CRUD peer-manager handoff, and the peer-group
+  `Set` read.
   **Operator-visible:** a stalled config store now yields an `UNAVAILABLE`
   error saying config persistence did not stage the candidate in time and
   nothing was applied, instead of exit 70. Waits after the first runtime

@@ -506,7 +506,10 @@ effect end by that deadline and settle clean no effect with `UNAVAILABLE`:
 - the current-table read in FIB-table CRUD and in config transactions that
   replace FIB tables, and the send half of FIB-table CRUD's peer-manager
   staging command;
-- the read of the existing group in peer-group Set.
+- the read of the existing group in peer-group Set;
+- the config-transaction persistence-slot reservation, which runs inside the
+  owner. FIB-table, neighbor, peer-group and policy CRUD reserve their slot
+  before registering, outside the budget.
 
 Only transport acceptance is capped on the peer-manager send. A command the
 actor has not accepted has no effect; an accepted one may, so its reply keeps
