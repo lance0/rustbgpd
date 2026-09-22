@@ -41,7 +41,7 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   - docker build --build-arg GOBGP_VERSION=4.6.0 --build-arg GOBGP_SHA256=6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m78-multicluster-orr-gobgp.clab.yml
 

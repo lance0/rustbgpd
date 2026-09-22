@@ -183,25 +183,24 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             "Dockerfile.bird3",
             "Dockerfile.bird-v2192",
             "Dockerfile.bird-v332",
+            "Dockerfile.gobgp-v47",
         ):
             shutil.copy2(ROOT / "tests" / "interop" / name, interop / name)
 
-    def mutate(self, relative, old, new="", occurrence=0, expect=None):
-        errors = self.mutated_errors(relative, old, new, occurrence)
+    def mutate(self, relative, old, new="", occurrence=0, expect=None, extra_files=None):
+        errors = self.mutated_errors(relative, old, new, occurrence, extra_files)
         self.assertTrue(errors, f"mutation stayed green: {relative}: {old}")
         if expect is not None:
             self.assertIn(expect, errors)
         return errors
 
-    def mutated_errors(self, relative, old, new="", occurrence=0):
+    def mutated_errors(self, relative, old, new="", occurrence=0, extra_files=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for fixture in (
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -238,6 +237,8 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 )
                 start = index + len(old)
             path.write_text(text[:index] + new + text[index + len(old) :])
+            for extra, content in (extra_files or {}).items():
+                (root / extra).write_text(content)
             return check(root)
 
     def stage_indexed_fixture(self, root):
@@ -245,8 +246,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             ".github/workflows",
             ".github/actions/install-gnmic-artifact",
             ".github/actions/install-grpcurl-artifact",
-            ".github/actions/prepare-gobgp-artifact",
-            ".github/actions/prepare-grpcurl-artifact",
             ".github/actions/prime-rustbgpd-dev-cache",
             ".github/actions/setup-dataplane-host",
             ".github/actions/stage-bird3-artifact",
@@ -346,10 +345,10 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             ),
             (
                 bird3,
-                "actions/download-artifact@v8",
-                "actions/download-artifact@main",
+                "actions/cache/restore@v6",
+                "actions/cache/restore@main",
                 f"{bird3}: action ref is not a reviewed version tag: "
-                "actions/download-artifact@main",
+                "actions/cache/restore@main",
             ),
         )
         for relative, old, new, expect in cases:
@@ -445,39 +444,72 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 expect="kernel-dataplane.yml:m37-ip: no run-interop-test call labelled M37-IP",
             )
 
-    def test_v064_producer_is_load_bearing(self):
+    def test_v064_core_tests_consumer_is_load_bearing(self):
+        ci = ".github/workflows/ci.yml"
         cache_key = (
             "key: rustbgpd-v0.64.0-linux-amd64-"
             "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
         )
         cases = (
-            ("  v064_validator:\n", "  renamed_validator:\n"),
-            ("uses: actions/cache@v6", "uses: actions/cache@main"),
-            (cache_key, f"{cache_key}\n          restore-keys: rustbgpd-v0.64"),
-            ("--self-test", "--skipped-self-test"),
-            ("--prepare-archive", "--skipped-prepare-archive"),
             (
-                "uses: actions/upload-artifact@v7",
-                "uses: actions/upload-artifact@main",
-            ),
-            ("if-no-files-found: error", "if-no-files-found: ignore"),
-        )
-        for old, new in cases:
-            with self.subTest(seam=old):
-                self.mutate(".github/workflows/ci.yml", old, new)
-
-    def test_v064_core_tests_consumer_is_load_bearing(self):
-        cases = (
-            ("    needs: v064_validator\n", "    needs: []\n"),
-            (
+                "uses: actions/cache/restore@v6",
                 "uses: actions/download-artifact@v8",
-                "uses: actions/download-artifact@main",
+                "ci.yml:core_tests: permits actions/download-artifact@",
             ),
-            ("--install-archive", "--prepare-archive"),
+            (
+                "uses: actions/cache/restore@v6",
+                "uses: actions/cache@v6",
+                "ci.yml:core_tests: permits uses: actions/cache@",
+            ),
+            (
+                "        if: steps.v064-cache.outputs.cache-hit != 'true'\n",
+                "",
+                "ci.yml:core_tests: cache save must run only on a miss",
+            ),
+            (
+                cache_key,
+                f"{cache_key}\n          restore-keys: rustbgpd-v0.64",
+                "ci.yml:core_tests: permits restore-keys:",
+            ),
+            (
+                ".github/scripts/install-rustbgpd-v064-validator.sh --self-test",
+                ".github/scripts/install-rustbgpd-v064-validator.sh --skipped-self-test",
+                "ci.yml:core_tests missing validator seam "
+                ".github/scripts/install-rustbgpd-v064-validator.sh --self-test",
+            ),
+            (
+                "--prepare-archive",
+                "--skipped-prepare-archive",
+                "ci.yml:core_tests: expected 1x --prepare-archive",
+            ),
+            (
+                "    name: core tests / rustdoc\n",
+                "    name: core tests / rustdoc\n    needs: [core]\n",
+                "ci.yml:core_tests must not wait on a producer job",
+            ),
+            (
+                "  core:\n",
+                "  v064_validator:\n    runs-on: ubuntu-latest\n\n  core:\n",
+                "ci.yml: a same-run v0.64 validator producer remains",
+            ),
+            (
+                "    needs: [core, core_tests, scale_receipts]\n",
+                "    needs: [core, scale_receipts]\n",
+                "ci.yml:check exact dependency roster drifted",
+            ),
         )
-        for old, new in cases:
+        for old, new, expect in cases:
             with self.subTest(seam=old):
-                self.mutate(".github/workflows/ci.yml", old, new)
+                self.mutate(ci, old, new, expect=expect)
+        for occurrence in (0, 1):
+            with self.subTest(key=occurrence):
+                self.mutate(
+                    ci,
+                    cache_key,
+                    "key: rustbgpd-v0.64.0-linux-amd64-latest",
+                    occurrence=occurrence,
+                    expect=f"ci.yml:core_tests: expected 2x {cache_key}",
+                )
 
     def test_empty_flow_needs_is_empty(self):
         self.assertEqual([], _list_needs("    needs: []\n"))
@@ -493,8 +525,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -522,8 +552,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -558,15 +586,8 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         )[0]
         script = textwrap.dedent(script)
         roster = INTEROP if workflow == "interop.yml" else KERNEL
-        artifacts = ["grpcurl_archive"]
-        if workflow == "interop.yml":
-            artifacts.append("gnmic_archive")
-        artifacts.append("gobgp_archive")
-        if workflow == "interop.yml":
-            artifacts.extend(("bird2192_archive", "bird332_archive"))
-        else:
-            artifacts.append("bird3_archive")
-        expected = ["classify_changes", *artifacts, "prime_dev_image", *roster]
+        gates = ["bird3_archive"] if workflow == "kernel-dataplane.yml" else []
+        expected = ["classify_changes", *gates, "prime_dev_image", *roster]
         if workflow == "kernel-dataplane.yml":
             expected.append("netns")
         needs = {
@@ -598,17 +619,8 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 self.assertEqual(0, self.run_aggregate(workflow, "true", {}).returncode)
 
             roster = INTEROP if workflow == "interop.yml" else KERNEL
-            artifacts = ["grpcurl_archive"]
-            if workflow == "interop.yml":
-                artifacts.append("gnmic_archive")
-            artifacts.append("gobgp_archive")
-            if workflow == "interop.yml":
-                artifacts.extend(("bird2192_archive", "bird332_archive"))
-            else:
-                artifacts.append("bird3_archive")
-            skipped = {
-                job: "skipped" for job in [*artifacts, "prime_dev_image", *roster]
-            }
+            gates = ["bird3_archive"] if workflow == "kernel-dataplane.yml" else []
+            skipped = {job: "skipped" for job in [*gates, "prime_dev_image", *roster]}
             if workflow == "kernel-dataplane.yml":
                 skipped["netns"] = "skipped"
             with self.subTest(workflow=workflow, state="docs only"):
@@ -617,47 +629,22 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 )
 
             for result in ("failure", "cancelled", "skipped"):
-                with self.subTest(workflow=workflow, producer=result):
+                with self.subTest(workflow=workflow, primer=result):
                     self.assertNotEqual(
                         0,
                         self.run_aggregate(
-                            workflow, "true", {"grpcurl_archive": result}
+                            workflow, "true", {"prime_dev_image": result}
                         ).returncode,
                     )
-            with self.subTest(workflow=workflow, state="producer red consumers skipped"):
-                failed = {job: "skipped" for job in roster}
-                failed.update({"grpcurl_archive": "failure"})
-                self.assertNotEqual(
-                    0, self.run_aggregate(workflow, "true", failed).returncode
-                )
-            if workflow == "interop.yml":
-                with self.subTest(workflow=workflow, state="gnmic producer red"):
+            first_lab = roster[0]
+            for result in ("failure", "cancelled", "skipped"):
+                with self.subTest(workflow=workflow, lab=result):
                     self.assertNotEqual(
                         0,
-                        self.run_aggregate(
-                            workflow,
-                            "true",
-                            {
-                                "gnmic_archive": "failure",
-                                "m54": "skipped",
-                                "m56": "skipped",
-                            },
-                        ).returncode,
+                        self.run_aggregate(workflow, "true", {first_lab: result}).returncode,
                     )
-            gobgp_consumers = (
-                ("m74", "m75", "m81", "m82")
-                if workflow == "interop.yml"
-                else ("m65", "m71", "m72")
-            )
-            with self.subTest(workflow=workflow, state="gobgp producer red"):
-                gobgp_red = {job: "skipped" for job in gobgp_consumers}
-                gobgp_red["gobgp_archive"] = "failure"
-                self.assertNotEqual(
-                    0,
-                    self.run_aggregate(workflow, "true", gobgp_red).returncode,
-                )
             if workflow == "kernel-dataplane.yml":
-                with self.subTest(workflow=workflow, state="bird3 producer red"):
+                with self.subTest(workflow=workflow, state="bird3 gate red"):
                     self.assertNotEqual(
                         0,
                         self.run_aggregate(
@@ -666,25 +653,11 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                             {"bird3_archive": "failure", "m43": "skipped"},
                         ).returncode,
                     )
-            else:
-                for producer, consumer in (
-                    ("bird2192_archive", "m83"),
-                    ("bird332_archive", "m101"),
-                ):
-                    with self.subTest(workflow=workflow, producer=producer):
-                        self.assertNotEqual(
-                            0,
-                            self.run_aggregate(
-                                workflow,
-                                "true",
-                                {producer: "failure", consumer: "skipped"},
-                            ).returncode,
-                        )
             for run_labs, results in (
                 ("", {}),
                 ("unknown", {}),
                 ("true", {"classify_changes": "failure"}),
-                ("false", {"grpcurl_archive": "success"}),
+                ("false", {"prime_dev_image": "success"}),
             ):
                 with self.subTest(workflow=workflow, state=(run_labs, results)):
                     self.assertNotEqual(
@@ -692,119 +665,96 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                         self.run_aggregate(workflow, run_labs, results).returncode,
                     )
 
-    def test_grpcurl_producers_are_load_bearing(self):
-        for workflow in ("interop.yml", "kernel-dataplane.yml"):
-            relative = f".github/workflows/{workflow}"
+    CACHE_CONSUMERS = (
+        (
+            ".github/actions/install-grpcurl-artifact/action.yml",
+            "install-grpcurl-artifact",
+            "--install-archive",
+        ),
+        (
+            ".github/actions/install-gnmic-artifact/action.yml",
+            "install-gnmic-artifact",
+            "--install-archive",
+        ),
+        (
+            ".github/actions/stage-gobgp-artifact/action.yml",
+            "stage-gobgp-artifact",
+            "--stage-archive",
+        ),
+        (
+            ".github/actions/stage-bird3-artifact/action.yml",
+            "stage-bird3-artifact",
+            "--stage-archive",
+        ),
+    )
+
+    def test_cache_consumer_actions_are_load_bearing(self):
+        save_if = "      if: steps.cache.outputs.cache-hit != 'true'\n"
+        for relative, label, offline in self.CACHE_CONSUMERS:
+            text = (ROOT / relative).read_text()
+            key_line = next(
+                line for line in text.splitlines() if line.startswith("        key: ")
+            )
+            path_line = next(
+                line for line in text.splitlines() if line.startswith("        path: ")
+            )
             cases = (
-                ("  grpcurl_archive:\n", "  removed_grpcurl_archive:\n", 0),
-                ("needs: classify_changes", "needs: []", 0),
                 (
-                    "if: needs.classify_changes.outputs.run_labs == 'true'",
-                    "if: false",
+                    "uses: actions/cache/restore@v6",
+                    "uses: actions/download-artifact@v8",
                     0,
+                    f"{label}: permits actions/download-artifact@",
                 ),
                 (
-                    "name: Prepare exact grpcurl archive",
-                    "name: Prepare approximate grpcurl archive",
+                    "uses: actions/cache/restore@v6",
+                    "uses: actions/cache@v6",
                     0,
-                ),
-                ("runs-on: ubuntu-latest", "runs-on: ubuntu-24.04", 1),
-                ("timeout-minutes: 10", "timeout-minutes: 9", 0),
-                ("ref: ${{ github.sha }}", "ref: main", 0),
-                (
-                    "uses: ./.github/actions/prepare-grpcurl-artifact",
-                    "uses: ./.github/actions/install-grpcurl-artifact",
-                    0,
+                    f"{label}: permits uses: actions/cache@",
                 ),
                 (
-                    "uses: ./.github/actions/prepare-grpcurl-artifact",
-                    "uses: ./.github/actions/prepare-grpcurl-artifact\n"
-                    "        with:\n"
-                    "          mode: permissive",
+                    "uses: actions/cache/save@v6",
+                    "uses: actions/upload-artifact@v7",
                     0,
+                    f"{label}: permits actions/upload-artifact@",
+                ),
+                (save_if, "", 0, f"{label}: cache save must run only on a miss"),
+                (
+                    key_line,
+                    f"{key_line}\n        restore-keys: stale-",
+                    0,
+                    f"{label}: permits restore-keys:",
                 ),
                 (
-                    "uses: ./.github/actions/prepare-grpcurl-artifact",
-                    "uses: ./.github/actions/prepare-grpcurl-artifact\n"
-                    "      - uses: actions/cache@v6",
+                    key_line,
+                    f"{key_line}\n        fail-on-cache-miss: true",
                     0,
+                    f"{label}: permits fail-on-cache-miss",
+                ),
+                (key_line, "        key: latest", 1, f"{label}: expected 2x {key_line.strip()}"),
+                (path_line, "        path: /tmp/wrong.tar.gz", 0, f"{label}: expected 2x {path_line.strip()}"),
+                ("--prepare-archive", "--skip-verification", 0, f"{label}: expected 1x --prepare-archive"),
+                (offline, "--prepare-archive", 0, f"{label}: expected 1x {offline}"),
+                (
+                    "set -euo pipefail\n",
+                    "set -euo pipefail\n        curl -o /tmp/x https://example.invalid/x\n",
+                    0,
+                    f"{label}: fetches outside the installer",
                 ),
             )
-            for old, new, occurrence in cases:
-                with self.subTest(workflow=workflow, seam=old, occurrence=occurrence):
-                    self.mutate(relative, old, new, occurrence=occurrence)
-
-    def test_grpcurl_producer_action_is_load_bearing(self):
-        relative = ".github/actions/prepare-grpcurl-artifact/action.yml"
-        archive = "grpcurl_1.9.1_linux_x86_64.tar.gz"
-        checksum = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
-        cases = (
-            ('using: "composite"', 'using: "docker"'),
-            ("actions/cache@v6", "actions/cache@main"),
-            (f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}", "key: grpcurl"),
-            ("shell: bash", "shell: sh"),
-            ("--prepare-archive", "--install-archive"),
-            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
-            ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest"),
-            ("if-no-files-found: error", "if-no-files-found: warn"),
-            ("retention-days: 1", "retention-days: 30"),
-            ("compression-level: 0", "compression-level: 6"),
-            (
-                f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}",
-                f"key: grpcurl-v1.9.1-linux-x86_64-{checksum}\n"
-                "        restore-keys: grpcurl-",
-            ),
-            (
-                "uses: actions/cache@v6",
-                "uses: actions/cache@v6\n      continue-on-error: true",
-            ),
-            (
-                "runs:\n",
-                "inputs:\n  mode:\n    required: false\nruns:\n",
-            ),
-            (
-                "runs:\n",
-                "outputs:\n  archive:\n    value: latest\nruns:\n",
-            ),
-            (
-                ".github/scripts/install-grpcurl.sh \\",
-                "curl https://example.invalid/grpcurl\n"
-                "        .github/scripts/install-grpcurl.sh \\",
-            ),
-        )
-        for old, new in cases:
-            with self.subTest(seam=old):
-                self.mutate(relative, old, new)
-        for occurrence in (0, 1):
-            with self.subTest(path=occurrence):
+            for old, new, occurrence, expect in cases:
+                with self.subTest(action=label, seam=old, occurrence=occurrence):
+                    self.mutate(relative, old, new, occurrence=occurrence, expect=expect)
+            # Saving before verification would seal unverified bytes under the key.
+            steps = text.split("\n    - name: ")
+            swapped = steps[:]
+            swapped[2], swapped[3] = steps[3], steps[2]
+            with self.subTest(action=label, seam="save before verify"):
                 self.mutate(
                     relative,
-                    f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{archive}",
-                    "path: ${{ runner.temp }}/grpcurl-cache/wrong.tar.gz",
-                    occurrence=occurrence,
+                    "\n    - name: ".join(steps[2:4]),
+                    "\n    - name: ".join(swapped[2:4]),
+                    expect=f"{label}: restore/prepare/save/offline order drifted",
                 )
-
-    def test_grpcurl_offline_consumer_is_load_bearing(self):
-        relative = ".github/actions/install-grpcurl-artifact/action.yml"
-        for old, new in (
-            ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ("name: grpcurl-v1.9.1-linux-x86_64", "name: grpcurl-latest"),
-            (
-                "path: ${{ runner.temp }}/grpcurl-artifact",
-                "path: ${{ runner.temp }}/wrong",
-            ),
-            ("--install-archive", "--prepare-archive"),
-            (
-                "set -euo pipefail",
-                "set -euo pipefail\n        curl https://example.invalid/grpcurl",
-            ),
-            (
-                "uses: actions/download-artifact@v8",
-                "uses: actions/download-artifact@v8\n    - uses: actions/cache@v6",
-            ),
-        ):
-            with self.subTest(seam=old):
-                self.mutate(relative, old, new)
 
         self.mutate(
             ".github/actions/setup-dataplane-host/action.yml",
@@ -817,58 +767,58 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             "run: bash .github/scripts/install-grpcurl.sh",
         )
 
-    def test_gnmic_producer_and_offline_consumers_are_load_bearing(self):
+    def test_no_lab_job_depends_on_a_same_run_producer(self):
+        for workflow, lab, anchor in (
+            ("interop.yml", "m1", "      - name: Install containerlab\n"),
+            ("kernel-dataplane.yml", "m36", "      - uses: ./.github/actions/setup-dataplane-host\n"),
+        ):
+            relative = f".github/workflows/{workflow}"
+            first_needs = "    needs: [prime_dev_image]\n"
+            download = (
+                "      - uses: actions/download-artifact@v8\n"
+                "        with:\n"
+                "          name: grpcurl-v1.9.1-linux-x86_64\n"
+            )
+            with self.subTest(workflow=workflow, seam="download step"):
+                self.mutate(
+                    relative,
+                    anchor,
+                    download + anchor,
+                    expect=f"{workflow}: a lab dependency flows through the artifact service",
+                )
+            with self.subTest(workflow=workflow, seam="producer dependency"):
+                self.mutate(
+                    relative,
+                    first_needs,
+                    "    needs: [grpcurl_archive, prime_dev_image]\n",
+                    expect=f"{workflow}:{lab}: missing exact gate/primer dependencies",
+                )
+            with self.subTest(workflow=workflow, seam="producer job"):
+                self.mutate(
+                    relative,
+                    "  prime_dev_image:\n",
+                    "  grpcurl_archive:\n"
+                    "    runs-on: ubuntu-latest\n"
+                    "    steps:\n"
+                    "      - uses: ./.github/actions/prepare-grpcurl-artifact\n\n"
+                    "  prime_dev_image:\n",
+                    expect=f"{workflow}: same-run producer prepare-grpcurl-artifact remains",
+                )
+
+    def test_gnmic_offline_consumers_are_load_bearing(self):
         workflow = ".github/workflows/interop.yml"
         for old, new in (
-            ("  gnmic_archive:\n", "  removed_gnmic_archive:\n"),
-            (
-                "key: gnmic-v0.46.0-linux-x86_64-a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e",
-                "key: gnmic-latest",
-            ),
-            ("name: gnmic-v0.46.0-linux-x86_64", "name: gnmic-latest"),
-            (
-                "needs: [grpcurl_archive, gnmic_archive, prime_dev_image]",
-                "needs: [grpcurl_archive, prime_dev_image]",
-            ),
             (
                 "uses: ./.github/actions/install-gnmic-artifact",
                 "run: curl https://example.invalid/gnmic | sudo tar -xz",
             ),
-        ):
-            with self.subTest(seam=old):
-                self.mutate(workflow, old, new)
-        for seam, replacement in (
-            ("actions/cache@v6", "actions/cache@main"),
-            ("--prepare-archive", "--install-archive"),
-            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
-        ):
-            with self.subTest(seam=f"gnmic producer {seam}"):
-                self.mutate(workflow, seam, replacement)
-        exact_path = (
-            "path: ${{ runner.temp }}/gnmic-cache/"
-            "gnmic_0.46.0_Linux_x86_64.tar.gz"
-        )
-        for occurrence in (0, 1):
-            with self.subTest(seam="gnmic exact path", occurrence=occurrence):
-                self.mutate(
-                    workflow,
-                    exact_path,
-                    "path: ${{ runner.temp }}/gnmic-cache/wrong.tar.gz",
-                    occurrence=occurrence,
-                )
-
-        action = ".github/actions/install-gnmic-artifact/action.yml"
-        for old, new in (
-            ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ("name: gnmic-v0.46.0-linux-x86_64", "name: gnmic-latest"),
-            ("--install-archive", "--prepare-archive"),
             (
-                "set -euo pipefail",
-                "set -euo pipefail\n        curl https://example.invalid/gnmic",
+                "uses: ./.github/actions/install-gnmic-artifact",
+                "uses: ./.github/actions/install-containerlab",
             ),
         ):
             with self.subTest(seam=old):
-                self.mutate(action, old, new)
+                self.mutate(workflow, old, new)
 
         installer = ".github/scripts/install-gnmic.sh"
         for old, new in (
@@ -879,105 +829,20 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             ),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
+            ("--retry-max-time 30", "--retry-max-time 3600"),
         ):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
-    def test_gobgp_producer_and_stage_consumers_are_load_bearing(self):
+    def test_gobgp_stage_consumers_are_load_bearing(self):
         checksum = "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
-            for old, new in (
-                ("  gobgp_archive:\n", "  removed_gobgp_archive:\n"),
-                (
-                    "uses: ./.github/actions/prepare-gobgp-artifact",
-                    "uses: ./.github/actions/stage-gobgp-artifact",
-                ),
-                (
-                    "uses: ./.github/actions/prepare-gobgp-artifact",
-                    "uses: ./.github/actions/prepare-gobgp-artifact\n"
-                    "        with:\n"
-                    "          mode: permissive",
-                ),
-                (
-                    "uses: ./.github/actions/prepare-gobgp-artifact",
-                    "uses: ./.github/actions/prepare-gobgp-artifact\n"
-                    "      - uses: actions/cache@v6",
-                ),
-                (
-                    "needs: [grpcurl_archive, gobgp_archive, prime_dev_image]",
-                    "needs: [grpcurl_archive, prime_dev_image]",
-                ),
-                (
+            with self.subTest(workflow=workflow):
+                self.mutate(
+                    relative,
                     "uses: ./.github/actions/stage-gobgp-artifact",
                     "run: curl https://example.invalid/gobgp -o /tmp/gobgp.tar.gz",
-                ),
-            ):
-                with self.subTest(workflow=workflow, seam=old):
-                    self.mutate(relative, old, new)
-
-        producer = ".github/actions/prepare-gobgp-artifact/action.yml"
-        verified_archive = (
-            '          "$RUNNER_TEMP/gobgp-cache/'
-            'gobgp_3.37.0_linux_amd64.tar.gz"\n'
-        )
-        for old, new in (
-            ('using: "composite"', 'using: "docker"'),
-            ("actions/cache@v6", "actions/cache@main"),
-            (f"key: gobgp-v3.37.0-linux-amd64-{checksum}", "key: gobgp-latest"),
-            ("shell: bash", "shell: sh"),
-            ("--prepare-archive", "--stage-archive"),
-            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
-            ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
-            ("if-no-files-found: error", "if-no-files-found: warn"),
-            ("retention-days: 1", "retention-days: 30"),
-            ("compression-level: 0", "compression-level: 6"),
-            (
-                f"key: gobgp-v3.37.0-linux-amd64-{checksum}",
-                f"key: gobgp-v3.37.0-linux-amd64-{checksum}\n"
-                "        restore-keys: gobgp-",
-            ),
-            (
-                "uses: actions/cache@v6",
-                "uses: actions/cache@v6\n      continue-on-error: true",
-            ),
-            (
-                "runs:\n",
-                "inputs:\n  mode:\n    required: false\nruns:\n",
-            ),
-            (
-                "runs:\n",
-                "outputs:\n  archive:\n    value: latest\nruns:\n",
-            ),
-            (
-                ".github/scripts/install-gobgp.sh \\",
-                "curl https://example.invalid/gobgp\n"
-                "        .github/scripts/install-gobgp.sh \\",
-            ),
-            (
-                verified_archive + "\n    - name: Upload verified gobgp archive",
-                verified_archive
-                + "\n    - name: Replace verified archive\n"
-                + "      shell: bash\n"
-                + '      run: cp "$RUNNER_TEMP/unverified.tar.gz" '
-                + '"$RUNNER_TEMP/gobgp-cache/"*.tar.gz\n'
-                + "\n"
-                + "    - name: Upload verified gobgp archive",
-            ),
-        ):
-            with self.subTest(seam=f"gobgp producer action {old}"):
-                self.mutate(producer, old, new)
-        exact_path = (
-            "path: ${{ runner.temp }}/gobgp-cache/"
-            "gobgp_3.37.0_linux_amd64.tar.gz"
-        )
-        for occurrence in (0, 1):
-            with self.subTest(seam="gobgp exact path", occurrence=occurrence):
-                self.mutate(
-                    producer,
-                    exact_path,
-                    "path: ${{ runner.temp }}/gobgp-cache/wrong.tar.gz",
-                    occurrence=occurrence,
                 )
 
         stage_then_build = (
@@ -1003,37 +868,97 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
 
         action = ".github/actions/stage-gobgp-artifact/action.yml"
         for old, new in (
-            ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ("name: gobgp-v3.37.0-linux-amd64", "name: gobgp-latest"),
-            ("--stage-archive", "--prepare-archive"),
-            (
-                "set -euo pipefail",
-                "set -euo pipefail\n        curl https://example.invalid/gobgp",
-            ),
+            ('default: "3.37.0"', 'default: "latest"'),
+            (f'default: "{checksum}"', 'default: "' + "0" * 64 + '"'),
+            ('--sha256 "${{ inputs.sha256 }}"', "--sha256 " + "0" * 64),
         ):
             with self.subTest(seam=old):
                 self.mutate(action, old, new)
 
         installer = ".github/scripts/install-gobgp.sh"
         for old, new in (
-            ('readonly GOBGP_VERSION="3.37.0"', 'readonly GOBGP_VERSION="latest"'),
+            ('GOBGP_VERSION="3.37.0"', 'GOBGP_VERSION="latest"'),
             (checksum, "0" * 64),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
+            ("--retry-max-time 30", "--retry-max-time 3600"),
+            ("--sha256) GOBGP_SHA256=$2 ;;", "--sha256) : ;;"),
+            ("readonly GOBGP_VERSION GOBGP_SHA256", ": mutable pins"),
         ):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
-    def test_shared_job_contracts_reject_additive_permissions(self):
-        producer = (
-            "  gobgp_archive:\n"
-            "    needs: classify_changes\n"
-            "    if: needs.classify_changes.outputs.run_labs == 'true'\n"
-            "    name: Prepare exact gobgp archive\n"
-            "    runs-on: ubuntu-latest\n"
-            "    timeout-minutes: 10\n"
-            "    steps:\n"
+    def test_gobgp4_builds_consume_a_matching_staged_archive(self):
+        workflow = ".github/workflows/interop.yml"
+        sha = {
+            "4.6.0": "6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c",
+            "4.7.0": "05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0",
+            "4.8.0": "43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03",
+        }
+
+        def stage(version):
+            return (
+                f"      - name: Stage verified GoBGP {version} archive\n"
+                "        uses: ./.github/actions/stage-gobgp-artifact\n"
+                "        with:\n"
+                f'          version: "{version}"\n'
+                f"          sha256: {sha[version]}\n\n"
+            )
+
+        m92_build = (
+            "      - name: Build gobgp:v4.7.0-m92\n"
+            "        run: docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n"
         )
+        cases = (
+            ("m92 stage removed", stage("4.7.0"), "", 0,
+             "interop.yml:m92: GoBGP 4.7.0 build is not preceded by a stage of the same version and checksum"),
+            ("m92 stage after build", stage("4.7.0") + m92_build, m92_build + "\n" + stage("4.7.0"), 0,
+             "interop.yml:m92: GoBGP 4.7.0 build is not preceded by a stage of the same version and checksum"),
+            ("m73 stage wrong checksum", stage("4.6.0"), stage("4.6.0").replace(sha["4.6.0"], sha["4.8.0"]), 0,
+             "interop.yml:m73: GoBGP 4.6.0 build is not preceded by a stage of the same version and checksum"),
+            ("m76 stage wrong version", stage("4.8.0"), stage("4.8.0").replace('"4.8.0"', '"4.7.0"'), 0,
+             "interop.yml:m76: GoBGP 4.8.0 build is not preceded by a stage of the same version and checksum"),
+            ("m73 build arg drift", "--build-arg GOBGP_VERSION=4.6.0", "--build-arg GOBGP_VERSION=4.7.0", 0,
+             "interop.yml:m73: GoBGP 4.6.0 build arguments drifted"),
+            ("m92 default build gains args", "docker build -t gobgp:v4.7.0-m92",
+             "docker build --build-arg GOBGP_VERSION=4.8.0 -t gobgp:v4.7.0-m92", 0,
+             "interop.yml:m92: GoBGP default build drifted"),
+        )
+        for name, old, new, occurrence, expect in cases:
+            with self.subTest(case=name):
+                self.mutate(workflow, old, new, occurrence=occurrence, expect=expect)
+
+        dockerfile = "tests/interop/Dockerfile.gobgp-v47"
+        for old, new, expect in (
+            ("COPY gobgp-archive/ /tmp/gobgp-archive/\n", "",
+             "Dockerfile.gobgp-v47: staged release seam missing: COPY gobgp-archive/ /tmp/gobgp-archive/"),
+            ('    echo "${GOBGP_SHA256}  ${archive}" | sha256sum --check --strict; \\\n', "",
+             'Dockerfile.gobgp-v47: staged release seam missing: echo "${GOBGP_SHA256}  ${archive}" | sha256sum --check --strict'),
+            ('    echo "${GOBGP_SHA256}  ${archive}" | sha256sum --check --strict; \\\n'
+             '    tar -xzf "${archive}" -C /usr/local/bin gobgp gobgpd; \\\n',
+             '    tar -xzf "${archive}" -C /usr/local/bin gobgp gobgpd; \\\n'
+             '    echo "${GOBGP_SHA256}  ${archive}" | sha256sum --check --strict; \\\n',
+             "Dockerfile.gobgp-v47: copy/check/extract ordering drifted"),
+            ("ARG GOBGP_SHA256=05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0",
+             "ARG GOBGP_SHA256=" + "0" * 64,
+             "Dockerfile.gobgp-v47: staged release seam missing: ARG GOBGP_SHA256="
+             "05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0"),
+            ("FROM debian:bookworm-slim AS gobgp-release\n",
+             "FROM golang:1.25-bookworm AS source\nFROM debian:bookworm-slim AS gobgp-release\n",
+             "Dockerfile.gobgp-v47: source or floating build replaced release archives"),
+        ):
+            with self.subTest(dockerfile_seam=old):
+                self.mutate(dockerfile, old, new, expect=expect)
+        with self.subTest(seam="source-built bgpls image returns"):
+            self.mutate(
+                dockerfile,
+                "CMD",
+                "CMD",
+                expect="Dockerfile.gobgp-bgpls: source-built GoBGP image returned",
+                extra_files={"tests/interop/Dockerfile.gobgp-bgpls": "FROM golang:1.25\n"},
+            )
+
+    def test_shared_job_contracts_reject_additive_permissions(self):
         primer = (
             "  prime_dev_image:\n"
             "    needs: classify_changes\n"
@@ -1048,71 +973,44 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         )
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
-            for job, envelope in (
-                ("gobgp_archive", producer),
-                ("prime_dev_image", primer),
-            ):
-                widened = envelope.replace(
-                    "    steps:\n",
-                    "    permissions: write-all\n    steps:\n",
-                )
-                with self.subTest(workflow=workflow, job=job):
-                    self.mutate(relative, envelope, widened)
+            widened = primer.replace(
+                "    steps:\n",
+                "    permissions: write-all\n    steps:\n",
+            )
+            with self.subTest(workflow=workflow):
+                self.mutate(relative, primer, widened)
 
     def test_shared_job_steps_reject_additive_behavior(self):
-        gobgp_call = (
-            "      - name: Restore, prepare, and upload exact gobgp archive\n"
-            "        uses: ./.github/actions/prepare-gobgp-artifact"
-        )
         primer_call = (
             "      - name: Prime rustbgpd:dev build cache\n"
             "        uses: ./.github/actions/prime-rustbgpd-dev-cache"
         )
         for workflow in ("interop.yml", "kernel-dataplane.yml"):
             relative = f".github/workflows/{workflow}"
-            cases = (
-                (
-                    "pre-gobgp helper change",
-                    gobgp_call,
-                    "      - name: Alter GoBGP helper\n"
-                    "        run: printf '\\nexit 0\\n' >> "
-                    ".github/scripts/install-gobgp.sh\n\n"
-                    + gobgp_call,
-                ),
-                (
-                    "pre-primer Dockerfile change",
+            with self.subTest(workflow=workflow, seam="pre-primer Dockerfile change"):
+                self.mutate(
+                    relative,
                     primer_call,
                     "      - name: Alter Dockerfile before priming\n"
                     "        run: printf '\\nRUN true\\n' >> Dockerfile\n\n"
                     + primer_call,
-                ),
-            )
-            for seam, old, new in cases:
-                with self.subTest(workflow=workflow, seam=seam):
-                    self.mutate(relative, old, new)
-
-            for job, call in (
-                ("gobgp_archive", gobgp_call),
-                ("primer", primer_call),
+                )
+            for field in (
+                "        if: false",
+                "        env:\n          CI_PROOF_MODE: altered",
+                "        with:\n          mode: altered",
             ):
-                for field in (
-                    "        if: false",
-                    "        env:\n          CI_PROOF_MODE: altered",
-                    "        with:\n          mode: altered",
-                ):
-                    with self.subTest(workflow=workflow, job=job, field=field):
-                        self.mutate(relative, call, f"{call}\n{field}")
+                with self.subTest(workflow=workflow, field=field):
+                    self.mutate(relative, primer_call, f"{primer_call}\n{field}")
 
-    def test_bird3_producer_and_stage_consumer_are_load_bearing(self):
+    def test_bird3_gate_and_stage_consumer_are_load_bearing(self):
         checksum = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
         relative = ".github/workflows/kernel-dataplane.yml"
         for old, new in (
             ("  bird3_archive:\n", "  removed_bird3_archive:\n"),
-            (f"key: bird3-v3.3.2-source-{checksum}", "key: bird3-latest"),
-            ("name: bird3-v3.3.2-source", "name: bird3-latest"),
             (
-                "needs: [grpcurl_archive, bird3_archive, prime_dev_image]",
-                "needs: [grpcurl_archive, prime_dev_image]",
+                "needs: [bird3_archive, prime_dev_image]",
+                "needs: [prime_dev_image]",
             ),
             (
                 "uses: ./.github/actions/stage-bird3-artifact",
@@ -1123,26 +1021,41 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
                 "cache-to: type=gha",
             ),
+            ("actions/cache/restore@v6", "actions/cache/restore@main"),
+            ("--prepare-archive", "--stage-archive"),
+            ("3) status=unavailable ;;", "3) status=ok ;;"),
+            (
+                "uses: actions/cache/save@v6",
+                "uses: actions/upload-artifact@v7",
+            ),
+            (
+                "        if: steps.prepare.outputs.bird3_status == 'ok' && "
+                "steps.cache.outputs.cache-hit != 'true'\n",
+                "",
+            ),
         ):
             with self.subTest(seam=old):
                 self.mutate(relative, old, new)
-        for seam, replacement in (
-            ("actions/cache@v6", "actions/cache@main"),
-            ("--prepare-archive", "--stage-archive"),
-            ("actions/upload-artifact@v7", "actions/upload-artifact@main"),
-        ):
-            with self.subTest(seam=f"bird3 producer {seam}"):
-                self.mutate(relative, seam, replacement)
-        exact_path = (
-            "path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz"
-        )
+        # The gate must share the stage action's derived identity, or m43
+        # misses the entry the gate just saved.
         for occurrence in (0, 1):
+            with self.subTest(seam="bird3 exact key", occurrence=occurrence):
+                self.mutate(
+                    relative,
+                    f"key: bird-v3.3.2-source-{checksum}",
+                    f"key: bird3-v3.3.2-source-{checksum}",
+                    occurrence=occurrence,
+                    expect="kernel-dataplane.yml:bird3_archive must share the stage "
+                    "action's cache identity",
+                )
             with self.subTest(seam="bird3 exact path", occurrence=occurrence):
                 self.mutate(
                     relative,
-                    exact_path,
-                    "path: ${{ runner.temp }}/bird3-cache/wrong.tar.gz",
+                    "path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz",
+                    "path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz",
                     occurrence=occurrence,
+                    expect="kernel-dataplane.yml:bird3_archive must share the stage "
+                    "action's cache identity",
                 )
 
         stage_step = (
@@ -1169,19 +1082,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 f"{build_step}\n{stage_step}",
             )
 
-        action = ".github/actions/stage-bird3-artifact/action.yml"
-        for old, new in (
-            ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ('default: "bird3-v3.3.2-source"', 'default: "bird3-latest"'),
-            ("--stage-archive", "--prepare-archive"),
-            (
-                "set -euo pipefail",
-                "set -euo pipefail\n        curl https://example.invalid/bird3",
-            ),
-        ):
-            with self.subTest(seam=old):
-                self.mutate(action, old, new)
-
         installer = ".github/scripts/install-bird3.sh"
         for old, new in (
             ('BIRD3_VERSION="3.3.2"', 'BIRD3_VERSION="latest"'),
@@ -1196,83 +1096,40 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
 
-    def test_required_interop_bird_producers_are_load_bearing(self):
+    def test_interop_bird_stage_inputs_are_load_bearing(self):
         relative = ".github/workflows/interop.yml"
-        specs = (
-            (
-                "bird2192_archive",
-                "2.19.2",
-                "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
-                "bird2192-cache",
-                "bird2192-v2.19.2-source",
-                "bird2192-v2.19.2-source",
-            ),
-            (
-                "bird332_archive",
-                "3.3.2",
-                "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
-                "bird3-cache",
-                "bird332-v3.3.2-source",
-                "bird3-v3.3.2-source",
-            ),
-        )
-        for job, version, checksum, cache_dir, artifact, cache_artifact in specs:
-            archive = f"bird-{version}.tar.gz"
-            cache_key = f"{cache_artifact}-{checksum}"
+        for version, checksum in (
+            ("2.19.2", "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660"),
+            ("3.3.2", "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"),
+        ):
             for old, new in (
-                (f"  {job}:\n", f"  removed_{job}:\n"),
-                (f"key: {cache_key}", "key: bird-latest"),
-                (f"--version {version}", "--version latest"),
-                (f"--sha256 {checksum}", "--sha256 " + "0" * 64),
-                (f"name: {artifact}", "name: bird-latest"),
+                (f'          version: "{version}"\n', '          version: "0.0.0"\n'),
+                (f"          sha256: {checksum}\n", "          sha256: " + "0" * 64 + "\n"),
             ):
-                with self.subTest(job=job, seam=old):
+                with self.subTest(version=version, seam=old):
                     self.mutate(relative, old, new)
-            upload_tail = (
-                f"          name: {artifact}\n"
-                f"          path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}\n"
-                "          if-no-files-found: error\n"
-                "          retention-days: 1\n"
-                "          compression-level: 0\n"
-            )
-            with self.subTest(job=job, seam="compression zero"):
-                self.mutate(
-                    relative,
-                    upload_tail,
-                    upload_tail.replace("compression-level: 0", "compression-level: 9"),
-                )
-            exact_path = (
-                f"path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}"
-            )
-            for occurrence in (0, 1):
-                with self.subTest(job=job, seam="exact path", occurrence=occurrence):
-                    self.mutate(
-                        relative,
-                        exact_path,
-                        f"path: ${{{{ runner.temp }}}}/{cache_dir}/wrong.tar.gz",
-                        occurrence=occurrence,
-                    )
-            with self.subTest(job=job, seam="no restore keys"):
-                self.mutate(
-                    relative,
-                    f"          key: {cache_key}\n",
-                    f"          key: {cache_key}\n          restore-keys: bird-\n",
-                )
 
     def test_parameterized_bird_stage_action_is_load_bearing(self):
         relative = ".github/actions/stage-bird3-artifact/action.yml"
-        for old, new in (
-            ("name: ${{ inputs.artifact-name }}", "name: bird3-v3.3.2-source"),
-            ('--version "${{ inputs.version }}"', "--version 3.3.2"),
-            ('--sha256 "${{ inputs.sha256 }}"', "--sha256 " + "0" * 64),
+        for old, new, occurrence in (
+            ('--version "${{ inputs.version }}"', "--version 3.3.2", 0),
+            ('--version "${{ inputs.version }}"', "--version 3.3.2", 1),
+            ('--sha256 "${{ inputs.sha256 }}"', "--sha256 " + "0" * 64, 1),
             (
-                '"$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz"',
-                '"$RUNNER_TEMP/bird3-artifact/bird-3.3.2.tar.gz"',
+                '"$RUNNER_TEMP/bird-cache/bird-${{ inputs.version }}.tar.gz"',
+                '"$RUNNER_TEMP/bird-cache/bird-3.3.2.tar.gz"',
+                1,
             ),
-            ('"${{ inputs.stage-directory }}"', "tests/interop/bird3-archive"),
+            (
+                "key: bird-v${{ inputs.version }}-source-${{ inputs.sha256 }}",
+                "key: bird3-v${{ inputs.version }}-source-${{ inputs.sha256 }}",
+                0,
+            ),
+            ('"${{ inputs.stage-directory }}"', "tests/interop/bird3-archive", 0),
+            ('--coverage-label "${{ github.job }}: ', '--coverage-label "M43: ', 0),
         ):
-            with self.subTest(seam=old):
-                self.mutate(relative, old, new)
+            with self.subTest(seam=old, occurrence=occurrence):
+                self.mutate(relative, old, new, occurrence=occurrence)
 
     def test_m83_m101_bird_archive_dockerfiles_are_load_bearing(self):
         specs = (
@@ -1319,8 +1176,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -1354,8 +1209,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -1389,8 +1242,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
                 ".github/workflows",
                 ".github/actions/install-gnmic-artifact",
                 ".github/actions/install-grpcurl-artifact",
-                ".github/actions/prepare-gobgp-artifact",
-                ".github/actions/prepare-grpcurl-artifact",
                 ".github/actions/prime-rustbgpd-dev-cache",
                 ".github/actions/setup-dataplane-host",
                 ".github/actions/stage-bird3-artifact",
@@ -1424,14 +1275,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         ):
             relative = f".github/workflows/{workflow}"
             needs_prefix = (
-                "needs: [classify_changes, grpcurl_archive, "
-                + ("gnmic_archive, " if workflow == "interop.yml" else "")
-                + "gobgp_archive, "
-                + (
-                    "bird2192_archive,\n      bird332_archive, "
-                    if workflow == "interop.yml"
-                    else ""
-                )
+                "needs: [classify_changes, "
                 + ("bird3_archive, " if workflow == "kernel-dataplane.yml" else "")
                 + "prime_dev_image, "
             )
@@ -1580,7 +1424,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             ),
             (
                 ".github/workflows/interop.yml",
-                "needs: [grpcurl_archive, prime_dev_image]",
+                "needs: [prime_dev_image]",
                 "needs: []",
             ),
             (
@@ -1740,7 +1584,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         with self.subTest(workflow=kernel, seam="consumer needs"):
             self.mutate(
                 kernel,
-                "needs: [grpcurl_archive, prime_dev_image]",
+                "needs: [prime_dev_image]",
                 "needs: []",
             )
 
@@ -1811,20 +1655,19 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
 
         m85_needs = (
             "  m85:\n"
-            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n"
+            "    needs: [prime_dev_image]\n"
         )
         self.assertEqual(1, workflow.count(m85_needs), "M85 needs seam must be unique")
         self.mutate(
             relative,
             m85_needs,
-            "  m85:\n    needs: [grpcurl_archive, prime_dev_image]\n",
+            "  m85:\n    needs: [bird2192_archive, prime_dev_image]\n",
         )
 
         for old in (
             "      - name: Stage verified BIRD 2.19.2 archive\n",
             '          version: "2.19.2"\n',
             "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n",
-            "          artifact-name: bird2192-v2.19.2-source\n",
             "      - name: Build bird:v2.19.2-m85\n",
             "          file: tests/interop/Dockerfile.bird-v2192\n",
             "          tags: bird:v2.19.2-m85\n",
@@ -1857,21 +1700,20 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         relative = ".github/workflows/interop.yml"
         m83_needs = (
             "  m83:\n"
-            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n"
+            "    needs: [prime_dev_image]\n"
         )
         workflow = (ROOT / relative).read_text()
         self.assertEqual(1, workflow.count(m83_needs), "M83 needs seam must be unique")
         self.mutate(
             relative,
             m83_needs,
-            "  m83:\n    needs: [grpcurl_archive, prime_dev_image]\n",
+            "  m83:\n    needs: [bird2192_archive, prime_dev_image]\n",
         )
 
         for old in (
             "      - name: Stage verified BIRD 2.19.2 archive\n",
             '          version: "2.19.2"\n',
             "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n",
-            "          artifact-name: bird2192-v2.19.2-source\n",
             "          file: tests/interop/Dockerfile.bird-v2192\n",
             "          tags: bird:v2.19.2-m83\n",
             "          cache-from: type=gha,scope=bird2192-m83\n",
@@ -1893,7 +1735,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         workflow = (ROOT / relative).read_text()
         m76_header = (
             "  m76:\n"
-            "    needs: [grpcurl_archive, prime_dev_image]\n"
+            "    needs: [prime_dev_image]\n"
             "    name: M76 — ORR divergent-best (GoBGP 4.8.0)\n"
         )
         self.assertEqual(1, workflow.count(m76_header), "M76 header must be unique")
@@ -1943,7 +1785,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         workflow = (ROOT / relative).read_text()
         m77_header = (
             "  m77:\n"
-            "    needs: [grpcurl_archive, prime_dev_image]\n"
+            "    needs: [prime_dev_image]\n"
             "    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)\n"
         )
         self.assertEqual(1, workflow.count(m77_header), "M77 header must be unique")
@@ -2011,8 +1853,8 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         unique_blocks = (
             (
                 "  m100:\n"
-                "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n",
-                "  m100:\n    needs: [grpcurl_archive, bird2192_archive]\n",
+                "    needs: [prime_dev_image]\n",
+                "  m100:\n    needs: [bird2192_archive, prime_dev_image]\n",
             ),
             (
                 "      # The current-daemon receiver beside the frozen released-image receiver.\n"
@@ -2084,7 +1926,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             "        with:\n"
             '          version: "2.19.2"\n'
             "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n"
-            "          artifact-name: bird2192-v2.19.2-source\n"
         )
         self.assertEqual(4, (ROOT / relative).read_text().count(stage))
         self.mutate(relative, stage, occurrence=2)
@@ -2093,11 +1934,9 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         relative = ".github/workflows/interop.yml"
         for old in (
             "  m101:\n",
-            "    needs: [grpcurl_archive, bird332_archive, prime_dev_image]\n",
             "      - name: Stage verified BIRD 3.3.2 archive\n",
             '          version: "3.3.2"\n',
             "          sha256: 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c\n",
-            "          artifact-name: bird332-v3.3.2-source\n",
             "      - name: Build checksum-pinned BIRD 3.3.2 image\n",
             "          file: tests/interop/Dockerfile.bird-v332\n",
             "          tags: bird:v3.3.2-m101\n",
@@ -2131,7 +1970,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         relative = ".github/workflows/interop.yml"
         for old in (
             "  m102:\n",
-            "    needs: [grpcurl_archive, prime_dev_image]\n",
             "      - name: Verify and pull digest-pinned OpenBGPD 9.2 image\n",
             "          OPENBGPD_AMD64_MANIFEST: sha256:3178027d7ca916eacec247c66472a1f95a17d83d4616fe4f118318a912ab8beb\n",
             "          OPENBGPD_CONFIG: sha256:06317b65d9fadc80f68c5c8e7c82815b0643577fd5441bd55038e43771b5807e\n",
@@ -2210,7 +2048,7 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
         job = workflow[job_start:job_end]
         for old in (
             "  m104:\n",
-            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n",
+            "    needs: [prime_dev_image]\n",
             "      - name: Verify and pull exact ARouteServer 1.23.2 image\n",
             "          AROUTESERVER_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66\n",
             "          AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93\n",
@@ -2246,7 +2084,6 @@ sleep() { printf '%s\n' "$1" >> "$SLEEPS"; }
             "        with:\n"
             '          version: "2.19.2"\n'
             "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n"
-            "          artifact-name: bird2192-v2.19.2-source\n"
         )
         count = (ROOT / relative).read_text().count(stage)
         self.assertGreaterEqual(count, 2)

@@ -91,31 +91,45 @@ GOBGP_CHECKSUMS = {
 }
 V064_SHA256 = "bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137"
 V064_ARCHIVE = "rustbgpd-linux-amd64.tar.gz"
-V064_ARTIFACT = "rustbgpd-v0.64.0-linux-amd64"
 V064_CACHE_KEY = f"rustbgpd-v0.64.0-linux-amd64-{V064_SHA256}"
 GRPCURL_SHA256 = "588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214"
 GRPCURL_ARCHIVE = "grpcurl_1.9.1_linux_x86_64.tar.gz"
-GRPCURL_ARTIFACT = "grpcurl-v1.9.1-linux-x86_64"
 GRPCURL_CACHE_KEY = f"grpcurl-v1.9.1-linux-x86_64-{GRPCURL_SHA256}"
-PREPARE_GRPCURL_ACTION = "uses: ./.github/actions/prepare-grpcurl-artifact"
 GRPCURL_ACTION = "uses: ./.github/actions/install-grpcurl-artifact"
 GNMIC_SHA256 = "a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e"
 GNMIC_ARCHIVE = "gnmic_0.46.0_Linux_x86_64.tar.gz"
-GNMIC_ARTIFACT = "gnmic-v0.46.0-linux-x86_64"
 GNMIC_CACHE_KEY = f"gnmic-v0.46.0-linux-x86_64-{GNMIC_SHA256}"
 GNMIC_ACTION = "uses: ./.github/actions/install-gnmic-artifact"
-GOBGP_ARCHIVE = f"gobgp_{GOBGP_VERSION}_linux_amd64.tar.gz"
-GOBGP_ARTIFACT = f"gobgp-v{GOBGP_VERSION}-linux-amd64"
-GOBGP_CACHE_KEY = f"{GOBGP_ARTIFACT}-{GOBGP_CHECKSUMS['amd64']}"
 GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
 GOBGP_BUILD = (
     "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
 )
+# Official GoBGP 4.x release archives built through Dockerfile.gobgp-v47. Each
+# build must be preceded in its job by a stage of the same version and checksum.
+GOBGP4_CHECKSUMS = {
+    "4.6.0": "6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c",
+    "4.7.0": "05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0",
+    "4.8.0": "43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03",
+}
+GOBGP4_DEFAULT = "4.7.0"
+GOBGP4_BUILDERS = {
+    "m73": "4.6.0",
+    "m76": "4.8.0",
+    "m77": "4.8.0",
+    "m78": "4.6.0",
+    "m79": "4.6.0",
+    "m83": "4.8.0",
+    "m92": "4.7.0",
+    "m103": "4.8.0",
+    "m104": "4.8.0",
+    "m107": "4.8.0",
+}
+GOBGP4_DOCKERFILE = "-f tests/interop/Dockerfile.gobgp-v47 tests/interop"
 BIRD3_VERSION = "3.3.2"
 BIRD3_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
 BIRD3_ARCHIVE = f"bird-{BIRD3_VERSION}.tar.gz"
-BIRD3_ARTIFACT = f"bird3-v{BIRD3_VERSION}-source"
-BIRD3_CACHE_KEY = f"{BIRD3_ARTIFACT}-{BIRD3_SHA256}"
+# One derived identity per archive, shared by every workflow that stages it.
+BIRD3_CACHE_KEY = f"bird-v{BIRD3_VERSION}-source-{BIRD3_SHA256}"
 BIRD3_ACTION = "uses: ./.github/actions/stage-bird3-artifact"
 BIRD3_BUILD = "file: tests/interop/Dockerfile.bird3"
 BIRD3_CACHE_SEAMS = (
@@ -124,15 +138,8 @@ BIRD3_CACHE_SEAMS = (
 )
 BIRD2192_VERSION = "2.19.2"
 BIRD2192_SHA256 = "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660"
-BIRD2192_ARCHIVE = f"bird-{BIRD2192_VERSION}.tar.gz"
-BIRD2192_ARTIFACT = f"bird2192-v{BIRD2192_VERSION}-source"
-BIRD2192_CACHE_KEY = f"{BIRD2192_ARTIFACT}-{BIRD2192_SHA256}"
 BIRD332_VERSION = "3.3.2"
 BIRD332_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
-BIRD332_ARCHIVE = f"bird-{BIRD332_VERSION}.tar.gz"
-BIRD332_ARTIFACT = f"bird332-v{BIRD332_VERSION}-source"
-BIRD332_CACHE_KEY = BIRD3_CACHE_KEY
-BIRD332_CACHE_DIR = "bird3-cache"
 FRR1070_IMAGE = (
     "quay.io/frrouting/frr@sha256:"
     "a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b"
@@ -153,9 +160,9 @@ PERMISSION_HASHES = {
 # bare commit SHAs. Adding an action or moving to a new major edits this set.
 PINS = frozenset(
     {
-        "actions/cache@v6",
+        "actions/cache/restore@v6",
+        "actions/cache/save@v6",
         "actions/checkout@v7",
-        "actions/download-artifact@v8",
         "actions/upload-artifact@v7",
         "docker/build-push-action@v7",
         "docker/setup-buildx-action@v4",
@@ -172,19 +179,6 @@ LAB_CALL = re.compile(
 LAB_CALL_INPUT = re.compile(r"(?m)^          (label|topology|script): (.+)$")
 SETUP_HOST_ACTION = "uses: ./.github/actions/setup-dataplane-host"
 
-GOBGP_PRODUCER_JOB_CONTRACT = (
-    "    needs: classify_changes",
-    "    if: needs.classify_changes.outputs.run_labs == 'true'",
-    "    name: Prepare exact gobgp archive",
-    "    runs-on: ubuntu-latest",
-    "    timeout-minutes: 10",
-    "    steps:",
-    "      - uses: actions/checkout@v7",
-    "        with:",
-    "          ref: ${{ github.sha }}",
-    "      - name: Restore, prepare, and upload exact gobgp archive",
-    "        uses: ./.github/actions/prepare-gobgp-artifact",
-)
 PRIME_DEV_IMAGE_JOB_CONTRACT = (
     "    needs: classify_changes",
     "    if: needs.classify_changes.outputs.run_labs == 'true'",
@@ -200,35 +194,6 @@ PRIME_DEV_IMAGE_JOB_CONTRACT = (
     "          ref: ${{ github.sha }}",
     "      - name: Prime rustbgpd:dev build cache",
     "        uses: ./.github/actions/prime-rustbgpd-dev-cache",
-)
-PREPARE_GOBGP_ACTION_CONTRACT = (
-    'name: "Prepare exact GoBGP artifact"',
-    (
-        'description: "Restore, verify, and upload the pinned GoBGP archive '
-        'for heavy CI lanes."'
-    ),
-    "runs:",
-    '  using: "composite"',
-    "  steps:",
-    "    - name: Restore exact gobgp archive cache",
-    "      uses: actions/cache@v6",
-    "      with:",
-    f"        path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
-    f"        key: {GOBGP_CACHE_KEY}",
-    "    - name: Prepare exact gobgp archive",
-    "      shell: bash",
-    "      run: |",
-    "        .github/scripts/install-gobgp.sh \\",
-    "          --prepare-archive \\",
-    f'          "$RUNNER_TEMP/gobgp-cache/{GOBGP_ARCHIVE}"',
-    "    - name: Upload verified gobgp archive",
-    "      uses: actions/upload-artifact@v7",
-    "      with:",
-    f"        name: {GOBGP_ARTIFACT}",
-    f"        path: ${{{{ runner.temp }}}}/gobgp-cache/{GOBGP_ARCHIVE}",
-    "        if-no-files-found: error",
-    "        retention-days: 1",
-    "        compression-level: 0",
 )
 PRIME_DEV_IMAGE_ACTION_CONTRACT = (
     'name: "Prime rustbgpd:dev build cache"',
@@ -251,6 +216,64 @@ PRIME_DEV_IMAGE_ACTION_CONTRACT = (
     "        cache-from: type=gha,scope=rustbgpd-dev",
     "        cache-to: type=gha,scope=rustbgpd-dev,mode=max,ignore-error=true",
 )
+
+
+CACHE_RESTORE = "uses: actions/cache/restore@v6"
+CACHE_SAVE = "uses: actions/cache/save@v6"
+CACHE_MISS_ONLY = "if: steps.cache.outputs.cache-hit != 'true'"
+# A consumer must never depend on a same-run producer (the artifact service),
+# must not let a stale partial key stand in for the sealed one, and must not
+# use the combined cache action, whose post-job save is skipped on a red lab.
+CONSUMER_FORBIDDEN = (
+    "actions/download-artifact@",
+    "actions/upload-artifact@",
+    "uses: actions/cache@",
+    "restore-keys:",
+    "fail-on-cache-miss",
+    "continue-on-error:",
+    "lookup-only",
+)
+
+
+def _check_cache_consumer(
+    label: str,
+    text: str,
+    path: str,
+    key: str,
+    prepare: str,
+    offline: str,
+    errors: list[str],
+) -> None:
+    """Restore the sealed entry, verify-or-fetch, save on a miss, then use offline.
+
+    Checksum verification lives in the installer's prepare step (which discards
+    an unverifiable hit before fetching) and again in its offline step, so the
+    contract here is order, identity and the absence of any other byte source.
+    """
+    anchors = (
+        ("id: cache", 1),
+        (CACHE_RESTORE, 1),
+        (prepare, 1),
+        (CACHE_SAVE, 1),
+        (CACHE_MISS_ONLY, 1),
+        (offline, 1),
+        (f"path: {path}", 2),
+        (f"key: {key}", 2),
+    )
+    for seam, count in anchors:
+        if text.count(seam) != count:
+            errors.append(f"{label}: expected {count}x {seam}")
+    positions = [text.find(seam) for seam in (CACHE_RESTORE, prepare, CACHE_SAVE, offline)]
+    if min(positions) < 0 or positions != sorted(positions):
+        errors.append(f"{label}: restore/prepare/save/offline order drifted")
+    save_step = text.split(CACHE_SAVE, 1)[0].rsplit("- name:", 1)[-1]
+    if CACHE_MISS_ONLY not in save_step:
+        errors.append(f"{label}: cache save must run only on a miss")
+    for forbidden in CONSUMER_FORBIDDEN:
+        if forbidden in text:
+            errors.append(f"{label}: permits {forbidden}")
+    if re.search(r"(?m)^\s*curl\s|releases/download/|bird\.nic\.cz", text):
+        errors.append(f"{label}: fetches outside the installer")
 
 
 def _hash(text: str) -> str:
@@ -389,6 +412,7 @@ def check(root: Path) -> list[str]:
         "curl -fsSL",
         "--connect-timeout 10",
         "--max-time 120",
+        "--retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 30",
         "--prepare-archive",
         "--install-archive",
         "--self-test",
@@ -408,14 +432,19 @@ def check(root: Path) -> list[str]:
         gobgp_installer.read_text() if gobgp_installer.is_file() else ""
     )
     for seam in (
-        f'readonly GOBGP_VERSION="{GOBGP_VERSION}"',
-        f'readonly GOBGP_SHA256="{GOBGP_CHECKSUMS["amd64"]}"',
+        f'GOBGP_VERSION="{GOBGP_VERSION}"',
+        f'GOBGP_SHA256="{GOBGP_CHECKSUMS["amd64"]}"',
+        "--version) GOBGP_VERSION=$2 ;;",
+        "--sha256) GOBGP_SHA256=$2 ;;",
+        "[[ $GOBGP_SHA256 =~ ^[0-9a-f]{64}$ ]]",
+        "readonly GOBGP_VERSION GOBGP_SHA256",
         'readonly GOBGP_ASSET="gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz"',
         "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/${GOBGP_ASSET}",
         "readonly GOBGP_ATTEMPTS=3",
         "curl -fsSL",
         "--connect-timeout 10",
         "--max-time 120",
+        "--retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 30",
         "--prepare-archive",
         "--stage-archive",
         "--self-test",
@@ -477,68 +506,41 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: permissions drifted")
 
     ci_jobs = _jobs(texts["ci.yml"])
-    producer = ci_jobs.get("v064_validator", "")
-    producer_seams = (
-        "name: prepare exact v0.64 config migration validator",
-        "runs-on: ubuntu-latest",
-        "timeout-minutes: 10",
-        CHECKOUT,
-        "uses: actions/cache@v6",
-        f"path: ${{{{ runner.temp }}}}/rustbgpd-v064-cache/{V064_ARCHIVE}",
-        f"key: {V064_CACHE_KEY}",
-        "--self-test",
-        "--prepare-archive",
-        "uses: actions/upload-artifact@v7",
-        f"name: {V064_ARTIFACT}",
-        "if-no-files-found: error",
-        "retention-days: 1",
-        "compression-level: 0",
-    )
-    for seam in producer_seams:
-        if seam not in producer:
-            errors.append(f"ci.yml:v064_validator missing {seam}")
-    for forbidden in ("restore-keys:", "continue-on-error:"):
-        if forbidden in producer:
-            errors.append(f"ci.yml:v064_validator permits {forbidden}")
-    if producer.count("uses: actions/cache@v6") != 1:
-        errors.append("ci.yml:v064_validator must have one cache producer")
-    if producer.count("uses: actions/upload-artifact@v7") != 1:
-        errors.append("ci.yml:v064_validator must upload one same-run artifact")
-
+    if "v064_validator" in ci_jobs or "v064_validator" in texts["ci.yml"]:
+        errors.append("ci.yml: a same-run v0.64 validator producer remains")
     consumer = ci_jobs.get("core_tests", "")
-    for seam in (
-        "needs: v064_validator",
-        "uses: actions/download-artifact@v8",
-        f"name: {V064_ARTIFACT}",
-        "path: ${{ runner.temp }}/rustbgpd-v064-artifact",
+    v064_path = f"${{{{ runner.temp }}}}/rustbgpd-v064-cache/{V064_ARCHIVE}"
+    v064_cache_path = f'"$RUNNER_TEMP/rustbgpd-v064-cache/{V064_ARCHIVE}"'
+    v064 = consumer.replace("id: v064-cache", "id: cache").replace(
+        "steps.v064-cache.outputs", "steps.cache.outputs"
+    )
+    _check_cache_consumer(
+        "ci.yml:core_tests",
+        v064,
+        v064_path,
+        V064_CACHE_KEY,
+        "--prepare-archive",
         "--install-archive",
-        f'"$RUNNER_TEMP/rustbgpd-v064-artifact/{V064_ARCHIVE}"',
+        errors,
+    )
+    for seam in (
+        "bash -n .github/scripts/install-rustbgpd-v064-validator.sh",
+        "shellcheck .github/scripts/install-rustbgpd-v064-validator.sh",
+        ".github/scripts/install-rustbgpd-v064-validator.sh --self-test",
         '"$RUNNER_TEMP/rustbgpd-v064"',
     ):
         if seam not in consumer:
             errors.append(f"ci.yml:core_tests missing validator seam {seam}")
-    if consumer.count("uses: actions/download-artifact@v8") != 1:
-        errors.append("ci.yml:core_tests must download one validator artifact")
-    for forbidden in (
-        "--prepare-archive",
-        "actions/cache@",
-        "actions/upload-artifact@",
-        "releases/download/v0.64.0",
-        "restore-keys:",
-        "continue-on-error:",
-    ):
-        if forbidden in consumer:
-            errors.append(f"ci.yml:core_tests validator consumer permits {forbidden}")
+    if consumer.count(v064_cache_path) != 2:
+        errors.append("ci.yml:core_tests must prepare and install the cached archive")
+    if "releases/download/v0.64.0" in consumer:
+        errors.append("ci.yml:core_tests fetches the validator outside the installer")
+    if _list_needs(consumer):
+        errors.append("ci.yml:core_tests must not wait on a producer job")
 
     aggregate = ci_jobs.get("check", "")
-    for seam in (
-        "needs: [v064_validator, core, core_tests, scale_receipts]",
-        "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
-        "printf 'v064_validator=%s\\n' \"$V064_VALIDATOR_RESULT\"",
-        '[[ "$V064_VALIDATOR_RESULT" != "success"',
-    ):
-        if seam not in aggregate:
-            errors.append(f"ci.yml:check missing validator result seam {seam}")
+    if "needs: [core, core_tests, scale_receipts]" not in aggregate:
+        errors.append("ci.yml:check exact dependency roster drifted")
 
     for name, roster, setup in (
         ("interop.yml", INTEROP, False),
@@ -546,13 +548,10 @@ def check(root: Path) -> list[str]:
     ):
         jobs = _jobs(texts[name])
         heavy = [*roster] + (["netns"] if setup else [])
-        artifact_jobs = (
-            ["grpcurl_archive"]
-            + ([] if setup else ["gnmic_archive"])
-            + ["gobgp_archive"]
-            + ([] if setup else ["bird2192_archive", "bird332_archive"])
-            + (["bird3_archive"] if setup else [])
-        )
+        # Lab jobs restore their own pinned archives. The kernel bird3_archive
+        # job survives only as m43's upstream-availability gate; it hands no
+        # bytes to m43 (see its checks below).
+        artifact_jobs = ["bird3_archive"] if setup else []
         gobgp_consumers = (
             {"m65", "m71", "m72"} if setup else {"m74", "m75", "m81", "m82"}
         )
@@ -575,98 +574,14 @@ def check(root: Path) -> list[str]:
         for forbidden in ("continue-on-error:", "if:"):
             if re.search(rf"(?m)^ +{re.escape(forbidden)}", classifier):
                 errors.append(f"{name}: classifier permits active {forbidden}")
-        grpcurl_producer = jobs.get("grpcurl_archive", "")
-        for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
-            if not _has_line(grpcurl_producer, f"    {seam}"):
-                errors.append(
-                    f"{name}:grpcurl_archive missing job-level {seam}"
-                )
-        for seam in (
-            "name: Prepare exact grpcurl archive",
-            "runs-on: ubuntu-latest",
-            "timeout-minutes: 10",
-            CHECKOUT,
-            "ref: ${{ github.sha }}",
-            "name: Restore, prepare, and upload exact grpcurl archive",
-            PREPARE_GRPCURL_ACTION,
-        ):
-            if seam not in grpcurl_producer:
-                errors.append(f"{name}:grpcurl_archive missing {seam}")
-        for forbidden in (
-            "restore-keys:",
-            "continue-on-error:",
-            "actions/download-artifact@",
-            "actions/cache@",
-            "actions/upload-artifact@",
-            "--prepare-archive",
-            "--install-archive",
-        ):
-            if forbidden in grpcurl_producer:
-                errors.append(f"{name}:grpcurl_archive permits {forbidden}")
-        producer_uses = re.findall(
-            r"(?m)^\s*(?:- )?uses:\s*(.+)$", grpcurl_producer
-        )
-        if producer_uses != [
-            "actions/checkout@v7",
-            "./.github/actions/prepare-grpcurl-artifact",
-        ]:
-            errors.append(f"{name}:grpcurl_archive action inventory drifted")
-        if grpcurl_producer.count(PREPARE_GRPCURL_ACTION) != 1:
-            errors.append(
-                f"{name}:grpcurl_archive must call one exact producer action"
-            )
-        producer_call_tail = grpcurl_producer.split(PREPARE_GRPCURL_ACTION, 1)[-1]
-        if "with:" in producer_call_tail:
-            errors.append(f"{name}:grpcurl_archive producer call must have no inputs")
-        if not setup:
-            gnmic_producer = jobs.get("gnmic_archive", "")
-            for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
-                if not _has_line(gnmic_producer, f"    {seam}"):
-                    errors.append(f"{name}:gnmic_archive missing job-level {seam}")
-            for seam in (
-                "name: Prepare exact gnmic archive",
-                "runs-on: ubuntu-latest",
-                "timeout-minutes: 10",
-                CHECKOUT,
-                "ref: ${{ github.sha }}",
-                "uses: actions/cache@v6",
-                f"path: ${{{{ runner.temp }}}}/gnmic-cache/{GNMIC_ARCHIVE}",
-                f"key: {GNMIC_CACHE_KEY}",
-                "--prepare-archive",
-                f'"$RUNNER_TEMP/gnmic-cache/{GNMIC_ARCHIVE}"',
-                "uses: actions/upload-artifact@v7",
-                f"name: {GNMIC_ARTIFACT}",
-                "if-no-files-found: error",
-                "retention-days: 1",
-                "compression-level: 0",
-            ):
-                if seam not in gnmic_producer:
-                    errors.append(f"{name}:gnmic_archive missing {seam}")
-            for forbidden in (
-                "restore-keys:",
-                "continue-on-error:",
-                "actions/download-artifact@",
-                "--install-archive",
-            ):
-                if forbidden in gnmic_producer:
-                    errors.append(f"{name}:gnmic_archive permits {forbidden}")
-            if gnmic_producer.count("uses: actions/cache@v6") != 1:
-                errors.append(f"{name}:gnmic_archive must restore one exact cache")
-            if gnmic_producer.count("uses: actions/upload-artifact@v7") != 1:
-                errors.append(f"{name}:gnmic_archive must upload one artifact")
-            exact_gnmic_path = (
-                f"path: ${{{{ runner.temp }}}}/gnmic-cache/{GNMIC_ARCHIVE}"
-            )
-            if gnmic_producer.count(exact_gnmic_path) != 2:
-                errors.append(f"{name}:gnmic_archive cache/artifact paths drifted")
-        gobgp_producer = jobs.get("gobgp_archive", "")
-        if (
-            _canonical_yaml_contract(gobgp_producer)
-            != GOBGP_PRODUCER_JOB_CONTRACT
-        ):
-            errors.append(f"{name}:gobgp_archive exact job contract drifted")
+        if "actions/download-artifact@" in texts[name]:
+            errors.append(f"{name}: a lab dependency flows through the artifact service")
+        for producer_seam in ("prepare-grpcurl-artifact", "prepare-gobgp-artifact"):
+            if producer_seam in texts[name]:
+                errors.append(f"{name}: same-run producer {producer_seam} remains")
         if setup:
             bird3_producer = jobs.get("bird3_archive", "")
+            bird3_path = f"path: ${{{{ runner.temp }}}}/bird-cache/{BIRD3_ARCHIVE}"
             for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
                 if not _has_line(bird3_producer, f"    {seam}"):
                     errors.append(f"{name}:bird3_archive missing job-level {seam}")
@@ -676,131 +591,33 @@ def check(root: Path) -> list[str]:
                 "timeout-minutes: 10",
                 CHECKOUT,
                 "ref: ${{ github.sha }}",
-                "uses: actions/cache@v6",
-                f"path: ${{{{ runner.temp }}}}/bird3-cache/{BIRD3_ARCHIVE}",
-                f"key: {BIRD3_CACHE_KEY}",
-                "--prepare-archive",
-                f'"$RUNNER_TEMP/bird3-cache/{BIRD3_ARCHIVE}"',
-                "uses: actions/upload-artifact@v7",
-                f"name: {BIRD3_ARTIFACT}",
-                "if-no-files-found: error",
-                "retention-days: 1",
-                "compression-level: 0",
+                "bird3_status: ${{ steps.prepare.outputs.bird3_status }}",
+                "id: cache",
+                CACHE_RESTORE,
+                "id: prepare",
+                f'"$RUNNER_TEMP/bird-cache/{BIRD3_ARCHIVE}" || rc=$?',
+                "3) status=unavailable ;;",
+                "4) status=corrupt ;;",
+                CACHE_SAVE,
+                (
+                    "if: steps.prepare.outputs.bird3_status == 'ok' && "
+                    "steps.cache.outputs.cache-hit != 'true'"
+                ),
             ):
                 if seam not in bird3_producer:
                     errors.append(f"{name}:bird3_archive missing {seam}")
-            for forbidden in (
-                "restore-keys:",
-                "continue-on-error:",
-                "actions/download-artifact@",
-                "--stage-archive",
-            ):
+            for forbidden in CONSUMER_FORBIDDEN + ("--stage-archive",):
                 if forbidden in bird3_producer:
                     errors.append(f"{name}:bird3_archive permits {forbidden}")
-            if bird3_producer.count("uses: actions/cache@v6") != 1:
-                errors.append(f"{name}:bird3_archive must restore one exact cache")
             if bird3_producer.count("--prepare-archive") != 1:
                 errors.append(f"{name}:bird3_archive must prepare one archive")
-            if bird3_producer.count("uses: actions/upload-artifact@v7") != 1:
-                errors.append(f"{name}:bird3_archive must upload one artifact")
-            exact_bird3_path = (
-                f"path: ${{{{ runner.temp }}}}/bird3-cache/{BIRD3_ARCHIVE}"
-            )
-            if bird3_producer.count(exact_bird3_path) != 2:
-                errors.append(f"{name}:bird3_archive cache/artifact paths drifted")
-        else:
-            bird_producers = (
-                (
-                    "bird2192_archive",
-                    "BIRD 2.19.2",
-                    BIRD2192_VERSION,
-                    BIRD2192_SHA256,
-                    BIRD2192_ARCHIVE,
-                    BIRD2192_ARTIFACT,
-                    BIRD2192_CACHE_KEY,
-                    "bird2192-cache",
-                    "M83 BIRD 2.19.2 image blocked",
-                ),
-                (
-                    "bird332_archive",
-                    "BIRD 3.3.2",
-                    BIRD332_VERSION,
-                    BIRD332_SHA256,
-                    BIRD332_ARCHIVE,
-                    BIRD332_ARTIFACT,
-                    BIRD332_CACHE_KEY,
-                    BIRD332_CACHE_DIR,
-                    "M101 BIRD 3.3.2 image blocked",
-                ),
-            )
-            for (
-                producer_name,
-                display,
-                version,
-                checksum,
-                archive,
-                artifact,
-                cache_key,
-                cache_dir,
-                coverage_label,
-            ) in bird_producers:
-                producer = jobs.get(producer_name, "")
-                exact_path = (
-                    f"path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}"
+            if (
+                bird3_producer.count(bird3_path) != 2
+                or bird3_producer.count(f"key: {BIRD3_CACHE_KEY}") != 2
+            ):
+                errors.append(
+                    f"{name}:bird3_archive must share the stage action's cache identity"
                 )
-                for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
-                    if not _has_line(producer, f"    {seam}"):
-                        errors.append(
-                            f"interop.yml:{producer_name} missing job-level {seam}"
-                        )
-                for seam in (
-                    f"name: Prepare exact {display} archive",
-                    "runs-on: ubuntu-latest",
-                    "timeout-minutes: 10",
-                    CHECKOUT,
-                    "ref: ${{ github.sha }}",
-                    "uses: actions/cache@v6",
-                    exact_path,
-                    f"key: {cache_key}",
-                    f"--version {version}",
-                    f"--sha256 {checksum}",
-                    f'--coverage-label "{coverage_label}"',
-                    "--prepare-archive",
-                    f'"$RUNNER_TEMP/{cache_dir}/{archive}"',
-                    "uses: actions/upload-artifact@v7",
-                    f"name: {artifact}",
-                    "if-no-files-found: error",
-                    "retention-days: 1",
-                    "compression-level: 0",
-                ):
-                    if seam not in producer:
-                        errors.append(f"interop.yml:{producer_name} missing {seam}")
-                for forbidden in (
-                    "restore-keys:",
-                    "continue-on-error:",
-                    "actions/download-artifact@",
-                    "--stage-archive",
-                ):
-                    if forbidden in producer:
-                        errors.append(
-                            f"interop.yml:{producer_name} permits {forbidden}"
-                        )
-                if producer.count("uses: actions/cache@v6") != 1:
-                    errors.append(
-                        f"interop.yml:{producer_name} must restore one exact cache"
-                    )
-                if producer.count("--prepare-archive") != 1:
-                    errors.append(
-                        f"interop.yml:{producer_name} must prepare one archive"
-                    )
-                if producer.count("uses: actions/upload-artifact@v7") != 1:
-                    errors.append(
-                        f"interop.yml:{producer_name} must upload one artifact"
-                    )
-                if producer.count(exact_path) != 2:
-                    errors.append(
-                        f"interop.yml:{producer_name} cache/artifact paths drifted"
-                    )
         primer = jobs.get("prime_dev_image", "")
         if (
             _canonical_yaml_contract(primer)
@@ -809,37 +626,45 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not setup and job_name in ("m83", "m85", "m100", "m104"):
-                expected_needs = (
-                    "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
-                )
-            elif not setup and job_name == "m101":
-                expected_needs = (
-                    "    needs: [grpcurl_archive, bird332_archive, prime_dev_image]"
-                )
-            elif not setup and job_name in ("m54", "m56"):
-                expected_needs = (
-                    "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
-                )
-            elif setup and job_name == "m43":
-                expected_needs = (
-                    "    needs: [grpcurl_archive, bird3_archive, prime_dev_image]"
-                )
-            elif job_name in gobgp_consumers:
-                expected_needs = (
-                    "    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]"
-                )
+            if setup and job_name == "m43":
+                expected_needs = "    needs: [bird3_archive, prime_dev_image]"
             else:
-                expected_needs = "    needs: [grpcurl_archive, prime_dev_image]"
+                expected_needs = "    needs: [prime_dev_image]"
             if not _has_line(job, expected_needs):
                 errors.append(
-                    f"{name}:{job_name}: missing exact artifact/primer dependencies"
+                    f"{name}:{job_name}: missing exact gate/primer dependencies"
                 )
             if setup and job_name == "m110" and job.count('max_attempts: "1"') != 1:
                 errors.append("kernel-dataplane.yml:m110: must use one fresh attempt")
+            gobgp4 = None if setup else GOBGP4_BUILDERS.get(job_name)
             expected_gobgp = 1 if job_name in gobgp_consumers else 0
-            if job.count(GOBGP_ACTION) != expected_gobgp:
+            if job.count(GOBGP_ACTION) != expected_gobgp + (1 if gobgp4 else 0):
                 errors.append(f"{name}:{job_name}: gobgp stage consumer drifted")
+            if job.count(GOBGP4_DOCKERFILE) != (1 if gobgp4 else 0):
+                errors.append(f"{name}:{job_name}: GoBGP 4.x build inventory drifted")
+            if gobgp4:
+                stage_at = job.find(
+                    f'{GOBGP_ACTION}\n        with:\n          version: "{gobgp4}"\n'
+                    f"          sha256: {GOBGP4_CHECKSUMS[gobgp4]}\n"
+                )
+                build_at = job.find(GOBGP4_DOCKERFILE)
+                if not 0 <= stage_at < build_at:
+                    errors.append(
+                        f"{name}:{job_name}: GoBGP {gobgp4} build is not preceded "
+                        "by a stage of the same version and checksum"
+                    )
+                build_step = job[job.rfind("- name:", 0, build_at) : build_at]
+                build_args = (
+                    f"--build-arg GOBGP_VERSION={gobgp4}",
+                    f"--build-arg GOBGP_SHA256={GOBGP4_CHECKSUMS[gobgp4]}",
+                )
+                if gobgp4 == GOBGP4_DEFAULT:
+                    if "GOBGP_" in build_step:
+                        errors.append(f"{name}:{job_name}: GoBGP default build drifted")
+                elif any(arg not in build_step for arg in build_args):
+                    errors.append(
+                        f"{name}:{job_name}: GoBGP {gobgp4} build arguments drifted"
+                    )
             if job.count(GOBGP_BUILD) != expected_gobgp:
                 errors.append(
                     f"{name}:{job_name}: gobgp:interop build inventory drifted"
@@ -870,7 +695,6 @@ def check(root: Path) -> list[str]:
                             "name: Stage verified BIRD 2.19.2 archive",
                             'version: "2.19.2"',
                             f"sha256: {BIRD2192_SHA256}",
-                            f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
                     "m100": (
@@ -883,7 +707,6 @@ def check(root: Path) -> list[str]:
                             "name: Stage verified BIRD 2.19.2 archive",
                             'version: "2.19.2"',
                             f"sha256: {BIRD2192_SHA256}",
-                            f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
                     "m85": (
@@ -896,7 +719,6 @@ def check(root: Path) -> list[str]:
                             "name: Stage verified BIRD 2.19.2 archive",
                             'version: "2.19.2"',
                             f"sha256: {BIRD2192_SHA256}",
-                            f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
                     "m101": (
@@ -909,7 +731,6 @@ def check(root: Path) -> list[str]:
                             "name: Stage verified BIRD 3.3.2 archive",
                             'version: "3.3.2"',
                             f"sha256: {BIRD332_SHA256}",
-                            f"artifact-name: {BIRD332_ARTIFACT}",
                         ),
                     ),
                     "m104": (
@@ -922,7 +743,6 @@ def check(root: Path) -> list[str]:
                             "name: Stage verified BIRD 2.19.2 archive",
                             'version: "2.19.2"',
                             f"sha256: {BIRD2192_SHA256}",
-                            f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
                 }
@@ -952,7 +772,9 @@ def check(root: Path) -> list[str]:
                     )
             if not setup and job_name == "m76":
                 m76_required = {
-                    "needs: [grpcurl_archive, prime_dev_image]": 1,
+                    "needs: [prime_dev_image]": 1,
+                    GOBGP_ACTION: 1,
+                    'version: "4.8.0"': 1,
                     "name: M76 — ORR divergent-best (GoBGP 4.8.0)": 1,
                     "name: Build gobgp:v4.8.0-m76": 1,
                     "--build-arg TARGETARCH=amd64": 1,
@@ -974,7 +796,9 @@ def check(root: Path) -> list[str]:
                         errors.append(f"interop.yml:m76: permits historical peer seam {forbidden}")
             if not setup and job_name == "m77":
                 m77_required = {
-                    "needs: [grpcurl_archive, prime_dev_image]": 1,
+                    "needs: [prime_dev_image]": 1,
+                    GOBGP_ACTION: 1,
+                    'version: "4.8.0"': 1,
                     "name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)": 1,
                     "name: Build gobgp:v4.8.0-m77": 1,
                     "--build-arg TARGETARCH=amd64": 1,
@@ -996,7 +820,7 @@ def check(root: Path) -> list[str]:
                         errors.append(f"interop.yml:m77: permits historical peer seam {forbidden}")
             if not setup and job_name == "m83":
                 m83_required = {
-                    "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+                    "needs: [prime_dev_image]": 1,
                     "name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)": 1,
                     "tags: bird:v2.19.2-m83": 1,
                     "--build-arg GOBGP_VERSION=4.8.0": 1,
@@ -1009,7 +833,7 @@ def check(root: Path) -> list[str]:
                     errors.append("interop.yml:m83: exact incumbent image contract drifted")
             if not setup and job_name == "m85":
                 m85_required = {
-                    "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+                    "needs: [prime_dev_image]": 1,
                     "name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.2": 1,
                     "name: Build bird:v2.19.2-m85": 1,
                     "tags: bird:v2.19.2-m85": 1,
@@ -1093,6 +917,8 @@ def check(root: Path) -> list[str]:
         GRPCURL_ACTION: 1,
         "docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop": 1,
         "docker build -t gobgp:v4.7.0-m92 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+        GOBGP_ACTION: 1,
+        'version: "4.7.0"': 1,
         "uses: ./.github/actions/run-interop-test": 2,
         "topology: tests/interop/m92-gobgp-v47-rs-differential.clab.yml": 2,
         "script: tests/interop/scripts/test-m92-gobgp-v47-rs-differential.sh": 2,
@@ -1128,7 +954,7 @@ def check(root: Path) -> list[str]:
     m100 = _jobs(texts["interop.yml"]).get("m100", "")
     m100_required = {
         GRPCURL_ACTION: 1,
-        "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+        "needs: [prime_dev_image]": 1,
         "name: Build rustbgpd:dev": 1,
         "tags: rustbgpd:dev": 1,
         "target: dev": 1,
@@ -1136,7 +962,6 @@ def check(root: Path) -> list[str]:
         BIRD3_ACTION: 1,
         'version: "2.19.2"': 1,
         f"sha256: {BIRD2192_SHA256}": 1,
-        f"artifact-name: {BIRD2192_ARTIFACT}": 1,
         "name: Build bird:v2.19.2-m100": 1,
         "file: tests/interop/Dockerfile.bird-v2192": 1,
         "tags: bird:v2.19.2-m100": 1,
@@ -1176,7 +1001,8 @@ def check(root: Path) -> list[str]:
     m101_required = {
         GRPCURL_ACTION: 1,
         BIRD3_ACTION: 1,
-        f"artifact-name: {BIRD332_ARTIFACT}": 1,
+        'version: "3.3.2"': 1,
+        f"sha256: {BIRD332_SHA256}": 1,
         "name: Build checksum-pinned BIRD 3.3.2 image": 1,
         "file: tests/interop/Dockerfile.bird-v332": 1,
         "tags: bird:v3.3.2-m101": 1,
@@ -1240,6 +1066,7 @@ def check(root: Path) -> list[str]:
         GRPCURL_ACTION: 1,
         "docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop": 1,
         "name: Build gobgp:v4.8.0-m103": 1,
+        GOBGP_ACTION: 1,
         "--build-arg TARGETARCH=amd64": 1,
         "--build-arg GOBGP_VERSION=4.8.0": 1,
         "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
@@ -1279,7 +1106,6 @@ def check(root: Path) -> list[str]:
         BIRD3_ACTION: 1,
         'version: "2.19.2"': 1,
         f"sha256: {BIRD2192_SHA256}": 1,
-        f"artifact-name: {BIRD2192_ARTIFACT}": 1,
         "name: Verify and pull exact ARouteServer 1.23.2 image": 1,
         "AROUTESERVER_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66": 1,
         "AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93": 1,
@@ -1294,6 +1120,7 @@ def check(root: Path) -> list[str]:
         "cache-from: type=gha,scope=bird2192-m104": 1,
         "cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true": 1,
         "name: Build gobgp:v4.8.0-m104": 1,
+        GOBGP_ACTION: 1,
         "uses: ./.github/actions/install-protobuf": 1,
         "--build-arg TARGETARCH=amd64": 1,
         "--build-arg GOBGP_VERSION=4.8.0": 1,
@@ -1338,18 +1165,17 @@ def check(root: Path) -> list[str]:
     kernel_classifier = kernel_jobs.get("classify_changes", "").replace(
         "kernel heavy-lab", "heavy-lab"
     )
-    if interop_classifier != kernel_classifier:
+    if _canonical_yaml_contract(interop_classifier) != _canonical_yaml_contract(
+        kernel_classifier
+    ):
         errors.append("heavy workflows must share an identical classifier job")
-    interop_grpcurl = _jobs(texts["interop.yml"]).get("grpcurl_archive", "")
-    if interop_grpcurl != kernel_jobs.get("grpcurl_archive", ""):
-        errors.append("heavy workflows must share an identical grpcurl producer job")
     netns = kernel_jobs.get("netns", "")
     for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
         if not _has_line(netns, f"    {seam}"):
             errors.append(f"kernel-dataplane.yml:netns missing job-level {seam}")
     if "needs: prime_dev_image" in netns:
         errors.append("kernel-dataplane.yml:netns must remain independent")
-    if "grpcurl_archive" in netns or GRPCURL_ACTION in netns:
+    if GRPCURL_ACTION in netns or SETUP_HOST_ACTION in netns:
         errors.append("kernel-dataplane.yml:netns must remain grpcurl-independent")
     harness_path = root / "crates/evpn-linux/tests/docker/run-netns-tests.sh"
     harness = harness_path.read_text() if harness_path.is_file() else ""
@@ -1407,12 +1233,9 @@ def check(root: Path) -> list[str]:
     grpcurl_action = (
         root / ".github" / "actions" / "install-grpcurl-artifact" / "action.yml"
     ).read_text()
-    prepare_grpcurl_action = (
-        root / ".github" / "actions" / "prepare-grpcurl-artifact" / "action.yml"
-    ).read_text()
-    prepare_gobgp_action = (
-        root / ".github" / "actions" / "prepare-gobgp-artifact" / "action.yml"
-    ).read_text()
+    for removed in ("prepare-grpcurl-artifact", "prepare-gobgp-artifact"):
+        if (root / ".github" / "actions" / removed).exists():
+            errors.append(f"same-run producer action {removed} remains")
     prime_dev_image_action = (
         root / ".github" / "actions" / "prime-rustbgpd-dev-cache" / "action.yml"
     ).read_text()
@@ -1425,169 +1248,84 @@ def check(root: Path) -> list[str]:
     bird3_action = (
         root / ".github" / "actions" / "stage-bird3-artifact" / "action.yml"
     ).read_text()
-    for seam in (
-        'using: "composite"',
-        "uses: actions/cache@v6",
-        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}",
-        f"key: {GRPCURL_CACHE_KEY}",
-        "shell: bash",
-        "--prepare-archive",
-        f'"$RUNNER_TEMP/grpcurl-cache/{GRPCURL_ARCHIVE}"',
-        "uses: actions/upload-artifact@v7",
-        f"name: {GRPCURL_ARTIFACT}",
-        "if-no-files-found: error",
-        "retention-days: 1",
-        "compression-level: 0",
-    ):
-        if seam not in prepare_grpcurl_action:
-            errors.append(f"prepare-grpcurl-artifact missing {seam}")
-    if prepare_grpcurl_action.count("uses: actions/cache@v6") != 1:
-        errors.append("prepare-grpcurl-artifact must restore one exact cache")
-    if prepare_grpcurl_action.count("--prepare-archive") != 1:
-        errors.append("prepare-grpcurl-artifact must prepare one archive")
-    if prepare_grpcurl_action.count("uses: actions/upload-artifact@v7") != 1:
-        errors.append("prepare-grpcurl-artifact must upload one artifact")
-    exact_grpcurl_path = (
-        f"path: ${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}"
-    )
-    if prepare_grpcurl_action.count(exact_grpcurl_path) != 2:
-        errors.append("prepare-grpcurl-artifact cache/artifact paths drifted")
-    if prepare_grpcurl_action.count(f"key: {GRPCURL_CACHE_KEY}") != 1:
-        errors.append("prepare-grpcurl-artifact cache key drifted")
-    if prepare_grpcurl_action.count(f"name: {GRPCURL_ARTIFACT}") != 1:
-        errors.append("prepare-grpcurl-artifact artifact name drifted")
-    for forbidden in (
-        "inputs:",
-        "outputs:",
-        "restore-keys:",
-        "continue-on-error:",
-        "actions/download-artifact@",
-        "--install-archive",
-        "releases/download/",
-    ):
-        if forbidden in prepare_grpcurl_action:
-            errors.append(f"prepare-grpcurl-artifact permits {forbidden}")
-    if re.search(r"(?m)^\s*curl\s", prepare_grpcurl_action):
-        errors.append("prepare-grpcurl-artifact permits curl")
-    if (
-        _canonical_yaml_contract(prepare_gobgp_action)
-        != PREPARE_GOBGP_ACTION_CONTRACT
-    ):
-        errors.append("prepare-gobgp-artifact exact action contract drifted")
     if (
         _canonical_yaml_contract(prime_dev_image_action)
         != PRIME_DEV_IMAGE_ACTION_CONTRACT
     ):
         errors.append("prime-rustbgpd-dev-cache exact action contract drifted")
+    gobgp_input = "${{ inputs.version }}"
+    bird_input = "${{ inputs.version }}"
+    for label, text, path, key, offline in (
+        (
+            "install-grpcurl-artifact",
+            grpcurl_action,
+            f"${{{{ runner.temp }}}}/grpcurl-cache/{GRPCURL_ARCHIVE}",
+            GRPCURL_CACHE_KEY,
+            "--install-archive",
+        ),
+        (
+            "install-gnmic-artifact",
+            gnmic_action,
+            f"${{{{ runner.temp }}}}/gnmic-cache/{GNMIC_ARCHIVE}",
+            GNMIC_CACHE_KEY,
+            "--install-archive",
+        ),
+        (
+            "stage-gobgp-artifact",
+            gobgp_action,
+            f"${{{{ runner.temp }}}}/gobgp-cache/gobgp_{gobgp_input}_linux_amd64.tar.gz",
+            "gobgp-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}",
+            "--stage-archive",
+        ),
+        (
+            "stage-bird3-artifact",
+            bird3_action,
+            f"${{{{ runner.temp }}}}/bird-cache/bird-{bird_input}.tar.gz",
+            "bird-v${{ inputs.version }}-source-${{ inputs.sha256 }}",
+            "--stage-archive",
+        ),
+    ):
+        _check_cache_consumer(
+            label, text, path, key, "--prepare-archive", offline, errors
+        )
+        cached = path.replace("${{ runner.temp }}", '"$RUNNER_TEMP') + '"'
+        if text.count(cached) != 2:
+            errors.append(f"{label}: prepare and offline use must share the cached archive")
+    for label, text in (
+        ("install-grpcurl-artifact", grpcurl_action),
+        ("install-gnmic-artifact", gnmic_action),
+    ):
+        if "/usr/local/bin" not in text:
+            errors.append(f"{label} missing /usr/local/bin")
+        if "inputs:" in text:
+            errors.append(f"{label} must pin its archive, not take inputs")
     for seam in (
-        "uses: actions/download-artifact@v8",
-        f"name: {GRPCURL_ARTIFACT}",
-        "path: ${{ runner.temp }}/grpcurl-artifact",
-        "--install-archive",
-        f'"$RUNNER_TEMP/grpcurl-artifact/{GRPCURL_ARCHIVE}"',
-        "/usr/local/bin",
-    ):
-        if seam not in grpcurl_action:
-            errors.append(f"install-grpcurl-artifact missing {seam}")
-    if grpcurl_action.count("uses: actions/download-artifact@v8") != 1:
-        errors.append("install-grpcurl-artifact must download one same-run artifact")
-    if grpcurl_action.count("--install-archive") != 1:
-        errors.append("install-grpcurl-artifact must perform one offline install")
-    for forbidden in (
-        "--prepare-archive",
-        "actions/cache@",
-        "actions/upload-artifact@",
-        "restore-keys:",
-        "continue-on-error:",
-        "releases/download/",
-    ):
-        if forbidden in grpcurl_action:
-            errors.append(f"install-grpcurl-artifact permits {forbidden}")
-    if re.search(r"(?m)^\s*curl\s", grpcurl_action):
-        errors.append("install-grpcurl-artifact permits curl")
-    for seam in (
-        "uses: actions/download-artifact@v8",
-        f"name: {GNMIC_ARTIFACT}",
-        "path: ${{ runner.temp }}/gnmic-artifact",
-        "--install-archive",
-        f'"$RUNNER_TEMP/gnmic-artifact/{GNMIC_ARCHIVE}"',
-        "/usr/local/bin",
-    ):
-        if seam not in gnmic_action:
-            errors.append(f"install-gnmic-artifact missing {seam}")
-    if gnmic_action.count("uses: actions/download-artifact@v8") != 1:
-        errors.append("install-gnmic-artifact must download one same-run artifact")
-    if gnmic_action.count("--install-archive") != 1:
-        errors.append("install-gnmic-artifact must perform one offline install")
-    for forbidden in (
-        "--prepare-archive",
-        "actions/cache@",
-        "actions/upload-artifact@",
-        "restore-keys:",
-        "continue-on-error:",
-        "releases/download/",
-        "curl ",
-    ):
-        if forbidden in gnmic_action:
-            errors.append(f"install-gnmic-artifact permits {forbidden}")
-    for seam in (
-        "uses: actions/download-artifact@v8",
-        f"name: {GOBGP_ARTIFACT}",
-        "path: ${{ runner.temp }}/gobgp-artifact",
-        "--stage-archive",
-        f'"$RUNNER_TEMP/gobgp-artifact/{GOBGP_ARCHIVE}"',
+        'default: "3.37.0"',
+        f'default: "{GOBGP_CHECKSUMS["amd64"]}"',
         "tests/interop/gobgp-archive",
     ):
         if seam not in gobgp_action:
             errors.append(f"stage-gobgp-artifact missing {seam}")
-    if gobgp_action.count("uses: actions/download-artifact@v8") != 1:
-        errors.append("stage-gobgp-artifact must download one same-run artifact")
-    if gobgp_action.count("--stage-archive") != 1:
-        errors.append("stage-gobgp-artifact must perform one offline stage")
-    for forbidden in (
-        "--prepare-archive",
-        "actions/cache@",
-        "actions/upload-artifact@",
-        "restore-keys:",
-        "continue-on-error:",
-        "releases/download/",
-        "curl ",
-    ):
-        if forbidden in gobgp_action:
-            errors.append(f"stage-gobgp-artifact permits {forbidden}")
+    if gobgp_action.count('--version "${{ inputs.version }}"') != 2 or gobgp_action.count(
+        '--sha256 "${{ inputs.sha256 }}"'
+    ) != 2:
+        errors.append("stage-gobgp-artifact must pin version and checksum on both calls")
+    if gobgp_action.count("default:") != 2:
+        errors.append("stage-gobgp-artifact exact default inventory drifted")
     for seam in (
-        "inputs:",
         'default: "3.3.2"',
         f'default: "{BIRD3_SHA256}"',
-        f'default: "{BIRD3_ARTIFACT}"',
         'default: "tests/interop/bird3-archive"',
-        "uses: actions/download-artifact@v8",
-        "name: ${{ inputs.artifact-name }}",
-        "path: ${{ runner.temp }}/bird3-artifact",
-        '--version "${{ inputs.version }}"',
-        '--sha256 "${{ inputs.sha256 }}"',
-        "--stage-archive",
-        '"$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz"',
         '"${{ inputs.stage-directory }}"',
+        '--coverage-label "${{ github.job }}: BIRD ${{ inputs.version }} image blocked"',
     ):
         if seam not in bird3_action:
             errors.append(f"stage-bird3-artifact missing {seam}")
-    if bird3_action.count("uses: actions/download-artifact@v8") != 1:
-        errors.append("stage-bird3-artifact must download one same-run artifact")
-    if bird3_action.count("--stage-archive") != 1:
-        errors.append("stage-bird3-artifact must perform one offline stage")
-    for forbidden in (
-        "--prepare-archive",
-        "actions/cache@",
-        "actions/upload-artifact@",
-        "restore-keys:",
-        "continue-on-error:",
-        "bird.nic.cz",
-        "curl ",
-    ):
-        if forbidden in bird3_action:
-            errors.append(f"stage-bird3-artifact permits {forbidden}")
-    if bird3_action.count("default:") != 4:
+    if bird3_action.count('--version "${{ inputs.version }}"') != 2 or bird3_action.count(
+        '--sha256 "${{ inputs.sha256 }}"'
+    ) != 2:
+        errors.append("stage-bird3-artifact must pin version and checksum on both calls")
+    if bird3_action.count("default:") != 3:
         errors.append("stage-bird3-artifact exact default inventory drifted")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
@@ -1630,7 +1368,6 @@ def check(root: Path) -> list[str]:
             texts["interop.yml"],
             texts["kernel-dataplane.yml"],
             action,
-            prepare_grpcurl_action,
             grpcurl_action,
         )
     )
@@ -1643,7 +1380,7 @@ def check(root: Path) -> list[str]:
         errors.append("gnmic release URL escaped the producer helper")
     if re.search(r"curl\s.*gnmic|curl\s.*\|\s*(?:sudo\s+)?tar", gnmic_surfaces):
         errors.append("interop.yml retains a streaming gnmic download")
-    if texts["interop.yml"].count(GOBGP_ACTION) != 4:
+    if texts["interop.yml"].count(GOBGP_ACTION) != 4 + len(GOBGP4_BUILDERS):
         errors.append("interop.yml: gobgp stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(GOBGP_ACTION) != 3:
         errors.append("kernel-dataplane.yml: gobgp stage consumer inventory drifted")
@@ -1651,7 +1388,6 @@ def check(root: Path) -> list[str]:
         (
             texts["interop.yml"],
             texts["kernel-dataplane.yml"],
-            prepare_gobgp_action,
             gobgp_action,
         )
     )
@@ -1670,8 +1406,6 @@ def check(root: Path) -> list[str]:
     pin_surfaces = {
         **{f".github/workflows/{name}": text for name, text in texts.items()},
         ".github/actions/setup-dataplane-host/action.yml": action,
-        ".github/actions/prepare-grpcurl-artifact/action.yml": prepare_grpcurl_action,
-        ".github/actions/prepare-gobgp-artifact/action.yml": prepare_gobgp_action,
         ".github/actions/prime-rustbgpd-dev-cache/action.yml": prime_dev_image_action,
         ".github/actions/install-grpcurl-artifact/action.yml": grpcurl_action,
         ".github/actions/install-gnmic-artifact/action.yml": gnmic_action,
@@ -1731,6 +1465,39 @@ def check(root: Path) -> list[str]:
         errors.append("Dockerfile.gobgp: floating GoBGP release is forbidden")
     if "go install github.com/osrg/gobgp" in gobgp or "FROM golang:" in gobgp:
         errors.append("Dockerfile.gobgp: source build replaced pinned release archives")
+
+    gobgp4_path = root / "tests" / "interop" / "Dockerfile.gobgp-v47"
+    gobgp4 = gobgp4_path.read_text() if gobgp4_path.is_file() else ""
+    gobgp4_steps = (
+        "COPY gobgp-archive/ /tmp/gobgp-archive/",
+        'echo "${GOBGP_SHA256}  ${archive}" | sha256sum --check --strict',
+        'tar -xzf "${archive}" -C /usr/local/bin gobgp gobgpd',
+    )
+    for seam in (
+        "FROM debian:bookworm-slim AS gobgp-release",
+        f"ARG GOBGP_VERSION={GOBGP4_DEFAULT}",
+        f"ARG GOBGP_SHA256={GOBGP4_CHECKSUMS[GOBGP4_DEFAULT]}",
+        'test "${TARGETARCH}" = amd64',
+        'archive="/tmp/gobgp-archive/gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz"',
+        'if [ ! -f "${archive}" ]; then',
+        "--retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180",
+        *gobgp4_steps,
+        'test "$(gobgp --version)" = "gobgp version ${GOBGP_VERSION}"',
+        'test "$(gobgpd --version)" = "gobgpd version ${GOBGP_VERSION}"',
+        "COPY --from=gobgp-release /usr/local/bin/gobgpd /usr/local/bin/gobgpd",
+        "COPY --from=gobgp-release /usr/local/bin/gobgp /usr/local/bin/gobgp",
+    ):
+        if seam not in gobgp4:
+            errors.append(f"Dockerfile.gobgp-v47: staged release seam missing: {seam}")
+    positions = [gobgp4.find(seam) for seam in gobgp4_steps]
+    if min(positions) < 0 or positions != sorted(positions):
+        errors.append("Dockerfile.gobgp-v47: copy/check/extract ordering drifted")
+    if gobgp4.count("osrg/gobgp/releases/download/") != 1:
+        errors.append("Dockerfile.gobgp-v47: release URL inventory drifted")
+    if re.search(r"FROM golang:|git clone|go (?:build|install)|/download/latest", gobgp4):
+        errors.append("Dockerfile.gobgp-v47: source or floating build replaced release archives")
+    if (root / "tests" / "interop" / "Dockerfile.gobgp-bgpls").exists():
+        errors.append("Dockerfile.gobgp-bgpls: source-built GoBGP image returned")
 
     bird3 = (root / "tests" / "interop" / "Dockerfile.bird3").read_text()
     for seam in (

@@ -693,12 +693,19 @@ fn m77_pins_gobgp48_identity_before_preserving_the_gr_llgr_contract() {
 
     let dockerfile = fs::read_to_string(interop_path("Dockerfile.gobgp-v47"))
         .expect("read checksum-built GoBGP Dockerfile");
+    let staged = dockerfile
+        .find("COPY gobgp-archive/ /tmp/gobgp-archive/")
+        .expect("GoBGP archive is taken from the staged build context");
     let checksum = dockerfile
-        .find("sha256sum -c -")
+        .find("echo \"${GOBGP_SHA256}  ${archive}\" | sha256sum --check --strict")
         .expect("GoBGP archive checksum is verified");
     let extract = dockerfile
-        .find("tar -xzf /tmp/gobgp.tar.gz")
+        .find("tar -xzf \"${archive}\" -C /usr/local/bin gobgp gobgpd")
         .expect("GoBGP archive is extracted");
+    assert!(
+        staged < checksum,
+        "the staged GoBGP archive must be copied in before verification"
+    );
     assert!(
         checksum < extract,
         "GoBGP archive must be verified before extraction"
@@ -2750,7 +2757,9 @@ fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
         "M104 must install protoc before the context proof and run that proof before live"
     );
     for required in [
-        "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]",
+        "needs: [prime_dev_image]",
+        "uses: ./.github/actions/stage-bird3-artifact",
+        "uses: ./.github/actions/stage-gobgp-artifact",
         "PROOF PASS: 23 checks",
         "M104_EXPECTED_GIT_SHA: ${{ github.sha }}",
         "max_attempts: \"1\"",
