@@ -29,7 +29,8 @@ deletes the consumed files. The published changelog stays an ordinary reviewed
   rewrite below, so wrap them at the width `CHANGELOG.md` uses.
 - Write relative links from this directory, as `../docs/...`, so they resolve
   where the fragment lives. The assembler drops the leading `../` of a link
-  target when it copies the bullet into the root `CHANGELOG.md`.
+  target when it copies the bullet into the root `CHANGELOG.md`; text inside
+  an inline code span is left as written.
 - Name the file `<category>-<short-slug>.md` in lowercase, for example
   `fixed-replay-eviction-gap.md`. Names must be unique; they set the order
   within a category.

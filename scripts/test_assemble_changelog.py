@@ -132,6 +132,35 @@ class AssembleChangelogTests(unittest.TestCase):
         )
         self.assertNotIn("](../", text)
 
+    def test_inline_code_spans_keep_their_literal_link_text(self):
+        fragment = """### Fixed
+
+- The literal `[guide](../docs/x.md)` and ``a `[b](../c.md)` d`` stay, while
+  [`code` text](../docs/y.md) and a span split over `two
+  lines [x](../z.md)` behave as Markdown reads them.
+"""
+        root = self.tree(**{"fixed-code.md": fragment})
+        assemble.run(root, check=False)
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            """- The literal `[guide](../docs/x.md)` and ``a `[b](../c.md)` d`` stay, while
+  [`code` text](docs/y.md) and a span split over `two
+  lines [x](../z.md)` behave as Markdown reads them.
+""",
+            text,
+        )
+
+    def test_duplicate_detection_compares_the_root_relative_link(self):
+        changelog = CHANGELOG.replace(
+            "- Existing fixed entry, hard-wrapped over",
+            "- See [the guide](docs/x.md).\n- Existing fixed entry, hard-wrapped over",
+        )
+        root = self.tree(changelog, **{"fixed-dup.md": "### Fixed\n\n- See [the guide](../docs/x.md).\n"})
+        with self.assertRaisesRegex(
+            ValueError, r"fixed-dup.md: bullet already present in \[Unreleased\]"
+        ):
+            assemble.run(root, check=True)
+
     def test_second_assembly_with_no_fragments_changes_nothing(self):
         root = self.tree(**{"fixed-a.md": "### Fixed\n\n- Fragment fix A.\n"})
         assemble.run(root, check=False)
