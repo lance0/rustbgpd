@@ -109,10 +109,28 @@ mutation can start behind that abandoned wait: an operation that obtains the
 permit only after shutdown has begun is refused as `UNAVAILABLE` (`runtime
 config coordinator is closed`; a SIGHUP reload is rejected with no effect)
 before it runs, and an owner that is already registered sends shutdown back to
-the watchdog wait instead of being abandoned. A second SIGINT or SIGTERM ends
-the five-second wait early and skips the later waits that have no deadline,
-but it does not shorten an owner's settlement either: a stop during an owned
-mutation still takes up to the watchdog deadline.
+the watchdog wait instead of being abandoned. A further SIGINT or SIGTERM ends
+the five-second wait early and skips the later waits that have no deadline.
+
+A further SIGINT or SIGTERM while an owner is registered does not skip that
+owner either; it **accelerates the fail-stop**. The daemon fences the owner as
+`operator_forced` at once and takes exactly the path budget expiry would have
+taken: readiness turns red, the diagnostic is published, and the process exits
+70 after the five-second grace, with the owner's journal and pending
+transaction state left on disk for the next start. "Further" means any
+termination signal after coordinated shutdown began, so the first signal
+after a `Shutdown` RPC escalates too. Signal-versus-owner races have one
+outcome each: an owner that settles first is left settled and the drain
+continues (no fence, no exit 70); a signal that lands first wins the fence
+and the owner's later settlement attempt loses; an operation that registers
+only after the signal is refused by the shutdown gate before it runs, never
+fenced. An accelerated fail-stop is not a rollback and not a graceful
+teardown: the mutation was abandoned mid-flight, nothing beyond the owner's
+own journaling is recorded, peers are not sent a Cease, and the exit status
+is 70, not 0. Boot decides from durable state exactly as after the watchdog
+path, so the recovery runbook below applies unchanged. Without an owner, a
+further signal keeps its "stop waiting" meaning and the exit status is
+unchanged.
 
 After clean settlement, the explicit pre-Cease stages have these sequential
 ceilings:
@@ -163,7 +181,7 @@ settlement (which releases the coordinator) or recovery fencing (which
 retains it until process death). There is no third outcome, and a late
 reply arriving after the fence has won cannot reverse it.
 
-## The five fence reasons
+## The fence reasons
 
 The fail-stop diagnostic names one `fence_reason`. In plain language:
 
@@ -174,8 +192,9 @@ The fail-stop diagnostic names one `fence_reason`. In plain language:
 | `known_divergence` | The daemon *knows* runtime and durable state diverged and cannot repair it in place: a compensating rollback failed, a torn-down session identity cannot be restored, or finalization of a durably published candidate failed. | Not ambiguous — the on-disk authority is known — but the runtime could not be brought back to match it. The restart rebuilds the runtime from disk. |
 | `publication_ambiguous` | The candidate config was renamed into place, but the directory fsync that proves durability did not complete. The complete candidate is visible at the target; the daemon adopted it and did not roll back. | Expect the **new** candidate to be the boot authority. Startup validates the published object and fails closed if it is invalid. |
 | `acknowledgement_lost` | A mutation, persistence, or finalization command was accepted, and the reply proving completion was lost. Done and not-done are indistinguishable. | Either config may be authoritative. Boot decides; verify before re-issuing (see the runbook). |
+| `operator_forced` | A further SIGINT or SIGTERM arrived during coordinated shutdown while this owner was still settling; the operator chose not to wait out the budget. Nothing is known about how far the mutation got beyond its phase. | Same as `budget_expired`: boot decides from durable state. The pending transaction, if any, is reverted or adopted on the next start exactly as it would be after a watchdog fail-stop. |
 
-The common rule across all five: no success or clean-failure claim
+The common rule across all six: no success or clean-failure claim
 without proof, no rollback guessing, and after the restart it is the
 durable state — not your memory of the RPC's last response — that says
 which config is live. `publication_ambiguous` and
@@ -249,7 +268,7 @@ exits 70, and no fail-stop happens without this line. Reading it:
   `neighbor_add`, `policy_set`, …) and `phase` names how far it got
   (`owned_preflight` / `mutating` / `settling_rollback`).
 - `fence_reason` is the diagnosis — see
-  [the table above](#the-five-fence-reasons). `elapsed_seconds` near
+  [the table above](#the-fence-reasons). `elapsed_seconds` near
   1800 with `budget_expired` is a silent wedge (expect the 15/25/29
   minute `runtime config settlement budget warning` lines before it);
   a small `elapsed_seconds` with any other reason is a detected
@@ -394,7 +413,12 @@ explicit `systemctl stop` in this window follows the same path and
 still ends in exit 70, not a clean shutdown; with a healthy
 still-settling owner, `stop` legitimately takes up to the watchdog
 deadline — that wait is the daemon refusing to abandon a mutation
-mid-flight, and `TimeoutStopSec=32min` is sized for it.
+mid-flight, and `TimeoutStopSec=32min` is sized for it. If you will
+not wait, a further SIGTERM or SIGINT to the process forces the
+fail-stop now (`fence_reason="operator_forced"`, exit 70 after the
+grace) — see [What coordinated shutdown
+bounds](#what-coordinated-shutdown-bounds) for what that does and does
+not mean.
 
 ---
 
@@ -412,6 +436,14 @@ values at release time:
 | `RestartSec` | `5` | Prompt retry for transient failures. |
 | `StartLimitIntervalSec` / `StartLimitBurst` | `10min` / `5` | Bound repeated fail-stop recovery so a deterministic fault ends in a visibly failed unit instead of an infinite flap. |
 | `TimeoutStopSec` | `32min` | An explicit stop waits through the full 30-minute settlement budget plus the 5-second grace; systemd must never SIGKILL a legitimately settling transaction. |
+
+`TimeoutStopSec` is sized for the ordinary first-signal path and does not
+change. One caveat for raw signals: `systemctl stop` sends one SIGTERM and
+suppresses automatic restart whatever the exit status, but a further
+SIGTERM or SIGINT you send with `kill` during that stop forces exit 70, and
+`Restart=on-failure` then restarts the unit unless the stop job is still
+pending. Either way the persisted transaction is recovered on the next
+actual start, not at exit.
 
 Two anti-patterns the release checker also rejects: listing 70 in
 `SuccessExitStatus` (masks the failure) or in

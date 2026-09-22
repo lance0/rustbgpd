@@ -576,6 +576,12 @@ Notes on the sandbox:
   Nothing else in the stop path needs that long: waits outside settlement
   ownership are bounded in seconds, and a second SIGTERM or SIGINT skips the
   ones that have no deadline, so `TimeoutStopSec` does not need to change.
+  A second signal while a mutation is still settling instead forces the
+  watchdog's fail-stop at once (`fence_reason="operator_forced"`, exit 70
+  after the grace, recovery on the next start). Note the supervisor
+  consequence: `systemctl stop` suppresses restart, but exit 70 provoked by
+  a raw `kill` during that stop is a failure that `Restart=on-failure` may
+  restart.
   `rbgp doctor` reports listener failures through its `bgp.listener` check.
 
 ### Installation

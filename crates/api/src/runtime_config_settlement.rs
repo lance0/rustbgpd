@@ -712,6 +712,9 @@ pub enum RuntimeConfigFenceReason {
     KnownDivergence,
     PublicationAmbiguous,
     AcknowledgementLost,
+    /// A further termination signal during coordinated shutdown forced the
+    /// active owner to the fail-stop path before its budget expired.
+    OperatorForced,
 }
 
 /// Closed, secret-free failure classification for settlement-owned policy
@@ -773,6 +776,7 @@ impl RuntimeConfigFenceReason {
             Self::KnownDivergence => "known_divergence",
             Self::PublicationAmbiguous => "publication_ambiguous",
             Self::AcknowledgementLost => "acknowledgement_lost",
+            Self::OperatorForced => "operator_forced",
         }
     }
 }
@@ -792,6 +796,7 @@ const AMBIGUITY_REASON_EXECUTOR: u8 = 2;
 const FENCE_REASON_DIVERGENCE: u8 = 3;
 const FENCE_REASON_PUBLICATION: u8 = 4;
 const FENCE_REASON_ACKNOWLEDGEMENT: u8 = 5;
+const FENCE_REASON_OPERATOR: u8 = 6;
 const RECOVERY_NOT_READY: &str = "runtime config settlement requires supervised recovery";
 const SIGHUP_RELOAD_STEP_NOT_RECORDED: &str = "not_recorded";
 const SIGHUP_RELOAD_STEP_NOT_APPLICABLE: &str = "not_applicable";
@@ -826,6 +831,7 @@ fn fence_reason_from_state(state: u8) -> Option<RuntimeConfigFenceReason> {
         FENCE_REASON_DIVERGENCE => Some(RuntimeConfigFenceReason::KnownDivergence),
         FENCE_REASON_PUBLICATION => Some(RuntimeConfigFenceReason::PublicationAmbiguous),
         FENCE_REASON_ACKNOWLEDGEMENT => Some(RuntimeConfigFenceReason::AcknowledgementLost),
+        FENCE_REASON_OPERATOR => Some(RuntimeConfigFenceReason::OperatorForced),
         _ => None,
     }
 }
@@ -1420,6 +1426,25 @@ impl RuntimeConfigSettlementWatchdog {
         self.registry.current.load().is_some()
     }
 
+    /// Fence the registered owner as `OperatorForced`, accelerating it to the
+    /// same fail-stop path the watchdog takes at budget expiry: readiness
+    /// turns red, the fatal boundary moves to now plus the grace, and the
+    /// process exits 70 with its recovery evidence untouched on disk.
+    ///
+    /// Returns `true` only when this call won the terminal transition. The
+    /// terminal state is one compare-and-swap, so this call and the owner's
+    /// `try_settle` have exactly one winner: an owner that settled first is
+    /// left settled and the caller sees `false`; a fence that won leaves the
+    /// owner's later settlement attempt returning `false` and parked until
+    /// the fatal clock fires. No owner, or an owner already fenced, is a
+    /// no-op that also returns `false`.
+    #[must_use]
+    pub fn force_fail_stop(&self) -> bool {
+        self.registry.current.load_full().is_some_and(|operation| {
+            transition_to_fenced(&operation, RuntimeConfigFenceReason::OperatorForced)
+        })
+    }
+
     /// Block until every clean registration settles, bounded by the current
     /// operation's registered deadline and pre-armed fatal boundary.
     ///
@@ -1711,6 +1736,7 @@ fn transition_to_fenced(operation: &OperationInner, reason: RuntimeConfigFenceRe
         RuntimeConfigFenceReason::KnownDivergence => FENCE_REASON_DIVERGENCE,
         RuntimeConfigFenceReason::PublicationAmbiguous => FENCE_REASON_PUBLICATION,
         RuntimeConfigFenceReason::AcknowledgementLost => FENCE_REASON_ACKNOWLEDGEMENT,
+        RuntimeConfigFenceReason::OperatorForced => FENCE_REASON_OPERATOR,
     };
     // Serialize the winning terminal transition with SIGHUP diagnostic writes
     // so the fail-stop line cannot observe a post-fence bucket or effect bit.
@@ -2112,6 +2138,7 @@ mod tests {
                 RuntimeConfigFenceReason::KnownDivergence.as_str(),
                 RuntimeConfigFenceReason::PublicationAmbiguous.as_str(),
                 RuntimeConfigFenceReason::AcknowledgementLost.as_str(),
+                RuntimeConfigFenceReason::OperatorForced.as_str(),
             ],
             [
                 "budget_expired",
@@ -2119,6 +2146,7 @@ mod tests {
                 "known_divergence",
                 "publication_ambiguous",
                 "acknowledgement_lost",
+                "operator_forced",
             ]
         );
         assert_eq!(
@@ -2233,6 +2261,10 @@ mod tests {
                 (
                     FENCE_REASON_ACKNOWLEDGEMENT,
                     RuntimeConfigFenceReason::AcknowledgementLost,
+                ),
+                (
+                    FENCE_REASON_OPERATOR,
+                    RuntimeConfigFenceReason::OperatorForced,
                 ),
             ] {
                 let fenced = SettlementMetricSnapshot::decode(
@@ -3165,6 +3197,91 @@ mod tests {
             assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
         }
         drop(guard);
+    }
+
+    #[tokio::test]
+    async fn operator_forced_fence_takes_the_watchdog_fail_stop_path() {
+        let old_deadline = Duration::from_secs(4);
+        let grace = Duration::from_millis(20);
+        let (watchdog, receiver) = test_watchdog(old_deadline, grace);
+        assert!(!watchdog.force_fail_stop(), "no owner must be a no-op");
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+
+        let (operation, guard, coordinator, _) = operation(&watchdog, false).await;
+        let prearmed = operation.inner.fatal_at_nanos.load(Ordering::Acquire);
+        let started = Instant::now();
+        assert!(watchdog.force_fail_stop());
+        assert!(
+            !watchdog.force_fail_stop(),
+            "a fenced owner is not fenced twice"
+        );
+        assert_eq!(
+            operation.fence_reason(),
+            Some(RuntimeConfigFenceReason::OperatorForced)
+        );
+        assert!(operation.inner.fatal_at_nanos.load(Ordering::Acquire) < prearmed);
+        assert!(
+            !operation.try_settle(),
+            "settlement after the fence must lose"
+        );
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
+        assert!(started.elapsed() < old_deadline);
+        // The owner is retained through the fail-stop: the coordinator stays
+        // closed and held, exactly as at budget expiry.
+        assert!(watchdog.has_owner());
+        assert!(coordinator.acquire().await.is_err());
+        assert!(
+            metrics(&watchdog).contains(
+                "bgp_runtime_config_settlement_fail_stops_total{fence_reason=\"operator_forced\",kind=\"apply\",phase=\"owned_preflight\",response_attached=\"attached\"} 1"
+            )
+        );
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn settlement_and_operator_forced_fence_have_exactly_one_winner() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let settle = {
+            let operation = operation.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                operation.try_settle()
+            })
+        };
+        let force = {
+            let watchdog = watchdog.0.clone();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                watchdog.force_fail_stop()
+            })
+        };
+        barrier.wait();
+        let settled = settle.join().unwrap();
+        let forced = force.join().unwrap();
+        assert_ne!(
+            settled, forced,
+            "exactly one side wins the terminal transition"
+        );
+        assert_eq!(
+            settled,
+            operation.terminal() == RuntimeConfigSettlementTerminal::Settled
+        );
+        if settled {
+            assert_eq!(operation.fence_reason(), None);
+            assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+            drop(guard);
+        } else {
+            assert_eq!(
+                operation.fence_reason(),
+                Some(RuntimeConfigFenceReason::OperatorForced)
+            );
+            assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+            drop(guard);
+        }
     }
 
     #[tokio::test]
