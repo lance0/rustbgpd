@@ -465,14 +465,20 @@ An owner registered at signal time is fenced whatever its phase.
 The no-owner path is unchanged: a further signal still only skips the waits
 that have no deadline, and the exit status is unchanged. The supervisor
 contract keeps `TimeoutStopSec=32min` for the ordinary first-signal path. A
-raw further signal during `systemctl stop` produces exit 70, which
-`Restart=on-failure` may restart, whereas the explicit stop itself suppresses
-automatic restart; recovery runs on the next actual start in both cases.
+further signal sent with `kill` to a running unit produces exit 70, an
+unclean exit code that `Restart=on-failure` restarts; a unit stopped with
+`systemctl stop` is never restarted automatically whatever its exit status,
+so a further signal during that stop only ends the wait. Recovery runs on
+the next actual start in both cases.
 
 Evidence: the operator-forced reason rides the existing fence-reason
 vocabulary (metrics, log diagnostic, consumer checker), the API crate proves
 the one-winner property against `try_settle`, and the real-daemon settlement
-matrix carries rows for first-signal waiting, further-signal exit 70 with the
-evidence on disk, owner-first and signal-first orderings, a signal after an
-RPC-initiated shutdown, the no-owner path, and restart recovery from the
-persisted pending transaction.
+matrix carries rows for first-signal waiting with a held owner,
+further-signal exit 70 with the evidence on disk, the signal-first ordering,
+an owner that settles during shutdown and is neither fenced nor made to exit
+70, a signal after an RPC-initiated shutdown, the no-owner path, and restart
+recovery from the persisted pending transaction. The settles-just-before-the-
+signal ordering is proven at unit level rather than in the matrix: once the
+owner settles the daemon finishes shutdown in milliseconds, leaving no
+deterministic window in which to deliver a further signal.

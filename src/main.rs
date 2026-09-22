@@ -2922,7 +2922,9 @@ async fn shutdown_wait<T>(
 /// begun, so the registration-site gate check settles it without running its
 /// body and the drain's short bounded wait covers it. An owner registered at
 /// signal time is fenced whatever its phase; one still in preflight has no
-/// durable effect to recover.
+/// durable effect to recover. An owner the budget or an executor loss had
+/// already fenced is reported as such rather than as a skipped wait: its
+/// fail-stop was in flight before the signal arrived.
 fn stop_waiting_on_signal(
     mut sigint: tokio::signal::unix::Signal,
     mut sigterm: tokio::signal::unix::Signal,
@@ -2941,6 +2943,13 @@ fn stop_waiting_on_signal(
                 fence_reason = "operator_forced",
                 exit_status = AMBIGUOUS_CONFIG_EXIT_STATUS,
                 "termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop"
+            );
+        } else if let Some(fence_reason) = runtime_config_settlement.owner_fence_reason() {
+            warn!(
+                signal,
+                fence_reason,
+                exit_status = AMBIGUOUS_CONFIG_EXIT_STATUS,
+                "termination signal received during coordinated shutdown; the owned runtime-config settlement is already fenced and the daemon will fail-stop"
             );
         } else {
             warn!(

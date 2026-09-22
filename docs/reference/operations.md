@@ -121,11 +121,13 @@ candidates, or raw error text.
 The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every
 five seconds forever. `TimeoutStopSec=32min` lets an explicit stop wait through
-the watchdog; systemd suppresses automatic restart for an explicit
-`systemctl stop`. A further raw SIGTERM or SIGINT during that stop instead
-forces the settling owner to fail-stop (`fence_reason="operator_forced"`,
-exit 70), which `Restart=on-failure` may restart; recovery runs on the next
-actual start either way. A wedge that consumes the full 30-minute budget intentionally
+the watchdog. A further SIGTERM or SIGINT forces the settling owner to
+fail-stop instead (`fence_reason="operator_forced"`, exit 70). What the
+supervisor does next depends on how the stop was requested: raw signals to a
+running unit end in exit 70, an unclean exit code that `Restart=on-failure`
+restarts, while systemd never automatically restarts a unit stopped
+explicitly with `systemctl stop`, whatever its exit status. Recovery from the
+persisted transaction runs on the next actual start either way. A wedge that consumes the full 30-minute budget intentionally
 does not reach five starts in ten minutes; the limit bounds fast deterministic
 failures, while the independent fatal clock still bounds each slow wedge. After
 inspecting and fixing the config directory, bind mount,
@@ -2346,7 +2348,8 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
-| `termination signal received during coordinated shutdown` | WARN | A further SIGINT/SIGTERM arrived after shutdown began with no settlement owner; waits without a deadline are skipped |
+| `termination signal received during coordinated shutdown; skipping waits that have no deadline` | WARN | A further SIGINT/SIGTERM arrived after shutdown began with no settlement owner; waits without a deadline are skipped |
+| `termination signal received during coordinated shutdown; the owned runtime-config settlement is already fenced and the daemon will fail-stop` | WARN | A further SIGINT/SIGTERM arrived after the owner had already been fenced; `fence_reason` names why, and exit 70 was already in flight |
 | `termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop` | ERROR | A further SIGINT/SIGTERM arrived while a runtime-config owner was still settling; it is fenced as `operator_forced` and exit 70 follows after the grace |
 | `runtime config coordinator permit is still held outside settlement ownership` | ERROR | Shutdown stopped waiting for an unowned coordinator permit (`reason` is `deadline_expired` or `second_signal`) and continues without the warm checkpoint |
 | `SIGHUP reload task is still running with no settlement owner` | ERROR | Shutdown stopped waiting to join the reload task and continues |

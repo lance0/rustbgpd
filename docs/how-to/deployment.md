@@ -578,10 +578,12 @@ Notes on the sandbox:
   ones that have no deadline, so `TimeoutStopSec` does not need to change.
   A second signal while a mutation is still settling instead forces the
   watchdog's fail-stop at once (`fence_reason="operator_forced"`, exit 70
-  after the grace, recovery on the next start). Note the supervisor
-  consequence: `systemctl stop` suppresses restart, but exit 70 provoked by
-  a raw `kill` during that stop is a failure that `Restart=on-failure` may
-  restart.
+  after the grace). The supervisor consequence depends on how the stop was
+  requested: raw signals to a running unit end in exit 70, an unclean exit
+  code that `Restart=on-failure` restarts, while a unit stopped explicitly
+  with `systemctl stop` is never restarted automatically whatever its exit
+  status. Recovery from the persisted transaction runs on the next actual
+  start either way.
   `rbgp doctor` reports listener failures through its `bgp.listener` check.
 
 ### Installation

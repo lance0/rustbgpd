@@ -117,9 +117,15 @@ owner either; it **accelerates the fail-stop**. The daemon fences the owner as
 `operator_forced` at once and takes exactly the path budget expiry would have
 taken: readiness turns red, the diagnostic is published, and the process exits
 70 after the five-second grace, with the owner's journal and pending
-transaction state left on disk for the next start. "Further" means any
-termination signal after coordinated shutdown began, so the first signal
-after a `Shutdown` RPC escalates too. Signal-versus-owner races have one
+transaction state left on disk for the next start. Reusing that path is a
+deliberate choice, and it has a visible cost: an operator who sends the
+second signal to stop the daemon *now* still waits out the five-second
+recovery-fence grace, because the escalation publishes the same readiness,
+diagnostic, and fatal boundary the watchdog would. Consistency with the
+watchdog path is worth those five seconds; `SIGKILL` remains the way to skip
+them, at the price of the diagnostic. "Further" means any termination signal
+after coordinated shutdown began, so the first signal after a `Shutdown` RPC
+escalates too. Signal-versus-owner races have one
 outcome each: an owner that settles first is left settled and the drain
 continues (no fence, no exit 70); a signal that lands first wins the fence
 and the owner's later settlement attempt loses; an operation that registers
@@ -438,12 +444,22 @@ values at release time:
 | `TimeoutStopSec` | `32min` | An explicit stop waits through the full 30-minute settlement budget plus the 5-second grace; systemd must never SIGKILL a legitimately settling transaction. |
 
 `TimeoutStopSec` is sized for the ordinary first-signal path and does not
-change. One caveat for raw signals: `systemctl stop` sends one SIGTERM and
-suppresses automatic restart whatever the exit status, but a further
-SIGTERM or SIGINT you send with `kill` during that stop forces exit 70, and
-`Restart=on-failure` then restarts the unit unless the stop job is still
-pending. Either way the persisted transaction is recovered on the next
-actual start, not at exit.
+change. What the supervisor does after a forced fail-stop depends on how the
+stop was requested, and the two cases differ:
+
+- **Raw signals, no systemd stop or restart in flight.** You send SIGTERM or
+  SIGINT against a running unit yourself and then send another. Exit 70 is an
+  unclean exit code, so `Restart=on-failure` restarts the unit and the
+  restart is the recovery, exactly as after a watchdog fail-stop — bounded by
+  `StartLimitIntervalSec` / `StartLimitBurst` like any other failure.
+- **`systemctl stop`.** systemd does not restart a service whose death is the
+  result of its own stop operation, whatever the exit status. A further signal
+  during the stop still forces exit 70 and the result is still recorded as a
+  failure, but no automatic restart follows: the daemon stays down until you
+  start it again.
+
+Either way the persisted transaction is recovered on the next actual start,
+never at exit.
 
 Two anti-patterns the release checker also rejects: listing 70 in
 `SuccessExitStatus` (masks the failure) or in

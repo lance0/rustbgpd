@@ -1445,6 +1445,22 @@ impl RuntimeConfigSettlementWatchdog {
         })
     }
 
+    /// Label of the current owner's fence reason, if an owner is registered
+    /// and already fenced.
+    ///
+    /// Coordinated shutdown uses this to tell an owner it has just fenced
+    /// itself from one the budget or an executor loss already fenced: in the
+    /// second case a fail-stop is in flight before the signal arrives, so
+    /// the signal is not what ends the process.
+    #[must_use]
+    pub fn owner_fence_reason(&self) -> Option<&'static str> {
+        self.registry
+            .current
+            .load_full()
+            .and_then(|operation| operation.fence_reason())
+            .map(RuntimeConfigFenceReason::as_str)
+    }
+
     /// Block until every clean registration settles, bounded by the current
     /// operation's registered deadline and pre-armed fatal boundary.
     ///
@@ -3205,6 +3221,7 @@ mod tests {
         let grace = Duration::from_millis(20);
         let (watchdog, receiver) = test_watchdog(old_deadline, grace);
         assert!(!watchdog.force_fail_stop(), "no owner must be a no-op");
+        assert_eq!(watchdog.owner_fence_reason(), None);
         assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
 
         let (operation, guard, coordinator, _) = operation(&watchdog, false).await;
@@ -3219,6 +3236,7 @@ mod tests {
             operation.fence_reason(),
             Some(RuntimeConfigFenceReason::OperatorForced)
         );
+        assert_eq!(watchdog.owner_fence_reason(), Some("operator_forced"));
         assert!(operation.inner.fatal_at_nanos.load(Ordering::Acquire) < prearmed);
         assert!(
             !operation.try_settle(),
@@ -3227,8 +3245,14 @@ mod tests {
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 70);
         assert!(started.elapsed() < old_deadline);
         // The owner is retained through the fail-stop: the coordinator stays
-        // closed and held, exactly as at budget expiry.
+        // closed and held, exactly as at budget expiry. `propagate_fence`
+        // closes it on the observer thread while the exit-70 publication
+        // above happens on the fatal clock, so receiving 70 orders nothing
+        // against the close. Wait for propagation first, as the
+        // budget-expiry sibling does: without it the acquire would park
+        // forever on the permit the fenced owner retains instead of failing.
         assert!(watchdog.has_owner());
+        wait_for_propagation(&operation);
         assert!(coordinator.acquire().await.is_err());
         assert!(
             metrics(&watchdog).contains(
@@ -3301,6 +3325,9 @@ mod tests {
             operation.fence_reason(),
             Some(RuntimeConfigFenceReason::ExecutorLost)
         );
+        // What coordinated shutdown reports when a signal arrives after some
+        // other cause already fenced the owner.
+        assert_eq!(watchdog.owner_fence_reason(), Some("executor_lost"));
     }
 
     #[test]
