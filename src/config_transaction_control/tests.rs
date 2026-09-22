@@ -10644,3 +10644,75 @@ async fn stalled_transaction_stage_acknowledgement_ends_clean_at_the_pre_effect_
     assert!(operation.try_settle());
     drop(executor_guard);
 }
+
+#[tokio::test(start_paused = true)]
+async fn stalled_transaction_fib_read_ends_clean_at_the_pre_effect_deadline() {
+    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let permit = coordinator.acquire().await.unwrap();
+    let (operation, executor_guard) = RuntimeConfigSettlementWatchdog::new().register_owned(
+        RuntimeConfigOperationKind::Apply,
+        coordinator,
+        permit,
+        rustbgpd_api::health_probe::DaemonGate::new(),
+        None,
+        None,
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+    );
+    let deadline = operation.pre_effect_deadline();
+    // Earlier waits consumed most of the budget, so the pre-effect deadline
+    // now falls inside the read's own ten-minute bound, as it always does
+    // under a short budget.
+    tokio::time::sleep(Duration::from_mins(25)).await;
+    let (fib_tx, mut fib_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let deps = deps(
+        Some(fib_tx),
+        mpsc::channel(1).0,
+        Some(config_tx.clone()),
+        Vec::new(),
+    );
+    let progress = RuntimeConfigMutationProgress::owned(&operation);
+    let commit = tokio::spawn(async move {
+        commit_fib_transaction(
+            &deps,
+            &internal_tx,
+            &config_tx,
+            "candidate".to_string(),
+            fib_config(&table("core", 1001)),
+            "next".to_string(),
+            proto::UpdateGroupImpactPlan::default(),
+            &progress,
+        )
+        .await
+        .map(|_| ())
+    });
+    // Handshake: the reconciler received the read and never answers it.
+    let Some(FibRuntimeCommand::GetTables { reply: _stalled }) = fib_rx.recv().await else {
+        panic!("expected GetTables")
+    };
+    tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
+    assert!(!commit.is_finished(), "read ended before its deadline");
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let failure = tokio::time::timeout(Duration::from_secs(1), commit)
+        .await
+        .expect("a stalled FIB read must end at the pre-effect deadline")
+        .unwrap()
+        .expect_err("a stalled FIB read must not commit");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    assert!(
+        failure.fence_reason.is_none(),
+        "a pre-effect timeout is clean"
+    );
+    assert_eq!(
+        failure.error,
+        ConfigTransactionApplyError::Unavailable(
+            "FIB reconciler did not answer GetTables in time".to_string()
+        )
+    );
+    assert!(config_rx.try_recv().is_err(), "nothing was staged on disk");
+    assert!(internal_rx.try_recv().is_err(), "no snapshot was staged");
+    assert!(operation.try_settle());
+    drop(executor_guard);
+}

@@ -503,8 +503,9 @@ effect end by that deadline and settle clean no effect with `UNAVAILABLE`:
   peer-group and policy CRUD; and config transactions. The dropped commit
   channel makes the config bridge discard the stage when the persister
   eventually answers;
-- the current-table read in FIB-table CRUD and the send half of its
-  peer-manager staging command;
+- the current-table read in FIB-table CRUD and in config transactions that
+  replace FIB tables, and the send half of FIB-table CRUD's peer-manager
+  staging command;
 - the read of the existing group in peer-group Set.
 
 Only transport acceptance is capped on the peer-manager send. A command the

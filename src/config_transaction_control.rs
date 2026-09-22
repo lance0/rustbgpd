@@ -2857,13 +2857,22 @@ async fn commit_fib_transaction(
         fib_error_to_apply_error(runtime_unavailable_error(!deps.startup_tables.is_empty()))
     })?;
     let permit = reserve_persist_permit(config_tx).await?;
-    let previous_tables = read_current_tables(
+    // The read precedes every runtime effect, so it ends by the owner's
+    // pre-effect deadline and settles clean rather than exhausting a short
+    // budget on its own ten-minute bound.
+    let read = read_current_tables(
         Some(&fib_cmd_tx),
         rustbgpd_api::rib_service::FibTableControlError::Internal,
-    )
-    .await
-    .map_err(fib_error_to_apply_error)?
-    .unwrap_or_default();
+    );
+    let previous_tables = before_pre_effect_deadline(progress.pre_effect_deadline(), read)
+        .await
+        .ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "FIB reconciler did not answer GetTables in time".to_string(),
+            )
+        })?
+        .map_err(fib_error_to_apply_error)?
+        .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
     progress.begin_mutation();
     let staged = stage_candidate_config(permit, candidate_toml, progress).await?;
