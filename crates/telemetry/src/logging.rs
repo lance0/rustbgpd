@@ -54,7 +54,14 @@ fn build_filter(
                 .filter(|s| match s.parse::<Directive>() {
                     Ok(_) => true,
                     Err(e) => {
-                        rejected.push(format!("`{s}`: {e}"));
+                        // Escaped for the report only, so a control
+                        // character in the directive (or echoed in a field
+                        // regex error) cannot split the one-line warning.
+                        rejected.push(format!(
+                            "`{}`: {}",
+                            escape_controls(s),
+                            escape_controls(&e.to_string())
+                        ));
                         false
                     }
                 })
@@ -80,6 +87,20 @@ fn build_filter(
         )
     });
     Ok((append_directives(base, extra_directives)?, report))
+}
+
+/// Escape control characters (`\n` becomes `\\n`) and leave everything else,
+/// quotes included, as written.
+fn escape_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Append per-peer directives onto a base filter. Split out from
@@ -389,6 +410,21 @@ mod tests {
                 "{value:?} falls back to info"
             );
         }
+    }
+
+    /// A control character in a rejected directive is escaped, so the
+    /// report stays one line and cannot pass for separate log output.
+    #[test]
+    fn rejected_directive_is_escaped_in_the_report() {
+        let (filter, report) = build_filter(Some("info,bad\nlevel=x"), &[]).expect("filter");
+        assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
+        let report = report.expect("report");
+        assert!(!report.contains(['\n', '\r']), "{report:?}");
+        assert!(report.contains("`bad\\nlevel=x`: "), "{report:?}");
+        let (_, report) = build_filter(Some("bad\r\u{1b}[2J=x"), &[]).expect("filter");
+        let report = report.expect("report");
+        assert!(!report.chars().any(char::is_control), "{report:?}");
+        assert!(report.contains("`bad\\r\\u{1b}[2J=x`: "), "{report:?}");
     }
 
     /// A `RUST_LOG` with no valid directive falls back to `info` (as the
