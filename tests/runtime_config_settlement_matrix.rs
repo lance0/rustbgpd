@@ -1323,12 +1323,13 @@ fn escalation_row_signal_lands_first(ordinal: usize) {
 ///
 /// A no-owner shutdown completes in milliseconds, and nothing in this lab can
 /// hold one open: the unwatched coordinator holder the bounded drain exists
-/// for is `ListFibTables`, which returns at once with no FIB reconciler
-/// configured, and the deadline-free stages (EVPN IMET sweep, peer-manager
-/// drain, BMP enqueue, RIB event stage) are all unconfigured here. A signal
-/// sent after observing `initiating coordinated shutdown` therefore usually
-/// arrives once the process is already gone, which is why this row must not
-/// rest on negative assertions.
+/// for was historically `ListFibTables`, which now reads without holding the
+/// permit; all remaining coordinator acquirers register an owner, so the bounded
+/// drain operates as defense-in-depth against future un-owned callers. The
+/// deadline-free stages (EVPN IMET sweep, peer-manager drain, BMP enqueue, RIB
+/// event stage) are all unconfigured here. A signal sent after observing
+/// `initiating coordinated shutdown` therefore usually arrives once the process
+/// is already gone, which is why this row must not rest on negative assertions.
 ///
 /// Both signals are instead delivered while the process is stopped. SIGTERM
 /// and SIGINT are distinct signals, so both stay pending and both are

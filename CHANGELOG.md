@@ -148,15 +148,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
   transition reason and seam.
 - `ListFibTables` (`rbgp fib-table list`) no longer waits without limit for
-  the FIB reconciler while it holds the daemon-wide runtime-config
-  coordinator. A reconciler that accepted the read and never answered parked
-  every config mutation, SIGHUP reload and the shutdown drain behind that one
-  read for as long as the client kept waiting. The read now fails
-  `UNAVAILABLE` after ten minutes and releases the coordinator, so the stall
-  is bounded at ten minutes rather than removed: the list still takes the
-  coordinator so it never reports a table set that an in-flight mutation may
-  yet roll back. The same deadline covers the table read that begins
-  `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction.
+  the FIB reconciler. A reconciler that accepted the read and never answered
+  left the list waiting for as long as the client kept waiting. The read now
+  fails `UNAVAILABLE` after ten minutes, so the stall is bounded at ten
+  minutes rather than removed. The same deadline covers the table read that
+  begins `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction.
 - Config transaction confirm, abort and rollback, and gNMI `Set`, no longer
   wait without limit for the runtime-config coordinator. After ten minutes
   they fail before taking ownership and without any runtime or persisted
