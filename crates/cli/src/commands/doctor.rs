@@ -44,7 +44,7 @@ use crate::proto::{
 const EVENT_HISTORY_LIMIT: u32 = 256;
 
 /// Keys in the shipped `BgpEvent` JSON whose values are free text that
-/// could echo operator/peer-supplied strings (e.g. RFC 8203 shutdown
+/// could echo operator/peer-supplied strings (e.g. RFC 9003 shutdown
 /// reasons). Redacted the same way `tcp_ao_detail`/metrics are.
 const EVENT_FREE_TEXT_KEYS: &[&str] = &["summary", "reason", "shutdown_reason", "target"];
 

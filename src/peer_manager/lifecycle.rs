@@ -1448,7 +1448,7 @@ impl PeerManager {
     /// because the remote dialed in, and `delete_peer_checked` rejects
     /// dynamic targets so the `dynamic_neighbor_limit` slot accounting stays
     /// owned by the `BackToIdle` reap path. Instead, each matched peer is
-    /// sent a graceful stop (Cease NOTIFICATION carrying an RFC 8203
+    /// sent a graceful stop (Cease NOTIFICATION carrying an RFC 9003
     /// shutdown communication) with its admin state untouched; the session's
     /// `BackToIdle` notification then drives the normal dynamic auto-removal
     /// (slot decrement, dead-letter carry-over, metric reaping), and the

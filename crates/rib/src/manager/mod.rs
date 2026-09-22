@@ -1,3 +1,8 @@
+//! The [`RibManager`] actor: one tokio task that owns every Adj-RIB-In, the
+//! Loc-RIB and every Adj-RIB-Out, and serves its update, query, readiness
+//! and summary channels. Family distribution, graceful restart, route
+//! refresh, queries and update groups live in submodules.
+
 #[cfg(feature = "bench-internals")]
 mod bench_support;
 #[cfg(feature = "bench-internals")]

@@ -108,7 +108,7 @@ fn bgp_identity(route: &Route) -> (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr) {
 /// The decisive step in a best-path comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BestPathReason {
-    /// RFC 9252 section 7: no valid applicable `SRv6` service SID.
+    /// RFC 9252 §7: no valid applicable `SRv6` service SID.
     Srv6SidInvalid,
     /// Step 0: non-stale preferred over stale (RFC 4724 / RFC 9494).
     StalePreference,

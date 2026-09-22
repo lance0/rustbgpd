@@ -1,3 +1,7 @@
+//! Adj-RIB-Out: the routes currently advertised to one peer, per address
+//! family, keyed by `(Prefix, path_id)` for unicast so Add-Path and
+//! single-best export share one table.
+
 use std::net::IpAddr;
 
 use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
