@@ -1255,8 +1255,8 @@ mod unix {
     /// first activation uses, then write the activation receipt for
     /// `candidate` (the generation being rolled away from): `rolled_back` when
     /// the daemon settled on `target`, `recovery_required` otherwise. An
-    /// attempt `activate` would roll back re-points `current` at `candidate`
-    /// again instead and leaves the receipt alone. The caller holds the
+    /// attempt proven [`not_applied`] instead re-points `current` back at
+    /// `candidate` and leaves the receipt alone. The caller holds the
     /// activation state lock.
     pub(crate) fn republish(
         state: &Path,
