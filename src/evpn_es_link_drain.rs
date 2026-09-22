@@ -12,7 +12,7 @@
 //! - **Carrier down → drain immediately.** A bound name absent from
 //!   the kernel projection counts as down (fail-closed), as does a
 //!   monitor that cannot run at all (spawn failure).
-//! - **Carrier up → hold `recovery_delay_secs`, then undrain.** The
+//! - **Carrier up → hold `recovery_delay_seconds`, then undrain.** The
 //!   hold re-arms on every up edge, so a flapping circuit stays
 //!   drained until it holds carrier for the full window (decision 3).
 //! - **Startup / binding change applies the first probe directly** —
@@ -800,7 +800,7 @@ mod tests {
         settle().await;
         assert!(
             rig.drain_state.snapshot().contains(&esi(1)),
-            "still drained before recovery_delay_secs elapses"
+            "still drained before recovery_delay_seconds elapses"
         );
 
         // ...and release once it elapses.

@@ -4,7 +4,7 @@
 # fails (the ADR-0085 link-driven drain), at which point it must win
 # DF, learn the CE MAC through the now-open flood path, and take
 # over Type 2 origination. Binds its own AC symmetrically
-# (`interface = "eth2"`, `recovery_delay_secs = 5`) — pe2's AC never
+# (`interface = "eth2"`, `recovery_delay_seconds = 5`) — pe2's AC never
 # fails in this proof, but the binding is what entitles pe2 to the
 # ADR-0085 decision 5 same-ESI local bias, mirroring a production
 # multi-homing config.
@@ -50,7 +50,7 @@ df_algorithm = "highest-preference"
 redundancy_mode = "single-active"
 originator_ip = "10.0.2.2"
 interface = "eth2"
-recovery_delay_secs = 5
+recovery_delay_seconds = 5
 
 [[neighbors]]
 address = "10.0.1.1"

@@ -3,7 +3,7 @@
 # highest-preference election with df_preference 200 (> pe2's 100)
 # makes this PE the deterministic DF. Unlike M66, the segment binds
 # its attachment circuit: `interface = "eth2"` (the CE-facing AC)
-# with a short, testable `recovery_delay_secs = 5`, so the driver's
+# with a short, testable `recovery_delay_seconds = 5`, so the driver's
 # `ip link set eth2 down` inside this container — not an RPC — is
 # the drain stimulus, and carrier return is held off 5 s before
 # origination resumes (ADR-0085 decisions 1–3).
@@ -58,7 +58,7 @@ originator_ip = "10.0.1.2"
 # immediately; recovery holds 5 s (short so the driver can observe
 # the hold-off without slowing the job).
 interface = "eth2"
-recovery_delay_secs = 5
+recovery_delay_seconds = 5
 
 [[neighbors]]
 address = "10.0.1.1"

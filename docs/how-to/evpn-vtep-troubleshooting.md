@@ -235,13 +235,13 @@ esi = "00:11:22:33:44:55:66:77:88:99"
 member_vnis = [100]
 originator_ip = "10.0.0.1"
 interface = "bond0"          # AC link; carrier = IFF_LOWER_UP
-recovery_delay_secs = 30     # hold-off after carrier returns (0-3600)
+recovery_delay_seconds = 30  # hold-off after carrier returns (0-3600)
 ```
 
 - **Carrier loss drains immediately** (cable pull and `ip link set
   ... down` both clear `IFF_LOWER_UP`). A bound link that does not
   exist in the kernel counts as down — fail-closed toward drain.
-- **Recovery is held off** for `recovery_delay_secs` after carrier
+- **Recovery is held off** for `recovery_delay_seconds` after carrier
   returns, and the hold re-arms on every up edge, so a flapping
   circuit stays drained until it holds carrier for the full window.
   Down is always immediate; only recovery waits.
@@ -256,7 +256,7 @@ recovery_delay_secs = 30     # hold-off after carrier returns (0-3600)
   `evpn_es_drained{esi, reason}` gauge exposes each reason in
   Prometheus.
 - Bindings hot-apply: SIGHUP / `ApplyEvpnRuntime` may add, change, or
-  remove `interface`/`recovery_delay_secs`; a changed binding
+  remove `interface`/`recovery_delay_seconds`; a changed binding
   re-evaluates against the new link immediately, and removing the
   binding clears any `link` drain.
 

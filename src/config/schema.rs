@@ -1158,14 +1158,18 @@ pub struct EvpnDuplicateMacDetectionConfig {
     pub action: EvpnDuplicateMacActionConfig,
     /// RFC 7432 M window in seconds. Default 180.
     #[serde(default = "default_duplicate_mac_window_seconds")]
+    #[schemars(range(min = 1))]
     pub window_seconds: u64,
     /// RFC 7432 N move threshold. Default 5.
     #[serde(default = "default_duplicate_mac_threshold")]
+    #[schemars(range(min = 1))]
     pub threshold: u32,
     /// Suppression hold time in seconds for `suppress_local`. Default
-    /// 540 (three M windows). Must still be non-zero in detect-only mode
-    /// so reloads can flip the action without introducing invalid state.
+    /// 540 (three M windows), range `1..=31536000` (one year). Must still
+    /// be non-zero in detect-only mode so reloads can flip the action
+    /// without introducing invalid state.
     #[serde(default = "default_duplicate_mac_recovery_seconds")]
+    #[schemars(range(min = 1, max = 31_536_000))]
     pub recovery_seconds: u64,
 }
 
@@ -3190,7 +3194,7 @@ pub(crate) fn default_fib_families() -> Vec<String> {
 ///   ES immediately; a link absent from the kernel counts as down
 ///   (fail-closed). Unbound segments behave as before — drain only
 ///   via the ADR-0084 RPC.
-/// - `recovery_delay_secs` — hold-off after carrier returns before
+/// - `recovery_delay_seconds` — hold-off after carrier returns before
 ///   the link drain is released (ADR-0085 decision 3). Default 30,
 ///   range `0..=3600`; the timer re-arms on every up edge, so a
 ///   flapping circuit stays drained until it holds carrier for the
@@ -3226,9 +3230,15 @@ pub struct EthernetSegmentConfig {
     pub interface: Option<String>,
     /// ADR-0085 decision 3: seconds to hold the link drain after
     /// carrier returns (default 30, range `0..=3600`). Rejected
-    /// without `interface` — it has no meaning unbound.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_delay_secs: Option<u64>,
+    /// without `interface` — it has no meaning unbound. The earlier
+    /// spelling `recovery_delay_secs` is still accepted.
+    #[serde(
+        default,
+        alias = "recovery_delay_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(range(max = 3600))]
+    pub recovery_delay_seconds: Option<u64>,
 }
 
 fn default_df_preference() -> u32 {

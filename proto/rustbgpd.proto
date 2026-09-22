@@ -499,7 +499,15 @@ message NeighborConfig {
   string address = 1;
   uint32 remote_asn = 2;
   string description = 3;
+  // Hold time in seconds: 0 or 3..65535. Default 90. On AddNeighbor,
+  // 0 means unset (inherit the peer-group value, else the default), so a
+  // disabled hold timer cannot be requested here. NeighborState reports
+  // the effective value, where 0 means disabled.
   uint32 hold_time = 4;
+  // Maximum prefixes accepted from this peer before the session is torn
+  // down. 0 means unset: on AddNeighbor it inherits the peer-group value,
+  // and when nothing sets it the limit is unlimited. NeighborState reports
+  // the effective value, where 0 means unlimited.
   uint32 max_prefixes = 5;
   // Canonical address-family labels: ipv4_unicast, ipv6_unicast,
   // ipv4_flowspec, ipv6_flowspec, l2vpn_evpn, linkstate, linkstate_vpn,

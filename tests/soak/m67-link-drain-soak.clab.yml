@@ -5,13 +5,13 @@
 # binding. M66 proved the ADR-0084 drain *primitive* with the operator
 # RPC as the stimulus; M67 proves the production trigger: a real
 # attachment-circuit failure. pe1 and pe2 bind their CE-facing AC
-# (`interface = "eth2"`, `recovery_delay_secs = 5`) so an AC carrier
+# (`interface = "eth2"`, `recovery_delay_seconds = 5`) so an AC carrier
 # loss on the active PE drives, with no operator action: the `link`
 # drain reason (`evpn_es_drained{esi, reason="link"}` gauge), the
 # RFC 7432 §8.2 withdrawal wire shape (Type 4 + EAD-per-ES +
 # EAD-per-EVI + the member VNI's local Type 2 routes), pe2's DF
 # promotion, and the receive-side handover on the vtep. Carrier
-# return is held off `recovery_delay_secs` before origination comes
+# return is held off `recovery_delay_seconds` before origination comes
 # back (RFC 8584 §3 recovery damping, re-armed per up edge), and the
 # operator/link reasons compose (ADR-0085 decision 2).
 #

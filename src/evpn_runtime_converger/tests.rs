@@ -2457,7 +2457,7 @@ async fn reload_apply_dropped_mid_converge_still_commits_and_advances_baseline()
 async fn committed_config_advance_republishes_es_link_bindings() {
     let baseline = load_runtime_test_config(l2vni_one_es_runtime_candidate_toml(), "test baseline");
     let bound_toml = format!(
-        "{}interface = \"bond0\"\nrecovery_delay_secs = 5\n",
+        "{}interface = \"bond0\"\nrecovery_delay_seconds = 5\n",
         l2vni_one_es_runtime_candidate_toml()
     );
     let bound = load_runtime_test_config(&bound_toml, "test candidate");
