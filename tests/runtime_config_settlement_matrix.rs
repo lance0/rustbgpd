@@ -1236,12 +1236,22 @@ fn escalation_row_owner_settles_first(ordinal: usize) {
     };
     shutdown_waits_on_held_owner(&lab, MatrixRow::PeerGroup, &mut daemon, Stop::Signal);
     lab.control.release(MatrixRow::PeerGroup.checkpoint());
-    daemon.wait_log(SETTLED_LINE, "\"kind\":\"peer_group_set\"");
-    // The owner has settled; a signal from here on can only skip deadline-free
-    // waits. The exiting process may already be gone, so this send is best
-    // effort, and the assertions below hold either way.
-    daemon.process.signal_cleanup(Signal::SIGTERM);
+    // Once the owner settles the daemon finishes shutdown in milliseconds, so
+    // there is no window in which a further signal could be delivered after
+    // settlement and before exit. This row therefore sends no second signal
+    // and claims only what it can prove: an owner that settles during
+    // shutdown is not fenced and the daemon exits 0. The fence-versus-
+    // settlement race itself is proven deterministically by the API crate's
+    // one-winner test, and the signal-first ordering by the row below.
+    // Asserting after exit for the same reason: polling the log while the
+    // daemon is dying would race its exit, and every line it wrote is in the
+    // file once it is gone.
     daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
+    assert!(
+        daemon.log_has(SETTLED_LINE, "\"kind\":\"peer_group_set\""),
+        "the released owner never settled\n{}",
+        daemon.log()
+    );
     assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
     assert!(
         !daemon.log_has(SIGNAL_LINE, OPERATOR_FORCED),
@@ -1297,20 +1307,43 @@ fn escalation_row_signal_lands_first(ordinal: usize) {
 }
 
 /// Row (e): with no owner, a further signal keeps its existing meaning.
+///
+/// A no-owner shutdown completes in milliseconds, and nothing in this lab can
+/// hold one open: the unwatched coordinator holder the bounded drain exists
+/// for is `ListFibTables`, which returns at once with no FIB reconciler
+/// configured, and the deadline-free stages (EVPN IMET sweep, peer-manager
+/// drain, BMP enqueue, RIB event stage) are all unconfigured here. A signal
+/// sent after observing `initiating coordinated shutdown` therefore usually
+/// arrives once the process is already gone, which is why this row must not
+/// rest on negative assertions.
+///
+/// Both signals are instead delivered while the process is stopped. SIGTERM
+/// and SIGINT are distinct signals, so both stay pending and both are
+/// delivered on SIGCONT: the main loop consumes whichever its `select!` polls
+/// first and begins coordinated shutdown, and the other is still unconsumed
+/// in its own signal stream, so the shutdown listener takes the
+/// further-signal path immediately. No sleep, and the row fails if that path
+/// never runs.
 fn escalation_row_no_owner(ordinal: usize) {
     let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal);
     let mut daemon = lab.spawn("plain", false);
     wait_ready_and_idle(daemon.metrics, &mut daemon);
-    daemon.sigterm();
-    daemon.wait_log("initiating coordinated shutdown", "");
-    daemon.process.signal_cleanup(Signal::SIGTERM);
+    daemon.process.signal(Signal::SIGSTOP);
+    daemon.process.signal(Signal::SIGTERM);
+    daemon.process.signal(Signal::SIGINT);
+    daemon.process.signal(Signal::SIGCONT);
     daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
-    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
     assert!(
-        !daemon.log_has(SIGNAL_LINE, OPERATOR_FORCED),
-        "{}",
+        daemon.log_has(SIGNAL_LINE, ""),
+        "the further signal never reached the shutdown listener\n{}",
         daemon.log()
     );
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, OPERATOR_FORCED),
+        "the no-owner signal must not fence anything\n{}",
+        daemon.log()
+    );
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
 }
 
 #[test]
