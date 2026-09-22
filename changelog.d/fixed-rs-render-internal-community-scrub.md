@@ -7,8 +7,8 @@
   and `reject_cause_map_*` communities, and every `custom_communities` entry.
   The renderer sets none of them, so previously a member-sent copy reached
   other clients unchanged. `reject_cause` stays unscrubbed because rpol cannot
-  remove its `dyn_val` range; see the
-  [filter pipeline](docs/cookbook/ixp-filter-pipeline.md).
+  remove its `dyn_val` range; see the filter-pipeline cookbook,
+  `docs/cookbook/ixp-filter-pipeline.md`.
   **Operator-visible:** rendered `rs-hygiene.rpol` gains `scrub-rpki-ov-*`,
   `scrub-reject-cause-map` and `scrub-custom-communities` terms when those
   communities are configured, and candidate hashes change. An `ext` form or a
