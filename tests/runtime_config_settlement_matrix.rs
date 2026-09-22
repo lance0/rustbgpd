@@ -268,6 +268,42 @@ impl Daemon {
         self.process.signal(Signal::SIGTERM);
     }
 
+    /// Whether a JSON log line's message starts with `message` (the key-log
+    /// prefix; some messages carry a detail suffix) and contains `needle`.
+    fn log_has(&self, message: &str, needle: &str) -> bool {
+        self.log().lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line).is_ok_and(|entry| {
+                entry["fields"]["message"]
+                    .as_str()
+                    .is_some_and(|logged| logged.starts_with(message))
+            }) && line.contains(needle)
+        })
+    }
+
+    /// Wait for a log line with `message` containing `needle`, returning the
+    /// instant it was first observed.
+    fn wait_log(&mut self, message: &str, needle: &str) -> Instant {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.log_has(message, needle) {
+                return Instant::now();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "missing log line {message:?} with {needle:?}\n{}",
+                self.log()
+            );
+            self.assert_running();
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_exit(&mut self, code: i32, timeout: Duration) {
+        let status = self.process.wait_status(timeout);
+        assert_eq!(status.code(), Some(code), "daemon log:\n{}", self.log());
+        self.process.assert_group_gone();
+    }
+
     fn wait_exit70(&mut self, fenced_at: Instant) {
         let remaining = (GRACE + EXIT_JITTER)
             .checked_sub(fenced_at.elapsed())
@@ -291,6 +327,8 @@ impl Daemon {
 struct Control {
     dir: PathBuf,
     nonce: String,
+    /// Budget the armed settlement registers under.
+    budget: Duration,
 }
 
 impl Control {
@@ -301,6 +339,7 @@ impl Control {
         let control = Self {
             dir,
             nonce: format!("{ordinal:032x}"),
+            budget: BUDGET,
         };
         control.write_settings(SETUP_BUDGET);
         control
@@ -333,8 +372,14 @@ impl Control {
         // The daemon re-reads the budget at every settlement registration,
         // so tightening here scopes the 2 s budget to exactly the armed
         // settlement; everything registered earlier ran under SETUP_BUDGET.
-        self.write_settings(BUDGET);
+        self.write_settings(self.budget);
         atomic_write(&self.dir, ARM, self.command(checkpoint).as_bytes());
+    }
+
+    /// Let the held owner continue from its checkpoint.
+    fn release(&self, checkpoint: &str) {
+        assert!(self.dir.join(RECEIPT).is_file(), "release before claim");
+        atomic_write(&self.dir, RELEASE, self.command(checkpoint).as_bytes());
     }
 
     fn wait_for_receipt(&self, checkpoint: &str, pid: u32, daemon: &mut Daemon) {
@@ -431,6 +476,12 @@ impl Lab {
             control,
             base,
         }
+    }
+
+    /// Register the armed settlement under `budget` instead of the 2 s default.
+    fn with_hold_budget(mut self, budget: Duration) -> Self {
+        self.control.budget = budget;
+        self
     }
 
     fn spawn(&self, name: &str, controlled: bool) -> Daemon {
@@ -631,15 +682,21 @@ fn metric_value(text: &str, name: &str, row: MatrixRow, reason: &str) -> Option<
     line.rsplit_once(' ')?.1.parse().ok()
 }
 
-fn exact_metrics(text: &str, row: MatrixRow, reason: &str, fenced: bool) -> bool {
-    let minimum_elapsed = if fenced { BUDGET.as_secs_f64() } else { 0.0 };
+fn exact_metrics(text: &str, row: MatrixRow, reason: &str, fenced: bool, budget: Duration) -> bool {
+    // Only budget expiry proves the owner outlived its budget; every other
+    // fence lands at whatever elapsed the owner had reached.
+    let minimum_elapsed = if fenced && reason == "budget_expired" {
+        budget.as_secs_f64()
+    } else {
+        0.0
+    };
     metric_value(text, "bgp_runtime_config_settlement_active", row, reason) == Some(1.0)
         && metric_value(
             text,
             "bgp_runtime_config_settlement_budget_seconds",
             row,
             reason,
-        ) == Some(2.0)
+        ) == Some(budget.as_secs_f64())
         && metric_value(
             text,
             "bgp_runtime_config_settlement_fail_stops_total",
@@ -656,7 +713,7 @@ fn exact_metrics(text: &str, row: MatrixRow, reason: &str, fenced: bool) -> bool
 }
 
 fn wait_metrics(
-    addr: SocketAddr,
+    lab: &Lab,
     row: MatrixRow,
     reason: &str,
     fenced: bool,
@@ -664,8 +721,8 @@ fn wait_metrics(
 ) -> String {
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
-        if let Some(text) = metrics(addr)
-            && exact_metrics(&text, row, reason, fenced)
+        if let Some(text) = metrics(daemon.metrics)
+            && exact_metrics(&text, row, reason, fenced, lab.control.budget)
         {
             return text;
         }
@@ -679,12 +736,13 @@ fn wait_metrics(
     }
 }
 
-fn wait_fenced(row: MatrixRow, daemon: &mut Daemon) -> Instant {
+fn wait_fenced(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Instant {
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
         if ready(daemon.metrics) == Some(503)
-            && metrics(daemon.metrics)
-                .is_some_and(|text| exact_metrics(&text, row, "budget_expired", true))
+            && metrics(daemon.metrics).is_some_and(|text| {
+                exact_metrics(&text, row, "budget_expired", true, lab.control.budget)
+            })
         {
             return Instant::now();
         }
@@ -809,7 +867,7 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     first.signal(Signal::SIGTERM);
     let status = first.wait_status(Duration::from_secs(1));
     assert!(!status.success());
-    wait_metrics(daemon.metrics, MatrixRow::Apply, "none", false, daemon);
+    wait_metrics(lab, MatrixRow::Apply, "none", false, daemon);
 
     let log = daemon.log();
     let address = bound_grpc_addr(&log)
@@ -873,7 +931,7 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     lab.control.arm(MatrixRow::AutoRevert.checkpoint());
     lab.control
         .wait_for_receipt(MatrixRow::AutoRevert.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(daemon.metrics, MatrixRow::AutoRevert, "none", false, daemon);
+    wait_metrics(lab, MatrixRow::AutoRevert, "none", false, daemon);
     assert!(locator.is_file(), "hold must retain rollback authority");
     lab.assert_disk("auto-candidate", true);
     // Auto-revert now durably stages the reverted config before the held
@@ -924,7 +982,7 @@ fn exercise_peer_group(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     ]);
     lab.control
         .wait_for_receipt(MatrixRow::PeerGroup.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(daemon.metrics, MatrixRow::PeerGroup, "none", false, daemon);
+    wait_metrics(lab, MatrixRow::PeerGroup, "none", false, daemon);
     wait_read_success(
         lab,
         &["--json", "peer-group", "get", "matrix-peer-group"],
@@ -953,7 +1011,7 @@ fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     ]);
     lab.control
         .wait_for_receipt(MatrixRow::Policy.checkpoint(), daemon.pid(), daemon);
-    wait_metrics(daemon.metrics, MatrixRow::Policy, "none", false, daemon);
+    wait_metrics(lab, MatrixRow::Policy, "none", false, daemon);
     wait_read_success(lab, &["--json", "policy", "get", "matrix-policy"], daemon);
     lab.assert_disk("matrix-policy", false);
     let staged = std::fs::read_to_string(lab.stage_path()).expect("policy stage");
@@ -962,7 +1020,7 @@ fn exercise_policy(lab: &Lab, daemon: &mut Daemon) -> RowResult {
 }
 
 fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult) {
-    let fenced_at = wait_fenced(row, daemon);
+    let fenced_at = wait_fenced(lab, row, daemon);
     lab.control.assert_one_claim_without_release();
     daemon.assert_running();
     let requests = match result {
@@ -1003,29 +1061,7 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             }
             restarted.assert_running();
         }
-        MatrixRow::AutoRevert => {
-            lab.assert_disk("auto-candidate", true);
-            let locator = PathBuf::from(format!(
-                "{}.commit-confirm-locator.json",
-                lab.config.display()
-            ));
-            assert!(locator.is_file(), "exit must retain rollback authority");
-            let mut restarted = lab.spawn("restart", false);
-            wait_ready_and_idle(restarted.metrics, &mut restarted);
-            lab.assert_disk("auto-candidate", false);
-            assert!(
-                std::fs::read_to_string(lab.root.path().join("rustbgpd.toml.unconfirmed"))
-                    .unwrap()
-                    .contains("auto-candidate")
-            );
-            assert!(
-                !lab.run(&["--json", "peer-group", "get", "auto-candidate"])
-                    .status
-                    .success()
-            );
-            assert!(!locator.exists());
-            restarted.assert_running();
-        }
+        MatrixRow::AutoRevert => assert_auto_revert_recovery(lab),
         MatrixRow::PeerGroup => {
             lab.assert_disk("matrix-peer-group", false);
             assert!(lab.stage_path().exists());
@@ -1040,6 +1076,32 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             lab.restart_and_assert_absent("policy", &["--json", "policy", "get", "matrix-policy"]);
         }
     }
+}
+
+/// After a fail-stop with the auto-revert held mid-commit, the exited process
+/// left its rollback authority on disk and the next start runs the revert.
+fn assert_auto_revert_recovery(lab: &Lab) {
+    lab.assert_disk("auto-candidate", true);
+    let locator = PathBuf::from(format!(
+        "{}.commit-confirm-locator.json",
+        lab.config.display()
+    ));
+    assert!(locator.is_file(), "exit must retain rollback authority");
+    let mut restarted = lab.spawn("restart", false);
+    wait_ready_and_idle(restarted.metrics, &mut restarted);
+    lab.assert_disk("auto-candidate", false);
+    assert!(
+        std::fs::read_to_string(lab.root.path().join("rustbgpd.toml.unconfirmed"))
+            .unwrap()
+            .contains("auto-candidate")
+    );
+    assert!(
+        !lab.run(&["--json", "peer-group", "get", "auto-candidate"])
+            .status
+            .success()
+    );
+    assert!(!locator.exists());
+    restarted.assert_running();
 }
 
 #[test]
@@ -1094,6 +1156,286 @@ fn runtime_config_settlement_matrix_four_rows_three_cycles() {
         matrix_started.elapsed() < MATRIX_LIMIT,
         "twelve-cycle settlement matrix exceeded {MATRIX_LIMIT:?}"
     );
+}
+
+// Budget for the shutdown-escalation rows: the held owner must still be
+// unfenced when the further signal lands, so no observation below may reach
+// the watchdog deadline. Well above every harness wait in these rows.
+const ESCALATION_HOLD_BUDGET: Duration = SETUP_BUDGET;
+const SIGNAL_LINE: &str = "termination signal received during coordinated shutdown";
+// The two distinct continuations of SIGNAL_LINE: the signal fenced the owner
+// itself, versus the signal arrived after something else already had. Neither
+// string is a substring of the other, so each excludes the other.
+const SIGNAL_FENCED_NOW: &str =
+    "the owned runtime-config settlement is fenced and the daemon will fail-stop";
+const SIGNAL_ALREADY_FENCED: &str =
+    "the owned runtime-config settlement is already fenced and the daemon will fail-stop";
+const FAIL_STOP_LINE: &str = "runtime config settlement fail-stop armed";
+const SETTLED_LINE: &str = "runtime config settlement settled";
+const OPERATOR_FORCED: &str = "\"fence_reason\":\"operator_forced\"";
+const CLEAN_EXIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// Begin coordinated shutdown with a registered, unfenced owner and prove
+/// the daemon is waiting on it: shutdown has begun (readiness is red), the
+/// owner is still active with no fence reason, and nothing has escalated.
+fn shutdown_waits_on_held_owner(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, via: Stop) {
+    match via {
+        Stop::Signal => daemon.sigterm(),
+        Stop::Rpc => {
+            let output = lab.run(&["shutdown", "--reason", "escalation-row"]);
+            assert!(output.status.success(), "shutdown RPC failed: {output:?}");
+        }
+    }
+    daemon.wait_log("initiating coordinated shutdown", "");
+    assert_eq!(ready(daemon.metrics), Some(503), "{}", daemon.log());
+    wait_metrics(lab, row, "none", false, daemon);
+    assert!(!daemon.log_has(SIGNAL_LINE, ""), "{}", daemon.log());
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
+    daemon.assert_running();
+}
+
+/// A further termination signal with a held owner: the owner is fenced as
+/// `operator_forced` at once and the process exits 70 within the grace.
+fn escalate_and_wait_exit70(lab: &Lab, row: MatrixRow, daemon: &mut Daemon) -> Instant {
+    let signalled = Instant::now();
+    daemon.sigterm();
+    daemon.wait_log(SIGNAL_LINE, OPERATOR_FORCED);
+    daemon.wait_log(SIGNAL_LINE, SIGNAL_FENCED_NOW);
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, SIGNAL_ALREADY_FENCED),
+        "a signal that fenced the owner must not report it as already fenced\n{}",
+        daemon.log()
+    );
+    daemon.wait_log(FAIL_STOP_LINE, OPERATOR_FORCED);
+    wait_metrics(lab, row, "operator_forced", true, daemon);
+    assert_eq!(ready(daemon.metrics), Some(503));
+    signalled
+}
+
+#[derive(Clone, Copy)]
+enum Stop {
+    Signal,
+    Rpc,
+}
+
+/// Rows (a), (b) and (f): the first stop waits on the held owner; a further
+/// signal fail-stops it with the recovery evidence intact; the next start
+/// runs the persisted revert. `Stop::Rpc` proves a signal after an
+/// RPC-initiated shutdown is the same escalation.
+fn escalation_row_held_auto_revert(ordinal: usize, via: Stop) {
+    let lab = Lab::new(MatrixRow::AutoRevert, 0, ordinal).with_hold_budget(ESCALATION_HOLD_BUDGET);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    assert!(matches!(
+        exercise_auto_revert(&lab, &mut daemon),
+        RowResult::None
+    ));
+    shutdown_waits_on_held_owner(&lab, MatrixRow::AutoRevert, &mut daemon, via);
+    let signalled = escalate_and_wait_exit70(&lab, MatrixRow::AutoRevert, &mut daemon);
+    daemon.wait_exit70(signalled);
+    lab.control.assert_one_claim_without_release();
+    assert!(!daemon.log_has(SETTLED_LINE, "\"kind\":\"auto_revert\""));
+    assert_auto_revert_recovery(&lab);
+}
+
+/// Row (c), owner first: the held owner settles after the first signal and
+/// before any further one, so the drain completes and the exit is clean.
+fn escalation_row_owner_settles_first(ordinal: usize) {
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal).with_hold_budget(ESCALATION_HOLD_BUDGET);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row returns its request");
+    };
+    shutdown_waits_on_held_owner(&lab, MatrixRow::PeerGroup, &mut daemon, Stop::Signal);
+    lab.control.release(MatrixRow::PeerGroup.checkpoint());
+    // Once the owner settles the daemon finishes shutdown in milliseconds, so
+    // there is no window in which a further signal could be delivered after
+    // settlement and before exit. This row therefore sends no second signal
+    // and claims only what it can prove: an owner that settles during
+    // shutdown is not fenced and the daemon exits 0. The fence-versus-
+    // settlement race itself is proven deterministically by the API crate's
+    // one-winner test, and the signal-first ordering by the row below.
+    // Asserting after exit for the same reason: polling the log while the
+    // daemon is dying would race its exit, and every line it wrote is in the
+    // file once it is gone.
+    daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
+    assert!(
+        daemon.log_has(SETTLED_LINE, "\"kind\":\"peer_group_set\""),
+        "the released owner never settled\n{}",
+        daemon.log()
+    );
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, OPERATOR_FORCED),
+        "{}",
+        daemon.log()
+    );
+    for request in requests {
+        let output = request.wait_output(Duration::from_secs(2));
+        assert!(
+            output.status.success(),
+            "settled mutation failed\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    lab.assert_disk("matrix-peer-group", true);
+    let mut restarted = lab.spawn("restart", false);
+    wait_ready_and_idle(restarted.metrics, &mut restarted);
+    assert!(
+        lab.run(&["--json", "peer-group", "get", "matrix-peer-group"])
+            .status
+            .success()
+    );
+    restarted.assert_running();
+}
+
+/// Row (c), signal first: the fence is observed before the held owner is
+/// released, so its later settlement attempt loses and the exit is still 70.
+fn escalation_row_signal_lands_first(ordinal: usize) {
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal).with_hold_budget(ESCALATION_HOLD_BUDGET);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row returns its request");
+    };
+    shutdown_waits_on_held_owner(&lab, MatrixRow::PeerGroup, &mut daemon, Stop::Signal);
+    let signalled = escalate_and_wait_exit70(&lab, MatrixRow::PeerGroup, &mut daemon);
+    lab.control.release(MatrixRow::PeerGroup.checkpoint());
+    daemon.wait_exit70(signalled);
+    assert!(
+        !daemon.log_has(SETTLED_LINE, "\"kind\":\"peer_group_set\""),
+        "a fenced owner settled\n{}",
+        daemon.log()
+    );
+    for request in requests {
+        assert_failed(
+            &request.wait_output(Duration::from_secs(2)),
+            "fenced mutation",
+        );
+    }
+    let mut restarted = lab.spawn("restart", false);
+    wait_ready_and_idle(restarted.metrics, &mut restarted);
+    restarted.assert_running();
+}
+
+/// Row (e): with no owner, a further signal keeps its existing meaning.
+///
+/// A no-owner shutdown completes in milliseconds, and nothing in this lab can
+/// hold one open: the unwatched coordinator holder the bounded drain exists
+/// for is `ListFibTables`, which returns at once with no FIB reconciler
+/// configured, and the deadline-free stages (EVPN IMET sweep, peer-manager
+/// drain, BMP enqueue, RIB event stage) are all unconfigured here. A signal
+/// sent after observing `initiating coordinated shutdown` therefore usually
+/// arrives once the process is already gone, which is why this row must not
+/// rest on negative assertions.
+///
+/// Both signals are instead delivered while the process is stopped. SIGTERM
+/// and SIGINT are distinct signals, so both stay pending and both are
+/// delivered on SIGCONT: the main loop consumes whichever its `select!` polls
+/// first and begins coordinated shutdown, and the other is still unconsumed
+/// in its own signal stream, so the shutdown listener takes the
+/// further-signal path immediately. No sleep, and the row fails if that path
+/// never runs.
+fn escalation_row_no_owner(ordinal: usize) {
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal);
+    let mut daemon = lab.spawn("plain", false);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    daemon.process.signal(Signal::SIGSTOP);
+    daemon.process.signal(Signal::SIGTERM);
+    daemon.process.signal(Signal::SIGINT);
+    daemon.process.signal(Signal::SIGCONT);
+    daemon.wait_exit(0, CLEAN_EXIT_LIMIT);
+    assert!(
+        daemon.log_has(SIGNAL_LINE, ""),
+        "the further signal never reached the shutdown listener\n{}",
+        daemon.log()
+    );
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, OPERATOR_FORCED),
+        "the no-owner signal must not fence anything\n{}",
+        daemon.log()
+    );
+    assert!(!daemon.log_has(FAIL_STOP_LINE, ""), "{}", daemon.log());
+}
+
+/// A further signal that finds the owner already fenced by its own budget
+/// rather than by the signal: the daemon reports the fail-stop that is
+/// already in flight, with the real reason, instead of a skipped wait.
+///
+/// This cannot be a third signal inside another row's grace window.
+/// `stop_waiting_on_signal` awaits one signal, logs, cancels its token and
+/// ends, so a later signal has no receiver awaiting it and is never logged.
+/// The owner must therefore be fenced by something other than the signal
+/// before the first further signal arrives, and the only such cause the lab
+/// can drive is budget expiry. The default two-second hold budget expires
+/// while coordinated shutdown waits on the owner, which leaves the
+/// five-second recovery-fence grace to deliver the further signal into.
+fn escalation_row_already_fenced(ordinal: usize) {
+    let lab = Lab::new(MatrixRow::PeerGroup, 0, ordinal);
+    let mut daemon = lab.spawn("controlled", true);
+    wait_ready_and_idle(daemon.metrics, &mut daemon);
+    let RowResult::Requests(requests) = exercise_peer_group(&lab, &mut daemon) else {
+        panic!("peer-group row returns its request");
+    };
+    daemon.sigterm();
+    daemon.wait_log("initiating coordinated shutdown", "");
+    // The owner's own budget fences it while the drain waits; the signal did not.
+    let fenced_at = wait_fenced(&lab, MatrixRow::PeerGroup, &mut daemon);
+    daemon.wait_log(FAIL_STOP_LINE, "\"fence_reason\":\"budget_expired\"");
+    assert!(
+        !daemon.log_has(SIGNAL_LINE, ""),
+        "nothing has taken the further-signal path yet\n{}",
+        daemon.log()
+    );
+
+    // The further signal lands inside the grace, with the owner already
+    // fenced. The row's existing outcome must be unchanged: one fence, one
+    // fail-stop line, still exit 70 within the grace. Assert the log after
+    // that exit rather than polling for it: the daemon exits at the grace
+    // boundary whatever the signal did, so polling would race the exit, and
+    // every line it wrote is in the file once it is gone.
+    daemon.sigterm();
+    daemon.wait_exit70(fenced_at);
+    assert!(
+        daemon.log_has(SIGNAL_LINE, SIGNAL_ALREADY_FENCED),
+        "the further signal did not report the fail-stop already in flight\n{}",
+        daemon.log()
+    );
+    assert!(
+        daemon.log_has(SIGNAL_LINE, "\"fence_reason\":\"budget_expired\""),
+        "the already-fenced report must carry the real fence reason\n{}",
+        daemon.log()
+    );
+    for absent in [SIGNAL_FENCED_NOW, OPERATOR_FORCED] {
+        assert!(
+            !daemon.log_has(SIGNAL_LINE, absent),
+            "the signal must not claim it fenced an already-fenced owner\n{}",
+            daemon.log()
+        );
+    }
+    assert!(
+        !daemon.log_has(FAIL_STOP_LINE, OPERATOR_FORCED),
+        "the owner must not be fenced a second time\n{}",
+        daemon.log()
+    );
+    for request in requests {
+        assert_failed(
+            &request.wait_output(Duration::from_secs(2)),
+            "fenced mutation",
+        );
+    }
+}
+
+#[test]
+fn shutdown_signal_escalation_rows() {
+    let _ = rbgp_binary();
+    escalation_row_held_auto_revert(101, Stop::Signal);
+    escalation_row_held_auto_revert(102, Stop::Rpc);
+    escalation_row_owner_settles_first(103);
+    escalation_row_signal_lands_first(104);
+    escalation_row_no_owner(105);
+    escalation_row_already_fenced(106);
 }
 
 #[test]

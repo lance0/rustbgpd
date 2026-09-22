@@ -3,7 +3,8 @@
 **Status:** Accepted
 **Date:** 2026-08-11
 **Accepted:** 2026-08-13
-**Amended:** 2026-08-14 (Consequences: receipt-backed fail-stop session cost)
+**Amended:** 2026-08-14 (Consequences: receipt-backed fail-stop session cost);
+2026-09-21 (a further termination signal during shutdown forces the fail-stop)
 
 ## Context
 
@@ -438,3 +439,46 @@ and Interop runs also completed successfully.
 - No public API or protobuf change is required. Internal readiness wiring,
   mutation fencing, supervision, metrics, and subprocess recovery tests are
   the accepted contract's evidence and enforcement mechanisms.
+
+## Amendment (2026-09-21): a further termination signal during shutdown forces the fail-stop
+
+The wait-only rule above ("shutdown must not abort its task: it waits for
+settlement or the already-armed watchdog") is kept for the first stop request
+and superseded for a further one. Once coordinated shutdown has begun, however
+it began, a further SIGINT or SIGTERM with a registered owner fences that
+owner with the new closed reason `OperatorForced` (`operator_forced`) and
+takes the existing terminal path unchanged: readiness red, admission closed,
+the redacted diagnostic, the recovery-fence grace, and exit 70 from the same
+fatal boundary the independent clock uses. No second exit route exists, no
+actor is torn down beneath the owner, and no coordinator or blocked actor is
+waited for on this escape path. The daemon still never reports a clean exit
+over abandoned mutation work.
+
+Races have one terminal outcome each because the fence and settlement share
+one compare-and-swap on the operation state: an owner that settled first
+stays settled and shutdown continues normally; a fence that won leaves the
+owner's later settlement attempt returning false and parked until exit 70; an
+operation that registers only after the signal is refused by the
+late-registration gate rule of the shutdown drain, never fenced and never run.
+An owner registered at signal time is fenced whatever its phase.
+
+The no-owner path is unchanged: a further signal still only skips the waits
+that have no deadline, and the exit status is unchanged. The supervisor
+contract keeps `TimeoutStopSec=32min` for the ordinary first-signal path. A
+further signal sent with `kill` to a running unit produces exit 70, an
+unclean exit code that `Restart=on-failure` restarts; a unit stopped with
+`systemctl stop` is never restarted automatically whatever its exit status,
+so a further signal during that stop only ends the wait. Recovery runs on
+the next actual start in both cases.
+
+Evidence: the operator-forced reason rides the existing fence-reason
+vocabulary (metrics, log diagnostic, consumer checker), the API crate proves
+the one-winner property against `try_settle`, and the real-daemon settlement
+matrix carries rows for first-signal waiting with a held owner,
+further-signal exit 70 with the evidence on disk, the signal-first ordering,
+an owner that settles during shutdown and is neither fenced nor made to exit
+70, a signal after an RPC-initiated shutdown, the no-owner path, and restart
+recovery from the persisted pending transaction. The settles-just-before-the-
+signal ordering is proven at unit level rather than in the matrix: once the
+owner settles the daemon finishes shutdown in milliseconds, leaving no
+deterministic window in which to deliver a further signal.

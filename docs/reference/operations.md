@@ -60,7 +60,7 @@ deadline; see [deployment.md](../how-to/deployment.md#systemd).
 ### Runtime-config settlement fail-stop
 
 The dedicated operator page — ownership phases, the two bounds, the
-five fence reasons, the exit-70 recovery runbook, and the supervisor
+fence reasons, the exit-70 recovery runbook, and the supervisor
 contract — is [settlement-watchdog.md](../how-to/settlement-watchdog.md). This
 section is the condensed production reference.
 
@@ -101,8 +101,8 @@ below; they emit no idle tuple.
 All four use the bounded labels `kind`, `phase`
 (`owned_preflight`, `mutating`, or `settling_rollback`), `response_attached`
 (`attached` or `detached`), and `fence_reason` (`none`, `budget_expired`,
-`executor_lost`, `known_divergence`, `publication_ambiguous`, or
-`acknowledgement_lost`). Detached means the daemon owns
+`executor_lost`, `known_divergence`, `publication_ambiguous`,
+`acknowledgement_lost`, or `operator_forced`). Detached means the daemon owns
 the work without a live RPC response; it does not weaken the deadline. The
 daemon-generated operation ID appears in logs at ownership registration, each
 phase transition, settlement, and fencing — never as a metric label.
@@ -121,9 +121,15 @@ candidates, or raw error text.
 The shipped systemd unit uses `Restart=on-failure`, but caps recovery at five
 starts per ten minutes so a deterministic persistence fault cannot flap every
 five seconds forever. `TimeoutStopSec=32min` lets an explicit stop wait through
-the watchdog; systemd suppresses automatic restart for an explicit
-`systemctl stop`. A wedge that consumes the full 30-minute budget intentionally
-does not reach five starts in ten minutes; the limit bounds fast deterministic
+the watchdog. A further SIGTERM or SIGINT forces the settling owner to
+fail-stop instead (`fence_reason="operator_forced"`, exit 70). What the
+supervisor does next depends on how the stop was requested: raw signals to a
+running unit end in exit 70, an unclean exit code that `Restart=on-failure`
+restarts, while systemd never automatically restarts a unit stopped
+explicitly with `systemctl stop`, whatever its exit status. Recovery from the
+persisted transaction runs on the next actual start either way. A wedge that
+consumes the full 30-minute budget intentionally does not reach five starts
+in ten minutes; the limit bounds fast deterministic
 failures, while the independent fatal clock still bounds each slow wedge. After
 inspecting and fixing the config directory, bind mount,
 and on-disk authority, recover a rate-limited unit with:
@@ -801,17 +807,29 @@ ownership` or `SIGHUP reload task is still running with no settlement owner`
 at ERROR, skips the optional warm checkpoint because its coordinator fence is
 missing, and continues teardown. The exit status is unchanged.
 
-A further SIGINT or SIGTERM after coordinated shutdown has begun means "stop
-waiting". The daemon logs `termination signal received during coordinated
-shutdown` at WARN and skips every remaining wait that has no deadline of its
-own: the unowned coordinator permit and SIGHUP join above, the EVPN IMET
-withdrawal sweep, the peer-manager drain (peers may then see the session drop
-without a Cease), the BMP shutdown enqueue, and the RIB event conversion
-stage. Cleanup that carries its own deadline still runs, so kernel routes, FDB
-entries, and BFD sessions are still withdrawn. The signal never shortens an
-owned runtime-config settlement: abandoning a mutation mid-flight is the one
-thing only the [settlement watchdog](../how-to/settlement-watchdog.md) may
-decide, and `SIGKILL` remains the way to force that.
+A further SIGINT or SIGTERM after coordinated shutdown has begun (including
+the first signal after a `Shutdown` RPC) means "stop waiting". With no
+settlement owner the daemon logs `termination signal received during
+coordinated shutdown` at WARN and skips every remaining wait that has no
+deadline of its own: the unowned coordinator permit and SIGHUP join above, the
+EVPN IMET withdrawal sweep, the peer-manager drain (peers may then see the
+session drop without a Cease), the BMP shutdown enqueue, and the RIB event
+conversion stage. Cleanup that carries its own deadline still runs, so kernel
+routes, FDB entries, and BFD sessions are still withdrawn, and the exit status
+is unchanged.
+
+With a settlement owner still registered, the same signal accelerates the
+[settlement watchdog](../how-to/settlement-watchdog.md)'s fail-stop instead
+of skipping it: the owner is fenced as `operator_forced`, the daemon logs the
+signal line at ERROR followed by the usual `runtime config settlement
+fail-stop armed` diagnostic, and the process exits 70 after the five-second
+grace with the owner's journal and pending transaction left on disk for the
+next start. That is not a completed rollback and not a graceful teardown;
+peers get no Cease and only the owner's own journaling is recorded. An owner
+that settles before the signal is left settled and shutdown continues
+normally; an operation that registers after the signal is refused by the
+shutdown gate, never fenced. `SIGKILL` is no longer needed to end a stop that
+is waiting on a mutation, and it still leaves the same durable state behind.
 
 **Restart-required surfaces** (logged at reload, surfaced under
 "Restart-required" in `--diff`): `[global]` ASN/router-id/cluster-id,
@@ -2331,7 +2349,9 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
-| `termination signal received during coordinated shutdown` | WARN | A further SIGINT/SIGTERM arrived after shutdown began; waits without a deadline are skipped |
+| `termination signal received during coordinated shutdown; skipping waits that have no deadline` | WARN | A further SIGINT/SIGTERM arrived after shutdown began with no settlement owner; waits without a deadline are skipped |
+| `termination signal received during coordinated shutdown; the owned runtime-config settlement is already fenced and the daemon will fail-stop` | WARN | A further SIGINT/SIGTERM arrived after the owner had already been fenced; `fence_reason` names why, and exit 70 was already in flight |
+| `termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop` | ERROR | A further SIGINT/SIGTERM arrived while a runtime-config owner was still settling; it is fenced as `operator_forced` and exit 70 follows after the grace |
 | `runtime config coordinator permit is still held outside settlement ownership` | ERROR | Shutdown stopped waiting for an unowned coordinator permit (`reason` is `deadline_expired` or `second_signal`) and continues without the warm checkpoint |
 | `SIGHUP reload task is still running with no settlement owner` | ERROR | Shutdown stopped waiting to join the reload task and continues |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |

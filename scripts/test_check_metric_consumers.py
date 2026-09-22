@@ -941,7 +941,7 @@ groups:
         family = "bgp_runtime_config_settlement_active"
         fence_reasons = {
             "none", "budget_expired", "executor_lost", "known_divergence",
-            "publication_ambiguous", "acknowledgement_lost",
+            "publication_ambiguous", "acknowledgement_lost", "operator_forced",
         }
         self.assertEqual(self.vocabularies[(family, "fence_reason")], fence_reasons)
         self.assertEqual(

@@ -100,8 +100,8 @@ use rustbgpd_api::peer_types::{
     WarmCheckpointSession,
 };
 use rustbgpd_api::runtime_config_settlement::{
-    OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
-    RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+    AMBIGUOUS_CONFIG_EXIT_STATUS, OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext,
+    RuntimeConfigOperationKind, RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
@@ -2906,12 +2906,29 @@ async fn shutdown_wait<T>(
 }
 
 /// Cancel the returned token on the next SIGINT or SIGTERM. Armed once
-/// coordinated shutdown has begun, so that signal means "stop waiting": every
-/// wait without its own deadline is skipped, while bounded cleanup and an
-/// owned runtime-config settlement still run to their own limits.
+/// coordinated shutdown has begun, however it began, so that signal means
+/// "stop waiting": every wait without its own deadline is skipped, while
+/// bounded cleanup still runs to its own limits.
+///
+/// An owned runtime-config settlement is the one wait that can be long, and
+/// it is never skipped: the signal instead fences the registered owner as
+/// `operator_forced`, which takes the watchdog's own fail-stop path (exit 70
+/// after the grace, recovery evidence left on disk for the next boot). Every
+/// signal-versus-owner race has one terminal outcome. The fence and the
+/// owner's settlement are one compare-and-swap on the operation state, so an
+/// owner that settled first is left settled and the drain continues
+/// normally, and a fence that won leaves the owner parked until exit 70. An
+/// operation that registers after this load is not fenced: shutdown has
+/// begun, so the registration-site gate check settles it without running its
+/// body and the drain's short bounded wait covers it. An owner registered at
+/// signal time is fenced whatever its phase; one still in preflight has no
+/// durable effect to recover. An owner the budget or an executor loss had
+/// already fenced is reported as such rather than as a skipped wait: its
+/// fail-stop was in flight before the signal arrived.
 fn stop_waiting_on_signal(
     mut sigint: tokio::signal::unix::Signal,
     mut sigterm: tokio::signal::unix::Signal,
+    runtime_config_settlement: RuntimeConfigSettlementWatchdog,
 ) -> tokio_util::sync::CancellationToken {
     let stop_waiting = tokio_util::sync::CancellationToken::new();
     let cancel = stop_waiting.clone();
@@ -2920,10 +2937,26 @@ fn stop_waiting_on_signal(
             _ = sigint.recv() => "SIGINT",
             _ = sigterm.recv() => "SIGTERM",
         };
-        warn!(
-            signal,
-            "termination signal received during coordinated shutdown; skipping waits that have no deadline (an owned runtime-config settlement is still awaited)"
-        );
+        if runtime_config_settlement.force_fail_stop() {
+            error!(
+                signal,
+                fence_reason = "operator_forced",
+                exit_status = AMBIGUOUS_CONFIG_EXIT_STATUS,
+                "termination signal received during coordinated shutdown; the owned runtime-config settlement is fenced and the daemon will fail-stop"
+            );
+        } else if let Some(fence_reason) = runtime_config_settlement.owner_fence_reason() {
+            warn!(
+                signal,
+                fence_reason,
+                exit_status = AMBIGUOUS_CONFIG_EXIT_STATUS,
+                "termination signal received during coordinated shutdown; the owned runtime-config settlement is already fenced and the daemon will fail-stop"
+            );
+        } else {
+            warn!(
+                signal,
+                "termination signal received during coordinated shutdown; skipping waits that have no deadline"
+            );
+        }
         cancel.cancel();
     });
     stop_waiting
@@ -6103,8 +6136,9 @@ async fn run<T>(
     sd_notify.stopping();
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
-    // The first signal asked for a graceful stop; a further one stops waiting.
-    let stop_waiting = stop_waiting_on_signal(sigint, sigterm);
+    // The first signal asked for a graceful stop; a further one stops waiting
+    // and fail-stops an owned runtime-config settlement instead of waiting it out.
+    let stop_waiting = stop_waiting_on_signal(sigint, sigterm, runtime_config_settlement.clone());
     if let Some(handle) = rpki_supervisor.take() {
         if rpki_failure_triggered {
             let report = await_rpki_failure_report(handle, rpki_failure_notice).await;
@@ -6550,8 +6584,10 @@ struct RuntimeConfigDrain<R> {
 /// Wait for the closed coordinator to go quiet, then join an in-flight SIGHUP.
 ///
 /// An owned mutation is waited for without any deadline of this function's:
-/// only the settlement watchdog may end that wait, by settlement or fail-stop.
-/// `deadline` and `stop_waiting` apply solely while no owner is registered,
+/// only the settlement watchdog may end that wait, by settlement or fail-stop
+/// (budget expiry, or the operator-forced fence a further signal applies in
+/// `stop_waiting_on_signal`). `deadline` and `stop_waiting` apply solely while
+/// no owner is registered,
 /// when the permit can only be held outside the watchdog. An owner that
 /// registers before the abandon check sends the loop back to the watchdog
 /// wait instead of being abandoned.
@@ -7414,14 +7450,25 @@ mod tests {
             .expect("the late owner kept the coordinator permit");
     }
 
+    /// Serializes the tests that raise a process-wide signal. A `raise`
+    /// notifies every `Signal` stream registered for that kind anywhere in
+    /// the process, so two listeners alive at once would cancel each other's
+    /// token. Each test registers its streams while holding this, after any
+    /// earlier raise has been delivered, and a stream never sees a signal
+    /// raised before it was created.
+    static SIGNAL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn a_signal_during_coordinated_shutdown_stops_waiting() {
         use tokio::signal::unix::{SignalKind, signal};
+        let _signals = SIGNAL_TEST_LOCK.lock().await;
         // SIGUSR1/SIGUSR2 stand in for SIGINT/SIGTERM so the raise cannot
-        // reach another test; the listener only sees two signal streams.
+        // reach the daemon's real listeners; the sibling signal test holds
+        // the same lock so the two never overlap.
         let stop_waiting = stop_waiting_on_signal(
             signal(SignalKind::user_defined1()).unwrap(),
             signal(SignalKind::user_defined2()).unwrap(),
+            RuntimeConfigSettlementWatchdog::new(),
         );
         tokio::task::yield_now().await;
         assert!(!stop_waiting.is_cancelled());
@@ -7429,6 +7476,74 @@ mod tests {
         tokio::time::timeout(DRAIN_TEST_GUARD, stop_waiting.cancelled())
             .await
             .expect("a termination signal during shutdown did not stop the waits");
+    }
+
+    #[tokio::test]
+    async fn a_signal_with_no_owner_fences_nothing_and_a_late_registrant_is_refused() {
+        use tokio::signal::unix::{SignalKind, signal};
+        let _signals = SIGNAL_TEST_LOCK.lock().await;
+        // The real signal task against a production watchdog: fencing anything
+        // here would `_exit(70)` this test process, so surviving it proves the
+        // no-owner signal fenced nothing. A permit holder that registers only
+        // after the signal is then refused by the gate rule, never fenced.
+        let settlement = RuntimeConfigSettlementWatchdog::new();
+        let coordinator = RuntimeConfigCoordinator::new();
+        let daemon_gate = DaemonGate::new();
+        let permit = coordinator.acquire().await.unwrap();
+        let body_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let late_owner = tokio::spawn({
+            let (settlement, coordinator) = (settlement.clone(), coordinator.clone());
+            let daemon_gate = daemon_gate.clone();
+            let body_ran = Arc::clone(&body_ran);
+            async move {
+                settlement
+                    .execute_owned(
+                        RuntimeConfigOperationKind::PolicySet,
+                        coordinator,
+                        daemon_gate,
+                        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                        move |_operation| async move {
+                            body_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                            OwnedRuntimeConfigOutcome::<(), tonic::Status>::AcknowledgedAuthority(())
+                        },
+                    )
+                    .await
+            }
+        });
+        daemon_gate.begin_shutdown();
+        let stop_waiting = stop_waiting_on_signal(
+            signal(SignalKind::user_defined1()).unwrap(),
+            signal(SignalKind::user_defined2()).unwrap(),
+            settlement.clone(),
+        );
+        tokio::task::yield_now().await;
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGUSR1).unwrap();
+        tokio::time::timeout(DRAIN_TEST_GUARD, stop_waiting.cancelled())
+            .await
+            .expect("the signal did not stop the waits");
+        let drain = tokio::time::timeout(
+            DRAIN_TEST_GUARD,
+            drain_runtime_config::<()>(
+                &settlement,
+                &coordinator,
+                None,
+                Duration::from_secs(3600),
+                &stop_waiting,
+            ),
+        )
+        .await
+        .expect("the drain did not give up on a permit no owner holds");
+        assert_eq!(drain.coordinator, ShutdownWait::SecondSignal);
+
+        drop(permit);
+        let status = tokio::time::timeout(DRAIN_TEST_GUARD, late_owner)
+            .await
+            .expect("the late owner did not finish")
+            .unwrap()
+            .expect_err("an owner registered after the signal must be refused");
+        assert!(!body_ran.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(!settlement.has_owner());
     }
 
     #[test]
