@@ -1051,13 +1051,16 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = bgpls_local_pref(b).cmp(&bgpls_local_pref(a));
+    let cmp = b
+        .local_pref_attr()
+        .unwrap_or(100)
+        .cmp(&a.local_pref_attr().unwrap_or(100));
     if cmp != Ordering::Equal {
         return cmp;
     }
 
-    let a_len = bgpls_as_path(a).map_or(0, AsPath::len);
-    let b_len = bgpls_as_path(b).map_or(0, AsPath::len);
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
     let cmp = a_len.cmp(&b_len);
     if cmp != Ordering::Equal {
         return cmp;
@@ -1068,7 +1071,7 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = bgpls_med(a).cmp(&bgpls_med(b));
+    let cmp = a.med_attr().unwrap_or(0).cmp(&b.med_attr().unwrap_or(0));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -1101,24 +1104,6 @@ fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
     }
 }
 
-fn bgpls_local_pref(route: &BgpLsRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::LocalPref(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(100)
-}
-
-fn bgpls_as_path(route: &BgpLsRibRoute) -> Option<&AsPath> {
-    route.attributes.iter().find_map(|attr| match attr {
-        PathAttribute::AsPath(path) => Some(path),
-        _ => None,
-    })
-}
-
 fn bgpls_origin(route: &BgpLsRibRoute) -> Origin {
     route
         .attributes
@@ -1128,17 +1113,6 @@ fn bgpls_origin(route: &BgpLsRibRoute) -> Origin {
             _ => None,
         })
         .unwrap_or(Origin::Incomplete)
-}
-
-fn bgpls_med(route: &BgpLsRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Med(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 fn bgpls_cluster_list_len(route: &BgpLsRibRoute) -> usize {
@@ -1193,13 +1167,16 @@ fn vpn_cmp_chain(
         return cmp;
     }
 
-    let cmp = vpn_local_pref(b).cmp(&vpn_local_pref(a));
+    let cmp = b
+        .local_pref_attr()
+        .unwrap_or(100)
+        .cmp(&a.local_pref_attr().unwrap_or(100));
     if cmp != Ordering::Equal {
         return cmp;
     }
 
-    let a_len = vpn_as_path(a).map_or(0, AsPath::len);
-    let b_len = vpn_as_path(b).map_or(0, AsPath::len);
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
     let cmp = a_len.cmp(&b_len);
     if cmp != Ordering::Equal {
         return cmp;
@@ -1210,7 +1187,7 @@ fn vpn_cmp_chain(
         return cmp;
     }
 
-    let cmp = vpn_med(a).cmp(&vpn_med(b));
+    let cmp = a.med_attr().unwrap_or(0).cmp(&b.med_attr().unwrap_or(0));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -1263,24 +1240,6 @@ fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
     }
 }
 
-fn vpn_local_pref(route: &VpnRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::LocalPref(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(100)
-}
-
-fn vpn_as_path(route: &VpnRibRoute) -> Option<&AsPath> {
-    route.attributes.iter().find_map(|attr| match attr {
-        PathAttribute::AsPath(path) => Some(path),
-        _ => None,
-    })
-}
-
 fn vpn_origin(route: &VpnRibRoute) -> Origin {
     route
         .attributes
@@ -1290,17 +1249,6 @@ fn vpn_origin(route: &VpnRibRoute) -> Origin {
             _ => None,
         })
         .unwrap_or(Origin::Incomplete)
-}
-
-fn vpn_med(route: &VpnRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Med(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 fn vpn_cluster_list_len(route: &VpnRibRoute) -> usize {
@@ -1356,13 +1304,16 @@ fn labeled_cmp_chain(
         return cmp;
     }
 
-    let cmp = labeled_local_pref(b).cmp(&labeled_local_pref(a));
+    let cmp = b
+        .local_pref_attr()
+        .unwrap_or(100)
+        .cmp(&a.local_pref_attr().unwrap_or(100));
     if cmp != Ordering::Equal {
         return cmp;
     }
 
-    let a_len = labeled_as_path(a).map_or(0, AsPath::len);
-    let b_len = labeled_as_path(b).map_or(0, AsPath::len);
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
     let cmp = a_len.cmp(&b_len);
     if cmp != Ordering::Equal {
         return cmp;
@@ -1373,7 +1324,7 @@ fn labeled_cmp_chain(
         return cmp;
     }
 
-    let cmp = labeled_med(a).cmp(&labeled_med(b));
+    let cmp = a.med_attr().unwrap_or(0).cmp(&b.med_attr().unwrap_or(0));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -1426,24 +1377,6 @@ fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
     }
 }
 
-fn labeled_local_pref(route: &LabeledRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::LocalPref(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(100)
-}
-
-fn labeled_as_path(route: &LabeledRibRoute) -> Option<&AsPath> {
-    route.attributes.iter().find_map(|attr| match attr {
-        PathAttribute::AsPath(path) => Some(path),
-        _ => None,
-    })
-}
-
 fn labeled_origin(route: &LabeledRibRoute) -> Origin {
     route
         .attributes
@@ -1453,17 +1386,6 @@ fn labeled_origin(route: &LabeledRibRoute) -> Origin {
             _ => None,
         })
         .unwrap_or(Origin::Incomplete)
-}
-
-fn labeled_med(route: &LabeledRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Med(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 fn labeled_cluster_list_len(route: &LabeledRibRoute) -> usize {
@@ -1490,13 +1412,16 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = rtc_local_pref(b).cmp(&rtc_local_pref(a));
+    let cmp = b
+        .local_pref_attr()
+        .unwrap_or(100)
+        .cmp(&a.local_pref_attr().unwrap_or(100));
     if cmp != Ordering::Equal {
         return cmp;
     }
 
-    let a_len = rtc_as_path(a).map_or(0, AsPath::len);
-    let b_len = rtc_as_path(b).map_or(0, AsPath::len);
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
     let cmp = a_len.cmp(&b_len);
     if cmp != Ordering::Equal {
         return cmp;
@@ -1507,7 +1432,7 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = rtc_med(a).cmp(&rtc_med(b));
+    let cmp = a.med_attr().unwrap_or(0).cmp(&b.med_attr().unwrap_or(0));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -1540,24 +1465,6 @@ fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
     }
 }
 
-fn rtc_local_pref(route: &RtcRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::LocalPref(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(100)
-}
-
-fn rtc_as_path(route: &RtcRibRoute) -> Option<&AsPath> {
-    route.attributes.iter().find_map(|attr| match attr {
-        PathAttribute::AsPath(path) => Some(path),
-        _ => None,
-    })
-}
-
 fn rtc_origin(route: &RtcRibRoute) -> Origin {
     route
         .attributes
@@ -1567,17 +1474,6 @@ fn rtc_origin(route: &RtcRibRoute) -> Origin {
             _ => None,
         })
         .unwrap_or(Origin::Incomplete)
-}
-
-fn rtc_med(route: &RtcRibRoute) -> u32 {
-    route
-        .attributes
-        .iter()
-        .find_map(|attr| match attr {
-            PathAttribute::Med(value) => Some(*value),
-            _ => None,
-        })
-        .unwrap_or(0)
 }
 
 fn rtc_cluster_list_len(route: &RtcRibRoute) -> usize {
@@ -2750,6 +2646,69 @@ mod tests {
         assert_eq!(loc.bgpls_len(), 1);
         assert_eq!(loc.len(), 0);
         assert!(loc.is_empty(), "legacy unicast emptiness is unchanged");
+    }
+
+    /// The BGP-LS, VPN, labeled and RTC chains rank a missing `LOCAL_PREF`
+    /// as exactly 100 and a missing MED as exactly 0. Route `a` comes from
+    /// peer 2, so it loses every later step to peer 1's route `b`. The
+    /// ordering flips only if the defaulted value alone decides.
+    #[test]
+    fn family_tiebreaks_default_missing_local_pref_and_med() {
+        type Attrs = Arc<Vec<PathAttribute>>;
+        type Chain = fn(Attrs, Attrs) -> Ordering;
+        fn attrs(local_pref: Option<u32>, med: Option<u32>) -> Attrs {
+            let mut v = vec![PathAttribute::Origin(Origin::Igp)];
+            v.extend(local_pref.map(PathAttribute::LocalPref));
+            v.extend(med.map(PathAttribute::Med));
+            Arc::new(v)
+        }
+        let chains: [(&str, Chain); 4] = [
+            ("bgpls", |a, b| {
+                let mut ra = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 2);
+                let mut rb = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 1);
+                (ra.attributes, rb.attributes) = (a, b);
+                bgpls_tiebreak(&ra, &rb)
+            }),
+            ("vpn", |a, b| {
+                let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+                let mut ra = make_vpn_route(nlri.clone(), 2, 0);
+                let mut rb = make_vpn_route(nlri, 1, 0);
+                (ra.attributes, rb.attributes) = (a, b);
+                vpn_tiebreak(&ra, &rb)
+            }),
+            ("labeled", |a, b| {
+                let nlri = labeled_nlri([10, 0, 1, 0], 24, 100);
+                let mut ra = make_labeled_route(nlri.clone(), 2, 0);
+                let mut rb = make_labeled_route(nlri, 1, 0);
+                (ra.attributes, rb.attributes) = (a, b);
+                labeled_tiebreak(&ra, &rb)
+            }),
+            ("rtc", |a, b| {
+                let mut ra = make_rtc_route(rtc_test_nlri(100), 2, 0);
+                let mut rb = make_rtc_route(rtc_test_nlri(100), 1, 0);
+                (ra.attributes, rb.attributes) = (a, b);
+                rtc_tiebreak(&ra, &rb)
+            }),
+        ];
+        for (family, cmp) in chains {
+            // Missing LOCAL_PREF is >= 100 (beats 99) and <= 100 (ties 100).
+            assert_eq!(
+                cmp(attrs(None, None), attrs(Some(99), None)),
+                Ordering::Less,
+                "{family}: missing LOCAL_PREF must outrank 99"
+            );
+            assert_eq!(
+                cmp(attrs(None, None), attrs(Some(100), None)),
+                Ordering::Greater,
+                "{family}: missing LOCAL_PREF must tie 100"
+            );
+            // Missing MED is 0: it beats MED 1.
+            assert_eq!(
+                cmp(attrs(Some(100), None), attrs(Some(100), Some(1))),
+                Ordering::Less,
+                "{family}: missing MED must rank as 0"
+            );
+        }
     }
 
     #[test]
