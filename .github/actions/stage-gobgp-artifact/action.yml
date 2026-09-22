@@ -1,22 +1,54 @@
 name: "Stage verified GoBGP archive"
 description: >-
-  Download the same-run GoBGP release archive, verify its immutable checksum
-  and exact gobgp/gobgpd versions offline, and stage it into the interop
-  image build context.
+  Restore a pinned GoBGP release archive from its content-addressed cache
+  entry, falling back to a retried, checksum-verified upstream fetch on a miss,
+  then verify its immutable checksum and exact gobgp/gobgpd versions and stage
+  it into the interop image build context. No same-run producer or artifact
+  service is involved: a cache outage degrades to a miss, and a bad cache hit
+  is discarded before any bytes are staged.
+inputs:
+  version:
+    description: "Exact GoBGP release version"
+    required: false
+    default: "3.37.0"
+  sha256:
+    description: "Exact linux/amd64 release archive SHA-256"
+    required: false
+    default: "e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522"
 runs:
   using: "composite"
   steps:
-    - name: Download verified GoBGP archive
-      uses: actions/download-artifact@v8
+    - name: Restore exact GoBGP archive cache
+      id: cache
+      uses: actions/cache/restore@v6
       with:
-        name: gobgp-v3.37.0-linux-amd64
-        path: ${{ runner.temp }}/gobgp-artifact
+        path: ${{ runner.temp }}/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz
+        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
+
+    - name: Verify cached GoBGP archive or fetch it upstream
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/scripts/install-gobgp.sh \
+          --version "${{ inputs.version }}" \
+          --sha256 "${{ inputs.sha256 }}" \
+          --prepare-archive \
+          "$RUNNER_TEMP/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz"
+
+    - name: Save verified GoBGP archive cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz
+        key: gobgp-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
 
     - name: Stage exact GoBGP archive offline
       shell: bash
       run: |
         set -euo pipefail
         .github/scripts/install-gobgp.sh \
+          --version "${{ inputs.version }}" \
+          --sha256 "${{ inputs.sha256 }}" \
           --stage-archive \
-          "$RUNNER_TEMP/gobgp-artifact/gobgp_3.37.0_linux_amd64.tar.gz" \
+          "$RUNNER_TEMP/gobgp-cache/gobgp_${{ inputs.version }}_linux_amd64.tar.gz" \
           tests/interop/gobgp-archive

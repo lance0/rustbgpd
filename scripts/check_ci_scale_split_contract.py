@@ -9,7 +9,6 @@ from collections import Counter
 from pathlib import Path
 
 ROSTER = {
-    "v064_validator",
     "core",
     "core_tests",
     "scale_receipts",
@@ -17,7 +16,7 @@ ROSTER = {
     "msrv",
     "evpn_bum_filter_kernel",
 }
-RESULTS = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+RESULTS = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
 RETIRED_PRIVILEGED_WORKFLOW = ".github/workflows/privileged-interop.yml"
 WORKFLOWS = tuple(
     f".github/workflows/{name}.yml"
@@ -205,7 +204,7 @@ def check(root: Path) -> list[str]:
     aggregate = jobs.get("check", "")
     if "if: ${{ always() }}" not in aggregate:
         errors.append("aggregate check must run with always()")
-    needs = "needs: [v064_validator, core, core_tests, scale_receipts]"
+    needs = "needs: [core, core_tests, scale_receipts]"
     if needs not in aggregate:
         errors.append("aggregate check needs drifted")
     for name in RESULTS:

@@ -38,7 +38,7 @@ readonly BIRD3_URL="https://bird.nic.cz/download/${BIRD3_ASSET}"
 readonly BIRD3_FALLBACK_URL="https://ftp.openbsd.org/pub/OpenBSD/distfiles/${BIRD3_ASSET}"
 readonly BIRD3_ATTEMPTS=3
 # Two sources: 6 * 60 seconds plus 30 seconds of retry sleeps = 390 seconds.
-# Leave 210 seconds of the producer's 10-minute job for setup and artifacts.
+# Leave 210 seconds of the kernel bird3_archive job's 10-minute budget for setup.
 readonly BIRD3_MAX_TIME=60
 # prepare_archive separates a third-party outage from a supply-chain signal so
 # callers can act on the difference. 3 = the archive bytes never arrived (every
@@ -87,9 +87,9 @@ stage_archive() (
     local stage_dir=${3:?stage directory}
     local staged_target
 
-    # This path is deliberately offline. Only the producer may fetch the
-    # release archive; consumers re-verify the same-run artifact before the
-    # bird3 image build context sees any bytes. The archive itself is staged
+    # This path is deliberately offline. Only prepare_archive may fetch the
+    # source archive; staging re-verifies the restored or fetched bytes before
+    # the bird3 image build context sees them. The archive itself is staged
     # (not extracted): Dockerfile.bird3 re-verifies the checksum inside the
     # build before extraction.
     verify_archive_contents "$sha256" "$archive" || return 1

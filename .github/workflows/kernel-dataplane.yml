@@ -51,33 +51,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/classify_heavy_ci_paths.py
 
-  grpcurl_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact grpcurl archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore, prepare, and upload exact grpcurl archive
-        uses: ./.github/actions/prepare-grpcurl-artifact
-
-  gobgp_archive:
-    needs: classify_changes
-    if: needs.classify_changes.outputs.run_labs == 'true'
-    name: Prepare exact gobgp archive
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-      - name: Restore, prepare, and upload exact gobgp archive
-        uses: ./.github/actions/prepare-gobgp-artifact
-
-  # This archive feeds exactly one scenario, m43. Its host is a third party:
+  # This job gates exactly one scenario, m43. Its host is a third party:
   # when it refuses to serve the pinned tarball (nic.cz returned 403 on all
   # three attempts with a cold cache on 2026-08-18) the run is carrying
   # evidence about somebody else's web server, not about rustbgpd, and it
@@ -102,10 +76,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - name: Restore exact bird3 archive cache
-        uses: actions/cache@v6
+        id: cache
+        uses: actions/cache/restore@v6
         with:
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
-          key: bird3-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+          path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
+          key: bird-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
       - name: Prepare exact bird3 archive
         id: prepare
         run: |
@@ -113,7 +88,7 @@ jobs:
           rc=0
           .github/scripts/install-bird3.sh \
             --prepare-archive \
-            "$RUNNER_TEMP/bird3-cache/bird-3.3.2.tar.gz" || rc=$?
+            "$RUNNER_TEMP/bird-cache/bird-3.3.2.tar.gz" || rc=$?
           case "$rc" in
             0) status=ok ;;
             3) status=unavailable ;;
@@ -124,15 +99,15 @@ jobs:
           if [ "$status" != ok ] && [ "$status" != unavailable ]; then
             exit "$rc"
           fi
-      - name: Upload verified bird3 archive
-        if: steps.prepare.outputs.bird3_status == 'ok'
-        uses: actions/upload-artifact@v7
+      # m43 restores this entry itself through stage-bird3-artifact (same key
+      # and path) and falls back to the same verified fetch on a miss, so this
+      # job never hands bytes over through the artifact service.
+      - name: Save verified bird3 archive cache
+        if: steps.prepare.outputs.bird3_status == 'ok' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
         with:
-          name: bird3-v3.3.2-source
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          path: ${{ runner.temp }}/bird-cache/bird-3.3.2.tar.gz
+          key: bird-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
 
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
@@ -153,7 +128,7 @@ jobs:
         uses: ./.github/actions/prime-rustbgpd-dev-cache
 
   m36:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M36 — EVPN VTEP receive FDB programming (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -169,7 +144,7 @@ jobs:
           script: tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
 
   m37:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M37 — EVPN local MAC origination (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -185,7 +160,7 @@ jobs:
           script: tests/interop/scripts/test-m37-evpn-local-origination.sh
 
   m37-ip:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M37+IP — EVPN local MAC/IP origination (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -201,7 +176,7 @@ jobs:
           script: tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
 
   m38:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M38 — EVPN DF election + Type 1/4 origination
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -217,7 +192,7 @@ jobs:
           script: tests/interop/scripts/test-m38-evpn-df-election.sh
 
   m39:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -234,7 +209,7 @@ jobs:
           script: tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
 
   m39b:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M39b — EVPN auto-derived Route Targets cross-vendor (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -251,7 +226,7 @@ jobs:
           script: tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
 
   m109:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M109 — EVPN L2 over an IPv6-only VXLAN underlay (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -267,7 +242,7 @@ jobs:
           script: tests/interop/scripts/test-m109-evpn-ipv6-underlay-vtep.sh
 
   m110:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M110 — EVPN IPv6-underlay symmetric Interface-less IRB (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -285,7 +260,7 @@ jobs:
           max_attempts: "1"
 
   m48:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -302,7 +277,7 @@ jobs:
           script: tests/interop/scripts/test-m48-evpn-tenant-teardown-datapath.sh
 
   m60:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M60 — ADR-0079 EVPN adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -318,7 +293,7 @@ jobs:
           script: tests/interop/scripts/test-m60-evpn-adoption-sweep.sh
 
   m61:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M61 — ADR-0079 EVPN L3 adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -335,7 +310,7 @@ jobs:
           script: tests/interop/scripts/test-m61-evpn-l3-adoption-sweep.sh
 
   m62:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M62 — ADR-0079 blackhole adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -351,7 +326,7 @@ jobs:
           script: tests/interop/scripts/test-m62-blackhole-adoption-sweep.sh
 
   m40:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -367,7 +342,7 @@ jobs:
           script: tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
 
   m42:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -383,7 +358,7 @@ jobs:
           script: tests/interop/scripts/test-m42-fib-runtime-frr.sh
 
   m50:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -399,7 +374,7 @@ jobs:
           script: tests/interop/scripts/test-m50-fib-ecmp-frr.sh
 
   m52:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M52 — ADR-0066 multipath-relax (FRR 10.7.1, mixed ASes)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -415,7 +390,7 @@ jobs:
           script: tests/interop/scripts/test-m52-fib-ecmp-relax-frr.sh
 
   m58:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M58 — ADR-0061 FIB-table runtime CRUD (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -431,7 +406,7 @@ jobs:
           script: tests/interop/scripts/test-m58-fib-table-crud-frr.sh
 
   m53:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M53 — ADR-0069 BGP unnumbered + scoped FIB (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -447,7 +422,7 @@ jobs:
           script: tests/interop/scripts/test-m53-bgp-unnumbered-frr.sh
 
   m51:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -463,7 +438,7 @@ jobs:
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
   m108:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M108 — RFC 5883 multihop BFD + RFC 5882 coupling across two hops (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -479,7 +454,7 @@ jobs:
           script: tests/interop/scripts/test-m108-bfd-multihop-frr.sh
 
   m43:
-    needs: [grpcurl_archive, bird3_archive, prime_dev_image]
+    needs: [bird3_archive, prime_dev_image]
     # No archive means no BIRD 3.3.2 image, so nothing here can run. Skipping
     # the whole job rather than letting it report success with its lab steps
     # quietly disabled is what lets the check aggregate print the skip and name
@@ -627,7 +602,7 @@ jobs:
           script: tests/interop/scripts/test-m43-tcp-ao-bird-crash-restart.sh
 
   m47:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M47 — EVPN runtime tenant teardown (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -643,7 +618,7 @@ jobs:
           script: tests/interop/scripts/test-m47-evpn-tenant-teardown.sh
 
   m69:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M69 — EVPN preference-DF election (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -659,7 +634,7 @@ jobs:
           script: tests/interop/scripts/test-m69-evpn-preference-df-frr.sh
 
   m70:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -679,7 +654,7 @@ jobs:
           script: tests/interop/scripts/test-m70-evpn-vlan-aware-bridge-frr.sh
 
   m65:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M65 — ADR-0083 single-active failover blackout measurement (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -703,7 +678,7 @@ jobs:
           script: tests/interop/scripts/test-m65-evpn-single-active-failover.sh
 
   m71:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M71 — RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -729,7 +704,7 @@ jobs:
           script: tests/interop/scripts/test-m71-evpn-esi-overlay-type5-receive-gobgp.sh
 
   m72:
-    needs: [grpcurl_archive, gobgp_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M72 — RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive (GoBGP 3.x)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -754,7 +729,7 @@ jobs:
           script: tests/interop/scripts/test-m72-evpn-esi-overlay-type5-all-active-gobgp.sh
 
   m66:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M66 — ADR-0084 ES drain service handover (rustbgpd ×3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -773,7 +748,7 @@ jobs:
           script: tests/interop/scripts/test-m66-evpn-es-drain-handover.sh
 
   m67:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M67 — ADR-0085 link-driven ES drain failover (rustbgpd ×3)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -794,7 +769,7 @@ jobs:
           script: tests/interop/scripts/test-m67-evpn-link-drain-failover.sh
 
   m68:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [prime_dev_image]
     name: M68 — ADR-0087 GW-IP overlay-index Type 5 (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -984,14 +959,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, gobgp_archive, bird3_archive, prime_dev_image, m36,
+    needs: [classify_changes, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m109, m110, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive gobgp_archive bird3_archive prime_dev_image
+        classify_changes bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
         m39b m109 m110 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 netns

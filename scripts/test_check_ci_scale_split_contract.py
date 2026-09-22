@@ -141,7 +141,6 @@ class ScaleSplitContractTests(unittest.TestCase):
 
     def test_semantic_mutations_fail_closed(self) -> None:
         cases = (
-            ("  v064_validator:\n", "  renamed_validator:\n"),
             ("  core:\n", "  renamed_core:\n"),
             ("  core_tests:\n", "  renamed_core_tests:\n"),
             ("  scale_receipts:\n", "  renamed_scale:\n"),
@@ -187,12 +186,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("              exit 1", "              true"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
-                "needs: [v064_validator, core, core_tests, scale_receipts]",
+                "needs: [core, core_tests, scale_receipts]",
                 "needs: [core]",
-            ),
-            (
-                "V064_VALIDATOR_RESULT: ${{ needs.v064_validator.result }}",
-                "V064_VALIDATOR_RESULT: success",
             ),
             ("CORE_RESULT: ${{ needs.core.result }}", "CORE_RESULT: success"),
             (
@@ -204,9 +199,8 @@ class ScaleSplitContractTests(unittest.TestCase):
                 "SCALE_RECEIPTS_RESULT: success",
             ),
             (
-                '[[ "$V064_VALIDATOR_RESULT" != "success" || "$CORE_RESULT" != '
-                '"success" || "$CORE_TESTS_RESULT" != "success" || '
-                '"$SCALE_RECEIPTS_RESULT" != "success" ]]',
+                '[[ "$CORE_RESULT" != "success" || "$CORE_TESTS_RESULT" != '
+                '"success" || "$SCALE_RECEIPTS_RESULT" != "success" ]]',
                 "[[ false ]]",
             ),
         )
@@ -220,14 +214,14 @@ class ScaleSplitContractTests(unittest.TestCase):
 
         def run(values):
             env = os.environ.copy()
-            for name in ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS"):
+            for name in ("CORE", "CORE_TESTS", "SCALE_RECEIPTS"):
                 env.pop(f"{name}_RESULT", None)
             for name, value in values.items():
                 if value is not None:
                     env[f"{name}_RESULT"] = value
             return subprocess.run(["bash", "-c", shell], env=env, capture_output=True)
 
-        names = ("V064_VALIDATOR", "CORE", "CORE_TESTS", "SCALE_RECEIPTS")
+        names = ("CORE", "CORE_TESTS", "SCALE_RECEIPTS")
         good = {name: "success" for name in names}
         self.assertEqual(0, run(good).returncode)
         for name in good:

@@ -27,9 +27,9 @@ install_from_archive() (
     local install_dir=${4:?install directory}
     local work_dir staged_target reported_version
 
-    # This path is deliberately offline. Producers are the only workflow jobs
-    # allowed to fetch the release archive; consumers re-verify the same-run
-    # artifact before tar sees any bytes.
+    # This path is deliberately offline. Only prepare_archive may fetch the
+    # release archive; install re-verifies the restored or fetched bytes
+    # before tar sees any of them.
     verify_archive "$sha256" "$archive" || return 1
 
     work_dir=$(mktemp -d) || return 1
@@ -73,9 +73,12 @@ download_archive_once() {
     local url=${1:?url}
     local destination=${2:?destination}
 
+    # Second retry layer under the caller's verified attempt loop: a brief
+    # release-host 5xx is retried in place, bounded to a 30-second window.
     curl -fsSL \
         --connect-timeout 10 \
         --max-time 120 \
+        --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 30 \
         --output "$destination" \
         "$url"
 }
@@ -120,92 +123,10 @@ fail_self_test() {
     return 1
 }
 
-# The consumer roster is derived, not pinned. An exact count proved to be a
-# change-detector, not a bypass-detector: a job fetching grpcurl directly
-# never moved the action-use count, while every legitimate roster addition
-# tripped it. Instead, the set of jobs that depend on the producer must
-# equal the set of jobs that install through the offline consumer path.
-
-# Emit "needs JOB" / "uses JOB" lines for the jobs of a workflow file:
-# "needs" when the job's needs list contains grpcurl_archive, "uses" when
-# the job block contains the consumer marker.
-workflow_consumer_sets() {
-    local workflow=${1:?workflow}
-    local marker=${2:?consumer marker}
-
-    awk -v marker="$marker" '
-        /^jobs:$/ { in_jobs = 1; next }
-        !in_jobs { next }
-        /^  [A-Za-z0-9_-]+:$/ {
-            job = substr($0, 3, length($0) - 3)
-            in_flow = 0
-            in_block = 0
-            next
-        }
-        job == "" { next }
-        in_flow {
-            if (index($0, "grpcurl_archive")) needs[job] = 1
-            if (index($0, "]")) in_flow = 0
-            next
-        }
-        in_block && /^      - / {
-            if (index($0, "grpcurl_archive")) needs[job] = 1
-            next
-        }
-        { in_block = 0 }
-        /^    needs:$/ { in_block = 1; next }
-        /^    needs:/ {
-            if (index($0, "grpcurl_archive")) needs[job] = 1
-            if (index($0, "[") && !index($0, "]")) in_flow = 1
-            next
-        }
-        index($0, marker) { uses[job] = 1 }
-        END {
-            for (j in needs) print "needs " j
-            for (j in uses) print "uses " j
-        }
-    ' "$workflow"
-}
-
-# Assert that the producer-dependency set equals the consumer-install set.
-# Arguments past the label name documented exceptions removed from the
-# needs side. An empty derived set is an error, never a pass.
-check_workflow_consumers() {
-    local workflow=${1:?workflow}
-    local marker=${2:?consumer marker}
-    local label=${3:?label}
-    shift 3
-    local exception parsed needs_jobs uses_jobs
-
-    parsed=$(workflow_consumer_sets "$workflow" "$marker")
-    needs_jobs=$(awk '$1 == "needs" { print $2 }' <<<"$parsed" | sort)
-    uses_jobs=$(awk '$1 == "uses" { print $2 }' <<<"$parsed" | sort)
-    for exception in "$@"; do
-        needs_jobs=$(grep -Fxv -- "$exception" <<<"$needs_jobs" || true)
-    done
-    if [[ -z "$needs_jobs" || -z "$uses_jobs" ]]; then
-        echo "${label}: derived zero grpcurl consumers (empty or unparsed workflow)" >&2
-        return 1
-    fi
-    if [[ "$needs_jobs" != "$uses_jobs" ]]; then
-        {
-            echo "${label}: grpcurl consumer sets diverged"
-            echo "  jobs needing grpcurl_archive: ${needs_jobs//$'\n'/ }"
-            echo "  jobs with '${marker}': ${uses_jobs//$'\n'/ }"
-            comm -23 <(printf '%s\n' "$needs_jobs") <(printf '%s\n' "$uses_jobs") \
-                | sed 's/^/  needs the producer but never installs: /'
-            comm -13 <(printf '%s\n' "$needs_jobs") <(printf '%s\n' "$uses_jobs") \
-                | sed 's/^/  installs without needing the producer: /'
-        } >&2
-        return 1
-    fi
-}
-
 self_test() (
     local repo_root fixture_dir source_dir base_archive valid_archive checksum
     local truncated_size wrong_source wrong_archive wrong_checksum counter
-    local cache_path target_path workflow setup_calls producer_calls prepare_calls
-    local prepare_mode_calls install_calls
+    local cache_path target_path setup_calls consumer_action seam
 
     repo_root=$(git rev-parse --show-toplevel)
     fixture_dir=$(mktemp -d)
@@ -360,42 +281,31 @@ EOF
             "$fixture_dir/offline-install"
     ) || fail_self_test "offline artifact install failed"
 
-    # Interop jobs install grpcurl through the consumer action directly.
-    # In kernel-dataplane.yml consumption routes through the shared
-    # setup-dataplane-host action, so that call is its consumer marker.
-    # Documented exception in both: `check` is the aggregate result gate --
-    # it needs every job, including the producer, but never installs.
-    check_workflow_consumers \
-        "$repo_root/.github/workflows/interop.yml" \
-        'uses: ./.github/actions/install-grpcurl-artifact' \
-        interop.yml check \
-        || fail_self_test "interop.yml grpcurl consumer sets diverged"
-    check_workflow_consumers \
-        "$repo_root/.github/workflows/kernel-dataplane.yml" \
-        'uses: ./.github/actions/setup-dataplane-host' \
-        kernel-dataplane.yml check \
-        || fail_self_test "kernel-dataplane.yml grpcurl consumer sets diverged"
+    # Every lab job installs grpcurl through the consumer action (kernel jobs
+    # reach it through setup-dataplane-host). That action restores the exact
+    # cache entry itself and falls back to the verified upstream fetch, so no
+    # job depends on a same-run producer or the artifact service.
     setup_calls=$(grep -cF 'uses: ./.github/actions/install-grpcurl-artifact' \
         "$repo_root/.github/actions/setup-dataplane-host/action.yml")
     [[ "$setup_calls" -eq 1 ]] \
         || fail_self_test "setup-dataplane-host must have one grpcurl consumer"
-    for workflow in interop.yml kernel-dataplane.yml; do
-        producer_calls=$(grep -cF \
-            'uses: ./.github/actions/prepare-grpcurl-artifact' \
-            "$repo_root/.github/workflows/$workflow")
-        [[ "$producer_calls" -eq 1 ]] \
-            || fail_self_test "$workflow must have exactly one grpcurl producer"
+    if grep -R -n -E 'grpcurl_archive|prepare-grpcurl-artifact' \
+        "$repo_root/.github/workflows" "$repo_root/.github/actions"; then
+        fail_self_test "a same-run grpcurl producer remains"
+    fi
+    consumer_action="$repo_root/.github/actions/install-grpcurl-artifact/action.yml"
+    for seam in \
+        'uses: actions/cache/restore@v6' \
+        '--prepare-archive' \
+        'uses: actions/cache/save@v6' \
+        "if: steps.cache.outputs.cache-hit != 'true'" \
+        '--install-archive'; do
+        [[ $(grep -cF -- "$seam" "$consumer_action") -eq 1 ]] \
+            || fail_self_test "consumer action must have exactly one: $seam"
     done
-    prepare_calls=$(grep -cF -- '.github/scripts/install-grpcurl.sh' \
-        "$repo_root/.github/actions/prepare-grpcurl-artifact/action.yml")
-    prepare_mode_calls=$(grep -cF -- '--prepare-archive' \
-        "$repo_root/.github/actions/prepare-grpcurl-artifact/action.yml")
-    [[ "$prepare_calls" -eq 1 && "$prepare_mode_calls" -eq 1 ]] \
-        || fail_self_test "producer action must have one grpcurl prepare call"
-    install_calls=$(grep -cF -- '--install-archive' \
-        "$repo_root/.github/actions/install-grpcurl-artifact/action.yml")
-    [[ "$install_calls" -eq 1 ]] \
-        || fail_self_test "consumer action must have one offline install"
+    if grep -F -n -e 'download-artifact' -e 'upload-artifact' "$consumer_action"; then
+        fail_self_test "consumer action depends on the artifact service"
+    fi
 
     # Bypass scan: only this installer may reference the upstream grpcurl
     # path (release URL, go install, or clone). The primer contract checker

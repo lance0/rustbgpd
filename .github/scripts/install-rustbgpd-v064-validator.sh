@@ -29,9 +29,9 @@ install_from_archive() (
     local binary_name=${5:?binary name}
     local work_dir staged_binary reported_version
 
-    # This path is deliberately offline. The producer is the only workflow
-    # job allowed to fetch the release archive; consumers re-verify the
-    # same-run artifact before tar sees any bytes.
+    # This path is deliberately offline. Only prepare_archive may fetch the
+    # release archive; install re-verifies the restored or fetched bytes
+    # before tar sees any of them.
     verify_archive "$sha256" "$archive" || return 1
 
     work_dir=$(mktemp -d) || return 1
@@ -59,9 +59,12 @@ download_archive_once() {
     local url=${1:?url}
     local destination=${2:?destination}
 
+    # Second retry layer under the caller's verified attempt loop: a brief
+    # release-host 5xx is retried in place, bounded to a 30-second window.
     curl -fsSL \
         --connect-timeout 10 \
         --max-time 120 \
+        --retry 2 --retry-all-errors --retry-delay 3 --retry-max-time 30 \
         --output "$destination" \
         "$url"
 }
