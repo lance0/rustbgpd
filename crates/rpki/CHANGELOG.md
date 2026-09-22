@@ -5,6 +5,14 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.3.2 - Unreleased
 
+- `RtrClient::new` now clamps a `RtrClientConfig::retry_interval` above
+  the RFC 8210 §6 maximum of 7200 seconds down to 7200 seconds and logs a
+  warning. Retry paces reconnects before any End of Data can lower it, so
+  a larger value parked the first reconnect at tokio's far-future deadline
+  and the client never retried a cache that was down at startup. Values
+  from 1 to 7200 seconds are unchanged. The configured-timer warning now
+  reports the applied value as `bounded` (previously `raised`) with the
+  message "RTR configured timer outside the §6 range, bounded".
 - Publish the first accepted empty VRP and ASPA tables so operator queries
   distinguish authoritative empty data from unavailable data. Identical
   replays remain suppressed; disconnects before any acceptance remain unavailable.
