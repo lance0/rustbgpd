@@ -217,7 +217,7 @@ async fn gr_eor_sweep_scopes_to_family() {
     let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
     let mut v6_route = make_v6_route(v6_prefix, "2001:db8::1".parse().unwrap());
-    v6_route.peer = source;
+    set_peer(&mut v6_route, source);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,

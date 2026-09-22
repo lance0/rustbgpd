@@ -7816,7 +7816,7 @@ fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
             Ipv6Prefix::new(address.parse().unwrap(), 48),
             "2001:db8::54".parse().unwrap(),
         );
-        route.peer = IpAddr::V4(source);
+        set_peer(&mut route, IpAddr::V4(source));
         announced.push(route);
     }
     manager.handle_update(RibUpdate::RoutesReceived {

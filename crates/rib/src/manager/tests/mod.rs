@@ -18,7 +18,9 @@ use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope, Route,
     VpnRibRoute,
 };
-use crate::test_support::{make_flowspec_route, make_route, make_route_with_lp, make_v6_route};
+use crate::test_support::{
+    make_flowspec_route, make_route, make_route_with_lp, make_v6_route, set_peer,
+};
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
 fn evpn_sendable() -> Vec<(Afi, Safi)> {

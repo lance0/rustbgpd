@@ -228,7 +228,7 @@ mod tests {
     use rustbgpd_wire::{Afi, Ipv6PrefixOffset, PathAttribute};
 
     use super::*;
-    use crate::test_support::{make_flowspec_route, make_route};
+    use crate::test_support::{make_flowspec_route, make_route, set_peer};
 
     const LOCAL_AS: u32 = 64512;
     const SOURCE_AS: u32 = 64496;
@@ -317,7 +317,7 @@ mod tests {
         let (mut flow, mut cover) = fixture();
         flow.origin_type = RouteOrigin::Ibgp;
         flow.attributes = vec![path(&[])];
-        cover.peer = "198.51.100.2".parse().unwrap();
+        set_peer(&mut cover, "198.51.100.2".parse().unwrap());
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
         assert_eq!(
             evaluate(&flow, None, &[]),
@@ -440,7 +440,7 @@ mod tests {
         cover.attributes = Arc::new(vec![path(&[])]);
         let mut child = cover.clone();
         child.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
-        child.peer = "198.51.100.2".parse().unwrap();
+        set_peer(&mut child, "198.51.100.2".parse().unwrap());
         assert_eq!(
             evaluate(&flow, Some(&cover), std::slice::from_ref(&child)),
             Feasibility::Feasible

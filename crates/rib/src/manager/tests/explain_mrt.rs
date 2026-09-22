@@ -95,7 +95,7 @@ async fn warm_mrt_snapshot_excludes_routes_for_family_outside_exact_view() {
         Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32),
         "2001:db8::1".parse().unwrap(),
     );
-    v6.peer = peer;
+    set_peer(&mut v6, peer);
     tx.send(RibUpdate::RoutesReceived {
         session_id: 42,
         peer,

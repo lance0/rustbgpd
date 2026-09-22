@@ -80,6 +80,14 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
     }
 }
 
+/// Move a fixture route to `peer`, keeping `peer_router_id` derived from
+/// the new peer rather than the constructor's. `LOCAL_PEER` (`0.0.0.0`)
+/// yields the injection sentinel, matching a locally originated route.
+pub(crate) fn set_peer(route: &mut Route, peer: IpAddr) {
+    route.peer = peer;
+    route.peer_router_id = session_router_id(peer);
+}
+
 pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(prefix),

@@ -586,7 +586,7 @@ fn ordered_table_indices_match_full_sort_across_add_path_and_replacement() {
 
     let mut inbound = AdjRibIn::new(peer_a);
     for mut route in inserted.clone() {
-        route.peer = peer_a;
+        set_peer(&mut route, peer_a);
         inbound.insert(route);
     }
     let mut inbound_expected: Vec<_> = inbound.iter().map(route_query_key).collect();
@@ -805,7 +805,7 @@ fn randomized_mixed_family_add_path_continuations_match_full_key_sort() {
             let low = u128::from(index).wrapping_mul(0x0001_0001_0001_0001);
             Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(high | low), len))
         };
-        route.peer = if state & 2 == 0 {
+        let peer = if state & 2 == 0 {
             IpAddr::V4(Ipv4Addr::from(
                 0xc000_0200u32 | u32::try_from((state >> 32) & 0xff).unwrap(),
             ))
@@ -814,6 +814,7 @@ fn randomized_mixed_family_add_path_continuations_match_full_key_sort() {
                 0x2001_0db8_ffff_0000_0000_0000_0000_0000u128 | u128::from(index % 251),
             ))
         };
+        set_peer(&mut route, peer);
         route.path_id = u32::try_from((state >> 40) & 0x0f).unwrap();
         outbound.insert(route);
     }

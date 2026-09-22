@@ -1804,7 +1804,7 @@ fn pcb_counts_agree_with_adv_entry_fold() {
 /// drops out of both the family row and the summed count.
 #[test]
 fn pcb_family_counts_lane_term_is_per_family() {
-    use crate::test_support::make_v6_route;
+    use crate::test_support::{make_v6_route, set_peer};
     let p4 = prefix(1);
     let p6 = Prefix::V6(Ipv6Prefix::new(
         std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
@@ -1821,7 +1821,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
         },
         std::net::Ipv6Addr::LOCALHOST,
     );
-    w6.peer = MEMBER;
+    set_peer(&mut w6, MEMBER);
     group.apply_delta(&GroupDelta {
         prefix: p6,
         path_id: 0,
@@ -1832,7 +1832,7 @@ fn pcb_family_counts_lane_term_is_per_family() {
         lane: None,
     });
     let mut r6 = w6;
-    r6.peer = OTHER2;
+    set_peer(&mut r6, OTHER2);
     group.apply_lane(p6, Some(lane_entry(r6, MEMBER, "lane", None)));
 
     assert_eq!(
