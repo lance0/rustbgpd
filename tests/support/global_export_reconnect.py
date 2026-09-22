@@ -225,7 +225,7 @@ action = "deny"
         while True:
             offset = log_path.stat().st_size
             daemon.send_signal(signal.SIGHUP)
-            wait(lambda: "SIGHUP received" in log_path.read_text()[offset:], "SIGHUP answer", deadline)
+            wait(lambda offset=offset: "SIGHUP received" in log_path.read_text()[offset:], "SIGHUP answer", deadline)
             if "SIGHUP received, reloading configuration" in log_path.read_text()[offset:]:
                 break
             drain(.2)
