@@ -127,10 +127,21 @@ action = "deny"
     daemon = subprocess.Popen([str(args.binary), str(config_path)], stdout=log, stderr=log)
 
     def connect(last):
-        deadline = time.monotonic() + 15
+        # One deadline bounds the whole admission, including the daemon's
+        # OPEN and KEEPALIVE. The listener binds before startup finishes its
+        # durable config-history writes and starts the peer manager, so under
+        # I/O load an accepted connection can wait many seconds (14 s seen
+        # beside a concurrent gate) before the daemon answers it.
+        deadline = time.monotonic() + 30
+
+        def remaining():
+            left = deadline - time.monotonic()
+            assert daemon.poll() is None and left > 0, f"peer 127.0.0.{last} did not connect"
+            return left
+
         while True:
             stream = socket.socket()
-            stream.settimeout(2)
+            stream.settimeout(remaining())
             stream.bind((f"127.0.0.{last}", 0))
             try:
                 stream.connect(("127.0.0.1", bgp_port))
@@ -139,17 +150,20 @@ action = "deny"
                 optional = bytes([2, len(caps)]) + caps
                 body = struct.pack("!BHHIB", 4, 65001, 90, int(ipaddress.IPv4Address(f"192.0.2.{last}")), len(optional))
                 stream.sendall(raw.message(1, body + optional))
+                stream.settimeout(remaining())
                 kind, _ = raw.read_message(stream)
                 assert kind == 1, ("expected OPEN", kind)
                 stream.sendall(raw.message(4))
+                stream.settimeout(remaining())
                 kind, _ = raw.read_message(stream)
                 assert kind == 4, ("expected KEEPALIVE", kind)
+                stream.settimeout(2)
                 sessions[last], routes[last] = stream, set()
                 stream.sendall(raw.message(2, b"\0\0\0\0"))
                 return
-            except (ConnectionRefusedError, ConnectionResetError, EOFError):
+            except (ConnectionRefusedError, ConnectionResetError, EOFError, TimeoutError):
                 stream.close()
-                assert daemon.poll() is None and time.monotonic() < deadline, "peer did not connect"
+                remaining()
                 time.sleep(.1)
 
     attrs = raw.attribute(0x40, 1, b"\0") + raw.attribute(0x40, 2, b"")
@@ -184,27 +198,39 @@ action = "deny"
                 else:
                     assert kind == 4, ("unexpected BGP message", last, kind, body.hex())
 
-    def wait(predicate, label):
-        deadline = time.monotonic() + 20
+    def wait(predicate, label, deadline=None):
+        deadline = deadline or time.monotonic() + 20
         while not predicate():
             assert time.monotonic() < deadline, (label, routes)
             drain(.1)
         drain(.2)
         assert predicate(), ("unstable result", label, routes)
 
-    def observe(label, expected):
-        wait(lambda: all(routes[peer] == expected for peer in sessions if peer != 2), label)
+    def observe(label, expected, deadline=None):
+        wait(lambda: all(routes[peer] == expected for peer in sessions if peer != 2), label, deadline)
         result = subprocess.run([str(args.rbgp), "--addr", addr, "--json", "policy", "stats", "--direction", "export"], capture_output=True, text=True, timeout=10, check=True)
         snapshot = {"label": label, "routes": {str(peer): sorted(value) for peer, value in routes.items()}, "stats": json.loads(result.stdout)}
         snapshots.append(snapshot)
         (args.out / "snapshots.json").write_text(json.dumps(snapshots, indent=2) + "\n")
 
     def reload(name, expected):
-        offset = log_path.stat().st_size
         config_path.write_bytes((args.out / f"{name}.toml").read_bytes())
-        daemon.send_signal(signal.SIGHUP)
-        wait(lambda: "reload generation applied" in log_path.read_text()[offset:], "SIGHUP completion")
-        observe(f"reload-{name}", expected)
+        # One budget covers the whole reload. Durable config-history writes
+        # can keep the previous SIGHUP settling for seconds under I/O load,
+        # and the daemon ignores a SIGHUP that arrives before its main loop
+        # has seen that reload task finish, which can be after the
+        # settlement's own log line. Resend until the daemon logs that it
+        # accepted this SIGHUP, then wait for that reload to apply.
+        deadline = time.monotonic() + 30
+        while True:
+            offset = log_path.stat().st_size
+            daemon.send_signal(signal.SIGHUP)
+            wait(lambda offset=offset: "SIGHUP received" in log_path.read_text()[offset:], "SIGHUP answer", deadline)
+            if "SIGHUP received, reloading configuration" in log_path.read_text()[offset:]:
+                break
+            drain(.2)
+        wait(lambda: "reload generation applied" in log_path.read_text()[offset:], "SIGHUP completion", deadline)
+        observe(f"reload-{name}", expected, deadline)
 
     def reconnect(last, label, expected):
         sessions.pop(last).close()
