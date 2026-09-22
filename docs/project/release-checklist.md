@@ -98,6 +98,9 @@ convention in `CONTRIBUTING.md`:
       docs, and tests all move together.
 - [ ] Process-only documentation changes intentionally omit CHANGELOG entries
       unless they affect users or operators.
+- [ ] Re-fetch the IANA BGP Path Attributes CSV and compare it with the snapshot
+      digest and census, following the
+      [refresh procedure](../reference/path-attribute-registry.md#provenance-and-refresh).
 - [ ] Every front-door performance claim inventoried in
       [`docs/perf/receipt-provenance.json`](../perf/receipt-provenance.json) — in
       `docs/perf/README.md`, `docs/benchmarks.md`, `docs/explanation/comparison.md`, or

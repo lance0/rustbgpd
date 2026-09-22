@@ -253,7 +253,7 @@ fn disposition(value: &str) -> ErrorDisposition {
 
 #[test]
 fn census_covers_every_code_exactly_once() {
-    assert!(DOC.contains("691f147f5c9ef9dbde82febe339f5691a1bfc4d83f63e3ed0d224676ebe68886"));
+    assert!(DOC.contains("b04771e1948af2e2682bae76ecff9b957c7c4ccc93e32b31efcec086281005a0"));
     assert!(DOC.contains("https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv"));
 
     let mut coverage = [0_u16; 256];
