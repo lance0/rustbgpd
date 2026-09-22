@@ -961,9 +961,14 @@ pub(crate) enum OwnedCatalogDispatch {
 
 /// Dispatch one settlement-owned catalog mutation with transport acceptance
 /// kept distinct from loss of the actor's typed reply.
+///
+/// Only the send half is capped at the owner's pre-effect deadline: an
+/// unaccepted command has no effect, while an accepted one may, so its reply
+/// keeps `timeout` alone.
 pub(crate) async fn dispatch_owned_catalog_mutation(
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     timeout: Duration,
+    pre_effect_deadline: Option<tokio::time::Instant>,
     mutation: OwnedCatalogMutation,
 ) -> OwnedCatalogDispatch {
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -971,7 +976,9 @@ pub(crate) async fn dispatch_owned_catalog_mutation(
         mutation,
         reply: reply_tx,
     };
-    match tokio::time::timeout(timeout, peer_mgr_tx.send(command)).await {
+    let send_deadline = tokio::time::Instant::now() + timeout;
+    let send_deadline = pre_effect_deadline.map_or(send_deadline, |cap| cap.min(send_deadline));
+    match tokio::time::timeout_at(send_deadline, peer_mgr_tx.send(command)).await {
         Err(_) => OwnedCatalogDispatch::NotAccepted(Status::unavailable(
             "peer manager mutation queue timed out before accepting command",
         )),

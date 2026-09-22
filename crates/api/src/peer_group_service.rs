@@ -551,7 +551,9 @@ async fn owned_peer_group_mutation_body(
         None
     };
 
-    let dispatch = dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    let dispatch =
+        dispatch_owned_catalog_mutation(peer_mgr_tx, actor_timeout, pre_effect_deadline, mutation)
+            .await;
     match dispatch {
         OwnedCatalogDispatch::NotAccepted(error) => {
             drop(staged);
@@ -1992,5 +1994,56 @@ mod tests {
                 .is_ok(),
             "ownership releases only after detached commit settles"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_peer_group_blocked_actor_send_ends_clean_at_the_pre_effect_deadline() {
+        use crate::test_support::{
+            assert_only_filler_delivered, full_peer_manager_queue, settle_exactly_at,
+            spawn_owned_body,
+        };
+        let (peer_tx, mut peer_rx) = full_peer_manager_queue();
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let (join, operation, _watchdog, terminal) = spawn_owned_body(
+            RuntimeConfigOperationKind::PeerGroupDelete,
+            move |operation| {
+                owned_peer_group_mutation_body(
+                    Some(operation),
+                    None,
+                    None,
+                    "test peer-group delete",
+                    peer_tx,
+                    OWNED_PEER_GROUP_ACTOR_TIMEOUT,
+                    PeerGroupMutationIntent::Delete {
+                        name: "rr-clients".to_string(),
+                    },
+                    Some(permit),
+                )
+            },
+        )
+        .await;
+        // Handshake: the stage is acknowledged, so the owner's remaining
+        // pre-effect wait is the send into the full peer-manager queue.
+        let Some(ConfigEvent::DeletePeerGroup {
+            ack: Some(crate::peer_types::ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected a staged peer-group delete")
+        };
+        staged.send(Ok(())).unwrap();
+
+        let error = settle_exactly_at(join, operation.pre_effect_deadline())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "peer manager mutation queue timed out before accepting command"
+        );
+        assert!(commit.await.is_err(), "the stage must be discarded");
+        assert_only_filler_delivered(&mut peer_rx);
+        assert!(terminal.try_recv().is_err(), "a clean owner never fences");
     }
 }

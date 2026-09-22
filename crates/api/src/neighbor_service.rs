@@ -273,9 +273,13 @@ enum OwnedNeighborDispatch {
     AcceptedReplyLost(Status),
 }
 
+/// Only the send half is capped at the owner's pre-effect deadline: an
+/// unaccepted command has no effect, while an accepted one may, so its reply
+/// keeps `timeout` alone.
 async fn dispatch_owned_neighbor_mutation(
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     timeout: Duration,
+    pre_effect_deadline: Option<tokio::time::Instant>,
     mutation: OwnedNeighborMutation,
 ) -> OwnedNeighborDispatch {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -283,7 +287,9 @@ async fn dispatch_owned_neighbor_mutation(
         mutation,
         reply: reply_tx,
     };
-    match tokio::time::timeout(timeout, peer_mgr_tx.send(command)).await {
+    let send_deadline = tokio::time::Instant::now() + timeout;
+    let send_deadline = pre_effect_deadline.map_or(send_deadline, |cap| cap.min(send_deadline));
+    match tokio::time::timeout_at(send_deadline, peer_mgr_tx.send(command)).await {
         Err(_) => OwnedNeighborDispatch::NotAccepted(Status::unavailable(
             "peer manager mutation queue timed out before accepting command",
         )),
@@ -345,7 +351,9 @@ where
         None
     };
 
-    let outcome = dispatch_owned_neighbor_mutation(peer_mgr_tx, actor_timeout, mutation).await;
+    let outcome =
+        dispatch_owned_neighbor_mutation(peer_mgr_tx, actor_timeout, pre_effect_deadline, mutation)
+            .await;
     match outcome {
         OwnedNeighborDispatch::NotAccepted(error) => {
             drop(staged);
@@ -4906,5 +4914,60 @@ mod tests {
         let err = svc.delete_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn owned_neighbor_blocked_actor_send_ends_clean_at_the_pre_effect_deadline() {
+        use crate::test_support::{
+            assert_only_filler_delivered, full_peer_manager_queue, settle_exactly_at,
+            spawn_owned_body,
+        };
+        let (peer_tx, mut peer_rx) = full_peer_manager_queue();
+        let (config_tx, mut config_rx) = mpsc::channel(1);
+        let permit = config_tx.reserve_owned().await.unwrap();
+        let (join, operation, _watchdog, terminal) = spawn_owned_body(
+            RuntimeConfigOperationKind::DynamicNeighborDelete,
+            move |operation| {
+                owned_neighbor_mutation_body(
+                    Some(operation),
+                    None,
+                    None,
+                    "test dynamic neighbor delete",
+                    peer_tx,
+                    OWNED_NEIGHBOR_ACTOR_TIMEOUT,
+                    OwnedNeighborMutation::DynamicDelete {
+                        prefix: "10.0.0.0/24".to_string(),
+                    },
+                    Some(permit),
+                    |ack| ConfigEvent::DynamicNeighborDeleted {
+                        prefix: "10.0.0.0/24".to_string(),
+                        ack: Some(ack),
+                    },
+                )
+            },
+        )
+        .await;
+        // Handshake: the stage is acknowledged, so the owner's remaining
+        // pre-effect wait is the send into the full peer-manager queue.
+        let Some(ConfigEvent::DynamicNeighborDeleted {
+            ack: Some(crate::peer_types::ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("expected a staged dynamic-neighbor delete")
+        };
+        staged.send(Ok(())).unwrap();
+
+        let error = settle_exactly_at(join, operation.pre_effect_deadline())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "peer manager mutation queue timed out before accepting command"
+        );
+        assert!(commit.await.is_err(), "the stage must be discarded");
+        assert_only_filler_delivered(&mut peer_rx);
+        assert!(terminal.try_recv().is_err(), "a clean owner never fences");
     }
 }

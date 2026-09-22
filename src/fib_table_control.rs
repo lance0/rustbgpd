@@ -542,10 +542,9 @@ async fn owned_fib_mutation_body(
     let pre_effect_deadline = owned
         .as_ref()
         .map(OwnedRuntimeConfigOperation::pre_effect_deadline);
-    let read = read_current_tables(Some(&fib_cmd_tx), FibTableControlError::Internal);
+    let read = read_current_tables(&fib_cmd_tx, FibTableControlError::Internal);
     let previous = match before_pre_effect_deadline(pre_effect_deadline, read).await {
-        Some(Ok(Some(tables))) => tables,
-        Some(Ok(None)) => Vec::new(),
+        Some(Ok(tables)) => tables,
         Some(Err(error)) => return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error.into())),
         None => {
             return OwnedRuntimeConfigOutcome::CleanNoEffect(Err(
@@ -702,15 +701,12 @@ async fn compensate_fib_not_published(
 }
 
 /// Read the reconciler's current table set for a mutation's read-modify-write.
-/// `Ok(None)` means no reconciler is running. `List` never calls this: it
-/// serves the committed snapshot without using the command queue.
+/// `List` never calls this: it serves the committed snapshot without using
+/// the command queue.
 pub(crate) async fn read_current_tables(
-    fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    tx: &mpsc::Sender<FibRuntimeCommand>,
     actor_error: fn(String) -> FibTableControlError,
-) -> Result<Option<Vec<FibTableConfig>>, FibTableControlError> {
-    let Some(tx) = fib_cmd_tx else {
-        return Ok(None);
-    };
+) -> Result<Vec<FibTableConfig>, FibTableControlError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     // A mutation caller holds the runtime-config coordinator across this read,
     // so a stalled reconciler must not park it forever. One deadline spans the
@@ -725,7 +721,6 @@ pub(crate) async fn read_current_tables(
     })
     .await
     .map_err(|_| actor_error("FIB reconciler did not answer GetTables in time".to_string()))?
-    .map(Some)
 }
 
 fn apply_mutation(

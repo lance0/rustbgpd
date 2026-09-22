@@ -508,3 +508,96 @@ pub(crate) fn blackhole_status(state: proto::BlackholeDiscardState) -> proto::Bl
         reason: "test".to_string(),
     }
 }
+
+pub(crate) type OwnedJoin = tokio::task::JoinHandle<Result<(), tonic::Status>>;
+
+/// Run an owned mutation body through the shared executor under a crate-test
+/// settlement watchdog. Hands back the owner, so a test can read its
+/// pre-effect deadline, plus the watchdog guard and its terminal receiver.
+pub(crate) async fn spawn_owned_body<F, Fut>(
+    kind: crate::runtime_config_settlement::RuntimeConfigOperationKind,
+    body: F,
+) -> (
+    OwnedJoin,
+    crate::runtime_config_settlement::OwnedRuntimeConfigOperation,
+    crate::runtime_config_settlement::TestWatchdog,
+    std::sync::mpsc::Receiver<i32>,
+)
+where
+    F: FnOnce(crate::runtime_config_settlement::OwnedRuntimeConfigOperation) -> Fut
+        + Send
+        + 'static,
+    Fut: std::future::Future<
+            Output = crate::runtime_config_settlement::OwnedRuntimeConfigOutcome<(), tonic::Status>,
+        > + Send
+        + 'static,
+{
+    let (watchdog, terminal) =
+        crate::runtime_config_settlement::RuntimeConfigSettlementWatchdog::for_crate_test(
+            std::time::Duration::from_secs(60),
+        );
+    let owner = (*watchdog).clone();
+    let (operation_tx, operation_rx) = tokio::sync::oneshot::channel();
+    let join = tokio::spawn(async move {
+        let (context, _attachment) =
+            crate::runtime_config_settlement::OwnedRuntimeConfigRequestContext::unary();
+        owner
+            .execute_owned(
+                kind,
+                crate::server::RuntimeConfigCoordinator::new(),
+                crate::health_probe::DaemonGate::new(),
+                context.response_attached(),
+                move |operation| {
+                    let _ = operation_tx.send(operation.clone());
+                    body(operation)
+                },
+            )
+            .await
+    });
+    let operation = operation_rx.await.expect("owner registered");
+    (join, operation, watchdog, terminal)
+}
+
+/// Await the owner at exactly `deadline`: unfinished 1 ms earlier, and
+/// finished at `deadline` without any further time passing. The outer
+/// timeout is only a hang guard for a regression.
+pub(crate) async fn settle_exactly_at(
+    join: OwnedJoin,
+    deadline: tokio::time::Instant,
+) -> Result<(), tonic::Status> {
+    tokio::time::sleep_until(deadline - std::time::Duration::from_millis(1)).await;
+    assert!(!join.is_finished(), "owner ended before its deadline");
+    tokio::time::sleep_until(deadline).await;
+    let at_deadline = tokio::time::Instant::now();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), join)
+        .await
+        .expect("a blocked pre-effect send must end at the pre-effect deadline")
+        .expect("owner task completes");
+    assert_eq!(tokio::time::Instant::now(), at_deadline);
+    result
+}
+
+/// A peer-manager queue already holding one filler command, so a further
+/// send can only block.
+pub(crate) fn full_peer_manager_queue() -> (
+    mpsc::Sender<PeerManagerCommand>,
+    mpsc::Receiver<PeerManagerCommand>,
+) {
+    let (tx, rx) = mpsc::channel(1);
+    let (reply, _) = tokio::sync::oneshot::channel();
+    tx.try_send(PeerManagerCommand::GetPeerGroup {
+        name: "filler".to_string(),
+        reply,
+    })
+    .unwrap();
+    (tx, rx)
+}
+
+/// Only the filler ever reached the peer manager.
+pub(crate) fn assert_only_filler_delivered(rx: &mut mpsc::Receiver<PeerManagerCommand>) {
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(PeerManagerCommand::GetPeerGroup { name, .. }) if name == "filler"
+    ));
+    assert!(rx.try_recv().is_err(), "the owned command was delivered");
+}
