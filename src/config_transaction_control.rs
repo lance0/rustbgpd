@@ -2573,12 +2573,24 @@ async fn apply_config_transaction_locked_with_preloaded(
     )
     .await?;
     if family == ApplyFamily::LivePolicyImpact {
+        // The candidate is already durable and live here: a re-plan failure
+        // must not read as a clean no-effect error, which would drop a
+        // confirmed apply's revert authority (ADR-0127: finalization of a
+        // durably published candidate failed).
         let authoritative = plan_loaded_candidate(
             peer_mgr_internal_tx,
             authoritative_candidate.expect("live policy candidate retained"),
             String::new(),
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            ApplyFailure::fenced(
+                ConfigTransactionApplyError::Internal(format!(
+                    "persisted configuration was committed but its post-commit runtime snapshot could not be planned: {error}"
+                )),
+                RuntimeConfigFenceReason::KnownDivergence,
+            )
+        })?;
         response.runtime_snapshot_token = authoritative.plan.runtime_snapshot_token;
     }
     Ok(response)
