@@ -1818,7 +1818,7 @@ impl BgpMetrics {
         let as_path_loop_detected = IntCounterVec::new(
             Opts::new(
                 "bgp_as_path_loop_detected_total",
-                "Total prefixes rejected due to AS_PATH loop detection",
+                "Total announced NLRI of any address family rejected due to AS_PATH loop detection",
             ),
             &["peer"],
         )

@@ -1002,3 +1002,92 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         _ => panic!("expected PeerGracefulRestart after route withdrawal"),
     }
 }
+
+/// `bgp_as_path_loop_detected_total` value summed across this session's
+/// series; 0 when the series does not exist.
+fn as_path_loop_detected_count(session: &PeerSession) -> u64 {
+    session
+        .metrics
+        .registry()
+        .gather()
+        .iter()
+        .filter(|f| f.name() == "bgp_as_path_loop_detected_total")
+        .flat_map(prometheus::proto::MetricFamily::get_metric)
+        .map(|m| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+            )]
+            let v = m.get_counter().value() as u64;
+            v
+        })
+        .sum()
+}
+
+/// Process an `AS_PATH`-loop UPDATE whose only announcements are `reach`
+/// and return how far `bgp_as_path_loop_detected_total` advanced.
+async fn as_path_loop_count_for(reach: rustbgpd_wire::MpReachNlri) -> u64 {
+    let (mut session, _rib_rx) =
+        nonunicast_safety_session((reach.afi, reach.safi), false, NonUnicastSafetyLoop::AsPath);
+    let attrs = nonunicast_safety_attrs(&session, NonUnicastSafetyLoop::AsPath);
+    session
+        .process_update(nonunicast_update(attrs, reach, None, false))
+        .await;
+    as_path_loop_detected_count(&session)
+}
+
+/// An `AS_PATH`-loop UPDATE discards every announced NLRI, so the loop
+/// counter advances by the announced `FlowSpec` rule count.
+#[tokio::test]
+async fn as_path_loop_counter_counts_flowspec_announcements() {
+    let rule = |protocol: u8| FlowSpecRule {
+        components: vec![FlowSpecComponent::IpProtocol(vec![NumericMatch {
+            end_of_list: true,
+            and_bit: false,
+            lt: false,
+            gt: false,
+            eq: true,
+            value: u64::from(protocol),
+        }])],
+    };
+    let mut reach =
+        empty_nonunicast_reach(Afi::Ipv4, Safi::FlowSpec, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    reach.flowspec_announced = vec![rule(6), rule(17), rule(47)];
+    assert_eq!(
+        as_path_loop_count_for(reach).await,
+        3,
+        "every loop-discarded FlowSpec rule must be counted"
+    );
+}
+
+/// An `AS_PATH`-loop UPDATE discards every announced NLRI, so the loop
+/// counter advances by the announced EVPN route count.
+#[tokio::test]
+async fn as_path_loop_counter_counts_evpn_announcements() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+    };
+    let route = |last: u8| {
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0x02, 0x00, 0x00, 0xAA, 0xBB, last]),
+            ip: None,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        })
+    };
+    let mut reach = empty_nonunicast_reach(
+        Afi::L2Vpn,
+        Safi::Evpn,
+        IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+    );
+    reach.evpn_announced = vec![route(1), route(2)];
+    assert_eq!(
+        as_path_loop_count_for(reach).await,
+        2,
+        "every loop-discarded EVPN route must be counted"
+    );
+}
