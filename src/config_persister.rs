@@ -995,11 +995,16 @@ log_format = "json"
         );
     }
 
-    /// A stage still outstanding when every sender is gone is discarded
-    /// before `run` returns, so its secret-bearing temp file never outlives
-    /// the persister.
-    #[tokio::test]
+    /// A stage still outstanding when every sender is gone is discarded on
+    /// the blocking pool before `run` returns, so its secret-bearing temp
+    /// file never outlives the persister.
+    ///
+    /// Red proof: without the exit discard, the persister's final drop on
+    /// this current-thread runtime removes the temp file on the test thread
+    /// and the thread-local removal count becomes 1.
+    #[tokio::test(flavor = "current_thread")]
     async fn closing_the_channel_discards_an_outstanding_stage() {
+        use crate::confirm_journal::STAGED_DROP_REMOVALS;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let config = minimal_config();
@@ -1025,11 +1030,17 @@ log_format = "json"
             "stage wrote its temp file"
         );
 
+        STAGED_DROP_REMOVALS.with(|count| count.set(0));
         drop(tx);
         handle.await.unwrap();
         assert!(
             !std::path::Path::new(&temp).exists(),
             "an uncommitted stage must not outlive the persister"
+        );
+        assert_eq!(
+            STAGED_DROP_REMOVALS.with(std::cell::Cell::get),
+            0,
+            "the exit discard must remove the stage off the runtime thread"
         );
         assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
     }
