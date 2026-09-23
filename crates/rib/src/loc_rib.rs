@@ -12,7 +12,7 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // Aliased to the std name so the storage types read unchanged.
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
-use crate::best_path::{best_path_cmp, compare_bgp_identifier};
+use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
@@ -125,10 +125,13 @@ impl LocRib {
         prefix: Prefix,
         candidates: impl Iterator<Item = &'a Route>,
     ) -> bool {
+        // Rank each candidate once, so the LLGR_STALE community scan runs
+        // N times rather than twice per comparison.
         let best = candidates
             .filter(|route| crate::srv6::unicast_eligible(route))
-            .min_by(|a, b| best_path_cmp(a, b))
-            .cloned();
+            .map(|route| (route, stale_rank(route)))
+            .min_by(|&(a, rank_a), &(b, rank_b)| best_path_cmp_ranked(a, rank_a, b, rank_b))
+            .map(|(route, _)| route.clone());
 
         if let Some(new_best) = best {
             // Detect preference-relevant changes AND same-peer payload

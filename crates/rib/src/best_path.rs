@@ -64,7 +64,7 @@ pub(crate) fn stale_tier_reason(loser_tier: u8, loser_is_llgr_stale: bool) -> Be
     }
 }
 
-fn stale_rank(route: &Route) -> u8 {
+pub(crate) fn stale_rank(route: &Route) -> u8 {
     stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
@@ -542,7 +542,14 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 ///    preference semantics).
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
-    cmp_chain(a, b, None)
+    cmp_chain(a, stale_rank(a), b, stale_rank(b), None)
+}
+
+/// [`best_path_cmp`] with each route's [`stale_rank`] computed by the
+/// caller. A selection over N candidates can then read each attribute list
+/// for the `LLGR_STALE` community once, not on every comparison.
+pub(crate) fn best_path_cmp_ranked(a: &Route, rank_a: u8, b: &Route, rank_b: u8) -> Ordering {
+    cmp_chain(a, rank_a, b, rank_b, None)
 }
 
 /// Compare two routes under RFC 9107 Optimal Route Reflection.
@@ -560,16 +567,22 @@ pub fn best_path_cmp_orr(
     cost_a: Option<u64>,
     cost_b: Option<u64>,
 ) -> Ordering {
-    cmp_chain(a, b, Some((cost_a, cost_b)))
+    cmp_chain(a, stale_rank(a), b, stale_rank(b), Some((cost_a, cost_b)))
 }
 
 /// The shared decision chain behind [`best_path_cmp`] (`orr_costs =
 /// None`) and [`best_path_cmp_orr`] (`orr_costs = Some(..)`).
-fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>) -> Ordering {
+fn cmp_chain(
+    a: &Route,
+    rank_a: u8,
+    b: &Route,
+    rank_b: u8,
+    orr_costs: Option<(Option<u64>, Option<u64>)>,
+) -> Ordering {
     // 0. Three-tier stale demotion: fresh > GR-stale > LLGR-stale, where
     //    LLGR-stale includes a received LLGR_STALE community (RFC 4724 +
     //    RFC 9494 §4.3/§4.4)
-    let cmp = stale_rank(a).cmp(&stale_rank(b));
+    let cmp = rank_a.cmp(&rank_b);
     if cmp != Ordering::Equal {
         return cmp;
     }
