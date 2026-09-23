@@ -22,6 +22,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
+use crate::accept_backoff::AcceptBackoff;
 use crate::actor_read::KnownPeerQueries;
 use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only};
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
@@ -2020,7 +2021,11 @@ async fn run_tcp_listener(
     let builder = Server::builder();
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
     let handshake_metrics = metrics.clone();
-    let incoming = FuturesStreamExt::map(TcpListenerStream::new(tcp_listener), move |accepted| {
+    let accepted = AcceptBackoff::new(
+        TcpListenerStream::new(tcp_listener),
+        format!("gRPC TCP {bound_addr}"),
+    );
+    let incoming = FuturesStreamExt::map(accepted, move |accepted| {
         let generation = credential_store.load();
         let metrics = handshake_metrics.clone();
         async move {
@@ -2454,7 +2459,10 @@ async fn run_uds_listener(
         .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
         .add_routes(routes.routes())
         .serve_with_incoming_shutdown(
-            UnixListenerStream::new(uds_listener),
+            AcceptBackoff::new(
+                UnixListenerStream::new(uds_listener),
+                format!("gRPC UDS {}", path.display()),
+            ),
             await_shutdown(shutdown_rx),
         )
         .await

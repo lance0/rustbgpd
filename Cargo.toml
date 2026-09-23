@@ -184,6 +184,7 @@ owo-colors.workspace = true
 axum.workspace = true
 socket2.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
+tokio-stream.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.23"

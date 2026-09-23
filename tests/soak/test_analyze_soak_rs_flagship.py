@@ -298,7 +298,7 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
             "fake_banner_line": daemon_record() + b"  |- ERROR hidden failure\n",
             "banner_incomplete": DAEMON_BANNER.rstrip(b"\n") + b"\n",
             "repeated_banner": DAEMON_BANNER + daemon_record() + DAEMON_BANNER,
-            "emfile": daemon_record("ERROR", "metrics server accept error",
+            "emfile": daemon_record("ERROR", "listener accept failing; backing off",
                                     error="Too many open files (os error 24)"),
             # The RS fixture includes deliberate trips. Those cannot exempt errors.
             "trip_decode_error": daemon_record("ERROR", "decode error",
