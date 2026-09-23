@@ -64,6 +64,19 @@ grpc_ll_bfd_state() {
         | jq -r '.sessions[0].state // ""'
 }
 
+grpc_ll_bfd_not_found() {
+    # True only when the daemon answers NOT_FOUND naming $LL_PEER, which is
+    # what a per-peer view returns once the neighbor is no longer configured.
+    # Success, a transport error, or any other status is not "removed".
+    local err
+    if err=$(grpcurl_call \
+        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>&1 >/dev/null); then
+        return 1
+    fi
+    grep -q "Code: NotFound" <<<"$err" && grep -qF "neighbor $LL_PEER not found" <<<"$err"
+}
+
 grpc_bfd_json() {
     grpcurl_call \
         -d "{\"peer_address\": \"$PEER\"}" \
@@ -267,6 +280,20 @@ wait_grpc_ll_bfd() {
         sleep 1
     done
     fail "rustbgpd link-local BFD session did not reach $label"
+    dump_state_on_failure
+    return 1
+}
+
+wait_grpc_ll_bfd_not_found() {
+    local label=$1 attempts=${2:-30}
+    for _ in $(seq 1 "$attempts"); do
+        if grpc_ll_bfd_not_found; then
+            ok "rustbgpd link-local BFD view $label"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "rustbgpd link-local BFD view did not report NOT_FOUND $label"
     dump_state_on_failure
     return 1
 }
@@ -494,7 +521,8 @@ check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
 check_member_continuity "$ll_before" "$LL_PEER" "$FRR_LL_BFD_PEER" "$LL_INTERFACE"
 
 reload_member_bfd remove
-wait_grpc_ll_bfd "" "absent after neighbor removal"
+# A removed neighbor is not a known peer: its per-peer view is NOT_FOUND.
+wait_grpc_ll_bfd_not_found "after neighbor removal"
 check_member_continuity "$numbered_before" "$PEER" "$FRR_BFD_PEER"
 reload_member_bfd inherit
 wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up on added member inheriting BFD"
