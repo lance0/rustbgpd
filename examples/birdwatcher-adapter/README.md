@@ -147,7 +147,9 @@ identities. Duplicate names or peers and malformed mappings fail before the
 HTTP listener starts. Aliases apply consistently to inventory,
 protocol detail, received/exported/filtered/noexport lookups, and route
 `from_protocol`; unmapped peers retain `bgp_<address>` and table `master`, and
-bare peer-IP lookup remains accepted.
+bare peer-IP lookup remains accepted. A received, exported, or noexport lookup
+for an address the daemon does not know as a peer returns 404; a known peer
+with no routes still returns 200 with an empty route array.
 
 For live member changes on Unix, put one mapping per line in
 `--protocol-alias-file`; blank lines and `#` comments are ignored. The file is

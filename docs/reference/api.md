@@ -1514,6 +1514,35 @@ The three unicast route-listing RPCs return raw ordered
 retains the zero receive-time sentinel. The same native route serializer is
 used by best, received, advertised, and embedded `ExplainBestPath` routes.
 
+### Unknown peers in peer-scoped views
+
+A peer-scoped view that finds no rows returns `NOT_FOUND` with the message
+`neighbor <address> not found` when the address names no known peer. This
+covers `ListReceivedRoutes` with `neighbor_address` set, `ListAdvertisedRoutes`,
+received-mode `ListFlowSpecRoutes`, `ListReceivedEvpnRoutes`,
+`ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute` with `received_from` or
+`advertised_to` when that side is absent, and `BfdService.GetBfdSessions`
+with `peer_address` set. A known peer is a configured neighbor, an accepted
+dynamic peer, or an address whose Adj-RIB-In still retains Graceful Restart or
+LLGR stale routes after its session ended; the first two clauses are the same
+managed-peer answer `GetPolicyStats` uses. The synthetic peer `0.0.0.0` that
+owns routes added through `InjectionService` is always known. A known peer that
+is down or has sent nothing still returns `OK` with an empty result. The daemon checks only when a
+view is empty, so a view with rows never pays for it. The whole check is bounded
+by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
+
+At startup the gRPC listeners serve before the configured-peer roster is
+installed, so for that brief window a configured neighbor is not yet known and
+these views, like `GetNeighborState` and `GetPolicyStats`, return `NOT_FOUND`
+for it. `/readyz` and systemd `READY=1` are reported only after the roster is
+installed.
+
+A continuation token does not outlive its peer. Removing a peer mutates the
+route table, so the next continuation returns `ABORTED`. Restarting from an
+empty token returns `NOT_FOUND` only once the address is neither managed nor
+retaining stale routes; while its Adj-RIB-In still retains Graceful Restart or
+LLGR stale routes, the restart returns `OK` with those rows.
+
 ### Prefix-SID inspection on VPN and EVPN routes
 
 `VpnRouteEntry.prefix_sid` (field 14) and `EvpnRouteEntry.prefix_sid`
@@ -1769,7 +1798,9 @@ Every response also carries `total_count`: the exact filtered count for the
 whole selected view, regardless of page size. This is the contract behind
 `rbgp rib --count` and
 `rbgp rib received|advertised <PEER> --count`, which request a single-row
-page and read only `total_count`.
+page and read only `total_count`. For an address that names no known peer the
+count fails with `NOT_FOUND` rather than reporting zero
+([unknown peers](#unknown-peers-in-peer-scoped-views)).
 
 The same contract backs `rbgp rib --limit N`,
 `rbgp rib received PEER --limit N`, and
@@ -1884,7 +1915,9 @@ and infeasible rules. `afi_safi` narrows either view. Invalid peer addresses
 are rejected before the query reaches the RIB.
 
 Received mode returns `received_routes` and sets `received_view: true`, even
-when empty; ordinary mode leaves both unset. Clients must check this
+when empty; ordinary mode leaves both unset. An empty received view for an
+address that names no known peer returns `NOT_FOUND` instead
+([unknown peers](#unknown-peers-in-peer-scoped-views)). Clients must check this
 acknowledgement because older servers ignore the additive request field.
 `rbgp flowspec received PEER [-a ipv4_flowspec|ipv6_flowspec]` performs that
 check and reports an unsupported operation instead of displaying an older
@@ -1932,7 +1965,9 @@ is 1000, and larger requests return `INVALID_ARGUMENT`. Rows are ordered by type
 EVPN route identity and source peer. Use the returned token with the same
 neighbor, direction, and filters to continue. Changed scope or filters, malformed
 or modified tokens return `INVALID_ARGUMENT`; table mutations return `ABORTED`,
-requiring a restart from an empty token. Tokens expire on daemon restart.
+requiring a restart from an empty token. An empty page for an address that names
+no known peer returns `NOT_FOUND`
+([unknown peers](#unknown-peers-in-peer-scoped-views)). Tokens expire on daemon restart.
 Version counters are conservative across peers and families in the same table
 class, so an unrelated mutation can also invalidate a walk. Types 3/4, attribute
 changes, retained-route lifecycle changes, and peer teardown participate.
@@ -3097,7 +3132,7 @@ transactions do not apply BFD attachment changes.
 
 | RPC | Description |
 |-----|-------------|
-| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag, remote-AdminDown cause, `multihop` mode flag), optionally filtered to one `peer_address` |
+| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag, remote-AdminDown cause, `multihop` mode flag), optionally filtered to one `peer_address`; a filter that matches no session and names no known peer returns `NOT_FOUND` ([unknown peers](#unknown-peers-in-peer-scoped-views)) |
 
 ```bash
 # All BFD sessions

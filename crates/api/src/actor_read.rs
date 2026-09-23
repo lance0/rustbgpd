@@ -1,5 +1,6 @@
 //! Shared transport boundary for read-only requests to the state-owning actors.
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use rustbgpd_rib::{RibSummaryQuery, RibUpdate};
@@ -54,6 +55,58 @@ async fn bounded_peer_manager_read<T, C>(
     .map_err(|_| Status::deadline_exceeded("peer manager read timed out"))?
 }
 
+/// Actor lanes that tell an unknown peer address from a known peer with no
+/// rows, for peer-scoped reads.
+#[derive(Clone)]
+pub(crate) struct KnownPeerQueries {
+    pub(crate) peer_manager: mpsc::Sender<PeerManagerCommand>,
+    pub(crate) operator_lane: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
+    pub(crate) rib: mpsc::Sender<RibUpdate>,
+}
+
+impl KnownPeerQueries {
+    /// Fail with `NOT_FOUND` naming `address` unless it names a known peer.
+    ///
+    /// Known means a managed peer — a configured neighbor or an accepted
+    /// dynamic peer, the same `HasPeerAddress` answer `GetPolicyStats` uses —
+    /// or a peer whose Adj-RIB-In still retains GR/LLGR-stale routes after its
+    /// session (and, for a dynamic peer, its managed entry) went away. The
+    /// synthetic peer that owns locally injected routes is always known, even
+    /// with nothing injected. Callers ask only when a peer-scoped result is
+    /// empty, so a result with rows is never delayed. The whole check, both
+    /// reads together, is bounded by one [`PEER_MANAGER_READ_TIMEOUT`]
+    /// deadline taken at entry.
+    pub(crate) async fn require_known(&self, address: IpAddr) -> Result<(), Status> {
+        if address == crate::injection_service::LOCAL_PEER {
+            return Ok(());
+        }
+        let known = tokio::time::timeout(PEER_MANAGER_READ_TIMEOUT, async {
+            let managed = peer_manager_operator_read(
+                &self.peer_manager,
+                self.operator_lane.as_ref(),
+                |reply| PeerManagerOperatorQuery::HasPeerAddress { address, reply },
+            )
+            .await?;
+            if managed {
+                return Ok(true);
+            }
+            let retained = rib_manager_read(&self.rib, |reply| RibUpdate::QueryPeerRetainedStale {
+                peer: address,
+                reply,
+            })
+            .await?;
+            Ok::<_, Status>(retained > 0)
+        })
+        .await
+        .map_err(|_| Status::deadline_exceeded("known-peer check timed out"))??;
+        if known {
+            Ok(())
+        } else {
+            Err(Status::not_found(format!("neighbor {address} not found")))
+        }
+    }
+}
+
 /// Send one read-only request to the RIB manager and await its reply.
 ///
 /// Unlike [`peer_manager_read`], this is deliberately unbounded here: RIB
@@ -95,9 +148,92 @@ async fn rib_read<T, C>(
         .map_err(|_| Status::unavailable("RIB manager dropped reply"))
 }
 
+/// Known-peer lanes backed by mock actors: `managed` is a managed peer and
+/// `retained` holds GR-stale Adj-RIB-In routes; every other address is unknown.
+#[cfg(test)]
+pub(crate) fn mock_known_peer_queries(managed: IpAddr, retained: IpAddr) -> KnownPeerQueries {
+    let (peer_mgr_tx, _) = mpsc::channel(1);
+    let (operator_tx, mut operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    tokio::spawn(async move {
+        while let Some(enqueued) = operator_rx.recv().await {
+            let PeerManagerOperatorQuery::HasPeerAddress { address, reply } = enqueued.query else {
+                panic!("known-peer check sends only HasPeerAddress");
+            };
+            let _ = reply.send(address == managed);
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(update) = rib_rx.recv().await {
+            let RibUpdate::QueryPeerRetainedStale { peer, reply } = update else {
+                panic!("known-peer check sends only QueryPeerRetainedStale");
+            };
+            let _ = reply.send(if peer == retained { 3 } else { 0 });
+        }
+    });
+    KnownPeerQueries {
+        peer_manager: peer_mgr_tx,
+        operator_lane: Some(operator_tx),
+        rib: rib_tx,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Load-bearing: dropping either clause of the known-peer definition
+    /// turns a managed or GR-retained peer into `NOT_FOUND`; dropping the
+    /// check turns the unknown row green.
+    #[tokio::test]
+    async fn known_peer_is_managed_or_retained_and_unknown_is_not_found() {
+        let managed: IpAddr = "192.0.2.1".parse().unwrap();
+        let retained: IpAddr = "192.0.2.2".parse().unwrap();
+        let known = mock_known_peer_queries(managed, retained);
+        known.require_known(managed).await.unwrap();
+        known.require_known(retained).await.unwrap();
+        let error = known
+            .require_known("192.0.2.99".parse().unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), "neighbor 192.0.2.99 not found");
+    }
+
+    /// Load-bearing: the whole existence check shares one
+    /// `PEER_MANAGER_READ_TIMEOUT` deadline. A managed read that spends most
+    /// of the budget followed by a wedged RIB read must fail at that single
+    /// deadline; bounding each read separately answers at the sum instead,
+    /// and an unbounded RIB read leaves the check pending past the guard.
+    #[tokio::test(start_paused = true)]
+    async fn known_peer_check_is_bounded_by_one_deadline() {
+        let managed_delay = PEER_MANAGER_READ_TIMEOUT * 3 / 4;
+        let (peer_mgr_tx, mut peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                if let PeerManagerCommand::HasPeerAddress { reply, .. } = command {
+                    tokio::time::sleep(managed_delay).await;
+                    let _ = reply.send(false);
+                }
+            }
+        });
+        let known = KnownPeerQueries {
+            peer_manager: peer_mgr_tx,
+            operator_lane: None,
+            rib: rib_tx,
+        };
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(30),
+            known.require_known("192.0.2.99".parse().unwrap()),
+        )
+        .await
+        .expect("known-peer check must be bounded")
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(started.elapsed(), PEER_MANAGER_READ_TIMEOUT);
+    }
     use crate::peer_types::PeerManagerCommand;
     use std::time::Duration;
 

@@ -653,7 +653,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Map a gRPC error to 502 Bad Gateway — the adapter is healthy, the
-/// upstream daemon call failed.
+/// upstream daemon call failed. `NOT_FOUND` is the daemon naming the peer
+/// unknown, so it keeps the documented 404 for an unknown identity.
 type HttpError = (StatusCode, Json<Value>);
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> HttpError {
@@ -664,6 +665,9 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> HttpError {
 }
 
 fn bad_gateway(context: &str, status: &tonic::Status) -> HttpError {
+    if status.code() == tonic::Code::NotFound {
+        return json_error(StatusCode::NOT_FOUND, "Protocol not found");
+    }
     error!(context, error = %status, "upstream gRPC call failed");
     json_error(StatusCode::BAD_GATEWAY, "Upstream daemon request failed")
 }
@@ -4854,6 +4858,11 @@ mod tests {
             serde_json::json!({"message":"Upstream daemon request failed"})
         );
         assert!(!body.to_string().contains("secret"));
+
+        let status = tonic::Status::not_found("neighbor 192.0.2.99 not found");
+        let (http_status, Json(body)) = bad_gateway("ListReceivedRoutes", &status);
+        assert_eq!(http_status, StatusCode::NOT_FOUND);
+        assert_eq!(body, serde_json::json!({"message":"Protocol not found"}));
     }
 
     #[test]

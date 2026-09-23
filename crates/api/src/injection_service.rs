@@ -33,7 +33,7 @@ impl InjectionService {
 }
 
 /// Sentinel peer address for locally-injected routes.
-const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+pub(crate) const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// Parse a prefix address + length + next-hop from a gRPC request.
 fn parse_prefix_and_nexthop(
