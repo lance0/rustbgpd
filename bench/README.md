@@ -314,10 +314,11 @@ exact-export form are in `bench/scale/rrharness/README.md`).
 
 `compare-rib-memory.sh` runs the ignored high-N RIB structural memory profile
 at two git refs and writes a Markdown summary, CSV, logs, and metadata under
-`target/rib-memory-compare/`. It measures allocator-tracked live heap for six
-RIB shapes: one-peer Adj-RIB-In (`adj_rib_in`), two-peer Adj-RIB-In + Loc-RIB
-(`full_rib`), the same two-peer shape with a distinct attribute set per prefix
-so attribute interning cannot dedupe (`full_rib_diverse`), a calibrated
+`target/rib-memory-compare/`. It measures allocator-tracked live heap for seven
+RIB shapes: one-peer Adj-RIB-In (`adj_rib_in`), a one-candidate Loc-RIB with no
+Adj-RIB copies (`loc_rib_only`), two-peer Adj-RIB-In + Loc-RIB (`full_rib`),
+the same two-peer shape with a distinct attribute set per prefix so attribute
+interning cannot dedupe (`full_rib_diverse`), a calibrated
 one-set-per-seven-prefixes arm (`full_rib_representative`), and route-server /
 route-reflector fanout with degenerate (`rr_fanout`) and calibrated
 (`rr_fanout_representative`) attribute diversity. The seven-prefix grouping is

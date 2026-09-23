@@ -1153,15 +1153,17 @@ These are per-unique-attribute-set costs. With interning, routes sharing the
 same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
 pointer.
 
-The `memory_profile` harness emits **six** shape rows per size —
-`adj_rib_in`, `full_rib`, `full_rib_diverse`, `full_rib_representative`,
-`rr_fanout`, and `rr_fanout_representative`. Three are tabled below:
-`adj_rib_in`, `full_rib`, and `rr_fanout`. `full_rib_diverse` is the
-`full_rib` shape with a distinct attribute set per prefix rather than one per
-peer, so it prices the interning claim above by removing the sharing. The two
+The `memory_profile` harness emits **seven** shape rows per size —
+`adj_rib_in`, `loc_rib_only`, `full_rib`, `full_rib_diverse`,
+`full_rib_representative`, `rr_fanout`, and `rr_fanout_representative`. Three
+are tabled below: `adj_rib_in`, `full_rib`, and `rr_fanout`. `loc_rib_only`
+isolates the Loc-RIB table, which `full_rib` reports only combined with its two
+Adj-RIB-In copies. `full_rib_diverse` is the `full_rib` shape with a distinct
+attribute set per prefix rather than one per peer, so it prices the interning
+claim above by removing the sharing. The two
 `_representative` shapes share one attribute set across seven consecutive
 prefixes instead, so they price partial sharing. No published table is carried
-for those three here, and a run of `bench/compare-rib-memory.sh` will show
+for those four here, and a run of `bench/compare-rib-memory.sh` will show
 those rows uninterpreted.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
