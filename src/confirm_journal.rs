@@ -223,6 +223,11 @@ impl StagedWrite {
     }
 }
 
+// Test-only count of temp-file removals `StagedWrite`'s drop performed on
+// this thread, so a test can tell which thread cleaned up a stage.
+#[cfg(test)]
+thread_local! { pub(crate) static STAGED_DROP_REMOVALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 /// Best-effort removal of the temp file on every path that does not publish
 /// it — an explicit [`StagedWrite::discard`], a failed [`StagedWrite::commit`]
 /// (including an `fsync_dir` failure after the rename, where removing the
@@ -233,6 +238,8 @@ impl StagedWrite {
 impl Drop for StagedWrite {
     fn drop(&mut self) {
         if !self.tmp.as_os_str().is_empty() && self.verify_owned_temp().is_ok() {
+            #[cfg(test)]
+            STAGED_DROP_REMOVALS.with(|count| count.set(count.get() + 1));
             let _ = fs::remove_file(&self.tmp);
         }
     }

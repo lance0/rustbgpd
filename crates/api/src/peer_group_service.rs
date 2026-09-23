@@ -25,7 +25,7 @@ use crate::runtime_config_settlement::{
 use crate::server::{
     AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
     catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
-    fully_compensated_status, peer_manager_request, read_only_rejection, reserve_config_event_slot,
+    fully_compensated_status, read_only_rejection, reserve_config_event_slot,
     stage_runtime_config_event_typed, with_catalog_persist_ack,
 };
 
@@ -468,11 +468,11 @@ async fn owned_peer_group_mutation_body(
             allow_passwordless_create,
         } => {
             if preserve_md5_password {
-                // A read with no effect: the pre-effect deadline bounds it
-                // whole, so a slow actor cannot consume the budget before
-                // the stage.
+                // A read with no effect takes the ordinary read bound, and
+                // the pre-effect deadline caps it too, so a stalled actor
+                // releases the coordinator quickly and cleanly.
                 let read =
-                    peer_manager_request(&peer_mgr_tx, |reply| PeerManagerCommand::GetPeerGroup {
+                    peer_manager_read(&peer_mgr_tx, |reply| PeerManagerCommand::GetPeerGroup {
                         name: name.clone(),
                         reply,
                     });
@@ -2044,6 +2044,52 @@ mod tests {
         );
         assert!(commit.await.is_err(), "the stage must be discarded");
         assert_only_filler_delivered(&mut peer_rx);
+        assert!(terminal.try_recv().is_err(), "a clean owner never fences");
+    }
+
+    /// Red proof: routing the owned pre-read back through the mutation
+    /// request bound leaves the owner waiting until the pre-effect deadline
+    /// instead of ending at the read bound.
+    #[tokio::test(start_paused = true)]
+    async fn owned_peer_group_pre_read_ends_clean_at_the_read_bound() {
+        use crate::test_support::{settle_exactly_at, spawn_owned_body};
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (join, operation, _watchdog, terminal) =
+            spawn_owned_body(RuntimeConfigOperationKind::PeerGroupSet, move |operation| {
+                owned_peer_group_mutation_body(
+                    Some(operation),
+                    None,
+                    None,
+                    "test peer-group set",
+                    peer_tx,
+                    OWNED_PEER_GROUP_ACTOR_TIMEOUT,
+                    PeerGroupMutationIntent::Set {
+                        name: "rr-clients".to_string(),
+                        definition: Box::new(
+                            proto_definition_to_input(sample_definition()).unwrap(),
+                        ),
+                        preserve_md5_password: true,
+                        allow_passwordless_create: true,
+                    },
+                    None,
+                )
+            })
+            .await;
+        // Handshake: the actor accepted the pre-read and holds its reply.
+        let Some(PeerManagerCommand::GetPeerGroup { reply: _held, .. }) = peer_rx.recv().await
+        else {
+            panic!("expected the owned peer-group pre-read")
+        };
+        let deadline = tokio::time::Instant::now() + crate::actor_read::PEER_MANAGER_READ_TIMEOUT;
+        assert!(deadline < operation.pre_effect_deadline());
+
+        let error = settle_exactly_at(join, deadline).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(error.message(), "peer manager read timed out");
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "no mutation after a failed read"
+        );
         assert!(terminal.try_recv().is_err(), "a clean owner never fences");
     }
 }
