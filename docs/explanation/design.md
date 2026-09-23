@@ -58,7 +58,7 @@ For crate dependency graph, runtime model, ownership model, data flow, lifecycle
 
 **Path attribute representation:** The wire crate uses a typed + raw hybrid model. Known attributes (ORIGIN, AS_PATH, NEXT_HOP, etc.) are decoded into typed Rust enums. Unknown attributes are preserved as `RawAttribute { flags, type_code, data: Bytes }` alongside typed ones. This is a hard architectural requirement — the daemon must re-emit unknown optional transitive attributes byte-for-byte with the Partial bit set correctly. Dropping unknown transitive attributes is a protocol correctness bug.
 
-**RIB query model:** Paginated gRPC queries run as bounded reads inside the RIB actor; an unfiltered page clones only the requested rows plus one lookahead. No server-side snapshot is retained: page tokens bind a generation, and a mutation in the same scope between pages fails the next request with `ABORTED` (see [RIB Query Model](#rib-query-model) below).
+**RIB query model:** Paginated gRPC queries run as bounded reads inside the RIB actor; an unfiltered page clones only the requested rows plus one lookahead. No server-side snapshot is retained: a page token binds one of two daemon-wide versions, one shared by every received and best listing and one shared by every advertised listing. Route ingest from any peer advances both, as do peer up/down and RPKI or ASPA table updates; export-policy changes advance the advertised version. Any such change between pages, including one for another peer or another listing, fails the next request with `ABORTED` (see [RIB Query Model](#rib-query-model) below).
 
 Linux dataplane reconcilers use a separate internal live-walk contract: an
 opt-in ordered prefix index serves bounded best-route and ECMP pages, exact
