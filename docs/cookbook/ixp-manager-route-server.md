@@ -31,7 +31,9 @@ and the pinned IXP Manager / Bird's Eye contract oracle
 which runs the real IXP Manager v7.4.0 router-config generator, PHP
 looking-glass consumer, and MySQL fixture against the real renderer,
 checker, daemon, and adapter. Every "expected output" block below is a
-real invocation of the release binaries on the checked-in v7.4 capture.
+real run, on the checked-in v7.4 capture, of release-profile binaries built
+from the source tree (they report version 0.71.0); hashes and version strings
+change with the build.
 
 The pipeline:
 
@@ -126,15 +128,21 @@ $ rs-config-render --input-format ixp-manager-v2 --context router.json \
     --out-dir candidate --router-handle b2-rs1-lan1-ipv4 \
     --runtime-state-dir /var/lib/rustbgpd/b2-rs1-lan1-ipv4 \
     --max-prefix-restart-seconds 300 --check-with /usr/bin/rustbgpd
-validated 5 candidate file(s) + receipt into candidate
+validated 9 candidate file(s) + receipt into candidate
 $ echo $?
 0
-$ ls -la candidate candidate/policy
+$ ls -la candidate candidate/datasets candidate/policy
 candidate:
 -rw-------  birdwatcher-protocol-aliases.conf
 -rw-------  config.toml
+drwx------  datasets
 drwx------  policy
 -rw-------  render-receipt.json
+candidate/datasets:
+-rw-------  client-1-origins.list
+-rw-------  client-1-prefixes.list
+-rw-------  client-4-origins.list
+-rw-------  client-4-prefixes.list
 candidate/policy:
 -rw-------  client-1.rpol
 -rw-------  client-4.rpol
@@ -152,19 +160,23 @@ must not be activated:
   "counts": { "clients": 2, "origins": 2, "prefixes": 2 },
   "generated_files": {
     "birdwatcher-protocol-aliases.conf": "08250f41…",
-    "config.toml": "5d7d0eb0…",
-    "policy/client-1.rpol": "3cf619c8…",
-    "policy/client-4.rpol": "1666481b…",
+    "config.toml": "b74665b0…",
+    "datasets/client-1-origins.list": "2c504ace…",
+    "datasets/client-1-prefixes.list": "2216ef2c…",
+    "datasets/client-4-origins.list": "f7dbab47…",
+    "datasets/client-4-prefixes.list": "26a65a96…",
+    "policy/client-1.rpol": "1ae08bbf…",
+    "policy/client-4.rpol": "0001d311…",
     "policy/ixp-hygiene.rpol": "23a80e76…"
   },
   "host": { "router_handle": "b2-rs1-lan1-ipv4",
             "runtime_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4" },
   "input": { "ixp_manager_version": "7.4.0", "router_handle": "b2-rs1-lan1-ipv4",
-             "schema": "rustbgpd.ixp-manager.router-config/v2", "sha256": "072f1678…" },
+             "schema": "rustbgpd.ixp-manager.router-config/v2", "sha256": "76f72c25…" },
   "irrdb_disabled_clients": [],
   "refusals": { "active_ui_filters": 0, "multi_address_clients": 0,
                 "route_server_skin_files": 0, "status": "passed" },
-  "strict_check": { "binary_version": "rustbgpd 0.65.0", "passed": true },
+  "strict_check": { "binary_version": "rustbgpd 0.71.0", "passed": true },
   "warnings": []
 }
 ```
@@ -206,6 +218,18 @@ rpol_files = [
     "policy/client-4.rpol",
 ]
 export_chain = ["ixp-transparent-export", "ixp-manager-own-as-export-scrub"]
+
+[policy.datasets.client-1-origins]
+path = "datasets/client-1-origins.list"
+
+[policy.datasets.client-1-prefixes]
+path = "datasets/client-1-prefixes.list"
+
+[policy.datasets.client-4-origins]
+path = "datasets/client-4-origins.list"
+
+[policy.datasets.client-4-prefixes]
+path = "datasets/client-4-prefixes.list"
 
 [[neighbors]]
 address = "10.1.0.10"
@@ -271,9 +295,15 @@ legacy implicit no-transit token, quarantine or non-route-server routers,
 clients with IRR enabled but an empty or invalid IRR answer, missing or
 zero-port RPKI caches, wrong-family client data, peering addresses that are
 not exactly the member's own interface addresses, interfaces of one member
-that disagree on IRR filtering or more-specifics, unknown schema fields,
-placeholder or overlong MD5, and symlink or public input/output paths. Each
-refusal names its cause on stderr; the member data is the thing to fix.
+that disagree on IRR filtering or more-specifics, placeholder or overlong
+MD5, and a symlinked or non-0600 input file. Each refusal names its cause on
+stderr; the member data is the thing to fix. Three other failures have their
+own codes: an unreadable or unparseable document, or one with an unknown
+schema field, exits 1 (invalid input); a candidate directory that is not
+absent or an empty mode-0700 directory (including a symlink) exits 8; and a
+candidate that `rustbgpd --check --strict` rejects exits 9, leaving its files
+without a receipt. See the
+[renderer's exit codes](../../tools/rs-config-render/README.md#exit-codes).
 
 Members with multiple router connections on the peering LAN render one
 session per VLAN interface. Every interface of the member must carry the
@@ -353,7 +383,7 @@ Neighbor  AS   State  Uptime   Rx Pfx Tx Pfx  Description
 $ ls -la /var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation
 -rw-------  activation-receipt.json
 -rw-------  activation.lock
-lrwxrwxrwx  current -> generations/a43f75ab…
+lrwxrwxrwx  current -> generations/0310599c…
 drwx------  generations
 $ rs-config-render activate … --candidate candidate-1
 activation noop
@@ -365,12 +395,12 @@ proven:
 ```json
 {
   "activation_runs": 1,
-  "candidate_sha256": "a43f75ab…",
-  "host": { "router_handle": "b2-rs1-lan1-ipv4",
-            "runtime_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4",
-            "activation_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation",
+  "candidate_sha256": "0310599c…",
+  "host": { "activation_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation",
             "host_state_dir": "/var/lib/rustbgpd/ixp-manager-host",
-            "rbgp_addr": "unix:///var/lib/rustbgpd/b2-rs1-lan1-ipv4/grpc.sock" },
+            "rbgp_addr": "unix:///var/lib/rustbgpd/b2-rs1-lan1-ipv4/grpc.sock",
+            "router_handle": "b2-rs1-lan1-ipv4",
+            "runtime_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4" },
   "initial": true,
   "phases": {
     "candidate_activation_ran": true,
@@ -384,7 +414,7 @@ proven:
   "previous_generation": null,
   "schema": "rustbgpd.ixp-manager.activation/v1",
   "status": "activated",
-  "strict_check": { "binary_version": "rustbgpd 0.65.0", "passed": true }
+  "strict_check": { "binary_version": "rustbgpd 0.71.0", "passed": true }
 }
 ```
 
@@ -412,7 +442,7 @@ rs-config-render: activation: candidate not applied; prior generation restored
 $ echo $?
 7
 $ readlink /var/lib/rustbgpd/b2-rs1-lan1-ipv4/activation/current
-generations/a43f75ab…                       # unchanged
+generations/0310599c…                       # unchanged
 
 $ rs-config-render activate … --candidate candidate-3 --activation-command /bin/false
 rs-config-render: activation: recovery required; inspect private activation state
@@ -540,7 +570,7 @@ capture (trimmed):
 
 ```console
 $ curl -s http://127.0.0.1:8080/protocols/bgp
-{"api":{"Version":"rustbgpd 0.65.0","version":"rustbgpd 0.65.0",…},
+{"api":{"Version":"rustbgpd 0.71.0",…,"version":"rustbgpd 0.71.0"},
  "protocols":{
   "pb_0001_as1213":{"bgp_state":"Active","description":"HEAnet","neighbor_address":"10.1.0.10",
                     "neighbor_as":1213,"protocol":"pb_0001_as1213","routes":{"exported":0,"filtered":0,"imported":0},
