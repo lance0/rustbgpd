@@ -35,25 +35,6 @@ grpc_list_best_routes() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null
 }
 
-# ---------------------------------------------------------------------------
-# Wait for BGP session to reach Established
-# ---------------------------------------------------------------------------
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session did not reach Established within 90s"
-    return 1
-}
-
 # Wait for routes to appear in the RIB
 wait_routes() {
     local expected=$1
@@ -80,7 +61,7 @@ wait_routes() {
 test_session_with_ipv6_cap() {
     log "Test 1: Session establishes with MP-BGP IPv6 unicast capability"
 
-    wait_established || return 1
+    wait_frr_established "$FRR" 10.0.0.1 || return 1
 
     # Verify FRR sees the IPv6 unicast AFI/SAFI negotiated
     local caps

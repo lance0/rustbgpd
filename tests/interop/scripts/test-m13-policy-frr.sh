@@ -51,24 +51,6 @@ grpc_delete_path() {
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
 }
 
-wait_established() {
-    local peer_addr=$1
-    local frr_container=$2
-    log "Waiting for BGP session to $peer_addr (on $frr_container) to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$frr_container" vtysh -c "show bgp neighbors ${peer_addr} json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session to $peer_addr established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session to $peer_addr did not reach Established within 90s"
-    return 1
-}
-
 wait_routes() {
     local expected=$1
     log "Waiting for $expected routes in RIB..."
@@ -363,8 +345,8 @@ main() {
     start_rustbgpd
 
     # Wait for both sessions
-    wait_established "10.0.0.1" "$FRR_A" || true
-    wait_established "10.0.1.1" "$FRR_B" || true
+    wait_frr_established "$FRR_A" "10.0.0.1" "$FRR_A" || true
+    wait_frr_established "$FRR_B" "10.0.1.1" "$FRR_B" || true
 
     # Wait for routes from FRR-A to arrive
     wait_routes 3 || true

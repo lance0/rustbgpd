@@ -47,24 +47,6 @@ grpc_list_advertised() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListAdvertisedRoutes 2>/dev/null
 }
 
-wait_established() {
-    local peer_addr=$1
-    local frr_container=$2
-    log "Waiting for BGP session to $peer_addr (on $frr_container) to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$frr_container" vtysh -c "show bgp neighbors ${peer_addr} json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session to $peer_addr established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session to $peer_addr did not reach Established within 90s"
-    return 1
-}
-
 wait_routes() {
     local expected=$1
     log "Waiting for $expected routes in RIB..."
@@ -247,9 +229,9 @@ main() {
     resolve_grpc_addr
     start_rustbgpd
 
-    wait_established "10.0.0.1" "$FRR_A" || true
-    wait_established "10.0.1.1" "$FRR_B" || true
-    wait_established "10.0.2.1" "$FRR_CLIENT" || true
+    wait_frr_established "$FRR_A" "10.0.0.1" "$FRR_A" || true
+    wait_frr_established "$FRR_B" "10.0.1.1" "$FRR_B" || true
+    wait_frr_established "$FRR_CLIENT" "10.0.2.1" "$FRR_CLIENT" || true
 
     # Wait for routes from both source peers
     wait_routes 4 || true

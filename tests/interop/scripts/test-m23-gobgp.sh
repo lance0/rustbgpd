@@ -80,6 +80,7 @@ gobgp_del_route() {
 # Wait helpers
 # ---------------------------------------------------------------------------
 
+# Not test-lib's wait_frr_established: the peer here is GoBGP, not FRR.
 wait_established() {
     log "Waiting for BGP session to reach Established..."
     for i in $(seq 1 45); do

@@ -70,24 +70,6 @@ grpc_disable_neighbor() {
         rustbgpd.v1.NeighborService/DisableNeighbor
 }
 
-# Wait for a specific FRR peer to reach Established
-wait_frr_established() {
-    local container=$1 peer_addr=$2 label=$3
-    log "Waiting for $label session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$container" vtysh -c "show bgp neighbors $peer_addr json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "$label session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "$label session did not reach Established within 90s"
-    return 1
-}
-
 # ---------------------------------------------------------------------------
 # Test 1: All 8 static sessions establish
 # ---------------------------------------------------------------------------

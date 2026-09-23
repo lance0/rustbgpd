@@ -11,7 +11,7 @@
 #   - Timestamped log/ok/fail helpers
 #   - resolve_grpc_addr, resolve_ip, grpcurl_call
 #   - start_rustbgpd with gRPC health wait
-#   - wait_established (FRR vtysh polling)
+#   - wait_frr_established (FRR vtysh polling)
 #   - Trap-based cleanup: auto-destroy containerlab on EXIT if CLEANUP=1
 
 set -euo pipefail
