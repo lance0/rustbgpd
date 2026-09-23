@@ -55,7 +55,9 @@ pub(crate) fn stale_tier<'a>(
 /// The reason for a decisive stale-tier step, named from the less
 /// preferred route: [`BestPathReason::LlgrStaleCommunity`] when it is least
 /// preferred only because it carries a received `LLGR_STALE` community,
-/// otherwise [`BestPathReason::StalePreference`].
+/// otherwise [`BestPathReason::StalePreference`]. A loser that is locally
+/// GR-stale and also carries the community reports `LlgrStaleCommunity`:
+/// the community alone moves it from tier 1 to tier 2.
 pub(crate) fn stale_tier_reason(loser_tier: u8, loser_is_llgr_stale: bool) -> BestPathReason {
     if loser_tier == 2 && !loser_is_llgr_stale {
         BestPathReason::LlgrStaleCommunity
@@ -1458,6 +1460,31 @@ mod tests {
         );
     }
 
+    /// A loser that is locally GR-stale AND carries a received
+    /// `LLGR_STALE` is tier 2 only because of the community, so the
+    /// community is the reported cause, not the local GR state.
+    #[test]
+    fn gr_stale_route_with_received_llgr_stale_reports_the_community() {
+        let fresh = ibgp(with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 100));
+        let mut both = received_llgr_stale(ibgp(with_local_pref(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            200,
+        )));
+        both.is_stale = true;
+        assert_eq!(
+            best_path_cmp_with_reason(&fresh, &both),
+            (Ordering::Less, BestPathReason::LlgrStaleCommunity)
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&both, &fresh),
+            (Ordering::Greater, BestPathReason::LlgrStaleCommunity)
+        );
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::LlgrStaleCommunity, &fresh, &both),
+            "stale_tier fresh vs llgr_stale (received LLGR_STALE community)"
+        );
+    }
+
     /// §4.4 boundary: two least-preferred routes fall back to normal
     /// tie-breaking — both received-tagged, and one received-tagged
     /// against one locally LLGR-stale.
@@ -2354,8 +2381,26 @@ mod proptests {
     /// `best_path_cmp_matches_legacy_without_identifier_or_path_id_ties`.
     /// Do not "fix" or refactor
     /// this copy; its value is that it never changes.
+    /// Frozen copy of the stale rank the oracle was written against: local
+    /// GR/LLGR flags only. The live [`stale_rank`] also ranks a received
+    /// `LLGR_STALE` community (RFC 9494 §4.3/§4.4); the oracle must not
+    /// absorb that rule, so the differential proptests exclude such routes.
+    fn legacy_stale_rank(route: &Route) -> u8 {
+        if route.is_llgr_stale {
+            2
+        } else {
+            u8::from(route.is_stale)
+        }
+    }
+
+    /// The legacy oracle's domain excludes a received `LLGR_STALE`; the
+    /// dedicated `received_llgr_stale_*` tests cover that tier.
+    fn carries_llgr_stale(route: &Route) -> bool {
+        route.communities().contains(&COMMUNITY_LLGR_STALE)
+    }
+
     fn legacy_best_path_cmp(a: &Route, b: &Route) -> Ordering {
-        let cmp = stale_rank(a).cmp(&stale_rank(b));
+        let cmp = legacy_stale_rank(a).cmp(&legacy_stale_rank(b));
         if cmp != Ordering::Equal {
             return cmp;
         }
@@ -2456,6 +2501,7 @@ mod proptests {
                 route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
                 route.path_id = 0;
             }
+            prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
             prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
         }
 
@@ -2474,6 +2520,7 @@ mod proptests {
                 route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
                 route.path_id = 0;
             }
+            prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
             prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
         }
 
