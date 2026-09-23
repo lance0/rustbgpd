@@ -4992,9 +4992,12 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
 ///
 /// Returns whether the candidate carries a restart-required posture change to
 /// report. A candidate holding exactly the canonical form of the live tuple
-/// (explicit effective epoch and boolean) is the ADR-0119 legacy-omission
-/// materialization written by any durable runtime mutation, not an operator
-/// posture edit: the running tuple is still retained, but nothing is reported.
+/// (explicit effective epoch and boolean) is what the ADR-0119 canonical
+/// renderer writes on any durable runtime mutation, not an operator posture
+/// edit: epoch 1 with the boolean omitted becomes explicit `false` (the named
+/// legacy-omission materialization), and epoch 2 with the boolean omitted
+/// becomes explicit `true`. The running tuple is still retained, but nothing
+/// is reported.
 pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current: &Config) -> bool {
     let live = current.rfc8212_posture();
     let candidate = new_config.rfc8212_posture();
