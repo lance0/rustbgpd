@@ -904,7 +904,7 @@ start_capture() {
         'tshark -i eth1 -w "$1" port 179 >"$2" 2>&1' \
         sh "$M83_CAPTURE_PATH" "$M83_CAPTURE_LOG"
     M83_CAPTURE_RUNNING=1
-    sleep 2
+    wait_capture_ready "$BIRD" "$M83_CAPTURE_PATH" "$M83_CAPTURE_LOG"
 }
 
 preflight_incumbent_versions() {

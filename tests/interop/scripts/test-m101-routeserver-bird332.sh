@@ -153,7 +153,7 @@ start_capture() {
         'tshark -i eth1 -w "$1" "tcp port 179" >"$2" 2>&1' \
         sh "$CAPTURE_PATH" "$CAPTURE_LOG"
     CAPTURE_RUNNING=1
-    sleep 2
+    wait_capture_ready "$BIRD" "$CAPTURE_PATH" "$CAPTURE_LOG" || return 1
     if ! docker exec "$BIRD" sh -c \
         'cat /proc/[0-9]*/comm 2>/dev/null | grep -x tshark' >/dev/null; then
         echo "ERROR: M101 tshark did not stay running after startup" >&2

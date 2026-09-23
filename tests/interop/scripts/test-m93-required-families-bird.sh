@@ -82,7 +82,7 @@ start_capture() {
     docker exec "$BIRD" sh -c 'rm -f /tmp/m93.pcap /tmp/tshark.log'
     docker exec -d "$BIRD" sh -c \
         'tshark -i eth1 -w /tmp/m93.pcap port 179 >/tmp/tshark.log 2>&1'
-    sleep 2
+    wait_capture_ready "$BIRD" /tmp/m93.pcap /tmp/tshark.log
 }
 
 capture_has_exact_rejection() {

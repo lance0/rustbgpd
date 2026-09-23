@@ -12,6 +12,7 @@
 #   - resolve_grpc_addr, resolve_ip, grpcurl_call
 #   - start_rustbgpd with gRPC health wait
 #   - wait_frr_established (FRR vtysh polling)
+#   - wait_capture_ready / capture_summary (packet capture arming + diagnosis)
 #   - Trap-based cleanup: auto-destroy containerlab on EXIT if CLEANUP=1
 
 set -euo pipefail
@@ -624,6 +625,40 @@ prober_max_gap_ms() {
         | grep -oE 'icmp_seq=[0-9]+' | cut -d= -f2 \
         | awk 'NR>1 && $1>prev+1 { g=$1-prev-1; if (g>max) max=g } { prev=$1 } END { print max+0 }' || true)
     echo $(( ${max_gap:-0} * PROBE_INTERVAL_MS ))
+}
+
+# ---------------------------------------------------------------------------
+# Packet capture readiness and diagnostics
+# ---------------------------------------------------------------------------
+# A capture launched with `docker exec -d` is armed only once it has created
+# its output file: dumpcap (behind tshark) and tcpdump open the interface and
+# install the capture filter before they create it. tshark's "Capturing on"
+# line is not a readiness signal; it is printed before dumpcap starts, and a
+# packet sent right after it is usually missed. Remove PCAP before launching
+# the capture. Neither helper touches the pass/fail ledger.
+
+# wait_capture_ready CONTAINER PCAP LOG [TIMEOUT_SECONDS]
+wait_capture_ready() {
+    local container=${1:?} pcap=${2:?} capture_log=${3:?} timeout=${4:-30} i
+    for ((i = 0; i < timeout * 5; i++)); do
+        if docker exec "$container" test -e "$pcap"; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    echo "ERROR: packet capture in $container did not create $pcap within ${timeout}s" >&2
+    docker exec "$container" cat "$capture_log" >&2 || true
+    return 1
+}
+
+# capture_summary CONTAINER PCAP — packets per source, destination and BGP
+# message type(s), for a failed capture check. Needs tshark in CONTAINER.
+capture_summary() {
+    local container=${1:?} pcap=${2:?}
+    echo "--- $container:$pcap packets by src dst bgp.type ---" >&2
+    docker exec "$container" tshark -r "$pcap" -T fields -E separator=' ' \
+        -e ip.src -e ipv6.src -e ip.dst -e ipv6.dst -e bgp.type \
+        | sort | uniq -c >&2 || true
 }
 
 # ---------------------------------------------------------------------------
