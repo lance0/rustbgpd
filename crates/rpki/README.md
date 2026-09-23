@@ -16,8 +16,12 @@ public item; it bounds the configured RTR client timers, as the RTR client
 entry below describes.
 
 The source tree prepares `0.3.2`, adding `AspaTable::providers` for borrowed,
-sorted merged-provider lookup and `aspa_verify::validation_context` for shared
-eBGP context construction. These additive helpers preserve verifier behavior.
+sorted merged-provider lookup, `aspa_verify::validation_context` for shared
+eBGP context construction, and `VrpManager::with_connectivity_observer` for
+per-cache RTR session up/down notification. These additive helpers preserve
+verifier behavior. `0.3.2` also publishes the first accepted empty VRP and
+ASPA tables, so consumers can tell authoritative empty data from unavailable
+data, and caps a configured `retry_interval` at 7200 seconds.
 
 ## What this crate provides
 
@@ -120,7 +124,7 @@ runs inside the task the application supplies.
 | Specification | Implemented scope |
 |---|---|
 | RFC 1982 | Serial-number ordering for incremental RTR epochs. |
-| RFC 6482 | Validated ROA Payload prefix, maximum-length, and origin-AS semantics. |
+| RFC 9582 (obsoletes RFC 6482) | Validated ROA Payload prefix, maximum-length, and origin-AS semantics. |
 | RFC 6811 | `Valid`, `Invalid`, and `NotFound` origin validation over every covering VRP. |
 | RFC 8210 | RTR version 1 client and PDU codec, including serial/reset synchronization and expiry. |
 | `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are not implemented. |
