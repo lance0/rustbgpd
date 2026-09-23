@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::rib_manager_read;
+use crate::actor_read::{KnownPeerQueries, rib_manager_read};
 use crate::proto;
 use rustbgpd_rib::update::ordered_route_query_filter;
 use rustbgpd_rib::{
@@ -146,6 +146,9 @@ pub struct RibService {
     /// it (tests, or a build without FIB control) — the mutating RPCs then
     /// return `FAILED_PRECONDITION`.
     fib_table_control: Option<FibTableControlFn>,
+    /// Resolves an empty peer-scoped listing to `NOT_FOUND` for an unknown
+    /// peer. `None` (tests, benchmarks) leaves every listing unchecked.
+    known_peers: Option<KnownPeerQueries>,
     #[cfg(feature = "bench-internals")]
     vpn_query_bench_receipts: Option<mpsc::Sender<VpnQueryServiceReceipt>>,
 }
@@ -171,6 +174,7 @@ impl RibService {
             // Fail closed: callers opt into mutations via `with_fib_table_control`.
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
+            known_peers: None,
             #[cfg(feature = "bench-internals")]
             vpn_query_bench_receipts: None,
         }
@@ -188,6 +192,7 @@ impl RibService {
             fib_route_snapshot,
             access_mode: crate::server::AccessMode::ReadOnly,
             fib_table_control: None,
+            known_peers: None,
             #[cfg(feature = "bench-internals")]
             vpn_query_bench_receipts: None,
         }
@@ -216,6 +221,22 @@ impl RibService {
         self.access_mode = access_mode;
         self.fib_table_control = fib_table_control;
         self
+    }
+
+    /// Answer an empty peer-scoped listing with `NOT_FOUND` for an unknown
+    /// peer (see [`KnownPeerQueries::require_known`]).
+    #[must_use]
+    pub(crate) fn with_known_peer_queries(mut self, known_peers: KnownPeerQueries) -> Self {
+        self.known_peers = Some(known_peers);
+        self
+    }
+
+    /// Fail an empty listing scoped to `peer` when that peer is unknown.
+    async fn require_known_peer_if_empty(&self, peer: IpAddr, empty: bool) -> Result<(), Status> {
+        match &self.known_peers {
+            Some(known_peers) if empty => known_peers.require_known(peer).await,
+            _ => Ok(()),
+        }
     }
 
     async fn query_orr_topology(&self) -> Result<OrrTopologySnapshot, Status> {
@@ -307,6 +328,8 @@ impl RibService {
                 "EVPN pagination unavailable because its process-local generation is exhausted",
             ),
         })?;
+        self.require_known_peer_if_empty(peer, page.routes.is_empty())
+            .await?;
         let next_page_token = if page.has_more {
             page.routes
                 .last()
@@ -1859,6 +1882,10 @@ impl proto::rib_service_server::RibService for RibService {
                 page_size,
             )
             .await?;
+        if let Some(peer) = peer {
+            self.require_known_peer_if_empty(peer, page.routes.is_empty())
+                .await?;
+        }
         Ok(Response::new(route_page_to_response(
             &page,
             scope,
@@ -1926,6 +1953,8 @@ impl proto::rib_service_server::RibService for RibService {
                 expected_version,
                 page_size,
             )
+            .await?;
+        self.require_known_peer_if_empty(peer, page.routes.is_empty())
             .await?;
         Ok(Response::new(route_page_to_response(
             &page,
@@ -2129,6 +2158,8 @@ impl proto::rib_service_server::RibService for RibService {
                 }
             })
             .await?;
+            self.require_known_peer_if_empty(peer, matched.is_empty())
+                .await?;
             return Ok(Response::new(proto::ListFlowSpecResponse {
                 routes: Vec::new(),
                 received_routes: matched
@@ -2258,6 +2289,17 @@ impl proto::rib_service_server::RibService for RibService {
             reply,
         })
         .await?;
+        if let Some(peer) = received_from {
+            self.require_known_peer_if_empty(peer, explanation.received.is_none())
+                .await?;
+        }
+        if let Some(peer) = advertised_to {
+            let advertised = explanation
+                .export
+                .as_ref()
+                .is_some_and(|export| export.advertised.is_some());
+            self.require_known_peer_if_empty(peer, !advertised).await?;
+        }
         Ok(Response::new(explain_evpn_to_proto(explanation, selector)))
     }
 
@@ -3508,6 +3550,198 @@ mod tests {
                 .await
                 .map(|_| ()),
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PeerScopedRead {
+        ListReceivedRoutes,
+        ListAdvertisedRoutes,
+        ListReceivedFlowSpecRoutes,
+        ListReceivedEvpnRoutes,
+        ListAdvertisedEvpnRoutes,
+        ExplainEvpnReceivedFrom,
+        ExplainEvpnAdvertisedTo,
+    }
+
+    async fn invoke_peer_scoped_read(
+        svc: &RibService,
+        rpc: PeerScopedRead,
+        peer: &str,
+    ) -> Result<(), Status> {
+        let peer = peer.to_string();
+        let evpn_peer = proto::ListPeerEvpnRoutesRequest {
+            neighbor_address: peer.clone(),
+            ..Default::default()
+        };
+        let routes = proto::ListRoutesRequest {
+            neighbor_address: peer.clone(),
+            ..list_routes_request()
+        };
+        match rpc {
+            PeerScopedRead::ListReceivedRoutes => svc
+                .list_received_routes(Request::new(routes))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ListAdvertisedRoutes => svc
+                .list_advertised_routes(Request::new(routes))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ListReceivedFlowSpecRoutes => svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: 0,
+                    received_peer_address: peer,
+                }))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ListReceivedEvpnRoutes => svc
+                .list_received_evpn_routes(Request::new(evpn_peer))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ListAdvertisedEvpnRoutes => svc
+                .list_advertised_evpn_routes(Request::new(evpn_peer))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ExplainEvpnReceivedFrom => svc
+                .explain_evpn_route(Request::new(proto::ExplainEvpnRouteRequest {
+                    received_from: peer,
+                    ..evpn_explain_request()
+                }))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ExplainEvpnAdvertisedTo => svc
+                .explain_evpn_route(Request::new(proto::ExplainEvpnRouteRequest {
+                    advertised_to: peer,
+                    ..evpn_explain_request()
+                }))
+                .await
+                .map(|_| ()),
+        }
+    }
+
+    /// Answers every peer-scoped RIB read with an empty result.
+    fn empty_peer_scoped_rib() -> mpsc::Sender<RibUpdate> {
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                match update {
+                    RibUpdate::QueryRoutesPage { reply, .. } => {
+                        let _ = reply.send(Ok(RoutePage::default()));
+                    }
+                    RibUpdate::QueryEvpnRoutesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::EvpnRoutePage::default()));
+                    }
+                    RibUpdate::QueryReceivedFlowSpecRoutes { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    RibUpdate::ExplainEvpnRoute {
+                        key,
+                        received_from,
+                        reply,
+                        ..
+                    } => {
+                        let _ = reply.send(rustbgpd_rib::update::ExplainEvpnRoute {
+                            key,
+                            received_from,
+                            received: None,
+                            best: None,
+                            selection_best: None,
+                            compared: None,
+                            candidate_count: 0,
+                            reason: None,
+                            reason_detail: String::new(),
+                            selection_deferred: false,
+                            export: None,
+                        });
+                    }
+                    _ => panic!("unexpected RIB read"),
+                }
+            }
+        });
+        tx
+    }
+
+    /// Load-bearing: removing the known-peer check from any peer-scoped view
+    /// makes its unknown row answer OK-empty; checking before the empty test
+    /// or dropping a known-peer clause makes a managed or retained row red.
+    #[tokio::test]
+    async fn empty_peer_scoped_views_reject_only_unknown_peers() {
+        let managed: IpAddr = "192.0.2.1".parse().unwrap();
+        let retained: IpAddr = "192.0.2.2".parse().unwrap();
+        let svc = RibService::new(empty_peer_scoped_rib()).with_known_peer_queries(
+            crate::actor_read::mock_known_peer_queries(managed, retained),
+        );
+        for rpc in [
+            PeerScopedRead::ListReceivedRoutes,
+            PeerScopedRead::ListAdvertisedRoutes,
+            PeerScopedRead::ListReceivedFlowSpecRoutes,
+            PeerScopedRead::ListReceivedEvpnRoutes,
+            PeerScopedRead::ListAdvertisedEvpnRoutes,
+            PeerScopedRead::ExplainEvpnReceivedFrom,
+            PeerScopedRead::ExplainEvpnAdvertisedTo,
+        ] {
+            invoke_peer_scoped_read(&svc, rpc, "192.0.2.1")
+                .await
+                .unwrap_or_else(|error| panic!("{rpc:?} managed: {error}"));
+            invoke_peer_scoped_read(&svc, rpc, "192.0.2.2")
+                .await
+                .unwrap_or_else(|error| panic!("{rpc:?} retained: {error}"));
+            let error = invoke_peer_scoped_read(&svc, rpc, "192.0.2.99")
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::NotFound, "{rpc:?}");
+            assert_eq!(error.message(), "neighbor 192.0.2.99 not found", "{rpc:?}");
+        }
+        // Without a known-peer lane (benchmarks, unit fixtures) the empty
+        // listing stays unchecked.
+        invoke_peer_scoped_read(
+            &RibService::new(empty_peer_scoped_rib()),
+            PeerScopedRead::ListReceivedRoutes,
+            "192.0.2.99",
+        )
+        .await
+        .unwrap();
+    }
+
+    /// A view with rows answers without consulting the known-peer lanes, so
+    /// a populated listing is never delayed or failed by the check.
+    #[tokio::test]
+    async fn populated_peer_scoped_view_skips_known_peer_check() {
+        let peer: IpAddr = "192.0.2.99".parse().unwrap();
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let Some(RibUpdate::QueryRoutesPage { reply, .. }) = rib_rx.recv().await else {
+                panic!("expected route page query");
+            };
+            let route = Route {
+                peer,
+                ..test_route(
+                    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                    Vec::new(),
+                )
+            };
+            let _ = reply.send(Ok(RoutePage {
+                routes: vec![route],
+                total: 1,
+                ..RoutePage::default()
+            }));
+        });
+        // Closed lanes: any known-peer read would fail UNAVAILABLE.
+        let (peer_mgr_tx, _) = mpsc::channel(1);
+        let (known_rib_tx, _) = mpsc::channel(1);
+        let svc = RibService::new(rib_tx).with_known_peer_queries(KnownPeerQueries {
+            peer_manager: peer_mgr_tx,
+            operator_lane: None,
+            rib: known_rib_tx,
+        });
+        let response = svc
+            .list_received_routes(Request::new(proto::ListRoutesRequest {
+                neighbor_address: peer.to_string(),
+                ..list_routes_request()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.routes.len(), 1);
     }
 
     /// Load-bearing: restoring any included unary RIB send mapping to

@@ -22,6 +22,7 @@ use tonic::transport::Server;
 use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
+use crate::actor_read::KnownPeerQueries;
 use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only};
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::bfd_service::BfdService;
@@ -2037,6 +2038,11 @@ async fn run_tcp_listener(
         }
     });
     let incoming = bounded_handshakes(incoming);
+    let known_peers = KnownPeerQueries {
+        peer_manager: peer_mgr_tx.clone(),
+        operator_lane: Some(peer_mgr_operator_tx.clone()),
+        rib: rib_query_tx.clone(),
+    };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
         RibService::with_status_snapshots(
@@ -2044,7 +2050,8 @@ async fn run_tcp_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
         )
-        .with_fib_table_control(access_mode, fib_table_control.clone()),
+        .with_fib_table_control(access_mode, fib_table_control.clone())
+        .with_known_peer_queries(known_peers.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
@@ -2062,7 +2069,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
-        BfdService::with_snapshot(bfd_session_snapshot),
+        BfdService::with_snapshot(bfd_session_snapshot).with_known_peer_queries(known_peers),
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(
@@ -2293,6 +2300,11 @@ async fn run_uds_listener(
     let audit_context =
         audit_context.with_dynamic_bearer(credential_store.clone(), credential_index);
     let interceptor = AuthInterceptor::new(credential_store, credential_index);
+    let known_peers = KnownPeerQueries {
+        peer_manager: peer_mgr_tx.clone(),
+        operator_lane: Some(peer_mgr_operator_tx.clone()),
+        rib: rib_query_tx.clone(),
+    };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
         RibService::with_status_snapshots(
@@ -2300,7 +2312,8 @@ async fn run_uds_listener(
             blackhole_discard_snapshot.clone(),
             fib_route_snapshot.clone(),
         )
-        .with_fib_table_control(access_mode, fib_table_control.clone()),
+        .with_fib_table_control(access_mode, fib_table_control.clone())
+        .with_known_peer_queries(known_peers.clone()),
         interceptor.clone(),
     ));
     routes.add_service(EventServiceServer::with_interceptor(
@@ -2318,7 +2331,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
-        BfdService::with_snapshot(bfd_session_snapshot),
+        BfdService::with_snapshot(bfd_session_snapshot).with_known_peer_queries(known_peers),
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(

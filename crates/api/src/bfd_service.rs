@@ -5,6 +5,7 @@
 
 use tonic::{Request, Response, Status};
 
+use crate::actor_read::KnownPeerQueries;
 use crate::proto;
 
 /// Live snapshot provider for BFD session status. The daemon wires this to the
@@ -16,12 +17,24 @@ pub type BfdSessionSnapshotFn =
 /// gRPC service exposing BFD session state (read-only).
 pub struct BfdService {
     snapshot: BfdSessionSnapshotFn,
+    /// Resolves an empty per-peer view to `NOT_FOUND` for an unknown peer.
+    known_peers: Option<KnownPeerQueries>,
 }
 
 impl BfdService {
     /// Create a BFD service backed by a live session snapshot provider.
     pub fn with_snapshot(snapshot: BfdSessionSnapshotFn) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            known_peers: None,
+        }
+    }
+
+    /// Answer an empty per-peer view with `NOT_FOUND` for an unknown peer.
+    #[must_use]
+    pub(crate) fn with_known_peer_queries(mut self, known_peers: KnownPeerQueries) -> Self {
+        self.known_peers = Some(known_peers);
+        self
     }
 }
 
@@ -30,6 +43,7 @@ impl Default for BfdService {
     fn default() -> Self {
         Self {
             snapshot: std::sync::Arc::new(Vec::new),
+            known_peers: None,
         }
     }
 }
@@ -47,11 +61,16 @@ impl proto::bfd_service_server::BfdService for BfdService {
             // textual representations (notably IPv6) match — mirrors the
             // address-filter handling in NeighborService / RibService. Snapshot
             // peer addresses are already `IpAddr::to_string()` (canonical).
-            let wanted = filter
+            let peer = filter
                 .parse::<std::net::IpAddr>()
-                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?
-                .to_string();
+                .map_err(|e| Status::invalid_argument(format!("invalid peer_address: {e}")))?;
+            let wanted = peer.to_string();
             sessions.retain(|s| s.peer_address == wanted);
+            if sessions.is_empty()
+                && let Some(known_peers) = &self.known_peers
+            {
+                known_peers.require_known(peer).await?;
+            }
         }
         Ok(Response::new(proto::GetBfdSessionsResponse { sessions }))
     }
@@ -114,6 +133,48 @@ mod tests {
             .into_inner();
         assert_eq!(resp.sessions.len(), 1);
         assert_eq!(resp.sessions[0].peer_address, "10.0.0.2");
+    }
+
+    /// Load-bearing: removing the known-peer check makes the unknown row
+    /// answer OK-empty; checking before the session filter fails the
+    /// unmanaged address that does own a session.
+    #[tokio::test]
+    async fn empty_peer_view_rejects_only_unknown_peers() {
+        let svc = BfdService::with_snapshot(std::sync::Arc::new(|| {
+            vec![session("10.0.0.9", proto::BfdSessionState::Up)]
+        }))
+        .with_known_peer_queries(crate::actor_read::mock_known_peer_queries(
+            "10.0.0.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+        ));
+        let view = |peer: &str| {
+            svc.get_bfd_sessions(Request::new(proto::GetBfdSessionsRequest {
+                peer_address: peer.to_string(),
+            }))
+        };
+        assert!(
+            view("10.0.0.1")
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+                .is_empty()
+        );
+        assert!(
+            view("10.0.0.2")
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+                .is_empty()
+        );
+        assert_eq!(
+            view("10.0.0.9").await.unwrap().into_inner().sessions.len(),
+            1
+        );
+        let error = view("192.0.2.99").await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), "neighbor 192.0.2.99 not found");
     }
 
     #[tokio::test]
