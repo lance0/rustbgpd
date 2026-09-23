@@ -52,6 +52,19 @@ fn parse_nonzero_asn(value: &str) -> Result<u32, String> {
     Ok(asn)
 }
 
+/// An empty address selects every peer or the global chain on the daemon, so
+/// a scope-selecting `--neighbor` must name one.
+fn parse_scope_neighbor(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err(
+            "neighbor address must not be empty; use --global or --all for the \
+                    daemon-wide scope"
+                .to_string(),
+        );
+    }
+    Ok(value.to_string())
+}
+
 fn parse_lookup_target(value: &str) -> Result<String, String> {
     output::parse_prefix(value)?;
     Ok(value.to_string())
@@ -490,11 +503,16 @@ enum Command {
     Gshut {
         /// Neighbor address. Omitting both this and --all toggles every
         /// peer; that form is deprecated, so pass --all instead
-        #[arg(long = "neighbor", visible_alias = "peer", conflicts_with = "all")]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            conflicts_with = "all",
+            value_parser = parse_scope_neighbor
+        )]
         neighbor: Option<String>,
 
         /// Toggle every currently-managed peer
-        #[arg(long)]
+        #[arg(long, conflicts_with = "neighbor")]
         all: bool,
 
         /// Clear instead of enabling.
@@ -989,11 +1007,16 @@ enum PolicyChainAction {
 struct ChainScope {
     /// Neighbor address. Omitting both this and --global changes the global
     /// chain; that form is deprecated, so pass --global instead
-    #[arg(long, visible_alias = "peer", conflicts_with = "global")]
+    #[arg(
+        long,
+        visible_alias = "peer",
+        conflicts_with = "global",
+        value_parser = parse_scope_neighbor
+    )]
     neighbor: Option<String>,
 
     /// Change the global chain, used by every neighbor without its own chain
-    #[arg(long)]
+    #[arg(long, conflicts_with = "neighbor")]
     global: bool,
 
     /// Skip the confirmation prompt for a global change (asked only on a terminal)
@@ -5453,20 +5476,28 @@ printf '%s\n' "${COMPREPLY[@]}"
     }
 
     #[test]
-    fn json_lines_completion_conflicts_are_reciprocal() {
+    fn completion_conflicts_are_reciprocal() {
         let mut command = cli_command(BINARY_NAME);
         command.build();
-        for path in [
-            vec![],
-            vec!["rib"],
-            vec!["rib", "received"],
-            vec!["rib", "advertised"],
+        let json = [("json", "json_lines"), ("json_lines", "json")];
+        let chain = [("neighbor", "global"), ("global", "neighbor")];
+        let gshut = [("neighbor", "all"), ("all", "neighbor")];
+        for (path, pairs) in [
+            (vec![], json),
+            (vec!["rib"], json),
+            (vec!["rib", "received"], json),
+            (vec!["rib", "advertised"], json),
+            (vec!["policy", "chain", "set-import"], chain),
+            (vec!["policy", "chain", "set-export"], chain),
+            (vec!["policy", "chain", "clear-import"], chain),
+            (vec!["policy", "chain", "clear-export"], chain),
+            (vec!["gshut"], gshut),
         ] {
             let mut view = &command;
             for name in &path {
                 view = view.find_subcommand(name).unwrap();
             }
-            for (flag, conflict) in [("json", "json_lines"), ("json_lines", "json")] {
+            for (flag, conflict) in pairs {
                 let arg = view
                     .get_arguments()
                     .find(|arg| arg.get_id() == flag)

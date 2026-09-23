@@ -2843,7 +2843,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'--all[Toggle every currently-managed peer]' \
+'(--neighbor)--all[Toggle every currently-managed peer]' \
 '--clear[Clear instead of enabling]' \
 '-y[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
@@ -3071,7 +3071,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'--global[Change the global chain, used by every neighbor without its own chain]' \
+'(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -3092,7 +3092,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'--global[Change the global chain, used by every neighbor without its own chain]' \
+'(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -3113,7 +3113,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'--global[Change the global chain, used by every neighbor without its own chain]' \
+'(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
@@ -3133,7 +3133,7 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'--global[Change the global chain, used by every neighbor without its own chain]' \
+'(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \

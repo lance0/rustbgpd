@@ -228,10 +228,10 @@ rbgp policy get <name>
 rbgp policy set <name> --from-file policy.json
 rbgp policy delete <name>
 rbgp policy chain show [--neighbor <addr>]
-rbgp policy chain set-import (--global | --neighbor <addr>) [--yes] <names...>
-rbgp policy chain set-export (--global | --neighbor <addr>) [--yes] <names...>
-rbgp policy chain clear-import (--global | --neighbor <addr>) [--yes]
-rbgp policy chain clear-export (--global | --neighbor <addr>) [--yes]
+rbgp policy chain set-import [--global | --neighbor <addr>] [--yes] <names...>
+rbgp policy chain set-export [--global | --neighbor <addr>] [--yes] <names...>
+rbgp policy chain clear-import [--global | --neighbor <addr>] [--yes]
+rbgp policy chain clear-export [--global | --neighbor <addr>] [--yes]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
@@ -494,7 +494,7 @@ rbgp watch              # legacy route-update stream
 
 rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS
 rbgp orr                # RFC 9107 ORR per-vantage status
-rbgp gshut (--all | --neighbor <addr>) [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
+rbgp gshut [--all | --neighbor <addr>] [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
 rbgp shutdown [--reason <text>] [--yes]
 rbgp completions bash

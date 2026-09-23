@@ -9,6 +9,9 @@
   `yes` aborts with exit code 1 and changes nothing. `-y`/`--yes` skips the
   prompt. The chain commands gain `--global` and `gshut` gains `--all` to
   select the daemon-wide scope explicitly; each conflicts with `--neighbor`.
+  An empty or blank `--neighbor` on these commands is now a usage error
+  (exit 2) instead of reaching the daemon, where an empty `gshut` address
+  meant every peer.
   **Operator-visible:** non-interactive runs (scripts, pipelines, `docker
   exec` without a TTY) never prompt and behave as before. Omitting both
   `--neighbor` and the new scope flag still selects the global chain or

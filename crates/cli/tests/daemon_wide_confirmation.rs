@@ -178,3 +178,53 @@ fn explicit_scope_flags_conflict_with_neighbor() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_scope_neighbor_is_a_usage_error_before_transport() {
+    // An empty address means every peer to SetGracefulShutdown, so an empty
+    // `--neighbor` must not pass as a neighbor scope that skips the prompt.
+    let server = test_support::spawn_mock_server(None).await;
+    for neighbor in ["", " \t"] {
+        for args in [
+            vec![
+                "policy",
+                "chain",
+                "set-import",
+                "--neighbor",
+                neighbor,
+                "p1",
+            ],
+            vec!["policy", "chain", "set-export", "--peer", neighbor, "p1"],
+            vec!["policy", "chain", "clear-import", "--neighbor", neighbor],
+            vec!["policy", "chain", "clear-export", "--neighbor", neighbor],
+            vec!["gshut", "--neighbor", neighbor],
+            vec!["gshut", "--peer", neighbor, "--clear"],
+        ] {
+            let output = rbgp(&server.addr, &args);
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+            let error = stderr(&output);
+            assert!(
+                error.contains("neighbor address must not be empty"),
+                "{args:?}: {error}"
+            );
+            assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        }
+    }
+    let state = &server.state;
+    assert!(state.last_set_neighbor_import_chain.lock().await.is_none());
+    assert!(state.last_set_neighbor_export_chain.lock().await.is_none());
+    assert!(
+        state
+            .last_clear_neighbor_import_chain
+            .lock()
+            .await
+            .is_none()
+    );
+    assert!(
+        state
+            .last_clear_neighbor_export_chain
+            .lock()
+            .await
+            .is_none()
+    );
+}
