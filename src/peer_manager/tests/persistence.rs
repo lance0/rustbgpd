@@ -94,7 +94,7 @@ fn observable_session(
 struct PersistenceRig {
     dir: tempfile::TempDir,
     config_path: std::path::PathBuf,
-    /// A persister handle for [`Self::persister_drained`]; the bridge owns the
+    /// A persister handle for [`Self::stage_discarded`]; the bridge owns the
     /// production sender.
     mutation_tx: mpsc::Sender<crate::config_persister::ConfigMutation>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -264,28 +264,39 @@ hold_time = 90
         self.dir.path().join("config.toml.tmp")
     }
 
-    /// Wait until the persister has finished every mutation already queued
-    /// to it.
+    /// Wait until no stage is outstanding: the persister has discarded (or
+    /// never made) the temp file a staged mutation writes.
     ///
     /// A mutation the actor rejects after staging answers its caller before
-    /// the persister has run the bridge's `DiscardStagedConfig`, whose unlink
-    /// runs on the blocking pool; the caller can still see the stage's temp
-    /// file. The persister handles mutations in order, so one `InspectCurrent`
-    /// round trip settles everything queued ahead of it. That discard is
-    /// queued once the bridge has handled any later config event, so a
-    /// caller orders it by sending one first.
-    async fn persister_drained(&self) {
-        let (reply, settled) = oneshot::channel();
-        self.mutation_tx
-            .send(crate::config_persister::ConfigMutation::InspectCurrent(
-                reply,
-            ))
-            .await
-            .expect("config persister alive");
-        tokio::time::timeout(Duration::from_secs(10), settled)
-            .await
-            .expect("config persister must drain, not hang")
-            .expect("config persister kept the inspect reply");
+    /// the bridge even queues its `DiscardStagedConfig`, and the persister
+    /// then unlinks the temp file on the blocking pool. Nothing the caller
+    /// can send is ordered behind that discard, so wait on the observed
+    /// state instead: each `InspectCurrent` round trip settles whatever the
+    /// persister has queued ahead of it, then the temp file is checked.
+    async fn stage_discarded(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (reply, settled) = oneshot::channel();
+            self.mutation_tx
+                .send(crate::config_persister::ConfigMutation::InspectCurrent(
+                    reply,
+                ))
+                .await
+                .expect("config persister alive");
+            tokio::time::timeout(Duration::from_secs(10), settled)
+                .await
+                .expect("config persister must answer, not hang")
+                .expect("config persister kept the inspect reply");
+            if !self.staged_temp_path().exists() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a rejected mutation's stage was never discarded: {}",
+                self.staged_temp_path().display()
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     /// Take write permission away from the config *directory* so the real
@@ -297,18 +308,14 @@ hold_time = 90
     /// premise is that writing fails, so ask the filesystem rather than
     /// guessing from the effective uid.
     ///
-    /// Drains the persister first. An earlier rejected mutation's discard
-    /// still in flight would otherwise hit the sealed directory, leave its
-    /// temp file behind, and let the next stage reopen that file instead of
-    /// failing, so the scenario would test a commit failure rather than a
-    /// staging failure.
+    /// Waits for any earlier stage to be discarded first. A discard still in
+    /// flight would otherwise hit the sealed directory, leave its temp file
+    /// behind, and let the next stage reopen that file instead of failing,
+    /// so the scenario would test a commit failure rather than a staging
+    /// failure.
     async fn seal_config_dir(&self) -> bool {
         use std::os::unix::fs::PermissionsExt;
-        self.persister_drained().await;
-        assert!(
-            !self.staged_temp_path().exists(),
-            "no stage may be outstanding when the config directory is sealed"
-        );
+        self.stage_discarded().await;
         std::fs::set_permissions(self.dir.path(), std::fs::Permissions::from_mode(0o500))
             .expect("seal config dir");
         let probe = self.dir.path().join("write-probe");
