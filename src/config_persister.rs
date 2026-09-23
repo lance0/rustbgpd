@@ -253,9 +253,10 @@ impl ConfigPersister {
     /// completion with the state it owns; every file operation it performs
     /// is individually atomic, as it was on the worker thread.
     ///
-    /// Not covered: if this task is aborted or dropped between mutations
-    /// with a stage outstanding, `StagedWrite`'s drop removes the temp file
-    /// best-effort on whichever thread drops the task.
+    /// Not covered: if this task is aborted or dropped between mutations, or
+    /// its job is cancelled at shutdown, with a stage outstanding,
+    /// `StagedWrite`'s drop removes the temp file best-effort on whichever
+    /// thread drops it.
     async fn off_runtime<R: Send + 'static>(
         self,
         work: impl FnOnce(&mut Self) -> R + Send + 'static,
@@ -270,7 +271,16 @@ impl ConfigPersister {
             Ok(settled) => settled,
             // Preserve the pre-existing behaviour of a panic in this work:
             // it ends the persister task.
-            Err(error) => std::panic::resume_unwind(error.into_panic()),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            // Nothing holds this job's handle to abort it, so tokio cancels it
+            // only when the blocking pool shuts down before the job ran: it was
+            // queued at shutdown, or spawned after shutdown began. The work
+            // never ran, and the persister state went down with the closure.
+            // Park rather than panic: `into_panic` would panic on a
+            // cancellation and write a spurious crash report mid-shutdown.
+            // Parking reports no outcome; the runtime drops this task, and the
+            // caller sees a lost acknowledgement, never a success.
+            Err(_cancelled) => std::future::pending().await,
         }
     }
 
@@ -1042,6 +1052,69 @@ log_format = "json"
             0,
             "the exit discard must remove the stage off the runtime thread"
         );
+        assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
+    }
+
+    /// A mutation whose blocking job the runtime cancels during shutdown
+    /// neither panics (a panic writes a spurious second crash report during a
+    /// failure-driven shutdown) nor acknowledges an outcome for work that
+    /// never ran.
+    ///
+    /// Shutting the runtime down first makes the cancellation deterministic:
+    /// tokio refuses a `spawn_blocking` after its blocking pool has begun
+    /// shutting down, and the returned handle resolves to
+    /// `JoinError::Cancelled`, the same error a job still queued at shutdown
+    /// gets.
+    ///
+    /// Red proof: resuming the unwind for every `JoinError` panics on the
+    /// first poll with "`JoinError` reason is not a panic".
+    #[test]
+    fn persist_job_cancelled_by_runtime_shutdown_parks_without_panicking_or_acking() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        runtime.shutdown_background();
+        let _entered = handle.enter();
+
+        let (tx, rx) = mpsc::channel(1);
+        let mut replacement = minimal_config();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let (ack, mut acked) = oneshot::channel();
+        tx.try_send(ConfigMutation::ReplaceConfigAck(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+            ack,
+        ))
+        .unwrap();
+        let mut run = Box::pin(ConfigPersister::new(rx, path.clone(), config, None).run());
+
+        let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+        }));
+        assert!(
+            matches!(polled, Ok(Poll::Pending)),
+            "a cancelled blocking job must park the persister, not panic or finish"
+        );
+        assert_eq!(
+            acked.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty),
+            "no outcome may be acknowledged for a write that never ran"
+        );
+
+        // The runtime drops the parked task; the caller then observes a lost
+        // acknowledgement, never a success.
+        drop(run);
+        assert_eq!(acked.try_recv(), Err(oneshot::error::TryRecvError::Closed));
         assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
     }
 }
