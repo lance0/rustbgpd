@@ -175,7 +175,8 @@ semantics and verification in
 1. **Confirm RS2 is healthy and consistent** (the diff above, all
    member sessions established). Two-instance redundancy means never
    starting maintenance while the survivor is degraded.
-2. **Drain RS1:** `rbgp gshut --all`. Outbound paths get the
+2. **Drain RS1:** `rbgp gshut --all` (on a terminal it asks for
+   confirmation; `--yes` skips the prompt). Outbound paths get the
    `GRACEFUL_SHUTDOWN` community; members honoring it demote those
    paths, so the RS2-learned copies win *before* anything closes.
 3. **Wait for the shift** (operator-defined; verify on a member:

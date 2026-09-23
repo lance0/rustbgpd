@@ -212,12 +212,12 @@ peer works with an unprivileged port because rustbgpd opens the session to it.
 
 ## 4. Verify
 
-The minimal example uses `/tmp/rustbgpd` as its runtime state directory, so point
-the CLI at that socket. gRPC access and authorization need no configuration
-here: the local socket is owner-only, so its clients are authorized as the
-implicit `local-operator` principal — even a config with no gRPC or
-`[security.grpc]` section at all gets this listener by default. Remote (TCP)
-or named access needs explicit principals and roles; see
+The `lab` profile (and `examples/minimal/config.toml`) uses `/tmp/rustbgpd` as
+its runtime state directory, so point the CLI at that socket. gRPC access and
+authorization need no configuration here: the local socket is owner-only, so its
+clients are authorized as the implicit `local-operator` principal — even a
+config with no gRPC or `[security.grpc]` section at all gets this listener by
+default. Remote (TCP) or named access needs explicit principals and roles; see
 [CONFIGURATION.md](../reference/configuration.md#securitygrpc).
 
 <!-- rbgp-cli-conformance -->
@@ -337,7 +337,7 @@ docker network rm rbgp-quickstart
 Enable shell completions:
 
 ```bash
-rbgp completions bash > /etc/bash_completion.d/rbgp
+rbgp completions bash | sudo tee /etc/bash_completion.d/rbgp >/dev/null
 # Or use the generated files in examples/completions/, or the
 # share/completions/ files shipped in the release tarball.
 ```

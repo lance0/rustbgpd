@@ -169,7 +169,7 @@ $ rbgp rib --prefix 10.1.0.0/24 advertised 10.0.0.11 --explain --rd 65000:1
 ```
 
 A STOP at `rt_membership` names exactly this condition. The VPN ladder runs
-`best_route → llgr → rt_membership → split_horizon → rr_reflection →
+`family → best_route → llgr → rt_membership → split_horizon → rr_reflection →
 export_policy → adj_rib_out`; a well-known-community suppression stops
 before `export_policy`.
 

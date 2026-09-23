@@ -93,7 +93,7 @@ Conventions:
   startup on the same commit that shipped them.
 - gRPC in the recipes stays on the default local Unix socket with tier
   authorization ([ADR-0064](../adr/0064-grpc-authorization.md)). For
-  remote access, see the mTLS guidance in [`SECURITY.md`](../reference/security.md).
+  remote access, see the mTLS guidance in the [security reference](../reference/security.md).
 - Start here if you haven't run the daemon at all yet:
   [`docs/tutorials/quickstart.md`](../tutorials/quickstart.md), then come
   back for your scenario.

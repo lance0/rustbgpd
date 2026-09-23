@@ -106,7 +106,9 @@ bogons, transit-free, path-length cap, RPKI origin validation),
 `policy/client-<id>.rpol` (the client's IRR-derived prefix/origin
 tests and dataset bindings), `datasets/client-<id>-origins.list` and
 `datasets/client-<id>-prefixes.list` (the generated IRR membership, plus a
-blackhole-cover dataset when configured), and `render-receipt.json`
+blackhole-cover dataset when configured), `birdwatcher-reject-communities.json`
+(when any client uses `reject_policy: tag_and_reject`; the looking-glass
+adapter's reject-cause map), and `render-receipt.json`
 (fingerprint, cardinalities,
 warnings). `--rtr-cache` is required whenever the context enables
 RPKI origin validation or `irrdb.use_rpki_roas_as_route_objects` — the
@@ -291,6 +293,7 @@ it is:
 | `2` | Refused — unsupported context knobs (listed on stderr) | remove the knob or wait for renderer support; repeats every run until the site config changes |
 | `3` | Implausible data — empty/collapsed member sets | usually an upstream IRR/PeeringDB outage; the previous config stays live by design |
 | `4` | Context shape mismatch — arouteserver output changed | pin the arouteserver version or update the renderer |
+| `8` | Output unusable — the output directory could not be created or written | fix the path, ownership, or free space; the previous config stays live |
 
 Exit `3` is the fail-stale case the pipeline exists for: a transient
 upstream outage must never strip a member's filters, so nothing is

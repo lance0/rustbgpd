@@ -26,6 +26,12 @@ and [`rustbgpd-m77-gr-rr.toml`](../../tests/interop/configs/rustbgpd-m77-gr-rr.t
 
 ## Config
 
+For a fuller starting point, the commented
+[`examples/route-reflector/config.toml`](../../examples/route-reflector/config.toml)
+adds a peer-group template, an auto-accept client range, and the non-client
+session to the pair's second reflector; it passes `rustbgpd --check --strict`
+as written.
+
 ```toml
 [global]
 asn = 65000

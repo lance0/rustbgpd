@@ -320,7 +320,8 @@ when the arouteserver site configures no control community, on only when
 it configures exactly the matrix above (the daemon's matrix is fixed; any
 other value is refused). IRR white lists render as extra dataset members
 and ordered accept terms, tagged with the site's
-`route_validated_via_white_list` community.
+`route_validated_via_white_list` community when the site configures it and
+`irrdb.tag_as_set` is on.
 
 An IPv6-only fleet can carry IPv4 unicast over its IPv6 sessions (RFC 8950):
 set arouteserver's `rfc8950` and the renderer emits
@@ -342,6 +343,7 @@ Prometheus (`prometheus_addr`, `/metrics`; dashboards in
 | Metric | Healthy shape |
 |--------|---------------|
 | `bgp_session_state_transitions_total` | flat outside member churn |
+| `bgp_rpki_cache_connected{cache}` | `1` for each configured RTR cache; `0` means that session is down, which shows before the VRP count moves because retained data keeps serving until it expires |
 | `sum without (af) (bgp_rpki_vrp_count)` | per-target IPv4 + IPv6 total; non-zero once the RTR cache syncs (`rbgp doctor` warns when configured caches have no visible VRPs) |
 | `bgp_update_group_fallback_peers` | ≥ your Add-Path send member count (Add-Path distributes per-peer; shareable-chain unicast-only `per_client_best` members group instead, ADR-0126) |
 | `bgp_update_group_runner_up_entries` | tracks announcement overlap across per-client-best groups (O(overlapped prefixes)); a climb toward the table size means heavy overlap, never member-count growth |

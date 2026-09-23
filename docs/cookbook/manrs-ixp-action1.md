@@ -40,7 +40,7 @@ configuration that passes `rustbgpd --check --strict` (the
 | Bogon / martian hygiene | Shared hygiene chain: special-purpose prefix rejection, AS_SET reject, ASPA-invalid reject ([`examples/route-server/hygiene.rpol`](../../examples/route-server/hygiene.rpol)); the rendered `rs-hygiene.rpol` adds transit-free and path-length caps | `rbgp rib received <member> --rejected` |
 | Filtering per published policy, fail-closed | RFC 8212 posture (`ebgp_requires_policy`), fail-stale rendering, parse-then-swap reload | `rustbgpd --check --strict`, `rbgp policy` surfaces |
 | Containment of misbehaving members | Per-family max-prefix ceilings with latched teardown ([ADR-0108](../adr/0108-per-family-max-prefix-limits.md)), outbound mirrors ([ADR-0113](../adr/0113-outbound-prefix-limits.md)) | `rbgp neighbor <ip>` limit state, metrics |
-| Member-visible transparency | Reject-retention store + looking-glass filtered view with reject-reason communities | Alice-LG, `rbgp rib received --rejected` |
+| Member-visible transparency | Reject-retention store + looking-glass filtered view with reject-reason communities | Alice-LG, `rbgp rib received <member> --rejected` |
 
 ## RPKI: invalid = reject
 

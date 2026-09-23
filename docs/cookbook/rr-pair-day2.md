@@ -123,5 +123,8 @@ rbgp gshut --all           # tag all outbound with GRACEFUL_SHUTDOWN (RFC 8326)
 rbgp shutdown              # writes the GR marker, notifies peers
 ```
 
+On a terminal, both commands ask for confirmation first; `--yes` skips the
+prompt, and non-interactive runs never prompt.
+
 Bring it back, confirm `rbgp neighbor --wide` converges to the same
 prefix counts as its twin, then repeat on the other RR.
