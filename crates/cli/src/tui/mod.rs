@@ -3,7 +3,7 @@ mod data;
 mod theme;
 mod ui;
 
-use std::io::{self, IsTerminal};
+use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
@@ -47,18 +47,6 @@ fn spawn_signal_forwarder(tx: mpsc::Sender<io::Result<KeyEvent>>) -> io::Result<
         let _ = tx.send(Ok(QUIT_KEY)).await;
     });
     Ok(())
-}
-
-/// The terminal crossterm reads keys from: stdin when it is a terminal,
-/// otherwise the controlling terminal.
-fn open_tty() -> Result<OwnedFd, CliError> {
-    let stdin = io::stdin();
-    if stdin.is_terminal() {
-        return Ok(stdin.as_fd().try_clone_to_owned()?);
-    }
-    std::fs::File::open("/dev/tty")
-        .map(OwnedFd::from)
-        .map_err(|_| CliError::Argument("rbgp top needs an interactive terminal".into()))
 }
 
 /// Wait up to `timeout` for input on `tty`; `true` if the terminal has hung
@@ -129,7 +117,9 @@ impl Drop for TerminalGuard {
 }
 
 pub async fn run(connection: Connection, interval: u64, no_color: bool) -> Result<(), CliError> {
-    let tty = open_tty()?;
+    // stdin is a terminal (checked before connecting), so it is the fd
+    // crossterm reads keys from.
+    let tty = io::stdin().as_fd().try_clone_to_owned()?;
     let (key_tx, mut key_rx) = mpsc::channel(16);
     spawn_signal_forwarder(key_tx.clone())?;
     enable_raw_mode()?;

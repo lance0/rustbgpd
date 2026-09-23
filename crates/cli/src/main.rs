@@ -2916,6 +2916,16 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
         Command::Top { interval } if !(1..=60).contains(interval) => Err(CliError::Argument(
             "interval must be between 1 and 60 seconds".into(),
         )),
+        // Checked before connecting: a redirected stdout would receive the
+        // TUI's escape codes, and keys are read from stdin.
+        Command::Top { .. }
+            if !(std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout())) =>
+        {
+            Err(CliError::Argument(
+                "rbgp top needs an interactive terminal on stdin and stdout".into(),
+            ))
+        }
         Command::Policy {
             action:
                 PolicyAction::Chain {
