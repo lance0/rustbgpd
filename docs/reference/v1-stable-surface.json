@@ -87,7 +87,7 @@
       {"definition": "EventHistoryConfig", "fields": ["enabled", "max_bytes", "max_events", "path", "required"], "schema_sha256": "07227afb2fd18c166fc671f78689795afdb701783fd5f621beff0ab1664327de"}
     ],
     "stable_types": [
-      {"definition": "BgpRoleConfig", "schema_sha256": "33acb141838f6612e3cff7273c7936e30683836d7ef8b56d09012215f745f183"},
+      {"definition": "BgpRoleConfig", "schema_sha256": "405d48a461a859ace9cc394323b19985311b1e1c8ad6df52470d0f91e3edf45d"},
       {"definition": "BmpMonitorView", "schema_sha256": "dec0dcdce7c5514ca4be543940f036bbe33e9223f12404ca66fc5d82b552ba16"},
       {"definition": "ConfigEpoch", "schema_sha256": "f7c7a4659ddb1441631d1f093429a36aca8dc11bf21d508aa6cd2bb9934bcd90"},
       {"definition": "GrpcAccessModeConfig", "schema_sha256": "83c96eb88d57e5c0b689443bb415086df4ed403fae8e5ccc77a5dd0fe7b7c577"},
