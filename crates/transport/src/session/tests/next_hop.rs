@@ -115,12 +115,20 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
     assert_eq!(announced[0].next_hop_scope, None);
 }
 
+/// A scoped link-local peer that did not negotiate Extended Next Hop must
+/// not import an IPv4-over-IPv6 link-local `MP_REACH`. Without RFC 8950 the
+/// 32-octet next hop is not the expected length (RFC 7606 §7.11), so the
+/// session resets rather than dropping the route silently. The positive case
+/// is `process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer`.
 #[tokio::test]
 async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     configure_scoped_link_local_peer(&mut session);
-    let negotiated = negotiated_session(65002, false);
-    session.negotiated = Some(Arc::new(negotiated));
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    rfc7606_drain(&mut rib_rx);
     let next_hop: Ipv6Addr = "fe80::1".parse().unwrap();
     let attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -146,18 +154,82 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
-    // Fail closed on the route, gracefully: a scoped link-local peer that did
-    // not negotiate Extended Next Hop must not import an IPv4-over-IPv6
-    // link-local MP_REACH (no route reaches the RIB), but the route is dropped
-    // per-route (ignore + WARN at the ENH gate), not by tearing the session
-    // down with a NOTIFICATION. Pinning both ends guards against a regression in
-    // either direction — silently accepting the route, or escalating to a
-    // session reset. The positive case is covered by
-    // `process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer`.
-    assert!(rib_rx.try_recv().is_err(), "no route may reach the RIB");
+    while let Ok(message) = rib_rx.try_recv() {
+        assert!(
+            !matches!(message, RibUpdate::RoutesReceived { .. }),
+            "no route may reach the RIB"
+        );
+    }
+    assert_ne!(session.fsm.state(), SessionState::Established);
+    let notification = read_until_notification(&mut server).await;
     assert_eq!(
-        session.notifications_sent, 0,
-        "the route is dropped at the Extended-Next-Hop gate, not via NOTIFICATION"
+        notification.code,
+        rustbgpd_wire::notification::NotificationCode::UpdateMessage
+    );
+    assert_eq!(
+        notification.subcode,
+        rustbgpd_wire::notification::update_subcode::OPTIONAL_ATTRIBUTE_ERROR
+    );
+}
+
+/// ADR-0107 strict-peer ownership covers IPv4 `MP_REACH` with a 4-octet
+/// next hop on a session without Extended Next Hop, now that the form is
+/// imported: a foreign next hop must be rejected, not slip past the gate.
+#[tokio::test]
+async fn strict_peer_next_hop_rejects_foreign_ipv4_mp_without_extended_nexthop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.next_hop_ownership_strict_peer = true;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let update = |next_hop: Ipv4Addr| {
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V4(next_hop),
+                link_local_next_hop: None,
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+                }],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            }),
+        ];
+        UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
+    };
+    session
+        .process_update(update(Ipv4Addr::new(10, 0, 0, 2)))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1, "conforming next hop must be accepted");
+    session
+        .process_update(update(Ipv4Addr::new(10, 0, 0, 9)))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty(), "foreign next hop must be rejected");
+    assert_eq!(
+        withdrawn,
+        vec![(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+            0
+        )]
     );
 }
 

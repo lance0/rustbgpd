@@ -1142,6 +1142,32 @@ carries inactive (absent), unlimited (zero), or finite.
   rejected replacement withdraws any previously advertised route; ordinary
   IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
   The peer's receive capability is not an inbound admission requirement.
+- Inbound, IPv4 unicast may use `MP_REACH_NLRI` / `MP_UNREACH_NLRI` on any
+  session that negotiated the family. Extended Next Hop governs only the
+  next-hop encoding, not whether the AFI/SAFI is allowed (§4). A 4-octet IPv4
+  next hop is accepted without the capability, and IPv4 `MP_UNREACH_NLRI`
+  withdrawals are always applied. Earlier releases ignored both forms when
+  Extended Next Hop was not negotiated, so a withdrawal sent that way left the
+  route in place.
+- A 16- or 32-octet (IPv6) next hop on IPv4-unicast NLRI without negotiated
+  Extended Next Hop is a malformed `MP_REACH_NLRI`. RFC 7606 §7.11 judges the
+  next-hop length against the one expected for the AFI/SAFI as modified by
+  the extensions in use, and gives RFC 5549 (now RFC 8950) as the example:
+  only when it is in use may IPv4 unicast carry a 16-octet next hop. A
+  mismatch requires session reset or AFI/SAFI disable. rustbgpd does not
+  implement AFI/SAFI disable, so the session resets with UPDATE Message
+  Error / Optional Attribute Error (3/9) carrying the `MP_REACH_NLRI`
+  attribute as received, the same NOTIFICATION as other malformed
+  `MP_REACH_NLRI` next hops. The reset is counted in
+  `bgp_update_malformed_total{disposition="session_reset"}`. That the
+  decoder could still locate the NLRI does not change the disposition.
+  Earlier releases dropped such an UPDATE with only a log line.
+- Receiving behavior of other implementations for that case, from their
+  source: ExaBGP 5.0.13 and OpenBGPD 9.2 also reset the session, BIRD 3.3.2
+  discards the routes, and FRR 10.7.1 and GoBGP v4.9.0 accept them. GoBGP
+  and ExaBGP send IPv4 routes with an IPv6 next hop without checking the
+  capability, so a peer misconfigured that way against a rustbgpd neighbor
+  that does not advertise Extended Next Hop has its session reset.
 - See ADR-0037 for the IPv4-unicast behavior.
 
 ---

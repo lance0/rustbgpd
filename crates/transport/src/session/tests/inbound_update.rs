@@ -1,35 +1,55 @@
 use super::*;
 
+/// RFC 4760 §4 / RFC 8950 §4: Extended Next Hop governs only the next-hop
+/// encoding, never whether IPv4 unicast may use the MP attributes. A route
+/// announced in the classic body and withdrawn by an IPv4 `MP_UNREACH_NLRI`
+/// must be withdrawn whether or not Extended Next Hop was negotiated.
 #[tokio::test]
-async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
-    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    let negotiated = negotiated_session(65002, false);
-    session.negotiated = Some(Arc::new(negotiated));
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::MpReachNlri(MpReachNlri {
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
-            link_local_next_hop: None,
-            announced: vec![NlriEntry {
-                path_id: 0,
-                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-            }],
-            flowspec_announced: vec![],
-            evpn_announced: vec![],
-            bgpls_announced: vec![],
-            labeled_announced: vec![],
-            vpn_announced: vec![],
-            rtc_announced: vec![],
-        }),
-    ];
-    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
-    session.process_update(update).await;
-    assert!(rib_rx.try_recv().is_err());
+async fn ipv4_mp_unreach_withdraws_body_route_with_or_without_extended_nexthop() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    for extended_nexthop in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        install_test_negotiated_session(&mut session, negotiated_session(65002, extended_nexthop));
+        rfc7606_drain(&mut rib_rx);
+
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+            .await;
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("ENH={extended_nexthop}: expected the body announcement");
+        };
+        assert_eq!(announced.len(), 1, "ENH={extended_nexthop}");
+        assert_eq!(session.known_prefix_count(), 1, "ENH={extended_nexthop}");
+
+        // MP_UNREACH_NLRI: AFI 1, SAFI 1, withdrawn 203.0.113.0/24.
+        session
+            .process_update(UpdateMessage {
+                withdrawn_routes: Bytes::new(),
+                path_attributes: Bytes::from_static(&[0x80, 15, 7, 0, 1, 1, 24, 203, 0, 113]),
+                nlri: Bytes::new(),
+            })
+            .await;
+        let RibUpdate::RoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("ENH={extended_nexthop}: IPv4 MP_UNREACH must reach the RIB");
+        };
+        assert!(announced.is_empty(), "ENH={extended_nexthop}");
+        assert_eq!(
+            withdrawn,
+            vec![(Prefix::V4(prefix), 0)],
+            "ENH={extended_nexthop}"
+        );
+        assert_eq!(session.known_prefix_count(), 0, "ENH={extended_nexthop}");
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert_single_malformed_disposition(&session, "none");
+    }
 }
 
 #[tokio::test]
