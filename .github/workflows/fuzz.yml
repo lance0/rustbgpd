@@ -40,6 +40,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ steps.nightly.outputs.toolchain }}
+      - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Restore bounded wire corpus cache
