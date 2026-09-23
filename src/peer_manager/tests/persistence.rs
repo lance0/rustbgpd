@@ -94,6 +94,9 @@ fn observable_session(
 struct PersistenceRig {
     dir: tempfile::TempDir,
     config_path: std::path::PathBuf,
+    /// A persister handle for [`Self::persister_drained`]; the bridge owns the
+    /// production sender.
+    mutation_tx: mpsc::Sender<crate::config_persister::ConfigMutation>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_rx: mpsc::Receiver<RibUpdate>,
     service: rustbgpd_api::NeighborService,
@@ -185,7 +188,7 @@ hold_time = 90
         tokio::spawn(crate::reload::run_config_bridge(
             event_rx,
             replace_rx,
-            mutation_tx,
+            mutation_tx.clone(),
             config,
         ));
 
@@ -226,6 +229,7 @@ hold_time = 90
         Self {
             dir,
             config_path,
+            mutation_tx,
             peer_mgr_tx,
             rib_rx,
             service,
@@ -260,6 +264,30 @@ hold_time = 90
         self.dir.path().join("config.toml.tmp")
     }
 
+    /// Wait until the persister has finished every mutation already queued
+    /// to it.
+    ///
+    /// A mutation the actor rejects after staging answers its caller before
+    /// the persister has run the bridge's `DiscardStagedConfig`, whose unlink
+    /// runs on the blocking pool; the caller can still see the stage's temp
+    /// file. The persister handles mutations in order, so one `InspectCurrent`
+    /// round trip settles everything queued ahead of it. That discard is
+    /// queued once the bridge has handled any later config event, so a
+    /// caller orders it by sending one first.
+    async fn persister_drained(&self) {
+        let (reply, settled) = oneshot::channel();
+        self.mutation_tx
+            .send(crate::config_persister::ConfigMutation::InspectCurrent(
+                reply,
+            ))
+            .await
+            .expect("config persister alive");
+        tokio::time::timeout(Duration::from_secs(10), settled)
+            .await
+            .expect("config persister must drain, not hang")
+            .expect("config persister kept the inspect reply");
+    }
+
     /// Take write permission away from the config *directory* so the real
     /// staging write fails with `EACCES`.
     ///
@@ -268,8 +296,19 @@ hold_time = 90
     /// produce. Probing with an actual write is the honest check: the whole
     /// premise is that writing fails, so ask the filesystem rather than
     /// guessing from the effective uid.
-    fn seal_config_dir(&self) -> bool {
+    ///
+    /// Drains the persister first. An earlier rejected mutation's discard
+    /// still in flight would otherwise hit the sealed directory, leave its
+    /// temp file behind, and let the next stage reopen that file instead of
+    /// failing, so the scenario would test a commit failure rather than a
+    /// staging failure.
+    async fn seal_config_dir(&self) -> bool {
         use std::os::unix::fs::PermissionsExt;
+        self.persister_drained().await;
+        assert!(
+            !self.staged_temp_path().exists(),
+            "no stage may be outstanding when the config directory is sealed"
+        );
         std::fs::set_permissions(self.dir.path(), std::fs::Permissions::from_mode(0o500))
             .expect("seal config dir");
         let probe = self.dir.path().join("write-probe");
@@ -588,7 +627,7 @@ async fn presence_create_rejections_leave_no_disk_history_or_live_half_state() {
     assert_eq!(rig.config_bytes(), config_before);
     assert_eq!(rig.session_history().await, history_before);
 
-    if !rig.seal_config_dir() {
+    if !rig.seal_config_dir().await {
         return;
     }
     let persistence_error = rig
@@ -728,7 +767,7 @@ async fn neighbor_delete_persistence_failure_leaves_the_session_untouched() {
     let before_observable = observable_session(&before);
     let config_before = rig.config_bytes();
 
-    if !rig.seal_config_dir() {
+    if !rig.seal_config_dir().await {
         return;
     }
 
@@ -786,7 +825,7 @@ async fn neighbor_add_persistence_failure_creates_no_session() {
     );
     let config_before = rig.config_bytes();
 
-    if !rig.seal_config_dir() {
+    if !rig.seal_config_dir().await {
         return;
     }
 
