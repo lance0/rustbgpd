@@ -891,8 +891,15 @@ fn max_prefix_on_command_peer_handle(
                     false
                 }
                 PeerCommand::QueryState { reply } => {
+                    // A CollisionDump target is one side of a detectable
+                    // collision, so it must hold a connection (RFC 4271 §6.8).
+                    let fsm_state = if trigger == MaxPrefixTrigger::CollisionDump {
+                        SessionState::OpenConfirm
+                    } else {
+                        SessionState::Idle
+                    };
                     let _ = reply.send(PeerSessionState {
-                        fsm_state: SessionState::Idle,
+                        fsm_state,
                         peer_ip: peer_addr,
                         peer_asn: Some(65002),
                         prefix_count: 0,
