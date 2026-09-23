@@ -1202,9 +1202,14 @@ carries inactive (absent), unlimited (zero), or finite.
   so ordinary eBGP export strips it
   under the non-transitive rule in "Extended Communities — non-transitive
   eBGP export" below unless `send_non_transitive_extended_communities =
-  true`, while route-server-client export preserves it — an operator who
-  tags RS-client exports with `OV_*` owns the draft's §6 removal
-  requirement.
+  true`, while route-server-client export preserves it (RFC 7947 §2.2.4
+  transparency). The shipped examples do not signal validation state to
+  members: the route-server example's `hygiene.rpol` adds no `OV_*`
+  community. rpol can still add one, but an operator whose policy tags
+  routes that reach another AS contradicts the draft's §6: "Operators
+  MUST NOT signal RPKI-derived validation states using BGP Path
+  Attributes carried over EBGP sessions across administrative
+  boundaries."
 - See ADR-0034.
 
 ---
