@@ -8,8 +8,18 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 Parser and usage errors, such as an unknown flag or malformed neighbor address,
 exit with code `2` before connecting. Argument validation after parsing, such as
 an out-of-range `top --interval` or an empty policy-chain list, keeps exit code
-`1`, as do connection and execution failures. Commands with detailed exit codes
-document them in `--help`; those codes apply after parsing.
+`1`, as do connection and execution failures and a declined confirmation
+prompt. Commands with detailed exit codes document them in `--help`; those codes
+apply after parsing.
+
+`rbgp shutdown`, a global policy-chain change, and an all-peers `rbgp gshut`
+change every session at once. When stdin and stdout are both terminals, they
+name the target endpoint and scope and ask `[y/N]` first; any answer other than
+`y` or `yes` aborts with exit code `1` and changes nothing. `-y`/`--yes` skips
+the prompt. Non-interactive runs, such as scripts and pipelines, never prompt.
+Pass `--global` or `--all` to select the daemon-wide scope explicitly; omitting
+both it and `--neighbor` still selects that scope but prints a deprecation
+warning on stderr, and a future release will reject it as a usage error.
 
 ## Commands
 
@@ -218,10 +228,10 @@ rbgp policy get <name>
 rbgp policy set <name> --from-file policy.json
 rbgp policy delete <name>
 rbgp policy chain show [--neighbor <addr>]
-rbgp policy chain set-import [--neighbor <addr>] <names...>
-rbgp policy chain set-export [--neighbor <addr>] <names...>
-rbgp policy chain clear-import [--neighbor <addr>]
-rbgp policy chain clear-export [--neighbor <addr>]
+rbgp policy chain set-import [--global | --neighbor <addr>] [--yes] <names...>
+rbgp policy chain set-export [--global | --neighbor <addr>] [--yes] <names...>
+rbgp policy chain clear-import [--global | --neighbor <addr>] [--yes]
+rbgp policy chain clear-export [--global | --neighbor <addr>] [--yes]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
@@ -484,9 +494,9 @@ rbgp watch              # legacy route-update stream
 
 rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS
 rbgp orr                # RFC 9107 ORR per-vantage status
-rbgp gshut [--neighbor <addr>] [--clear]   # RFC 8326 graceful-shutdown toggle
+rbgp gshut [--all | --neighbor <addr>] [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
-rbgp shutdown
+rbgp shutdown [--reason <text>] [--yes]
 rbgp completions bash
 rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 ```

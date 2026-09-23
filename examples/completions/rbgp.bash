@@ -5519,7 +5519,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__gshut)
-            opts="-s -j -h --peer --neighbor --clear --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --peer --neighbor --all --clear --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8813,7 +8813,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__chain__subcmd__clear__subcmd__export)
-            opts="-s -j -h --peer --neighbor --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --peer --neighbor --global --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8855,7 +8855,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__chain__subcmd__clear__subcmd__import)
-            opts="-s -j -h --peer --neighbor --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --peer --neighbor --global --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8995,7 +8995,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__chain__subcmd__set__subcmd__export)
-            opts="-s -j -h --peer --neighbor --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --peer --neighbor --global --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -9037,7 +9037,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__chain__subcmd__set__subcmd__import)
-            opts="-s -j -h --peer --neighbor --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --peer --neighbor --global --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -10917,7 +10917,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__shutdown)
-            opts="-s -j -h --reason --addr --token-file --json --json-version --json-lines --no-color --pager --help"
+            opts="-y -s -j -h --reason --yes --addr --token-file --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

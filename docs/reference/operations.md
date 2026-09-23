@@ -3592,7 +3592,7 @@ rbgp neighbor-set set transit-peers --from-file ns.json
 rbgp peer-group set transit --from-file pg.json
 
 # Apply chains globally or per-neighbor
-rbgp policy chain set-import import-from-transit
+rbgp policy chain set-import --global import-from-transit
 rbgp policy chain set-import import-from-transit --neighbor 10.0.0.2
 rbgp policy chain show --neighbor 10.0.0.2
 
@@ -3607,13 +3607,23 @@ unknown fields are rejected at parse time. Empty
 `chain set-{import,export}` is rejected — use the matching `clear-*`
 subcommand to drop a chain.
 
+A global chain change applies to every neighbor without its own chain and is
+persisted. Select the scope with `--global` or `--neighbor`; omitting both
+still selects the global chain but prints a deprecation warning, and a future
+release will reject it. When stdin and stdout are both terminals, a global
+change names the endpoint and asks `[y/N]` first; `-y`/`--yes` skips the
+prompt, and non-interactive runs never prompt. A declined prompt exits `1`
+without changing anything.
+
 ### Graceful shutdown (daemon exit)
 
 ```bash
 rbgp shutdown
 ```
 
-Sends NOTIFICATION to all peers, writes GR marker, exits cleanly.
+Sends NOTIFICATION to all peers, writes GR marker, exits cleanly. On a
+terminal, `rbgp shutdown` names the endpoint and asks `[y/N]` first; pass
+`-y`/`--yes` to skip the prompt. Non-interactive runs never prompt.
 
 ### RFC 8326 graceful-shutdown community (planned maintenance)
 
@@ -3632,7 +3642,7 @@ already moved.
 rbgp gshut --neighbor 10.0.0.2
 
 # Or drain every currently-managed peer at once
-rbgp gshut
+rbgp gshut --all
 
 # Wait for traffic to shift (operator-defined, typically 30s-5min
 # depending on convergence in the upstream AS), then proceed with
@@ -3640,8 +3650,12 @@ rbgp gshut
 
 # Clear the community when maintenance ends
 rbgp gshut --neighbor 10.0.0.2 --clear
-rbgp gshut --clear
+rbgp gshut --all --clear
 ```
+
+An all-peers change asks `[y/N]` first when stdin and stdout are both
+terminals; `-y`/`--yes` skips it. `rbgp gshut` without `--all` or
+`--neighbor` still selects every peer but prints a deprecation warning.
 
 The toggle is **operator-runtime state**, not config — it lives on
 the `ManagedPeer` desired-state record, mirrors to the live session,

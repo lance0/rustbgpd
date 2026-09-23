@@ -175,7 +175,7 @@ semantics and verification in
 1. **Confirm RS2 is healthy and consistent** (the diff above, all
    member sessions established). Two-instance redundancy means never
    starting maintenance while the survivor is degraded.
-2. **Drain RS1:** `rbgp gshut` (all peers). Outbound paths get the
+2. **Drain RS1:** `rbgp gshut --all`. Outbound paths get the
    `GRACEFUL_SHUTDOWN` community; members honoring it demote those
    paths, so the RS2-learned copies win *before* anything closes.
 3. **Wait for the shift** (operator-defined; verify on a member:
@@ -184,7 +184,7 @@ semantics and verification in
 4. **Do the maintenance.** Members stay converged via RS2.
 5. **Restore RS1**, wait for sessions and full table
    (`rbgp summary`, `rbgp rib sent <member> --count` plausible).
-6. **Clear the drain:** `rbgp gshut --clear` (the toggle does not
+6. **Clear the drain:** `rbgp gshut --all --clear` (the toggle does not
    persist across restart by design — after a restart-type
    maintenance, step 6 is a no-op, but run it when the daemon kept
    running). Re-run the consistency check.

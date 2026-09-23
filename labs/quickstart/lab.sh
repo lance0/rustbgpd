@@ -62,7 +62,7 @@ case "$1" in
         echo 'Building and starting the quickstart lab.'
         "${compose[@]}" up -d --build
         wait_for healthy
-        rb policy chain set-import lab-permit-all-import
+        rb policy chain set-import --global lab-permit-all-import
         wait_for verify
         echo 'Ready: FRR is Established and 192.168.1.0/24 is selected.'
         ;;
@@ -74,7 +74,7 @@ case "$1" in
         echo 'Verified: FRR is Established and 192.168.1.0/24 is selected.'
         ;;
     break)
-        rb policy chain clear-import
+        rb policy chain clear-import --global
         wait_for rejected
         echo 'Import policy removed. Inspect the rejected routes with: just lab quickstart explain'
         ;;

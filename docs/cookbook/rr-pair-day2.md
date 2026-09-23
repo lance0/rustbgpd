@@ -118,7 +118,7 @@ lifecycle and failure states: [`OPERATIONS.md`](../reference/operations.md).
 ## Draining an RR for maintenance
 
 ```bash
-rbgp gshut                 # tag all outbound with GRACEFUL_SHUTDOWN (RFC 8326)
+rbgp gshut --all           # tag all outbound with GRACEFUL_SHUTDOWN (RFC 8326)
 # clients honoring 8326 de-pref this RR; then stop the daemon:
 rbgp shutdown              # writes the GR marker, notifies peers
 ```
