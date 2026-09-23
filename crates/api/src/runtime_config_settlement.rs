@@ -3442,16 +3442,19 @@ mod tests {
                 .1,
             &[
                 "Checkpoint::ReplaceBeforePublish",
-                "self.discard_staged()",
-                "let result = self.persist();",
+                "p.replace_ack(new_config)",
                 "if !drop_ack",
             ],
+        );
+        ordered(
+            persister.split_once("fn replace_ack(").unwrap().1,
+            &["self.discard_staged()", "let result = self.persist();"],
         );
         ordered(
             persister.split_once("CommitStagedConfig(ack)").unwrap().1,
             &[
                 "Checkpoint::StagedCommitBeforePublish",
-                "self.commit_staged()",
+                "Self::commit_staged",
                 "if !drop_ack",
             ],
         );
@@ -3460,7 +3463,7 @@ mod tests {
                 .split_once("StageConfigAck(new_config, ack)")
                 .unwrap()
                 .1,
-            &["Checkpoint::StageBeforeAck", "self.stage(new_config)"],
+            &["Checkpoint::StageBeforeAck", "p.stage(new_config)"],
         );
     }
 
