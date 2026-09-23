@@ -34,14 +34,20 @@ rustbgpd --init-config edge | \
 sudo chmod 0640 /etc/rustbgpd/config.toml
 sudo chgrp rustbgpd /etc/rustbgpd/config.toml
 
-# Kernel-dataplane hosts only:
-sudo install -d /etc/systemd/system/rustbgpd.service.d
-sudo install -m 0644 share/systemd/rustbgpd-dataplane.conf \
-  /etc/systemd/system/rustbgpd.service.d/rustbgpd-dataplane.conf
-
 rustbgpd --version && rbgp --version
 ```
 <!-- release-install-contract:tarball:end -->
+
+**Optional, kernel-dataplane hosts only.** Skip this unless the config
+programs the kernel (`[[fib_tables]]`, `install_blackhole_discard`, or the
+EVPN VTEP/IRB dataplane). The drop-in grants the service `CAP_NET_ADMIN`,
+which a control-plane-only install does not need:
+
+```bash
+sudo install -d /etc/systemd/system/rustbgpd.service.d
+sudo install -m 0644 share/systemd/rustbgpd-dataplane.conf \
+  /etc/systemd/system/rustbgpd.service.d/rustbgpd-dataplane.conf
+```
 
 Releases from v0.70.0 onward also publish a verified installer, `install.sh`,
 as a release asset (source:
@@ -97,9 +103,10 @@ rustbgpd --init-config lab > config.toml
 $EDITOR config.toml
 ```
 
-Set at least the local ASN, router ID, and peer address. The `edge` profile is
-an eBGP edge skeleton with a default-route-dropping import chain and a
-default-deny export chain to fill in. Each profile is validated through the
+For a real peer, set at least the local ASN, router ID, and peer address; the
+[test peer](#bring-up-a-test-peer) below needs only the peer address changed.
+The `edge` profile is an eBGP edge skeleton with a default-route-dropping
+import chain and a default-deny export chain to fill in. Each profile is validated through the
 real config loader before it is printed, and each passes
 `rustbgpd --check --strict` as emitted: `lab` is permit-all in both
 directions, but says so in an explicit chain rather than by omission.
@@ -130,17 +137,69 @@ For a production route-server, continue with
 the route-server cookbook, and [`rs-config-render`](../../tools/rs-config-render)
 for generated member inventories.
 
+### Bring up a test peer
+
+"Establish a session" needs something to peer with. If you do not have a lab
+router, run a throwaway FRR container on its own Docker network. It speaks
+eBGP as AS 65002 to the `lab` profile's AS 65001 and announces one prefix,
+`192.0.2.0/24`:
+
+```bash
+docker network create --subnet 172.31.254.0/24 rbgp-quickstart
+cat > frr.conf <<'EOF'
+router bgp 65002
+ no bgp ebgp-requires-policy
+ no bgp network import-check
+ neighbor 172.31.254.1 remote-as 65001
+ address-family ipv4 unicast
+  network 192.0.2.0/24
+ exit-address-family
+EOF
+docker run -d --name rbgp-quickstart-peer --network rbgp-quickstart \
+  --ip 172.31.254.2 --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+  -v "$PWD/frr.conf:/etc/frr/frr.conf:ro" quay.io/frrouting/frr:10.7.1 \
+  sh -c "sed -i 's/^bgpd=no/bgpd=yes/' /etc/frr/daemons && exec /usr/lib/frr/docker-start"
+
+# Point the lab profile's neighbor at the container.
+sed -i 's/^address = "10.0.0.2"/address = "172.31.254.2"/' config.toml
+```
+
+The host is `172.31.254.1` on that network, the address FRR expects the
+session from. If `172.31.254.0/24` is already in use on your host, pick
+another private subnet and replace every `172.31.254` in this block. The
+[Compose demo](../../examples/docker-compose) is the no-host alternative: it
+runs both routers in containers.
+
 ## 3. Validate and run
 
 ```bash
 # Validate config without starting the daemon.
 rustbgpd --check --strict config.toml
 
-# Preview what a config reload would change.
+# Preview what a config reload would change: edit a copy, then compare.
+sed 's/^hold_time = 90/hold_time = 30/' config.toml > new-config.toml
 rustbgpd --diff new-config.toml config.toml
 
-# Start the daemon.
+# Start the daemon in the foreground; use a second terminal for the steps
+# below. Raise the shell's soft open-file limit first: `rbgp doctor` fails a
+# daemon running with fewer than 4096.
+ulimit -n 65536
 rustbgpd config.toml
+```
+
+The `--diff` preview of that one-line edit, which exits 1 because the plan
+has changes (0 means there is nothing to reload):
+
+```text
+Reload-applied changes:
+
+  Neighbors:
+    ~ 172.31.254.2:
+        hold_time: 90 → 30  [session reset: OPEN renegotiation]
+
+SIGHUP reload route: generation (one owned runtime generation; a late failure restores the prior generation)
+
+Plan: 1 to change · 1 session will reset
 ```
 
 The daemon refuses to start when the BGP listener cannot bind on either
@@ -148,7 +207,8 @@ address family — with the starter's `listen_port = 179` that means an
 unprivileged run exits immediately with `Permission denied`. Either run as
 root, grant the binary the bind capability
 (`sudo setcap cap_net_bind_service=+ep $(command -v rustbgpd)`), or set an
-unprivileged `listen_port` (>= 1024) in the config for lab sessions.
+unprivileged `listen_port` (>= 1024) in the config for lab sessions. The test
+peer works with an unprivileged port because rustbgpd opens the session to it.
 
 ## 4. Verify
 
@@ -165,11 +225,22 @@ or named access needs explicit principals and roles; see
 export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 
 rbgp health
-rbgp summary    # alias for `rbgp neighbor` (--wide adds MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd)
+rbgp summary    # alias for `rbgp neighbor` (--wide adds Source/MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd)
 rbgp rib
 rbgp bfd       # BFD sessions, if configured
 rbgp top       # live TUI dashboard
 ```
+
+With the [test peer](#bring-up-a-test-peer), the session comes up within a
+few seconds of starting the daemon, and `rbgp summary` shows its one prefix:
+
+```text
+Neighbor     AS    State       Uptime   Rx Pfx Tx Pfx  Description
+172.31.254.2 65002 Established 00:00:02      1      0  lab-peer
+```
+
+`Tx Pfx 0` is expected: the only route came from that peer, and it is not
+advertised back to it.
 
 From the TUI peer detail, press `r` to open the on-demand route explorer: `v`
 cycles the global Best table and the peer's Received, Advertised, and Rejected
@@ -219,7 +290,9 @@ grants operator-tier `local-operator`; use its dedicated authenticated
 # which is rewritten in canonical form — see CONFIGURATION.md.
 rbgp neighbor 10.0.0.5 add --remote-asn 65005
 rbgp neighbor 203.0.113.2 add --remote-asn 65002 --role provider --strict-role
-rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --remote-asn 65101
+# A link-local peer carries its interface as a zone. Placeholder: replace
+# eth1 with the host's interface before running it.
+# rbgp neighbor fe80::5054:ff:fe00:1%eth1 add --remote-asn 65101
 
 # Create the peer group before adding a dynamic-neighbor accept range.
 # Omitting both password fields creates a passwordless group; on an existing
@@ -238,22 +311,27 @@ rbgp --json dynamic-neighbor list
 # Manage Linux unicast FIB-export tables.
 rbgp fib-table list
 
-# Explain why a route was selected as best.
-rbgp rib --prefix 10.0.0.0/24 --explain
+# Explain why the test peer's route was selected as best.
+rbgp rib --prefix 192.0.2.0/24 --explain
 
 # Inspect peer views with familiar route-server / RR terms.
-rbgp rib recv 10.0.0.5
-rbgp rib sent 10.0.0.5
+rbgp rib recv 172.31.254.2
+rbgp rib sent 172.31.254.2
 rbgp policy counters
 
 # Reload config after editing the file.
 kill -HUP $(pidof rustbgpd)
 
-# Graceful shutdown: writes the GR marker and notifies peers.
-rbgp shutdown
-
-# Support bundle for a bug report.
+# Support bundle for a bug report; it needs the daemon running.
 rbgp doctor
+
+# Graceful shutdown: writes the GR marker and notifies peers. On a terminal
+# it asks for confirmation first; --yes skips the prompt.
+rbgp shutdown --yes
+
+# Remove the test peer.
+docker rm -f rbgp-quickstart-peer
+docker network rm rbgp-quickstart
 ```
 
 Enable shell completions:
