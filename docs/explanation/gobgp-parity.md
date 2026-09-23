@@ -45,7 +45,7 @@ releases rather than carried forward from older measurements.
 | BGP-LS (RFC 9552) | Yes | Partial | ADR-0077 slice negotiates BGP-LS / BGP-LS VPN, stores opaque RFC 9552 NLRI/TLV objects, exposes them through `ListBgpLsRoutes` / `rbgp rib bgpls`, and reflects them to eligible negotiated peers; the received topology also feeds the RFC 9107 ORR SPF engine (`rbgp topology`, ADR-0095). Local IGP topology production remains deferred |
 | SR Policy | Yes | No | |
 | SRv6 MUP | Yes | No | |
-| Route Target Constraints (RFC 4684) | Yes | Yes | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), RFC-faithful 96-bit prefix matching, self-originated default membership, RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
+| Route Target Constraints (RFC 4684) | Yes | Partial (RR) | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), RFC-faithful 96-bit prefix matching, self-originated default membership (no membership derived from local VRF or EVPN-instance import RTs), RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
 
 ## Core Protocol
 
@@ -68,7 +68,7 @@ releases rather than carried forward from older measurements.
 | Extended Messages (RFC 8654) | Yes | Yes | GoBGP upstream support was added in v4.7.0; no rustbgpd/GoBGP interop receipt is claimed here |
 | Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | BGP unnumbered (interface-scoped IPv6 link-local) | Yes | Yes | Both carry IPv4 unicast over RFC 8950 on link-local interface neighbors. GoBGP uses interface autodiscovery (`neighbor-interface`, derives the peer from the link-local); rustbgpd v1 uses static `address` + `interface` (FRR-style autodiscovery deferred) and additionally installs the scoped Linux FIB next-hop with the egress `dev`. M53 validates rustbgpd against FRR. ADR-0069 |
-| Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
+| Admin Shutdown Comm (RFC 9003, obsoletes 8203) | Yes | Yes | Reason text in NOTIFICATION |
 | BGP Roles + Only-to-Customer (RFC 9234) | No | Yes | rustbgpd negotiates the OPEN Role capability, applies §5 strict-mode rejection on mismatch, and enforces OTC ingress / egress rules per §6 with a structured `OtcRouteBlockedEvent` payload on `SubscribeFromEvent` alongside the `bgp_otc_routes_blocked_total{peer, reason}` counter and per-peer scalar. GoBGP does not implement RFC 9234 (no Role capability in `bgp.go`; open feature request osrg/gobgp#3244). ADR-0071, M55. |
 
 ## Path Attributes
@@ -134,7 +134,7 @@ releases rather than carried forward from older measurements.
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
 | Import-policy explain | No | Yes (opt-in) | `ExplainImportPolicy` RPC + `rbgp policy explain` — per-prefix PERMIT/DENY/WITHDRAWN/EVICTED/STALE/NOT_SEEN decision trace at the transport eval site, IPv4/IPv6 unicast (ADR-0073). Off unless `[policy.explain] enabled = true`; the decision cache is per session |
-| RPKI management | Yes | Partial | `RpkiService` `ListCaches` (cache status and accepted epoch) and `ValidateRouteOrigin`, plus metrics; caches are config-file only, no gRPC RPKI CRUD |
+| RPKI management | Yes | Partial | `RpkiService` `ListCaches` (cache status and accepted epoch), `ValidateRouteOrigin`, `LookupAspa`, and `VerifyAsPath`, plus metrics; caches are config-file only, no gRPC RPKI CRUD |
 | BMP management | Yes | Partial | Collectors are config-file only, no runtime gRPC add/remove; experimental `ReplayOutbound` (`rbgp neighbor PEER replay-out`) re-announces one peer's unicast routes and re-baselines eligible `rib_out_post` collectors for that peer |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
 | Zebra/FRR integration | Yes | No | |
@@ -155,7 +155,7 @@ releases rather than carried forward from older measurements.
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
 | Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
-| gNMI / OpenConfig telemetry | No | Yes | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
+| gNMI / OpenConfig telemetry | No | Partial | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
 
 [^bmp-views]: Checked 2026-09-09: GoBGP 4.9.0's
@@ -190,7 +190,7 @@ releases rather than carried forward from older measurements.
 | Rustc-style config errors | No | Yes | Source-line spans with column markers on validation errors |
 | Docker image | Yes | Yes | |
 | Route server client mode | Yes | Yes | Transparent eBGP export for unicast plus FlowSpec AS_PATH transparency |
-| Fuzz testing | Yes | Yes | Both ship in-tree targets. GoBGP v4.9.0 has Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and ZAPI decoders plus policy community matchers (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run instructions in `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under the ordinary `go test` CI run and extend only under an explicit `-fuzz` invocation. rustbgpd has libFuzzer targets in `crates/*/fuzz/fuzz_targets` covering the `wire`, `rpki`, `mrt`, `bfd`, `evpn`, and `policy` crates, run nightly by `fuzz.yml` |
+| Fuzz testing | Yes | Yes | Both ship in-tree targets. GoBGP v4.9.0 has Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and ZAPI decoders plus policy community matchers (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run instructions in `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under the ordinary `go test` CI run and extend only under an explicit `-fuzz` invocation. rustbgpd has libFuzzer targets in `crates/*/fuzz/fuzz_targets` covering the `wire`, `rpki`, `mrt`, `bfd`, `evpn`, and `policy` crates plus the CLI's `rbgp diff snapshot` MRT/BMP converters, run nightly by `fuzz.yml` |
 | Interop test suite | Yes | Yes | Both ship one. GoBGP v4.9.0 has `test/scenario_test/` — docker-driven scenario modules with foreign-daemon drivers in `test/lib/` (ExaBGP, Quagga, YABGP, BIRD, bagpipe) — and `ci.yml` runs each module as its own job on every push and pull request. rustbgpd has containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD, ExaBGP, and OpenBGPD, gated per pull request by `interop.yml` |
 
 ## Best-Path Selection

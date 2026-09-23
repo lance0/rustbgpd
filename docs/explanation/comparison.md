@@ -18,10 +18,10 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | | rustbgpd | FRR (bgpd) | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | Language | Rust | C | C | Go | C |
-| License | MIT | GPL-2.0 | GPL-2.0+ | Apache-2.0 | ISC |
+| License | MIT OR Apache-2.0 | GPL-2.0 | GPL-2.0+ | Apache-2.0 | ISC |
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
-| Multithreaded | Yes (tokio) | No | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
+| Multithreaded | Yes (tokio) | Partial (packet I/O + keepalive pthreads; route processing single-threaded) | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
 | Latest release (verified 2026-09-18)[^versions] | v0.70.2 (2026-09-18) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
 
 [^versions]: Dates are the upstream release announcements: FRR
@@ -49,7 +49,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | IPv6 Labeled Unicast | Partial[^mpls-rr] | Yes | Yes | Yes | No |
 | VPNv4 (RFC 4364) | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
 | VPNv6 | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
-| RT-Constrain (RFC 4684) | Partial[^mpls-rr] | Yes | Yes | Yes | No |
+| RT-Constrain (RFC 4684) | Partial[^rtc] | Yes | Yes | Yes | No |
 | L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Partial[^evpn-bird] | Yes | RIB only[^evpn-openbgpd] |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
@@ -73,6 +73,12 @@ IPv4/IPv6 `Prefix` routes.
 
 [^mpls-rr]: RR/controller-feed only. No VRF import, MPLS label forwarding,
     CE-facing attachment, or MPLS FIB programming.
+
+[^rtc]: Reflector side complete: RT membership from a peer that negotiated
+    RT-Constrain filters both VPNv4/VPNv6 and EVPN export to that peer (EVPN
+    Type 4 matches on its ES-Import RT, RFC 7432 §7.6). Local membership
+    origination is the default (zero-length) route only; no membership is
+    derived from local VRF or EVPN-instance import RTs.
 
 [^evpn]: rustbgpd EVPN is **alpha**; its local VTEP and dataplane support are
     Linux/VXLAN-only. Shipped and
@@ -144,7 +150,7 @@ IPv4/IPv6 `Prefix` routes.
 | BGP unnumbered (interface IPv6 link-local)[^unnum] | Yes | Yes | Yes | Yes | No |
 | Route Reflector (RFC 4456) | Yes | Yes | Yes | Yes | Yes |
 | Confederation (RFC 5065) | No | Yes | Yes | Yes | No |
-| Admin Shutdown (RFC 8203) | Yes | Yes | Yes | Yes | Yes |
+| Admin Shutdown (RFC 9003, obsoletes 8203) | Yes | Yes | Yes | Yes | Yes |
 | BGP Roles + OTC (RFC 9234) | Yes[^roles] | Yes | Yes | No | Yes |
 
 [^roles]: rustbgpd's v1 Roles + Only-to-Customer implementation covers static
@@ -424,7 +430,8 @@ member individually.
 [^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
     differs. rustbgpd carries libFuzzer targets in
     `crates/*/fuzz/fuzz_targets` covering the wire decoder along with the
-    RPKI, MRT, BFD, EVPN, and policy crates, run nightly by `fuzz.yml`.
+    RPKI, MRT, BFD, EVPN, and policy crates and the CLI's `rbgp diff snapshot`
+    MRT/BMP converters, run nightly by `fuzz.yml`.
     GoBGP `v4.9.0` carries Go-native fuzz targets covering the BGP, BMP,
     MRT, RTR, and ZAPI decoders plus policy community matchers
     (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run

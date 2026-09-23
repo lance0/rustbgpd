@@ -231,7 +231,7 @@ gRPC request
 | Route distribution | `crates/rib/src/manager/distribution/` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
-| FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/mod.rs` — `handle_query_fib_install_candidates` |
+| FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/queries.rs` — `handle_query_fib_install_candidates` |
 | Unicast Linux FIB install (ECMP, weighted multipath, scoped link-local `dev`) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence) — ADR-0061 / 0066 / 0068 / 0069 |
 | BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880, ADR-0067) |
 | BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (RFC 5881/5883 UDP encapsulation, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
