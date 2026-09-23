@@ -201,6 +201,51 @@ fn hygiene_never_tags_rpki_validation_state() {
     }
 }
 
+/// Pins today's behavior: `reject_invalid: false` drops both RPKI-invalid
+/// rejects, so invalid routes are accepted and announced to members
+/// (arouteserver withholds them on export instead).
+#[test]
+fn rpki_invalid_rejects_follow_reject_invalid() {
+    for reject_invalid in [true, false] {
+        for blackhole in [false, true] {
+            let mut value = healthy_value();
+            set_path(
+                &mut value,
+                &[
+                    "cfg",
+                    "filtering",
+                    "rpki_bgp_origin_validation",
+                    "reject_invalid",
+                ],
+                reject_invalid.into(),
+            );
+            if blackhole {
+                set_blackhole_policy(&mut value, "policy_ipv4", Some("propagate-unchanged"));
+                set_path(
+                    &mut value,
+                    &["cfg", "communities", "blackholing", "std"],
+                    serde_yaml::Value::String("65500:666".to_owned()),
+                );
+            }
+            let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+            let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+            assert_eq!(
+                hygiene.contains("term reject-rpki-invalid "),
+                reject_invalid,
+                "reject_invalid = {reject_invalid}, blackhole = {blackhole}:\n{hygiene}"
+            );
+            if blackhole {
+                let client = &rendered.files["policy/client-as4242-1.rpol"];
+                assert_eq!(
+                    client.contains("term reject-ordinary-rpki-invalid "),
+                    reject_invalid,
+                    "reject_invalid = {reject_invalid}:\n{client}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn receipt_carries_cardinalities_and_fingerprint() {
     let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
