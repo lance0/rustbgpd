@@ -65,6 +65,8 @@ frr_evpn_negotiated() {
 # Wait helpers
 # ---------------------------------------------------------------------------
 
+# Not test-lib's wait_frr_established: polls the L2VPN/EVPN summary, and stays
+# silent because [test 1/4] records the counted verdict.
 wait_established() {
     log "Waiting for BGP L2VPN/EVPN session to reach Established..."
     for i in $(seq 1 45); do

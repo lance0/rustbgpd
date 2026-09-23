@@ -62,22 +62,6 @@ grpc_metrics() {
 # Wait helpers
 # ---------------------------------------------------------------------------
 
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "BGP session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "BGP session did not reach Established within 90s"
-    return 1
-}
-
 wait_routes() {
     local expected=$1
     log "Waiting for $expected routes in RIB..."
@@ -297,7 +281,7 @@ main() {
     patch_rpki_config
     start_with_custom_config
 
-    wait_established || exit 1
+    wait_frr_established "$FRR" 10.0.0.1 || exit 1
     wait_routes 3 || exit 1
     wait_rpki_validation || exit 1
 

@@ -77,25 +77,6 @@ get_gr_active_count() {
     echo "$total"
 }
 
-# ---------------------------------------------------------------------------
-# Wait for BGP session to reach Established
-# ---------------------------------------------------------------------------
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session did not reach Established within 90s"
-    return 1
-}
-
 # Wait for routes to appear in the RIB
 wait_routes() {
     local expected=$1
@@ -136,7 +117,7 @@ wait_rustbgpd_state() {
 test_gr_capability_negotiated() {
     log "Test 1: GR capability negotiated with FRR"
 
-    wait_established || return 1
+    wait_frr_established "$FRR" 10.0.0.1 || return 1
     wait_routes 3 || return 1
 
     # Verify FRR sees GR capability from rustbgpd
@@ -219,7 +200,7 @@ test_eor_clears_stale() {
     # watchfrr should restart bgpd automatically
     log "Waiting for FRR bgpd to restart (via watchfrr) and session to re-establish..."
 
-    wait_established || {
+    wait_frr_established "$FRR" 10.0.0.1 || {
         fail "Session did not re-establish after peer restart"
         return 1
     }

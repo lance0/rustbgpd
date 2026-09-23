@@ -29,6 +29,10 @@ if [ "${1:-}" = internal-activate ]; then
 fi
 
 TOPO=m97-ixp-manager-lifecycle
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/interop/scripts/test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
+
 RUST=clab-${TOPO}-rustbgpd
 IXP=clab-${TOPO}-ixp-manager
 MYSQL=clab-${TOPO}-mysql
@@ -63,8 +67,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-fail() { printf 'M97 FAIL: %s\n' "$*" >&2; exit 1; }
-ok() { printf 'M97 PASS: %s\n' "$*"; }
+# Fail fast: every later step builds on the state the failed check proves.
+fail() {
+    fail=$((fail + 1))
+    printf "\033[1;31m  [%s] FAIL\033[0m %s\n" "$(_ts)" "$*"
+    print_summary
+}
 
 for container in "$RUST" "$IXP" "$MYSQL" "$FRR"; do
     docker inspect "$container" >/dev/null 2>&1 || fail "$container is not running"
@@ -472,3 +480,4 @@ docker exec "$FRR" vtysh -c 'show bgp neighbors 2001:db8::8 json' \
     | jq -e '.["2001:db8::8"].bgpState == "Established"' >/dev/null \
     || fail "FRR does not report the IPv6 authenticated session Established"
 ok "M97 two-handle listeners, private state, cleanup, and redaction complete"
+print_summary
