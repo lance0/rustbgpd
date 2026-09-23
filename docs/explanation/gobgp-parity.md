@@ -45,7 +45,7 @@ releases rather than carried forward from older measurements.
 | BGP-LS (RFC 9552) | Yes | Partial | ADR-0077 slice negotiates BGP-LS / BGP-LS VPN, stores opaque RFC 9552 NLRI/TLV objects, exposes them through `ListBgpLsRoutes` / `rbgp rib bgpls`, and reflects them to eligible negotiated peers; the received topology also feeds the RFC 9107 ORR SPF engine (`rbgp topology`, ADR-0095). Local IGP topology production remains deferred |
 | SR Policy | Yes | No | |
 | SRv6 MUP | Yes | No | |
-| Route Target Constraints (RFC 4684) | Yes | Yes | Strict per-peer VPN reflection filtering (a negotiated peer with empty interest receives nothing), RFC-faithful 96-bit prefix matching, self-originated default membership, RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
+| Route Target Constraints (RFC 4684) | Yes | Yes | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), RFC-faithful 96-bit prefix matching, self-originated default membership, RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
 
 ## Core Protocol
 
@@ -114,7 +114,7 @@ releases rather than carried forward from older measurements.
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
 | Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.9.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd enforces RFC 8212 when opted in, by either `[global] ebgp_requires_policy = true` or the ADR-0119 activated secure default — root `config_epoch = 2` with the boolean omitted resolves to effective `true`. Epoch-less and `config_epoch = 1` omission stay effective `false` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
-| Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
+| Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over a retained post-policy Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
 
 ## gRPC API

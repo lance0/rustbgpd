@@ -1,0 +1,23 @@
+[package]
+name = "rustbgpctl-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+
+[dependencies.rustbgpctl]
+path = ".."
+
+[[bin]]
+name = "ribsnap_convert"
+path = "fuzz_targets/ribsnap_convert.rs"
+test = false
+doc = false
+
+[workspace]

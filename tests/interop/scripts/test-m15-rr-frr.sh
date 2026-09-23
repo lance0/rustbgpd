@@ -101,22 +101,6 @@ stable_receipt_baseline() {
     return 1
 }
 
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors $FRR_PEER json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session did not reach Established within 90s"
-    return 1
-}
-
 wait_routes() {
     local expected=$1
     log "Waiting for $expected routes in RIB..."
@@ -340,7 +324,7 @@ main() {
     resolve_grpc_addr
     start_rustbgpd
 
-    wait_established || true
+    wait_frr_established "$FRR" "$FRR_PEER" || true
     wait_routes 2 || true
 
     test_initial_routes

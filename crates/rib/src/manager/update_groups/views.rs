@@ -249,7 +249,7 @@ impl RibManager {
         // The member's Φ: the per-peer path's RT gate precedes the policy
         // evaluation, so an RT-failed entry records NO eval — the replay
         // must count only Φ-passing permits and denials (design §2.4).
-        let vpn_filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
+        let vpn_filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         let mut rows: Vec<(Option<String>, PolicyAction, u64)> = Vec::new();
         {
             let Some(group) = self.group_ribs.get(&gid) else {
@@ -468,7 +468,7 @@ impl RibManager {
     pub(in crate::manager) fn grouped_vpn_advertised_count(&self, peer: IpAddr) -> Option<usize> {
         let gid = self.vpn_grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
-        let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
+        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
                 .inspect(|_| self.replacement_checkpoint(false))
@@ -498,7 +498,7 @@ impl RibManager {
         let gid = self.grouped_member_of(peer)?;
         let group = self.group_ribs.get(&gid)?;
         let mut counts = group.family_counts_for(peer);
-        let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
+        let filter = self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer));
         if let Some(rejected) = self.peer_unexportable.get(&peer) {
             for key in rejected {
                 self.replacement_checkpoint(false);

@@ -31,25 +31,6 @@ grpc_list_routes_for_peer() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListReceivedRoutes 2>/dev/null
 }
 
-# ---------------------------------------------------------------------------
-# Wait for BGP session to reach Established
-# ---------------------------------------------------------------------------
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "Session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "Session did not reach Established within 90s"
-    return 1
-}
-
 # Wait for routes to appear in the RIB (FRR may take a moment to send UPDATEs)
 wait_routes() {
     local expected=$1
@@ -73,7 +54,7 @@ wait_routes() {
 test_routes_received() {
     log "Test 1: Routes appear in RIB after session establishment"
 
-    wait_established || return 1
+    wait_frr_established "$FRR" 10.0.0.1 || return 1
     wait_routes 3 || return 1
 
     local routes
@@ -192,7 +173,7 @@ test_peer_restart() {
     log "Waiting for watchfrr to restart bgpd and rustbgpd to reconnect..."
 
     # Wait for session re-establishment and routes
-    wait_established || return 1
+    wait_frr_established "$FRR" 10.0.0.1 || return 1
     wait_routes 3 || return 1
 
     ok "RIB repopulated after peer restart"

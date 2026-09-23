@@ -182,7 +182,13 @@ $ rbgp policy test edge.rpol --policy "customer-in(150)" \
 ```
 
 Output: accept/reject counts, per-term hit counters, and before/after
-attribute diffs for the first N modified routes.
+attribute diffs for the first N modified routes. An import dry run
+evaluates only the retained post-policy Adj-RIB-In (routes import policy
+admitted when they were received or last re-evaluated; during GR/LLGR
+retention or before a pending re-evaluation completes, that can include
+routes the installed policy would now reject). It cannot show routes the
+candidate would newly admit; to see recent rejections,
+run `rbgp rib received <peer> --rejected`.
 
 ## 4. Hot-swap under traffic
 

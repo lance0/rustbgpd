@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PULL_REQUEST = "pull_request"
 FUZZ_ROOTS = (
     "crates/bfd/fuzz",
+    "crates/cli/fuzz",
     "crates/evpn/fuzz",
     "crates/mrt/fuzz",
     "crates/policy/fuzz",

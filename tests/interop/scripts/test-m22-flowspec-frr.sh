@@ -144,22 +144,6 @@ RULE2_ADD='{
 # Wait helpers
 # ---------------------------------------------------------------------------
 
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "BGP session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "BGP session did not reach Established within 90s"
-    return 1
-}
-
 # Use the standardized `start_rustbgpd` from test-lib.sh — handles
 # both the /proc poll loop and the gRPC-ready wait.
 
@@ -578,7 +562,7 @@ main() {
     resolve_grpc_addr
     start_rustbgpd
 
-    wait_established || exit 1
+    wait_frr_established "$FRR" 10.0.0.1 || exit 1
 
     # Snapshot the connectionsDropped counter immediately after the
     # session is up. Every test step asserts this hasn't grown,

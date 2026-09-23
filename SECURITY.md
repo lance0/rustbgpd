@@ -129,12 +129,12 @@ see the full ~16,000-ASN path.
 
 ### Fuzzing
 
-Six fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
-`crates/evpn`, `crates/bfd`, `crates/rpki`) carry fuzz targets covering
+Seven fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
+`crates/evpn`, `crates/bfd`, `crates/rpki`, `crates/cli`) carry fuzz targets covering
 the message decoders, the policy frontend, structure-aware policy-chain
 compilation and explain-walk agreement, MRT snapshot and warm-bundle
-readers, EVPN parsing, the BFD control-packet decoder, and the RTR PDU
-decoder. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every
+readers, EVPN parsing, the BFD control-packet decoder, the RTR PDU
+decoder, and the `rbgp` BMP and MRT capture adapters. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every
 target in each crate against tracked seed corpora and fails loudly if
 target enumeration returns nothing. In both nightly and hosted campaigns,
 the complete-message wire target accepts 65,535-byte RFC 8654 messages and

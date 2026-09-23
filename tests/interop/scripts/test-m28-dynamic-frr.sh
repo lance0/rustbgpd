@@ -47,6 +47,7 @@ grpc_list_received() {
 # Wait helpers
 # ---------------------------------------------------------------------------
 
+# Deliberately silent (no ledger row): Test 1 below is the counted Established assertion.
 wait_established() {
     log "Waiting for BGP session to reach Established..."
     for i in $(seq 1 45); do

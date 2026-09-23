@@ -1534,6 +1534,8 @@ impl RibManager {
                 self.peer_sendable_families.get(&peer),
                 self.peer_advertised_llgr_families.get(&peer),
                 self.export_policy_for(peer),
+                self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer))
+                    .as_ref(),
                 &mut Vec::new(),
                 &mut Vec::new(),
                 false,
@@ -1858,7 +1860,7 @@ impl RibManager {
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
         let peer_asn = self.peer_asn.get(&peer).copied();
         let peer_group = self.peer_group.get(&peer).map(String::as_str);
-        let rtc_filter = self.rtc_vpn_filter(peer, sendable);
+        let rtc_filter = self.rtc_export_filter(peer, sendable);
         let orr_ctx = self
             .peer_orr_vantage
             .get(&peer)

@@ -86,8 +86,8 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   shape applies only to ORR single-best.
 - For RTC (SAFI 132), `NO_ADVERTISE` suppression has a wider blast radius than
   for other families. An RT-membership NLRI suppressed by community policy is
-  withdrawn like any other route, and a receiver that filters VPN
-  advertisements by RT-Constrain membership then prunes every VPN route
+  withdrawn like any other route, and a receiver that filters VPN or EVPN
+  advertisements by RT-Constrain membership then prunes every route
   carrying that Route Target; rustbgpd's own RFC 4684 outbound gate reacts the
   same way toward a peer whose membership no longer covers an RT. The
   mechanics are correct and fail-closed — the amplification is inherent to
@@ -1202,9 +1202,16 @@ carries inactive (absent), unlimited (zero), or finite.
   so ordinary eBGP export strips it
   under the non-transitive rule in "Extended Communities — non-transitive
   eBGP export" below unless `send_non_transitive_extended_communities =
-  true`, while route-server-client export preserves it — an operator who
-  tags RS-client exports with `OV_*` owns the draft's §6 removal
-  requirement.
+  true`, while route-server-client export preserves it (RFC 7947 §2.2.4
+  transparency). The hand-written route-server example's `hygiene.rpol`
+  adds no `OV_*` community, and neither does `rs-config-render` in IXP
+  Manager mode, which embeds that file. `rs-config-render` in arouteserver
+  mode currently still adds RFC 8097 `OV_*` tags to the routes it accepts
+  when RPKI origin validation is enabled, so its members receive them.
+  That output, like any operator policy that tags routes reaching another
+  AS, contradicts the draft's §6: "Operators MUST NOT signal RPKI-derived
+  validation states using BGP Path Attributes carried over EBGP sessions
+  across administrative boundaries." rpol can still add `OV_*`.
 - See ADR-0034.
 
 ---

@@ -52,41 +52,6 @@ grpc_delete_path() {
         "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath 2>/dev/null
 }
 
-# ---------------------------------------------------------------------------
-# Wait for BGP sessions to reach Established
-# ---------------------------------------------------------------------------
-wait_established_a() {
-    log "Waiting for FRR-A session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR_A" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "FRR-A session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "FRR-A session did not reach Established within 90s"
-    return 1
-}
-
-wait_established_b() {
-    log "Waiting for FRR-B session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR_B" vtysh -c "show bgp neighbors 10.0.1.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "FRR-B session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "FRR-B session did not reach Established within 90s"
-    return 1
-}
-
 wait_routes_in_rib() {
     local expected=$1
     log "Waiting for $expected received routes in RIB..."
@@ -116,8 +81,8 @@ frr_b_has_prefix() {
 test_route_redistribution() {
     log "Test 1: Route redistribution (FRR-A → rustbgpd → FRR-B)"
 
-    wait_established_a || return 1
-    wait_established_b || return 1
+    wait_frr_established "$FRR_A" 10.0.0.1 FRR-A || return 1
+    wait_frr_established "$FRR_B" 10.0.1.1 FRR-B || return 1
     wait_routes_in_rib 3 || return 1
 
     # Wait for outbound distribution to FRR-B

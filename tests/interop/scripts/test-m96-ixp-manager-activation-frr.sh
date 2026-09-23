@@ -25,6 +25,10 @@ if [ "${1:-}" = internal-activate ]; then
 fi
 
 TOPO=m96-ixp-manager-activation
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/interop/scripts/test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
+
 RUST=clab-${TOPO}-rustbgpd
 FRR=clab-${TOPO}-frr
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -40,8 +44,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-fail() { printf 'M96 FAIL: %s\n' "$*" >&2; exit 1; }
-ok() { printf 'M96 PASS: %s\n' "$*"; }
+# Fail fast: every later step builds on the state the failed check proves.
+fail() {
+    fail=$((fail + 1))
+    printf "\033[1;31m  [%s] FAIL\033[0m %s\n" "$(_ts)" "$*"
+    print_summary
+}
 
 for container in "$RUST" "$FRR"; do
     docker inspect "$container" >/dev/null 2>&1 || fail "$container is not running"
@@ -145,7 +153,7 @@ session_ready() {
 
 runtime_equal() {
     docker exec "$RUST" bash -c \
-        "sed 's#\"policy/#\"$STATE/current/policy/#g' '$STATE/current/config.toml' >'$STATE/.m96-compare.toml'; chmod 600 '$STATE/.m96-compare.toml'; /usr/local/bin/rbgp --addr '$ADDR' config diff '$STATE/.m96-compare.toml' >/dev/null 2>&1"
+        "sed -e 's#\"policy/#\"$STATE/current/policy/#g' -e 's#\"datasets/#\"$STATE/current/datasets/#g' '$STATE/current/config.toml' >'$STATE/.m96-compare.toml'; chmod 600 '$STATE/.m96-compare.toml'; /usr/local/bin/rbgp --addr '$ADDR' config diff '$STATE/.m96-compare.toml' >/dev/null 2>&1"
 }
 
 private_state() {
@@ -311,3 +319,4 @@ if find "$WORK" \( -name '*.output' -o -name '*receipt.json' \) \
     fail "MD5 escaped into helper output or receipts"
 fi
 ok "M96 real-process activation and pre-effect restoration contract complete"
+print_summary

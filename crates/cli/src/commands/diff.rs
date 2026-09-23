@@ -30,12 +30,9 @@ use rustbgpctl::ribdiff::{
     self, AsPathSegment, AsSegmentKind, DiffClass, DiffLimits, DiffReport, FamilyId, Nlri,
     PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, UnknownAttr, Verdict,
 };
+use rustbgpctl::ribsnap::SNAPSHOT_SCHEMA;
 use serde::Deserialize;
 use tokio::time::Instant;
-
-/// Versioned identifier of the accepted NDJSON snapshot schema (the
-/// `schema` field of the header record).
-pub const SNAPSHOT_SCHEMA: &str = "rbgp-ribsnap/1";
 
 /// Complete inputs, no semantic differences.
 pub const EXIT_IN_SYNC: i32 = 0;
@@ -2975,7 +2972,7 @@ mod tests {
         }
 
         /// Wire-truth routes matching the from-bmp golden capture
-        /// (crates/cli/src/commands/ribsnap_bmp.rs `golden_capture`,
+        /// (crates/cli/src/ribsnap_bmp.rs `golden_capture`,
         /// regenerated with `BLESS=1`).
         fn from_bmp_wire_truth() -> Vec<Vec<server_proto::Route>> {
             let peer_a = vec![

@@ -2248,6 +2248,7 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
             heavy.FUZZ_ROOTS,
             (
                 "crates/bfd/fuzz",
+                "crates/cli/fuzz",
                 "crates/evpn/fuzz",
                 "crates/mrt/fuzz",
                 "crates/policy/fuzz",

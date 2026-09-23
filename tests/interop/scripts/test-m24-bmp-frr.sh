@@ -54,22 +54,6 @@ start_with_custom_config() {
     start_rustbgpd "/usr/local/bin/rustbgpd /tmp/config.toml"
 }
 
-wait_established() {
-    log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 45); do
-        local state
-        state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-            | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-        if [ "$state" = "Established" ]; then
-            ok "BGP session established (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "BGP session did not reach Established within 90s"
-    return 1
-}
-
 # Read BMP messages from the receiver's output file
 get_bmp_messages() {
     docker exec "$BMP_RECEIVER" cat "$BMP_MESSAGES" 2>/dev/null || echo '{"messages":[]}'
@@ -214,7 +198,7 @@ main() {
     start_bmp_receiver
     start_with_custom_config
 
-    wait_established || exit 1
+    wait_frr_established "$FRR" 10.0.0.1 || exit 1
 
     # Give BMP messages time to flow after session establishment
     sleep 5

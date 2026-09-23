@@ -825,12 +825,15 @@ enum PolicyAction {
         /// arguments for parameterized policies, e.g. "customer-in(200)"
         #[arg(long)]
         policy: String,
-        /// Evaluation direction: import (Adj-RIB-In) or export
+        /// Evaluation direction: import (retained post-policy
+        /// Adj-RIB-In: routes admitted when received or last
+        /// re-evaluated; newly admitted routes are not visible) or export
         /// (Loc-RIB best routes)
         #[arg(long)]
         direction: String,
         /// Neighbor address: restricts the import snapshot to one
-        /// peer's Adj-RIB-In, or sets the export evaluation target
+        /// peer's retained post-policy Adj-RIB-In, or sets the export
+        /// evaluation target
         #[arg(long = "neighbor", visible_alias = "peer")]
         neighbor: Option<String>,
         /// Address family filter (ipv4_unicast, ipv6_unicast)
@@ -3312,7 +3315,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             },
     } = &cli.command
     {
-        let opts = commands::ribsnap::FromMrtOpts {
+        let opts = rustbgpctl::ribsnap::FromMrtOpts {
             file,
             view,
             peer,
@@ -3320,7 +3323,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             source: source.as_deref(),
             generation: *generation,
         };
-        std::process::exit(commands::ribsnap::from_mrt(&opts));
+        std::process::exit(rustbgpctl::ribsnap::from_mrt(&opts));
     }
 
     // `diff snapshot from-bmp` is likewise a pure offline adapter.
@@ -3337,13 +3340,13 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             },
     } = &cli.command
     {
-        let opts = commands::ribsnap_bmp::FromBmpOpts {
+        let opts = rustbgpctl::ribsnap_bmp::FromBmpOpts {
             file,
             peers: peer,
             source: source.as_deref(),
             generation: *generation,
         };
-        std::process::exit(commands::ribsnap_bmp::from_bmp(&opts));
+        std::process::exit(rustbgpctl::ribsnap_bmp::from_bmp(&opts));
     }
 
     // `doctor` must produce a bundle even when the daemon is down, so it

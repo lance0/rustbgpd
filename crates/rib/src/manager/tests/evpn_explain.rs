@@ -128,6 +128,7 @@ fn exact_evpn_explain_runs_each_export_stop_in_live_order() {
         "no_advertise_suppressed",
         "no_export_suppressed",
         "llgr_stale_suppressed",
+        "rt_membership_miss",
         "source_peer",
         "ibgp_split_horizon",
         "policy_denied",
@@ -159,6 +160,13 @@ fn exact_evpn_explain_runs_each_export_stop_in_live_order() {
             "llgr_stale_suppressed" => {
                 route.is_llgr_stale = true;
                 install(&mut manager, &route);
+            }
+            "rt_membership_miss" => {
+                // RT-Constrain negotiated, no membership: strict empty.
+                manager.peer_sendable_families.insert(
+                    TARGET,
+                    vec![(Afi::L2Vpn, Safi::Evpn), (Afi::Ipv4, Safi::RtConstrain)],
+                );
             }
             "source_peer" => {
                 route.peer = TARGET;

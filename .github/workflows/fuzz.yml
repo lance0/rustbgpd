@@ -203,6 +203,24 @@ jobs:
             [ -d "fuzz/seeds/$t" ] && seeds+=("fuzz/seeds/$t")
             cargo fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=120 -max_len=65535
           done
+      - name: Fuzz rbgp snapshot adapters (2 minutes)
+        run: |
+          cd crates/cli
+          targets=$(cargo fuzz list)
+          if [ -z "$targets" ]; then
+            echo "fuzz-target enumeration returned no targets" >&2
+            exit 1
+          fi
+          if ! grep -Fxq ribsnap_convert <<<"$targets"; then
+            echo "required CLI fuzz target ribsnap_convert is missing" >&2
+            exit 1
+          fi
+          for t in $targets; do
+            mkdir -p "fuzz/corpus/$t"
+            seeds=()
+            [ -d "fuzz/seeds/$t" ] && seeds+=("fuzz/seeds/$t")
+            cargo fuzz run "$t" "fuzz/corpus/$t" "${seeds[@]}" -- -max_total_time=120 -max_len=65536
+          done
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v7
@@ -216,6 +234,7 @@ jobs:
             crates/mrt/fuzz/artifacts/
             crates/bfd/fuzz/artifacts/
             crates/rpki/fuzz/artifacts/
+            crates/cli/fuzz/artifacts/
       - name: Seal bounded wire corpus cache
         id: wire-corpus-seal
         if: success() && env.WIRE_CORPUS_WRITER == 'true'
