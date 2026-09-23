@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 
-use rustbgpd_wire::{AsPath, AspaValidation, RpkiValidation};
+use rustbgpd_wire::{AsPath, AspaValidation, COMMUNITY_LLGR_STALE, RpkiValidation};
 
 use crate::route::{Route, RouteOrigin};
 
@@ -30,14 +30,42 @@ fn aspa_preference(v: AspaValidation) -> u8 {
     }
 }
 
-/// Three-tier stale ranking: fresh (0) > GR-stale (1) > LLGR-stale (2).
-/// Lower value = more preferred.
-fn stale_rank(route: &Route) -> u8 {
-    if route.is_llgr_stale {
+/// Three-tier stale ranking shared by every family's ranker: fresh (0) >
+/// GR-stale (1) > least preferred (2). Lower value = more preferred.
+///
+/// Least preferred (RFC 9494 §4.3/§4.4) is a route this speaker holds
+/// LLGR-stale **or** any route carrying the `LLGR_STALE` community, which
+/// covers one received already tagged by an upstream helper. The rule does
+/// not depend on the source session's LLGR state. `communities` runs only
+/// when the local flag is clear; two least-preferred routes tie here and
+/// fall through to normal tie-breaking.
+#[inline]
+pub(crate) fn stale_tier<'a>(
+    is_stale: bool,
+    is_llgr_stale: bool,
+    communities: impl FnOnce() -> &'a [u32],
+) -> u8 {
+    if is_llgr_stale || communities().contains(&COMMUNITY_LLGR_STALE) {
         2
     } else {
-        u8::from(route.is_stale)
+        u8::from(is_stale)
     }
+}
+
+/// The reason for a decisive stale-tier step, named from the less
+/// preferred route: [`BestPathReason::LlgrStaleCommunity`] when it is least
+/// preferred only because it carries a received `LLGR_STALE` community,
+/// otherwise [`BestPathReason::StalePreference`].
+pub(crate) fn stale_tier_reason(loser_tier: u8, loser_is_llgr_stale: bool) -> BestPathReason {
+    if loser_tier == 2 && !loser_is_llgr_stale {
+        BestPathReason::LlgrStaleCommunity
+    } else {
+        BestPathReason::StalePreference
+    }
+}
+
+fn stale_rank(route: &Route) -> u8 {
+    stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 /// The identifier a route is compared by at RFC 4271 §9.1.2.2 step (f),
@@ -112,6 +140,9 @@ pub enum BestPathReason {
     Srv6SidInvalid,
     /// Step 0: non-stale preferred over stale (RFC 4724 / RFC 9494).
     StalePreference,
+    /// Step 0: the less preferred route carries an `LLGR_STALE` community
+    /// it was received with, so it is least preferred (RFC 9494 §4.3/§4.4).
+    LlgrStaleCommunity,
     /// Step 0.5: RPKI validation preference (`Valid` > `NotFound` > `Invalid`).
     RpkiPreference,
     /// Step 0.7: ASPA path verification preference (Valid > Unknown > Invalid).
@@ -160,6 +191,7 @@ impl BestPathReason {
         match self {
             Self::Srv6SidInvalid => "srv6_sid_invalid",
             Self::StalePreference => "stale_preference",
+            Self::LlgrStaleCommunity => "llgr_stale_community",
             Self::RpkiPreference => "rpki_preference",
             Self::AspaPreference => "aspa_preference",
             Self::HigherLocalPref => "higher_local_pref",
@@ -189,9 +221,15 @@ impl std::fmt::Display for BestPathReason {
 /// Same logic as [`best_path_cmp`] but also returns which step broke the tie.
 #[must_use]
 pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathReason) {
-    let cmp = stale_rank(a).cmp(&stale_rank(b));
+    let (tier_a, tier_b) = (stale_rank(a), stale_rank(b));
+    let cmp = tier_a.cmp(&tier_b);
     if cmp != Ordering::Equal {
-        return (cmp, BestPathReason::StalePreference);
+        let (loser_tier, loser) = if cmp == Ordering::Less {
+            (tier_b, b)
+        } else {
+            (tier_a, a)
+        };
+        return (cmp, stale_tier_reason(loser_tier, loser.is_llgr_stale));
     }
 
     let cmp = rpki_preference(b.validation_state).cmp(&rpki_preference(a.validation_state));
@@ -352,6 +390,13 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
                 stale_tier_name(b)
             )
         }
+        BestPathReason::LlgrStaleCommunity => {
+            format!(
+                "stale_tier {} vs {} (received LLGR_STALE community)",
+                stale_tier_name(a),
+                stale_tier_name(b)
+            )
+        }
         BestPathReason::RpkiPreference => {
             format!("rpki {} vs {}", a.validation_state, b.validation_state)
         }
@@ -475,7 +520,8 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
-/// 0. Non-stale preferred over stale (RFC 4724 / RFC 9494 three-tier)
+/// 0. Non-stale preferred over stale (RFC 4724 / RFC 9494 three-tier); a
+///    route carrying `LLGR_STALE` is least preferred (RFC 9494 §4.3/§4.4)
 /// 0.5. RPKI validation: Valid > `NotFound` > Invalid (RFC 6811)
 /// 0.7. ASPA path verification: Valid > Unknown > Invalid
 /// 1. Highest `LOCAL_PREF` (default 100)
@@ -520,7 +566,9 @@ pub fn best_path_cmp_orr(
 /// The shared decision chain behind [`best_path_cmp`] (`orr_costs =
 /// None`) and [`best_path_cmp_orr`] (`orr_costs = Some(..)`).
 fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>) -> Ordering {
-    // 0. Three-tier stale demotion: fresh > GR-stale > LLGR-stale (RFC 4724 + RFC 9494)
+    // 0. Three-tier stale demotion: fresh > GR-stale > LLGR-stale, where
+    //    LLGR-stale includes a received LLGR_STALE community (RFC 4724 +
+    //    RFC 9494 §4.3/§4.4)
     let cmp = stale_rank(a).cmp(&stale_rank(b));
     if cmp != Ordering::Equal {
         return cmp;
@@ -1311,6 +1359,125 @@ mod tests {
         assert_eq!(best_path_cmp(&fresh, &llgr), Ordering::Less);
     }
 
+    fn ibgp(mut r: Route) -> Route {
+        r.origin_type = RouteOrigin::Ibgp;
+        r
+    }
+
+    /// A route that arrived carrying `LLGR_STALE` (tagged by an upstream
+    /// helper), with the local `is_llgr_stale` flag clear.
+    fn received_llgr_stale(mut r: Route) -> Route {
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::Communities(vec![
+            0xFDE9_0064, // 65001:100
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+        r
+    }
+
+    fn v6(mut r: Route, last: u16) -> Route {
+        let peer = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, last);
+        r.prefix = Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
+            48,
+        ));
+        r.peer = IpAddr::V6(peer);
+        r.next_hop = IpAddr::V6(peer);
+        r
+    }
+
+    /// RFC 9494 §4.3/§4.4: a received route carrying `LLGR_STALE` is least
+    /// preferred even though it is locally fresh — a fresh untagged
+    /// alternative wins despite a lower `LOCAL_PREF`. IPv4 and IPv6.
+    #[test]
+    fn received_llgr_stale_community_is_least_preferred() {
+        let tagged_v4 = received_llgr_stale(ibgp(with_local_pref(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            200,
+        )));
+        let fresh_v4 = ibgp(with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100));
+        let pairs = [
+            (tagged_v4.clone(), fresh_v4.clone()),
+            (v6(tagged_v4, 1), v6(fresh_v4, 2)),
+        ];
+        for (tagged, fresh) in pairs {
+            assert!(!tagged.is_llgr_stale && !tagged.is_stale);
+            assert_eq!(best_path_cmp(&fresh, &tagged), Ordering::Less);
+            assert_eq!(best_path_cmp(&tagged, &fresh), Ordering::Greater);
+            assert_eq!(
+                best_path_cmp_with_reason(&tagged, &fresh),
+                (Ordering::Greater, BestPathReason::LlgrStaleCommunity)
+            );
+            assert_eq!(
+                best_path_cmp_with_reason(&fresh, &tagged),
+                (Ordering::Less, BestPathReason::LlgrStaleCommunity)
+            );
+            assert!(!multipath_equal(&fresh, &tagged, true));
+        }
+    }
+
+    /// Received `LLGR_STALE` ranks below a locally GR-stale route too:
+    /// least preferred is below every route that is not also least
+    /// preferred (§4.4).
+    #[test]
+    fn received_llgr_stale_ranks_below_gr_stale() {
+        let tagged = received_llgr_stale(ibgp(with_local_pref(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            200,
+        )));
+        let mut gr = ibgp(with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100));
+        gr.is_stale = true;
+        assert_eq!(best_path_cmp(&gr, &tagged), Ordering::Less);
+        assert_eq!(
+            best_path_cmp_with_reason(&gr, &tagged),
+            (Ordering::Less, BestPathReason::LlgrStaleCommunity)
+        );
+        assert_eq!(
+            best_path_reason_detail(BestPathReason::LlgrStaleCommunity, &gr, &tagged),
+            "stale_tier gr_stale vs llgr_stale (received LLGR_STALE community)"
+        );
+
+        // A locally LLGR-stale loser keeps the local-state reason.
+        let mut local = ibgp(with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200));
+        local.is_llgr_stale = true;
+        assert_eq!(
+            best_path_cmp_with_reason(&gr, &local),
+            (Ordering::Less, BestPathReason::StalePreference)
+        );
+    }
+
+    /// §4.4 boundary: two least-preferred routes fall back to normal
+    /// tie-breaking — both received-tagged, and one received-tagged
+    /// against one locally LLGR-stale.
+    #[test]
+    fn two_least_preferred_routes_tie_break_normally() {
+        let p1 = Ipv4Addr::new(1, 0, 0, 1);
+        let p2 = Ipv4Addr::new(1, 0, 0, 2);
+        let high = received_llgr_stale(ibgp(with_local_pref(base_route(p1), 200)));
+        let low = received_llgr_stale(ibgp(with_local_pref(base_route(p2), 100)));
+        assert_eq!(
+            best_path_cmp_with_reason(&high, &low),
+            (Ordering::Less, BestPathReason::HigherLocalPref)
+        );
+
+        // Locally LLGR-stale (flag only, isolating the flag from the
+        // community it normally carries) versus received-tagged.
+        for (local_lp, received_lp, winner_is_local) in [(200, 100, true), (100, 200, false)] {
+            let mut local = ibgp(with_local_pref(base_route(p1), local_lp));
+            local.is_llgr_stale = true;
+            let received = received_llgr_stale(ibgp(with_local_pref(base_route(p2), received_lp)));
+            let expected = if winner_is_local {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
+            assert_eq!(
+                best_path_cmp_with_reason(&local, &received),
+                (expected, BestPathReason::HigherLocalPref)
+            );
+            assert_eq!(best_path_cmp(&local, &received), expected);
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the table intentionally exercises every decisive reason in one agreement loop"
@@ -1339,6 +1506,12 @@ mod tests {
                 stale_a,
                 base_route(p2),
                 BestPathReason::StalePreference,
+            ),
+            (
+                "llgr_stale_community",
+                received_llgr_stale(base_route(p1)),
+                base_route(p2),
+                BestPathReason::LlgrStaleCommunity,
             ),
             (
                 "rpki",

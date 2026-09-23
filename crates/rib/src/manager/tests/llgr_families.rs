@@ -1775,3 +1775,167 @@ async fn peer_up_registers_llgr_families_and_teardown_clears() {
         "teardown must clear the per-peer LLGR-family registration"
     );
 }
+
+/// RFC 9494 §4.2: an IPv4 unicast route carrying `NO_LLGR` is removed at
+/// GR→LLGR promotion, while a sibling from the same peer without the
+/// community is retained as LLGR-stale.
+#[tokio::test]
+async fn unicast_llgr_no_llgr_community_drops_route_on_promotion() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let dropped = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let kept = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+    let mut no_llgr = make_route(dropped, Ipv4Addr::new(10, 0, 0, 1));
+    Arc::make_mut(&mut no_llgr.attributes).push(PathAttribute::Communities(vec![
+        rustbgpd_wire::COMMUNITY_NO_LLGR,
+    ]));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![no_llgr, make_route(kept, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let family = vec![(Afi::Ipv4, Safi::Unicast)];
+    tx.send(gr_with_llgr(source, 2, family.clone(), family, 3600))
+        .await
+        .unwrap();
+    let stale = query_best_routes(&tx).await;
+    assert_eq!(stale.len(), 2);
+    assert!(stale.iter().all(|route| route.is_stale));
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    let retained = query_best_routes(&tx).await;
+    assert_eq!(
+        retained.len(),
+        1,
+        "the NO_LLGR route must be dropped on GR timer expiry"
+    );
+    assert_eq!(retained[0].prefix, Prefix::V4(kept));
+    assert!(retained[0].is_llgr_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 9494 §4.3/§4.4 through selection and distribution: a reflector
+/// holding a fresh path and a path that arrived already tagged
+/// `LLGR_STALE` (with a higher `LOCAL_PREF`) selects the fresh path and
+/// never reflects the tagged one to its client. The tagged source runs
+/// both with and without an LLGR-negotiated session: the ranking does not
+/// depend on the source session's LLGR state.
+#[tokio::test]
+async fn reflector_does_not_propagate_received_llgr_stale_over_fresh_path() {
+    let v4 = vec![(Afi::Ipv4, Safi::Unicast)];
+    for source_llgr in [v4.clone(), Vec::new()] {
+        let (tx, rx) = mpsc::channel(64);
+        let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+        let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let client = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let tagged_source = Ipv4Addr::new(10, 0, 0, 1);
+        let fresh_source = Ipv4Addr::new(10, 0, 0, 3);
+        let mut client_rx =
+            llgr_gate_peer_up(&tx, client, ipv4_sendable(), false, v4.clone(), None).await;
+        // Sources' outbound receivers stay open for the whole test.
+        let mut source_rxs = Vec::new();
+        for (source, llgr) in [(tagged_source, source_llgr.clone()), (fresh_source, vec![])] {
+            source_rxs.push(
+                llgr_gate_peer_up(&tx, IpAddr::V4(source), ipv4_sendable(), false, llgr, None)
+                    .await,
+            );
+        }
+        drain_eor(&mut client_rx).await;
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        // Sent after the tagged path: once the client sees it, every
+        // update the tagged path could cause has already been emitted.
+        let sentinel = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 9, 0), 24);
+        let ibgp = |prefix, source, local_pref| {
+            let mut route = make_route_with_lp(prefix, source, local_pref);
+            route.origin_type = crate::route::RouteOrigin::Ibgp;
+            route
+        };
+        let mut tagged = ibgp(prefix, tagged_source, 200);
+        Arc::make_mut(&mut tagged.attributes).push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+        for (source, route) in [
+            (fresh_source, ibgp(prefix, fresh_source, 100)),
+            (tagged_source, tagged),
+            (fresh_source, ibgp(sentinel, fresh_source, 100)),
+        ] {
+            tx.send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: IpAddr::V4(source),
+                announced: vec![route],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+            })
+            .await
+            .unwrap();
+        }
+
+        let best = query_best_routes(&tx).await;
+        let best = best
+            .iter()
+            .find(|route| route.prefix == Prefix::V4(prefix))
+            .unwrap();
+        assert_eq!(
+            best.peer,
+            IpAddr::V4(fresh_source),
+            "source LLGR {source_llgr:?}: the fresh path must be best"
+        );
+
+        let mut announced = Vec::new();
+        loop {
+            let update = tokio::time::timeout(Duration::from_secs(5), client_rx.recv())
+                .await
+                .expect("client update")
+                .expect("client channel open");
+            announced.extend(update.announce.iter().cloned());
+            if announced
+                .iter()
+                .any(|route| route.prefix == Prefix::V4(sentinel))
+            {
+                break;
+            }
+        }
+        let reflected: Vec<_> = announced
+            .iter()
+            .filter(|route| route.prefix == Prefix::V4(prefix))
+            .map(|route| {
+                let tagged = route
+                    .communities()
+                    .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE);
+                (route.peer, tagged)
+            })
+            .collect();
+        assert!(
+            !reflected.is_empty()
+                && reflected
+                    .iter()
+                    .all(|&(peer, tagged)| peer == IpAddr::V4(fresh_source) && !tagged),
+            "source LLGR {source_llgr:?}: only the fresh path may be reflected: {reflected:?}"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+}

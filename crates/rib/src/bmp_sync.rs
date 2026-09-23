@@ -66,6 +66,7 @@ pub fn path_marking_reason_code(reason: BestPathReason) -> Option<u16> {
         BestPathReason::LowerPeerAddress => Some(bmp_tlv::REASON_PEER_ADDRESS),
         BestPathReason::Srv6SidInvalid
         | BestPathReason::StalePreference
+        | BestPathReason::LlgrStaleCommunity
         | BestPathReason::RpkiPreference
         | BestPathReason::AspaPreference
         | BestPathReason::ShorterClusterList
@@ -818,6 +819,7 @@ mod tests {
             (R::LowerBgpIdentifier, Some(tlv::REASON_ROUTER_ID)),
             (R::LowerPeerAddress, Some(tlv::REASON_PEER_ADDRESS)),
             (R::StalePreference, None),
+            (R::LlgrStaleCommunity, None),
             (R::RpkiPreference, None),
             (R::AspaPreference, None),
             (R::ShorterClusterList, None),

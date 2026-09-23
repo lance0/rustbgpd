@@ -963,6 +963,41 @@ route always loses to any non-stale alternative regardless of other
 attributes. This matches GoBGP and FRR and is the safest behavior for a
 receiving speaker.
 
+### RFC 9494 §4.3/§4.4 — `LLGR_STALE` Routes Are Least Preferred
+
+RFC 9494 §4.3: "A BGP speaker that has advertised the Long-Lived Graceful
+Restart Capability to a neighbor MUST perform the following upon receiving a
+route from that neighbor with the LLGR_STALE community or upon attaching the
+LLGR_STALE community itself per Section 4.2: Treat the route as the least
+preferred in route selection". §4.4: "A least preferred route MUST be treated
+as less preferred than any other route that is not also least preferred. When
+performing route selection between two routes when both are least preferred,
+normal tiebreaking applies."
+
+Every family's ranker (unicast and each route-reflection family) places a
+route in the least-preferred tier when this speaker holds it LLGR-stale or
+when it carries the `LLGR_STALE` community, at the same step 0 as GR stale
+demotion (see Stale Demotion Placement above). Two least-preferred routes,
+including one tagged on receipt and one tagged locally, compare by the
+remaining steps. Best-path explain reports `llgr_stale_community` when the
+losing route is least preferred only because of a received community, and
+`stale_preference` for local GR or LLGR stale state.
+
+The rule applies whether or not this speaker advertised LLGR to the neighbor
+the route came from. §4.3 mandates the behavior when LLGR was advertised and
+states no requirement otherwise, so applying it unconditionally satisfies the
+MUST. A route tagged `LLGR_STALE` then ranks the same on every LLGR-capable
+router in the AS, whatever each router's per-session LLGR configuration,
+which is the consistency §5.2 identifies as the defense against forwarding
+loops. FRR also ranks on the community without a session check
+(`bgp_path_info_cmp` in `bgpd/bgp_route.c`). Unlike that implementation, two
+least-preferred routes here fall back to normal tie-breaking, as §4.4
+requires.
+
+The check reads the route's community list on each comparison, like the
+other attribute-derived steps (`LOCAL_PREF`, `AS_PATH`, MED); no per-route
+field is added. It runs only when the route is not already LLGR-stale.
+
 ### All GR Families Retained
 
 RFC 4724 §4.2: "the receiving speaker MUST retain the routes received from
