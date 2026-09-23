@@ -12,7 +12,7 @@ use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerCommand, PeerManagerOp
 /// are O(peers) state lookups, so this matches the duration class of the
 /// neighbor service's `RIB_SNAPSHOT_TIMEOUT`: a wedged actor must surface as
 /// `DEADLINE_EXCEEDED` instead of hanging the RPC until client cancel.
-const PEER_MANAGER_READ_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const PEER_MANAGER_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Send one read-only request to the peer manager and await its reply.
 pub(crate) async fn peer_manager_read<T>(
