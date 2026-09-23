@@ -856,6 +856,83 @@ fn bench_loc_rib_recompute(c: &mut Criterion) {
     group.finish();
 }
 
+/// Production-shaped Loc-RIB probes. The legacy benchmark above intentionally
+/// remains byte-for-byte stable, but it constructs an empty `LocRib` and moves
+/// the whole value through Criterion for every sample. These cells keep the RIB
+/// behind a box so they isolate steady table access from that struct-move cost.
+fn bench_loc_rib_steady(c: &mut Criterion) {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let installed = make_route(prefix, 1);
+
+    let mut replacement = installed.clone();
+    replacement.next_hop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
+    let mut group = c.benchmark_group("loc_rib_recompute_steady");
+    group.bench_function("unchanged_hit", |b| {
+        b.iter_batched(
+            || {
+                let mut rib = Box::new(LocRib::new());
+                assert!(rib.recompute(prefix, std::iter::once(&installed)));
+                rib
+            },
+            |mut rib| {
+                std::hint::black_box(rib.recompute(prefix, std::iter::once(&installed)));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("payload_replace_hit", |b| {
+        b.iter_batched(
+            || {
+                let mut rib = Box::new(LocRib::new());
+                assert!(rib.recompute(prefix, std::iter::once(&installed)));
+                rib
+            },
+            |mut rib| {
+                std::hint::black_box(rib.recompute(prefix, std::iter::once(&replacement)));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("withdraw_hit", |b| {
+        b.iter_batched(
+            || {
+                let mut rib = Box::new(LocRib::new());
+                assert!(rib.recompute(prefix, std::iter::once(&installed)));
+                rib
+            },
+            |mut rib| {
+                std::hint::black_box(rib.recompute(prefix, std::iter::empty::<&Route>()));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+
+    let prefixes = generate_prefixes(100_000);
+    let attributes = Arc::new(typical_attributes(1));
+    let routes: Vec<_> = prefixes
+        .iter()
+        .map(|prefix| make_route_with_attributes(*prefix, 1, Arc::clone(&attributes)))
+        .collect();
+    let mut rib = LocRib::with_capacity(prefixes.len());
+    for route in &routes {
+        assert!(rib.recompute(route.prefix, std::iter::once(route)));
+    }
+    assert_eq!(rib.len(), prefixes.len());
+
+    let mut group = c.benchmark_group("loc_rib_lookup");
+    group.sample_size(10);
+    group.bench_function("100000_hits", |b| {
+        b.iter(|| {
+            for prefix in &prefixes {
+                std::hint::black_box(rib.get(prefix));
+            }
+        });
+    });
+    group.finish();
+}
+
 fn bench_rib_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("rib_pipeline");
     group.sample_size(10);
@@ -1085,6 +1162,7 @@ criterion_group!(
     bench_best_path_cmp,
     bench_adj_rib_in_insert,
     bench_loc_rib_recompute,
+    bench_loc_rib_steady,
     bench_rib_pipeline,
     bench_bulk_initial_load,
     bench_route_churn,
