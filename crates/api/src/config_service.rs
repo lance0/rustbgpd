@@ -28,6 +28,13 @@ use crate::server::{
 
 pub(super) const CONFIG_OPERATION_TIMEOUT: Duration = Duration::from_mins(30);
 
+/// Longest `confirm_id` (in characters) the daemon accepts on a
+/// confirmed config transaction.
+pub const MAX_CONFIRM_ID_CHARS: usize = 128;
+/// Longest `confirm_timeout_seconds` the daemon accepts on a confirmed
+/// config transaction.
+pub const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
+
 async fn request_peer_manager<T>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     command: impl FnOnce(oneshot::Sender<T>) -> PeerManagerCommand,

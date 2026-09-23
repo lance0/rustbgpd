@@ -8447,7 +8447,7 @@ async fn gnmi_set_commit_cancel_rolls_back_pending_transaction() {
         ),
         plan(
             RuntimeConfigTransactionStatus::Committable,
-            vec![NEIGHBOR_DELETE_SECTION.to_string()],
+            vec![TRANSACTION_NEIGHBOR_DELETE_SECTION.to_string()],
         ),
         snapshot_toml.clone(),
     );

@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 use super::{Config, DatasetBindMode, absolute_config_path, persisted_config_document_bounded};
 
-const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
+pub(crate) const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 const EXTERNAL_SOURCES_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-external-sources.v2\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

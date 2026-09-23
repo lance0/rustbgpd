@@ -113,6 +113,69 @@ class AssembleChangelogTests(unittest.TestCase):
         self.assertIn(MULTILINE[len("### Fixed\n\n") :], text)
         self.assertEqual(text.count("### Fixed"), 1)
 
+    def test_fragment_relative_link_targets_become_root_relative(self):
+        fragment = """### Fixed
+
+- See the [guide](../docs/x.md#anchor), the
+  [upstream](https://example.org/../a.md), and [below](#local-anchor).
+  The path ../docs/y.md and [a label](plain text) stay as written.
+"""
+        root = self.tree(**{"fixed-links.md": fragment})
+        assemble.run(root, check=False)
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            """- See the [guide](docs/x.md#anchor), the
+  [upstream](https://example.org/../a.md), and [below](#local-anchor).
+  The path ../docs/y.md and [a label](plain text) stay as written.
+""",
+            text,
+        )
+        self.assertNotIn("](../", text)
+
+    def test_inline_code_spans_keep_their_literal_link_text(self):
+        fragment = """### Fixed
+
+- The literal `[guide](../docs/x.md)` and ``a `[b](../c.md)` d`` stay, while
+  [`code` text](../docs/y.md) and a span split over `two
+  lines [x](../z.md)` behave as Markdown reads them.
+"""
+        root = self.tree(**{"fixed-code.md": fragment})
+        assemble.run(root, check=False)
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(
+            """- The literal `[guide](../docs/x.md)` and ``a `[b](../c.md)` d`` stay, while
+  [`code` text](docs/y.md) and a span split over `two
+  lines [x](../z.md)` behave as Markdown reads them.
+""",
+            text,
+        )
+
+    def test_escaped_backticks_do_not_open_a_code_span(self):
+        cases = {
+            # An escaped backtick is literal, so it cannot pair with a later span.
+            r"\`[guide](../docs/x.md) and `code`": r"\`[guide](docs/x.md) and `code`",
+            r"\\\`[guide](../docs/x.md) and `code`": r"\\\`[guide](docs/x.md) and `code`",
+            # An escaped backslash leaves the following backtick run unescaped.
+            r"\\`[guide](../docs/x.md)`": r"\\`[guide](../docs/x.md)`",
+            r"`x`\\`[guide](../docs/x.md)`": r"`x`\\`[guide](../docs/x.md)`",
+            # A backslash inside a span is literal and does not escape the closer.
+            r"`C:\` [guide](../docs/x.md) `code`": r"`C:\` [guide](docs/x.md) `code`",
+        }
+        for fragment, expected in cases.items():
+            with self.subTest(fragment=fragment):
+                self.assertEqual(assemble.root_relative_links(fragment), expected)
+
+    def test_duplicate_detection_compares_the_root_relative_link(self):
+        changelog = CHANGELOG.replace(
+            "- Existing fixed entry, hard-wrapped over",
+            "- See [the guide](docs/x.md).\n- Existing fixed entry, hard-wrapped over",
+        )
+        root = self.tree(changelog, **{"fixed-dup.md": "### Fixed\n\n- See [the guide](../docs/x.md).\n"})
+        with self.assertRaisesRegex(
+            ValueError, r"fixed-dup.md: bullet already present in \[Unreleased\]"
+        ):
+            assemble.run(root, check=True)
+
     def test_second_assembly_with_no_fragments_changes_nothing(self):
         root = self.tree(**{"fixed-a.md": "### Fixed\n\n- Fragment fix A.\n"})
         assemble.run(root, check=False)

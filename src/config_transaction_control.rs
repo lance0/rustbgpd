@@ -35,16 +35,23 @@ use rustbgpd_api::runtime_config_settlement::{
     RuntimeConfigFenceReason, before_pre_effect_deadline,
 };
 use rustbgpd_api::server::{
-    ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn, ConfigTransactionAbortFn,
-    ConfigTransactionApplyContext, ConfigTransactionApplyError, ConfigTransactionApplyFn,
-    ConfigTransactionConfirmFn, ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError,
-    GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed, RuntimeConfigCoordinatorPermit,
+    CONFIG_PERSIST_RESERVE_TIMEOUT, ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn,
+    ConfigTransactionAbortFn, ConfigTransactionApplyContext, ConfigTransactionApplyError,
+    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
+    GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed,
+    RuntimeConfigCoordinatorPermit,
 };
+use rustbgpd_api::{MAX_CONFIRM_ID_CHARS, MAX_CONFIRM_TIMEOUT_SECONDS};
 use rustbgpd_telemetry::BgpMetrics;
 use tracing::{error, info, warn};
 
 use crate::config::{
-    AcceptedConfigSnapshot, Config, EffectiveNeighborImpactKind, Neighbor, diff_config,
+    AcceptedConfigSnapshot, Config, EffectiveNeighborImpactKind, Neighbor,
+    TRANSACTION_DYNAMIC_SECTION, TRANSACTION_FIB_SECTION, TRANSACTION_NEIGHBOR_ADD_SECTION,
+    TRANSACTION_NEIGHBOR_DELETE_SECTION, TRANSACTION_NEIGHBOR_MODIFY_SECTION,
+    TRANSACTION_PEER_GROUP_CATALOG_SECTION, TRANSACTION_POLICY_DEFINITIONS_SECTION,
+    TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION, TRANSACTION_POLICY_LIVE_IMPACT_SECTION,
+    TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION, TRANSACTION_SESSION_RESHAPE_SECTION, diff_config,
     diff_neighbors, normalized_discard_path_attributes,
 };
 use crate::fib_table_control::{
@@ -58,7 +65,6 @@ use crate::peer_manager::{
 };
 use crate::reload::transaction_config_snapshot_accepted;
 
-const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT: Duration = Duration::from_mins(10);
 /// How long the confirm-window auto-revert may queue for the coordinator past
 /// its deadline before it is reported overdue, and the reminder cadence after
@@ -68,19 +74,6 @@ const CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT: Duration = Duration::from_
 /// first warning and two reminders before the watchdog resolves such a hold.
 const AUTO_REVERT_OVERDUE_INTERVAL: Duration = CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT;
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS: u32 = 600;
-const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
-const MAX_CONFIRM_ID_CHARS: usize = 128;
-const FIB_SECTION: &str = "[[fib_tables]]";
-const DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
-const NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
-const NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
-const NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
-const PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
-const POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
-const POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
-const POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
-const POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
-const SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
 
 #[derive(Clone)]
 pub struct ConfigTransactionController {
@@ -2752,7 +2745,7 @@ async fn commit_apply_family_inner(
             .await?;
             Ok(committable_response(
                 post_commit_runtime_snapshot_token,
-                vec![DYNAMIC_SECTION.to_string()],
+                vec![TRANSACTION_DYNAMIC_SECTION.to_string()],
                 format!(
                     "Committed [[dynamic_neighbors]] transaction.\n{} range(s) active.\n",
                     candidate.dynamic_neighbors.len()
@@ -2923,7 +2916,7 @@ async fn commit_fib_transaction(
     commit_config_snapshot_stage(&deps.peer_mgr_tx).await?;
     Ok(committable_response(
         post_commit_runtime_snapshot_token,
-        vec![FIB_SECTION.to_string()],
+        vec![TRANSACTION_FIB_SECTION.to_string()],
         format!(
             "Committed [[fib_tables]] transaction.\n{} table(s) active.\n",
             staged_tables.len()
@@ -3055,33 +3048,37 @@ enum ApplyFamily {
 
 fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
     match sections {
-        [section] if section == FIB_SECTION => Some(ApplyFamily::FibTables),
-        [section] if section == DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
+        [section] if section == TRANSACTION_FIB_SECTION => Some(ApplyFamily::FibTables),
+        [section] if section == TRANSACTION_DYNAMIC_SECTION => Some(ApplyFamily::DynamicNeighbors),
         // A live-impact transaction carries the `[policy] live impact` marker
         // alongside the catalog record section(s) it stems from. It supersedes
         // the catalog executor: catalog-only stages a snapshot, but a live
         // impact must also re-apply resolved chains to the affected sessions.
         sections
-            if sections.iter().any(|s| s == POLICY_LIVE_IMPACT_SECTION)
+            if sections
+                .iter()
+                .any(|s| s == TRANSACTION_POLICY_LIVE_IMPACT_SECTION)
                 && sections.iter().all(|s| {
-                    s == POLICY_LIVE_IMPACT_SECTION
-                        || s == PEER_GROUP_CATALOG_SECTION
-                        || s == POLICY_DEFINITIONS_SECTION
-                        || s == POLICY_NEIGHBOR_SETS_SECTION
-                        || s == POLICY_GLOBAL_CHAINS_SECTION
+                    s == TRANSACTION_POLICY_LIVE_IMPACT_SECTION
+                        || s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
+                        || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
+                        || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
+                        || s == TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION
                 }) =>
         {
             Some(ApplyFamily::LivePolicyImpact)
         }
         sections
-            if sections.iter().any(|s| s == SESSION_RESHAPE_SECTION)
+            if sections
+                .iter()
+                .any(|s| s == TRANSACTION_SESSION_RESHAPE_SECTION)
                 && sections.iter().all(|s| {
-                    s == SESSION_RESHAPE_SECTION
-                        || s == PEER_GROUP_CATALOG_SECTION
-                        || s == POLICY_DEFINITIONS_SECTION
-                        || s == POLICY_NEIGHBOR_SETS_SECTION
-                        || s == POLICY_GLOBAL_CHAINS_SECTION
-                        || s == NEIGHBOR_MODIFY_SECTION
+                    s == TRANSACTION_SESSION_RESHAPE_SECTION
+                        || s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
+                        || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
+                        || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
+                        || s == TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION
+                        || s == TRANSACTION_NEIGHBOR_MODIFY_SECTION
                 }) =>
         {
             Some(ApplyFamily::PeerSessionReshape)
@@ -3089,10 +3086,10 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
         sections
             if !sections.is_empty()
                 && sections.iter().all(|s| {
-                    s == PEER_GROUP_CATALOG_SECTION
-                        || s == POLICY_DEFINITIONS_SECTION
-                        || s == POLICY_NEIGHBOR_SETS_SECTION
-                        || s == POLICY_GLOBAL_CHAINS_SECTION
+                    s == TRANSACTION_PEER_GROUP_CATALOG_SECTION
+                        || s == TRANSACTION_POLICY_DEFINITIONS_SECTION
+                        || s == TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION
+                        || s == TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION
                 }) =>
         {
             Some(ApplyFamily::CatalogSnapshot)
@@ -3100,9 +3097,9 @@ fn apply_family(sections: &[String]) -> Option<ApplyFamily> {
         sections
             if !sections.is_empty()
                 && sections.iter().all(|s| {
-                    s == NEIGHBOR_ADD_SECTION
-                        || s == NEIGHBOR_DELETE_SECTION
-                        || s == NEIGHBOR_MODIFY_SECTION
+                    s == TRANSACTION_NEIGHBOR_ADD_SECTION
+                        || s == TRANSACTION_NEIGHBOR_DELETE_SECTION
+                        || s == TRANSACTION_NEIGHBOR_MODIFY_SECTION
                 }) =>
         {
             Some(ApplyFamily::StaticNeighbors)
@@ -3275,7 +3272,9 @@ async fn commit_static_neighbors_locked(
     .await?;
     let neighbor_diff = diff_neighbors(&rollback.previous().neighbors, &candidate.neighbors);
     if committed_sections.iter().any(|s| {
-        s != NEIGHBOR_ADD_SECTION && s != NEIGHBOR_DELETE_SECTION && s != NEIGHBOR_MODIFY_SECTION
+        s != TRANSACTION_NEIGHBOR_ADD_SECTION
+            && s != TRANSACTION_NEIGHBOR_DELETE_SECTION
+            && s != TRANSACTION_NEIGHBOR_MODIFY_SECTION
     }) {
         let error = ConfigTransactionApplyError::Internal(
             "static-neighbor transaction executor received a non-static-neighbor diff".to_string(),
@@ -3917,7 +3916,7 @@ async fn reserve_persist_permit(
     config_tx: &mpsc::Sender<ConfigEvent>,
     progress: &RuntimeConfigMutationProgress,
 ) -> Result<mpsc::OwnedPermit<ConfigEvent>, ConfigTransactionApplyError> {
-    let deadline = tokio::time::Instant::now() + PERSIST_RESERVE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + CONFIG_PERSIST_RESERVE_TIMEOUT;
     let deadline = progress
         .pre_effect_deadline()
         .map_or(deadline, |cap| cap.min(deadline));

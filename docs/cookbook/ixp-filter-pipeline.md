@@ -125,11 +125,23 @@ Shared hygiene scrubs every configured arouteserver `*_validated_*` tag
 (white list, RPKI ROAs, ARIN and registro.br whois dumps) from received
 routes, whether or not the site tags routes with it, as arouteserver's
 `scrub_communities_in()` does. A member therefore cannot pass a lookalike
-validation tag through to other clients. Upstream's inbound scrub also removes
-the internal `rpki_bgp_origin_validation_valid`/`unknown`/`invalid`
-communities and any `custom_communities`. The renderer neither sets nor
-scrubs those, so a member-sent value in those ranges reaches other clients
-unchanged.
+validation tag through to other clients. The same scrub covers the rest of
+upstream's inbound list that has a fixed value: the internal
+`rpki_bgp_origin_validation_valid`/`unknown`/`invalid` and
+`reject_cause_map_*` communities and every `custom_communities` entry. The
+renderer sets none of these, so the scrub only removes member-sent copies.
+An `ext` form or a malformed value is refused, and so is a client's
+`attach_custom_communities`, which the renderer does not reproduce.
+`rejected_route_announced_by`, the other internal community with a `dyn_val`
+range, is refused whenever it is configured.
+
+One internal community is not scrubbed: `reject_cause`. Upstream removes
+its whole `dyn_val` range, and rpol has no removal pattern for that form, so
+a member-sent value in the `reject_cause` range reaches other clients
+unchanged. rustbgpd does not act on it: a rejected route is retained with a
+structured reason rather than tagged. For `tag_and_reject` clients, the
+Birdwatcher adapter replaces wire copies of the reject communities when it
+displays a filtered route.
 
 ### Try it from this repository
 

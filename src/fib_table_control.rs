@@ -48,12 +48,10 @@ use rustbgpd_api::runtime_config_settlement::{
     RuntimeConfigFenceReason, before_pre_effect_deadline,
 };
 use rustbgpd_api::server::{
-    ConfigMutationGateFn, RuntimeConfigCoordinator, RuntimeConfigCoordinatorClosed,
+    CONFIG_PERSIST_RESERVE_TIMEOUT, ConfigMutationGateFn, RuntimeConfigCoordinator,
+    RuntimeConfigCoordinatorClosed,
 };
 
-/// How long to wait for a config-persistence permit before refusing the
-/// mutation (mirrors the dynamic-neighbor CRUD reserve deadline).
-const PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNED_FIB_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 const COORDINATOR_CLOSED: &str = "runtime config coordinator is closed";
 const STAGE_TIMED_OUT: &str =
@@ -752,16 +750,17 @@ fn apply_mutation(
 async fn reserve_persist_permit(
     config_tx: &mpsc::Sender<ConfigEvent>,
 ) -> Result<mpsc::OwnedPermit<ConfigEvent>, FibTableControlError> {
-    tokio::time::timeout(PERSIST_RESERVE_TIMEOUT, config_tx.clone().reserve_owned())
-        .await
-        .map_err(|_| {
-            FibTableControlError::Unavailable(
-                "config persistence queue busy — refusing mutation to avoid drift".to_string(),
-            )
-        })?
-        .map_err(|_| {
-            FibTableControlError::Unavailable("config persistence unavailable".to_string())
-        })
+    tokio::time::timeout(
+        CONFIG_PERSIST_RESERVE_TIMEOUT,
+        config_tx.clone().reserve_owned(),
+    )
+    .await
+    .map_err(|_| {
+        FibTableControlError::Unavailable(
+            "config persistence queue busy — refusing mutation to avoid drift".to_string(),
+        )
+    })?
+    .map_err(|_| FibTableControlError::Unavailable("config persistence unavailable".to_string()))
 }
 
 pub(crate) fn runtime_unavailable_error(startup_had_tables: bool) -> FibTableControlError {
@@ -1336,7 +1335,7 @@ families = ["ipv4_unicast"]
         let (busy_tx, _busy_rx) = mpsc::channel(1);
         let _held = busy_tx.clone().reserve_owned().await.unwrap();
         let waiter = tokio::spawn(async move { reserve_persist_permit(&busy_tx).await });
-        tokio::time::advance(PERSIST_RESERVE_TIMEOUT).await;
+        tokio::time::advance(CONFIG_PERSIST_RESERVE_TIMEOUT).await;
         assert!(matches!(
             waiter.await.unwrap(),
             Err(FibTableControlError::Unavailable(ref message)) if message.contains("queue busy")
