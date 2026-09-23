@@ -858,6 +858,7 @@ impl PeerManager {
                 // missed deadline must not tear it down. The remote retries.
                 info!(
                     peer = %peer_addr,
+                    primary_state = "unknown",
                     rule = "primary_state_unknown",
                     "collision: primary state query timed out, dropping inbound"
                 );
@@ -896,6 +897,7 @@ impl PeerManager {
             SessionState::Established => {
                 info!(
                     peer = %peer_addr,
+                    primary_state = primary_state.as_str(),
                     rule = "primary_established",
                     "collision: primary established, dropping inbound"
                 );
