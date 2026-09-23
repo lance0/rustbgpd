@@ -1525,8 +1525,9 @@ received-mode `ListFlowSpecRoutes`, `ListReceivedEvpnRoutes`,
 with `peer_address` set. A known peer is a configured neighbor, an accepted
 dynamic peer, or an address whose Adj-RIB-In still retains Graceful Restart or
 LLGR stale routes after its session ended; the first two clauses are the same
-managed-peer answer `GetPolicyStats` uses. A known peer that is down or has sent
-nothing still returns `OK` with an empty result. The daemon checks only when a
+managed-peer answer `GetPolicyStats` uses. The synthetic peer `0.0.0.0` that
+owns routes added through `InjectionService` is always known. A known peer that
+is down or has sent nothing still returns `OK` with an empty result. The daemon checks only when a
 view is empty, so a view with rows never pays for it. The whole check is bounded
 by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
 

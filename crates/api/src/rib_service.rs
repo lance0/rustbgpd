@@ -3685,6 +3685,11 @@ mod tests {
             invoke_peer_scoped_read(&svc, rpc, "192.0.2.2")
                 .await
                 .unwrap_or_else(|error| panic!("{rpc:?} retained: {error}"));
+            // The synthetic injected-route peer is always known, even when
+            // nothing has been injected.
+            invoke_peer_scoped_read(&svc, rpc, "0.0.0.0")
+                .await
+                .unwrap_or_else(|error| panic!("{rpc:?} local injection: {error}"));
             let error = invoke_peer_scoped_read(&svc, rpc, "192.0.2.99")
                 .await
                 .unwrap_err();

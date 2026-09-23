@@ -70,11 +70,16 @@ impl KnownPeerQueries {
     /// Known means a managed peer — a configured neighbor or an accepted
     /// dynamic peer, the same `HasPeerAddress` answer `GetPolicyStats` uses —
     /// or a peer whose Adj-RIB-In still retains GR/LLGR-stale routes after its
-    /// session (and, for a dynamic peer, its managed entry) went away. Callers
-    /// ask only when a peer-scoped result is empty, so a result with rows is
-    /// never delayed. The whole check, both reads together, is bounded by one
-    /// [`PEER_MANAGER_READ_TIMEOUT`] deadline taken at entry.
+    /// session (and, for a dynamic peer, its managed entry) went away. The
+    /// synthetic peer that owns locally injected routes is always known, even
+    /// with nothing injected. Callers ask only when a peer-scoped result is
+    /// empty, so a result with rows is never delayed. The whole check, both
+    /// reads together, is bounded by one [`PEER_MANAGER_READ_TIMEOUT`]
+    /// deadline taken at entry.
     pub(crate) async fn require_known(&self, address: IpAddr) -> Result<(), Status> {
+        if address == crate::injection_service::LOCAL_PEER {
+            return Ok(());
+        }
         let known = tokio::time::timeout(PEER_MANAGER_READ_TIMEOUT, async {
             let managed = peer_manager_operator_read(
                 &self.peer_manager,
