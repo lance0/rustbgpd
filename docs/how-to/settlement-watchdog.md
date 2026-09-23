@@ -69,14 +69,21 @@ coordinator acquisition is a fence, not a mutation owner.
 
 Two separate bounds apply, and they mean very different things:
 
-- **Pre-ownership (10 minutes, Apply only).** A unary or streamed
-  `ApplyConfigTransaction` waits at most ten minutes to acquire the
-  coordinator. Expiry returns `DEADLINE_EXCEEDED` with the message
-  that "coordinator ownership was not acquired and apply did not
-  begin" — a clean rejection with **no daemon effect**. Nothing was
-  mutated; retry once the current owner settles. This bound covers
-  only Apply: SIGHUP and the neighbor/FIB/peer-group/policy RPCs have
-  no pre-ownership timeout and queue until the coordinator frees.
+- **Pre-ownership (10 minutes, config-transaction RPCs).** Unary and
+  streamed `ApplyConfigTransaction`, `ConfirmConfigTransaction`,
+  `AbortConfigTransaction`, `RollbackConfigTransaction`, and gNMI `Set`
+  each wait at most ten minutes to acquire the coordinator. Expiry
+  returns `DEADLINE_EXCEEDED` (`UNAVAILABLE` for gNMI `Set`) with a
+  message that coordinator ownership was not acquired and the
+  operation did not begin — a clean rejection with **no daemon
+  effect**. Nothing was mutated; retry once the current owner settles.
+  The confirm-window auto-revert has no caller to reject, so it never
+  gives up its place in the queue: once it is ten minutes past its
+  deadline it logs `confirmed config transaction auto-revert is
+  overdue: waiting for the runtime-config coordinator`, repeated every
+  ten minutes until it acquires. SIGHUP and the
+  neighbor/FIB/peer-group/policy RPCs have no pre-ownership timeout
+  and queue until the coordinator frees.
 - **Post-ownership (30 minutes + 5 seconds, every owner).** The moment
   an operation acquires the coordinator, one fixed, non-resettable
   30-minute settlement budget arms. An owner that cannot prove

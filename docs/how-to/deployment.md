@@ -1335,8 +1335,8 @@ therefore own the graceful stop and the verification that follows it.
    rewrites, or stops anything. A green result is an observation at one
    instant (human output says `Pre-upgrade observation as of unix <t>`; JSON
    carries `observed_at_unix_seconds`), not a fence: a transaction can still
-   start after it, which is why the stop in step 3 and the repeated checks in
-   step 3 stay in the procedure. See
+   start after it, which is why step 3 stops the daemon and then repeats these
+   checks. See
    [the check reference](../reference/operations.md#pre-upgrade-checks).
 
    When the installed release is v0.64.0 or earlier, also clear retired
@@ -1496,7 +1496,7 @@ operations via gRPC persist back to the config file (see
 
 ## Sample profiles
 
-The repo ships ten config profiles under
+The repo ships ten config profiles, plus a Docker Compose quick-start, under
 [`examples/`](../../examples) covering the standard deployment
 shapes. Pick the closest match, copy, edit:
 

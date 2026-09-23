@@ -156,10 +156,15 @@ Or filter via `RUST_LOG` using the per-peer tracing span:
 RUST_LOG='info,[peer{peer_addr=10.0.0.1}]=debug' rustbgpd /etc/rustbgpd/config.toml
 ```
 
-The span directive needs the square brackets. `RUST_LOG` is parsed as a
-whole, so one directive that does not parse, such as the unbracketed
-`peer{peer_addr=10.0.0.1}=debug`, makes the daemon ignore `RUST_LOG`
-entirely and log at `info`.
+The span directive needs the square brackets. `RUST_LOG` is parsed one
+comma-separated directive at a time: a directive that does not parse, such as
+the unbracketed `peer{peer_addr=10.0.0.1}=debug`, is dropped and the valid
+directives are kept. The dropped directives are reported with their parse
+errors in one `warning: ignoring unparseable RUST_LOG directive(s), ...` line
+on stderr at startup and whenever a successful SIGHUP reload rebuilds the log
+filter; the reload also logs that line as a `warn` event. Only a `RUST_LOG`
+with no valid directive falls back to `info`. An empty, comma-only or
+whitespace-only `RUST_LOG` is treated as unset.
 
 The span directive and `log_level` select events emitted inside that peer's
 session span: the BGP session task, its connect path, and its socket writer.
@@ -325,7 +330,8 @@ counts before publishing authority or mutating peer, persisted, or runtime
 state. Apply without `--confirm-id`, or reduce the canonical config size.
 
 While a confirmed transaction is applying or awaiting confirmation, SIGHUP
-reload is ignored and every persisted runtime config mutator (FIB-table and
+reload is rejected at preflight with no effect (SIGHUP outcome
+`rejected_no_effect`) and every persisted runtime config mutator (FIB-table and
 dynamic-neighbor CRUD, neighbor lifecycle, a further `config apply`) is rejected
 with `FAILED_PRECONDITION`, so a pending timeout rollback cannot be overwritten
 by a later ad hoc change. The fence clears only after the transaction is
@@ -2001,31 +2007,36 @@ of choice and apply retention outside the daemon:
 Useful local queries follow. `operator_only` decisions log at WARN and most
 others at INFO, but a successful `read`-tier call (`CheckLiveness`) logs at
 DEBUG, so these queries omit such calls unless debug logging is enabled;
-`bgp_grpc_authz_decisions_total` still counts every request.
+`bgp_grpc_authz_decisions_total` still counts every request. The JSON log
+nests event fields under `.fields`, so `tier`, `result` and `principal` are
+read as `.fields.tier` and so on. The unit's journal also holds the plain-text
+startup banner from stderr, so the queries read raw lines (`jq -R`) and skip
+any line that is not JSON (`fromjson?`).
 
 ```bash
 # gRPC authorization records at the configured log level from a systemd unit.
 journalctl -u rustbgpd -o cat --since -24h \
-  | jq 'select(.target == "grpc_authz")'
+  | jq -R 'fromjson? | select(.target == "grpc_authz")'
 
 # Operator-only calls, including forwarded and denied attempts.
 journalctl -u rustbgpd -o cat --since -24h \
-  | jq 'select(.target == "grpc_authz" and .tier == "operator_only")'
+  | jq -R 'fromjson? | select(.target == "grpc_authz"
+      and .fields.tier == "operator_only")'
 
 # Listener-cap, role, and authentication denials to investigate.
 journalctl -u rustbgpd -o cat --since -24h \
-  | jq 'select(.target == "grpc_authz"
-      and (.result == "listener_tier_denied"
-        or .result == "principal_unmapped"
-        or .result == "role_tier_denied"
-        or .result == "authn_failed"))'
+  | jq -R 'fromjson? | select(.target == "grpc_authz"
+      and (.fields.result == "listener_tier_denied"
+        or .fields.result == "principal_unmapped"
+        or .fields.result == "role_tier_denied"
+        or .fields.result == "authn_failed"))'
 
-# Mutating/operator activity grouped by principal when jq has group_by.
+# Mutating/operator activity grouped by principal.
 journalctl -u rustbgpd -o cat --since -24h \
-  | jq -s '[.[] | select(.target == "grpc_authz"
-      and (.tier == "mutating" or .tier == "operator_only"))]
-      | group_by(.principal)
-      | map({principal: .[0].principal, count: length})'
+  | jq -nR '[inputs | fromjson? | select(.target == "grpc_authz"
+      and (.fields.tier == "mutating" or .fields.tier == "operator_only"))]
+      | group_by(.fields.principal)
+      | map({principal: .[0].fields.principal, count: length})'
 ```
 
 TLS handshake failures occur before request authorization and increment
@@ -2413,6 +2424,9 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
+| `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fails the daemon through gRPC server supervision; the metrics listener stops serving |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |
@@ -3076,7 +3090,10 @@ rbgp top -i 5     # 5s poll interval
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
 streaming route events in a terminal UI. `q` or Ctrl-C quits; SIGTERM,
 SIGINT, and SIGHUP quit the same way and restore the terminal before the
-process exits with status 0. The route-event subscription is
+process exits with status 0, and so does a terminal hangup such as a dropped
+SSH session. `rbgp top` needs an interactive terminal on both stdin and stdout;
+otherwise it exits 1 with `rbgp top needs an interactive terminal on stdin and
+stdout` before connecting. The route-event subscription is
 opened only while the events panel is visible (`e`).
 The panel uses the lag-aware `WatchEvents` route stream, including exact missed
 counts and policy-filter source/target/reason/Add-Path context. Admission and

@@ -993,6 +993,8 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
+| `import_policy`        | [table]  | no       | --      | Inline import policy statements (`[[neighbors.import_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `import_policy_chain` |
+| `export_policy`        | [table]  | no       | --      | Inline export policy statements (`[[neighbors.export_policy]]`, see [Policy entries](#policy-entries)); mutually exclusive with `export_policy_chain` |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 | `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
@@ -3193,7 +3195,12 @@ For each neighbor, import and export policies are resolved independently:
 2. If the neighbor has per-neighbor **inline policy** (`[[neighbors.import_policy]]`
    or `[[neighbors.export_policy]]`), those are wrapped in a single-element chain.
 3. Otherwise, the global **chain** (`import_chain` / `export_chain`) is used.
-4. If none of the above exist, all routes are permitted (no filtering).
+4. If none of the above exist, the direction has no operator policy. iBGP
+   sessions, and eBGP sessions with RFC 8212 enforcement off, permit all
+   routes. eBGP sessions with enforcement effective
+   (`[global].ebgp_requires_policy = true`, or `config_epoch = 2` with the key
+   omitted) run the reserved deny-all chain for that direction instead; see
+   [`ebgp_requires_policy`](#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
 
 Per-neighbor policy completely replaces the global policy for that direction --
 the two are never merged. Inline and chain on the same neighbor/direction is a
@@ -3206,10 +3213,15 @@ config error.
 A realistic configuration with three peers, policy actions, and community matching:
 
 ```toml
+# RFC 8212 posture: epoch 2 with explicit enforcement. An eBGP direction with
+# no explicit policy carries no routes.
+config_epoch = 2
+
 [global]
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -3314,6 +3326,15 @@ prefix = "0.0.0.0/0"
 le = 24
 action = "permit"
 set_med = 50
+
+[[neighbors.export_policy]]
+prefix = "192.168.1.0/24"
+action = "permit"
+
+[[neighbors.export_policy]]
+prefix = "0.0.0.0/0"
+le = 32
+action = "deny"
 ```
 
 ---
@@ -4728,9 +4749,12 @@ after a chain swap.
 `[global]` identity and daemon-wide flags (ASN, router-id, listen
 port, cluster-id, admission and multipath knobs),
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, and `apply_bum_enforcement` are
+`[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
+`[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and
+`apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
-`rustbgpd --diff`. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
+`rustbgpd --diff`. The [reload matrix](reload-matrix.md) is the full per-field
+list. EVPN tables (`[[evpn_instances]]`, `[[ethernet_segments]]`,
 and `[[evpn_ip_vrfs]]`) are coordinator-gated instead: SIGHUP and the
 whole-model `EvpnService.ApplyEvpnRuntime` RPC validate a full candidate,
 converge the daemon actors in order, and advance the committed runtime

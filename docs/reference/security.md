@@ -467,7 +467,7 @@ They remain owner-private and disclose equality between accepted generations.
 They are permanently rollback-ineligible. Config-history v3 has no authority
 over the separate commit-confirm v3 raw prior or cleanup residue.
 The enum value `LEGACY_TOML_ONLY` is
-receive-only for an N-1 server and is never emitted by v0.65. Unreadable rows
+receive-only for an N-1 server and has not been emitted since v0.65. Unreadable rows
 return `UNREADABLE`, empty TOML and source digests, and a constant summary so
 paths, filenames, raw errors, and unverified digest claims do not cross the API
 boundary.

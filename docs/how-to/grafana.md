@@ -107,8 +107,8 @@ selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
 send-hold teardown, session event source loss, live event-stream
 lag/desynchronization, BMP feed loss and stream divergence, BMP
 control-event and Loc-RIB source drops, policy evaluation errors, BLACKHOLE
-discard install activity and admission limits, RPKI cache End-of-Data
-readiness, and stale MRT dumps)
+discard install activity and admission limits, RPKI cache RTR session loss
+and End-of-Data readiness, and stale MRT dumps)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../../examples/prometheus/rustbgpd-alerts.yml),
 with per-rule unit tests in
@@ -261,9 +261,11 @@ inside the bounded window does.
   event outbox, graceful restart) stay empty until the corresponding
   feature is configured; vector metrics only emit series once a label
   combination is touched.
-- The "Memory (jemalloc)" panel shows data only for builds with the
-  `jemalloc` feature (the release container image); other builds do not
-  export the `jemalloc_*` gauges.
+- The "Memory (jemalloc)" panel is populated on every default build:
+  `jemalloc` is the default allocator feature (release image, tarballs,
+  and a plain `cargo build --release`). Only a stock-glibc
+  `--no-default-features` build omits the `jemalloc_*` gauges, and the
+  panel is then empty.
 - EVPN metrics (the `evpn_*` families) remain off the overview dashboard; the
   dedicated Alpha dashboard aggregates MAC, ESI, and netdevice-name dimensions.
   There is no dedicated Type-3, VTEP-reachability, generic FDB/NHG installed

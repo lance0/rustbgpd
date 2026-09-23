@@ -113,8 +113,8 @@ in-place additive change. Each format inventory names the CLI paths that expose
 it. Every pinned ribsnap golden is also linked to the exact BIRD, FRR, GoBGP,
 MRT, or BMP producer test that creates it; the executable floor checks every
 record in those real goldens and then passes each complete artifact through the
-fail-closed parser. The neighbor-detail JSON and support-bundle manifest v2 pin
-required and optional key/type floors, including promised nested object shapes,
+fail-closed parser. The neighbor-detail JSON, neighbor update-group comparison
+JSON, and support-bundle manifest v2 pin required and optional key/type floors, including promised nested object shapes,
 in their serializer contract tests while allowing additive fields.
 
 Prometheus metrics and structured event payloads used by the stable roles are

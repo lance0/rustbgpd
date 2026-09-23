@@ -39,7 +39,10 @@ resolved.
   The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
   records CPU placement, complete call results and remaining stale observations.
   The paired native rollback cell passes on both baseline and candidate; it
-  does not establish a general deadline guarantee. This issue stays open
+  does not establish a general deadline guarantee. The
+  [2026-09-21 route-server flagship soak](../soaks/soak-rs-flagship-24h-2026-09-21.md)
+  on the v0.71.0 tag passed, but its slowest `policy stats` read took
+  1969 ms, 31 ms under the 2 s deadline. This issue stays open
   until the final phase coverage and qualifying soak pass on the final runtime
   candidate. Retrying an operator command does not
   turn a failed management-soak sample into a pass. See the
@@ -311,7 +314,8 @@ resolved.
   `docs/project/roadmap.md`.
 
 - **RFC 8326 initiator toggle does not persist across daemon restart.**
-  `rbgp gshut --peer X` flips a runtime bool on `ManagedPeer`
+  `rbgp gshut --neighbor X` (or `rbgp gshut --all --yes` for every peer)
+  flips a runtime bool on `ManagedPeer`
   + the corresponding session, and triggers a RIB refresh so the
   community appears on the wire. The toggle survives session flaps
   and collision-replaces during the daemon's lifetime, but is lost
@@ -500,10 +504,3 @@ resolved.
   `true`), silently discarding the original flag on round-trip. This is
   safe for all normal use but means a decode→encode cycle is not
   perfectly lossless for malformed inputs with incorrect flags.
-- **FlowSpec AFI defaults to IPv4 when no destination prefix component.**
-  A FlowSpec rule with no destination prefix component (e.g., "drop all
-  UDP") received on an IPv6 FlowSpec session is stored with
-  `afi: Afi::Ipv4` implicitly via the MpReachNlri AFI. This is correct
-  per wire semantics (the AFI comes from the MP_REACH attribute, not the
-  rule itself) but worth noting — the AFI is always set correctly from
-  the MP_REACH/MP_UNREACH framing.

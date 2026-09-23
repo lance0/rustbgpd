@@ -419,7 +419,8 @@ to one or more IR terms:
   is pure and cannot diverge.
 - When one `.rpol` term produces multiple IR terms they are named
   `<term>.<n>` (1-based); a lone IR term keeps the plain term name.
-  Explain surfaces will render these names.
+  Explain traces, `rbgp policy test` term hits, and `rbgp policy stats`
+  render these names.
 
 ### Parameters
 
