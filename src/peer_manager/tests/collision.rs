@@ -1537,3 +1537,398 @@ async fn saturated_dynamic_neighbor_accept_counts_rejection_without_consuming_ca
     drop(first_client);
     drop(rejected_client);
 }
+
+/// RFC 4271 §6.8: "a connection collision cannot be detected with connections
+/// that are in Idle, Connect, or Active states." A candidate that has received
+/// the peer's OPEN while the primary has no connection is the only live
+/// connection, so it is promoted even when the local identifier is higher.
+/// Dropping it instead livelocks against a peer that keeps connecting in.
+async fn assert_candidate_promoted_over_connectionless_primary(primary_state: SessionState) {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 10),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, primary_state, None, primary.clone()),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+
+    // Resolution joins the retired primary before returning, so the counters
+    // are final here.
+    assert_eq!(
+        pending.collision_dump.load(Ordering::SeqCst),
+        0,
+        "{primary_state:?} primary: the only live connection must not be dumped"
+    );
+    assert_eq!(
+        primary.shutdown.load(Ordering::SeqCst),
+        1,
+        "{primary_state:?} primary and its connect attempt must be stopped and joined"
+    );
+    assert_eq!(
+        primary.collision_dump.load(Ordering::SeqCst),
+        0,
+        "{primary_state:?} primary has no connection to send Cease 6/7 on"
+    );
+    assert_eq!(
+        pending.activate_max_prefix_metrics.load(Ordering::SeqCst),
+        1,
+        "promotion must transfer metric ownership"
+    );
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+        "{primary_state:?} primary: the candidate must become the primary"
+    );
+    assert_eq!(
+        mgr.peer_key_for_session(1),
+        None,
+        "retired primary unregistered"
+    );
+
+    // Late signals from the retired primary (its outbound connect completing
+    // and reading an OPEN, or its Idle transition) must not start a second
+    // collision round against the promoted session.
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+    assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(pending.shutdown.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+        "stale signals from the retired primary must not touch the promoted session"
+    );
+}
+
+#[tokio::test]
+async fn collision_primary_active_promotes_inbound_despite_higher_local_id() {
+    assert_candidate_promoted_over_connectionless_primary(SessionState::Active).await;
+}
+
+#[tokio::test]
+async fn collision_primary_connect_promotes_inbound_despite_higher_local_id() {
+    assert_candidate_promoted_over_connectionless_primary(SessionState::Connect).await;
+}
+
+#[tokio::test]
+async fn collision_primary_idle_promotes_inbound_despite_higher_local_id() {
+    // Reachable when the primary has dropped to Idle but its BackToIdle
+    // notification is still queued behind the candidate's OpenReceived.
+    assert_candidate_promoted_over_connectionless_primary(SessionState::Idle).await;
+}
+
+#[tokio::test]
+async fn collision_primary_established_keeps_primary_even_when_remote_id_higher() {
+    // RFC 4271 §6.8: a collision with an Established connection closes the
+    // newly created one, whatever the identifiers say.
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id: 2,
+        role: rustbgpd_transport::SessionRole::InboundCandidate,
+        peer_addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65002,
+    })
+    .await;
+
+    assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+        "an Established primary must survive a late candidate OPEN"
+    );
+}
+
+/// Accept a real inbound connection for `peer_addr` (loopback) and return the
+/// remote end after the manager has started it as a live collision candidate.
+async fn accept_real_candidate(mgr: &mut PeerManager, peer_addr: IpAddr) -> TcpStream {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+    let (server_stream, remote_addr) = listener.accept().await.unwrap();
+    let client_stream = client.await.unwrap();
+    mgr.handle_inbound(server_stream, remote_addr, None, None)
+        .await;
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_some()),
+        "inbound socket should become a live collision candidate"
+    );
+    client_stream
+}
+
+async fn next_candidate_open_received(mgr: &mut PeerManager) -> SessionNotification {
+    let notification = tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
+        .await
+        .expect("candidate should notify OpenReceived")
+        .expect("notification channel should stay open");
+    assert!(
+        matches!(
+            notification,
+            SessionNotification::OpenReceived {
+                role: rustbgpd_transport::SessionRole::InboundCandidate,
+                ..
+            }
+        ),
+        "expected candidate OpenReceived, got {notification:?}"
+    );
+    notification
+}
+
+/// The M81 interleaving end to end: the primary sits in Active with no
+/// connection, the peer connects in, and the candidate reaches Established
+/// before the manager resolves its OPEN. With a higher local identifier the
+/// candidate must still be kept.
+#[tokio::test]
+async fn inbound_candidate_established_while_primary_active_is_promoted() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // The helper-inserted primary is session 1; keep the candidate distinct.
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("candidate must send OPEN");
+    assert!(matches!(msg, Message::Open(_)));
+    send_bgp_message(
+        &mut client,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("candidate should send KEEPALIVE after OPEN");
+    assert!(matches!(msg, Message::Keepalive));
+    send_bgp_message(&mut client, &Message::Keepalive).await;
+
+    // Hold the OpenReceived notification until the candidate is Established,
+    // which is the order the M81 daemon log recorded.
+    let notification = next_candidate_open_received(&mut mgr).await;
+    let mut established = false;
+    for _ in 0..40 {
+        let pending = mgr.peers[&key(peer_addr)].pending_inbound.as_ref().unwrap();
+        if pending.handle.query_state().await.unwrap().fsm_state == SessionState::Established {
+            established = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(established, "candidate did not reach Established");
+
+    mgr.handle_session_notification(notification).await;
+
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(managed.pending_inbound.is_none() && managed.session_id != 1);
+    assert_eq!(
+        managed.handle.query_state().await.unwrap().fsm_state,
+        SessionState::Established,
+        "the promoted inbound session must stay up"
+    );
+}
+
+/// The resolution rule reads the primary's state when the OPEN arrives, not
+/// the state seen when the connection was accepted: a primary that was Active
+/// at accept time but has since reached `OpenConfirm` on its own connection is a
+/// real collision, and the higher local identifier keeps it.
+#[tokio::test]
+async fn collision_rule_uses_primary_state_at_resolution_not_accept() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let accept_time = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, accept_time.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    assert_eq!(accept_time.query_state.load(Ordering::SeqCst), 1);
+
+    // The primary's own outbound connection completes its OPEN exchange
+    // before the candidate's OPEN arrives.
+    let resolution_time = Arc::new(FakePeerCounters::default());
+    let accept_handle = std::mem::replace(
+        &mut mgr.peers.get_mut(&key(peer_addr)).unwrap().handle,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            resolution_time.clone(),
+        ),
+    );
+    let _ = accept_handle.shutdown().await;
+
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("candidate must send OPEN");
+    assert!(matches!(msg, Message::Open(_)));
+    send_bgp_message(
+        &mut client,
+        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
+    )
+    .await;
+    let notification = next_candidate_open_received(&mut mgr).await;
+    mgr.handle_session_notification(notification).await;
+
+    assert_eq!(resolution_time.collision_dump.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+        "an OpenConfirm primary with the higher local identifier must win"
+    );
+    loop {
+        let msg = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_bgp_message(&mut client, &mut buf),
+        )
+        .await
+        .expect("dropped candidate must send a NOTIFICATION");
+        if let Message::Notification(notification) = msg {
+            assert_eq!(
+                notification.code,
+                rustbgpd_wire::notification::NotificationCode::Cease
+            );
+            assert_eq!(
+                notification.subcode,
+                rustbgpd_wire::notification::cease_subcode::CONNECTION_COLLISION_RESOLUTION
+            );
+            break;
+        }
+    }
+}
