@@ -3,6 +3,8 @@
 //! Runs as a single tokio task, receiving mutations via an mpsc channel.
 //! Each mutation is applied to the in-memory config, serialized to TOML,
 //! and atomically written (temp file + rename) to the config path.
+//! The filesystem work for each mutation runs on the blocking pool, off the
+//! runtime workers.
 
 #![deny(unsafe_code)]
 
@@ -117,29 +119,15 @@ impl ConfigPersister {
         )
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         // Boot recording already happened synchronously in `new_accepted` so
         // readers cannot race directory migration. This task handles later
         // accepted mutations without rereading external sources.
-        while let Some(mutation) = self.rx.recv().await {
+        let mut persister = self;
+        while let Some(mutation) = persister.rx.recv().await {
             match mutation {
                 ConfigMutation::ReplaceConfig(new_config) => {
-                    self.discard_staged();
-                    info!("replacing persister config snapshot and persisting it");
-                    self.current = new_config;
-                    match self.persist() {
-                        ConfigPersistCommitOutcome::PublishedDurable => {}
-                        ConfigPersistCommitOutcome::NotPublished(error) => error!(
-                            path = %self.config_path.display(),
-                            error = %error,
-                            "config was not published — in-memory state diverges from disk"
-                        ),
-                        ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
-                            path = %self.config_path.display(),
-                            error = %error,
-                            "config is visible but crash durability is unproved"
-                        ),
-                    }
+                    (persister, ()) = persister.off_runtime(move |p| p.replace(new_config)).await;
                 }
                 ConfigMutation::ReplaceConfigAck(new_config, ack) => {
                     #[cfg(debug_assertions)]
@@ -147,23 +135,10 @@ impl ConfigPersister {
                         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::ReplaceBeforePublish,
                     )
                     .await;
-                    self.discard_staged();
-                    let previous = Arc::clone(&self.current);
-                    info!("replacing persister config snapshot and persisting it");
-                    self.current = new_config;
-                    let result = self.persist();
-                    if let ConfigPersistCommitOutcome::NotPublished(error) = &result {
-                        self.current = previous;
-                        error!(
-                            path = %self.config_path.display(),
-                            error = %error,
-                            "config was not published — persister snapshot rolled back to previous state"
-                        );
-                    } else if let ConfigPersistCommitOutcome::PublicationAmbiguous(error) = &result
-                    {
-                        error!(path = %self.config_path.display(), error = %error,
-                            "config is visible but crash durability is unproved");
-                    }
+                    let result;
+                    (persister, result) = persister
+                        .off_runtime(move |p| p.replace_ack(new_config))
+                        .await;
                     #[cfg(not(debug_assertions))]
                     let drop_ack = false;
                     if !drop_ack {
@@ -176,7 +151,11 @@ impl ConfigPersister {
                         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::StageBeforeAck,
                     )
                     .await;
-                    let _ = ack.send(self.stage(new_config).map_err(|e| e.to_string()));
+                    let result;
+                    (persister, result) = persister
+                        .off_runtime(move |p| p.stage(new_config).map_err(|e| e.to_string()))
+                        .await;
+                    let _ = ack.send(result);
                 }
                 ConfigMutation::CommitStagedConfig(ack) => {
                     #[cfg(debug_assertions)]
@@ -184,7 +163,8 @@ impl ConfigPersister {
                         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::StagedCommitBeforePublish,
                     )
                     .await;
-                    let result = self.commit_staged();
+                    let result;
+                    (persister, result) = persister.off_runtime(Self::commit_staged).await;
                     #[cfg(not(debug_assertions))]
                     let drop_ack = false;
                     if !drop_ack {
@@ -192,20 +172,95 @@ impl ConfigPersister {
                     }
                 }
                 ConfigMutation::DiscardStagedConfig => {
-                    self.discard_staged();
+                    (persister, ()) = persister.off_runtime(Self::discard_staged).await;
                 }
                 ConfigMutation::AdoptReloadSnapshot { snapshot, adopted } => {
-                    self.discard_staged();
-                    info!("adopting SIGHUP config snapshot without rewriting the operator file");
-                    self.current = snapshot;
-                    self.record_current_history();
+                    (persister, ()) = persister
+                        .off_runtime(move |p| {
+                            p.discard_staged();
+                            info!(
+                                "adopting SIGHUP config snapshot without rewriting the operator file"
+                            );
+                            p.current = snapshot;
+                            p.record_current_history();
+                        })
+                        .await;
                     let _ = adopted.send(());
                 }
                 #[cfg(test)]
                 ConfigMutation::InspectCurrent(reply) => {
-                    let _ = reply.send(Arc::clone(&self.current));
+                    let _ = reply.send(Arc::clone(&persister.current));
                 }
             }
+        }
+    }
+
+    fn replace(&mut self, new_config: Arc<AcceptedConfigSnapshot>) {
+        self.discard_staged();
+        info!("replacing persister config snapshot and persisting it");
+        self.current = new_config;
+        match self.persist() {
+            ConfigPersistCommitOutcome::PublishedDurable => {}
+            ConfigPersistCommitOutcome::NotPublished(error) => error!(
+                path = %self.config_path.display(),
+                error = %error,
+                "config was not published — in-memory state diverges from disk"
+            ),
+            ConfigPersistCommitOutcome::PublicationAmbiguous(error) => error!(
+                path = %self.config_path.display(),
+                error = %error,
+                "config is visible but crash durability is unproved"
+            ),
+        }
+    }
+
+    fn replace_ack(
+        &mut self,
+        new_config: Arc<AcceptedConfigSnapshot>,
+    ) -> ConfigPersistCommitOutcome {
+        self.discard_staged();
+        let previous = Arc::clone(&self.current);
+        info!("replacing persister config snapshot and persisting it");
+        self.current = new_config;
+        let result = self.persist();
+        if let ConfigPersistCommitOutcome::NotPublished(error) = &result {
+            self.current = previous;
+            error!(
+                path = %self.config_path.display(),
+                error = %error,
+                "config was not published — persister snapshot rolled back to previous state"
+            );
+        } else if let ConfigPersistCommitOutcome::PublicationAmbiguous(error) = &result {
+            error!(path = %self.config_path.display(), error = %error,
+                "config is visible but crash durability is unproved");
+        }
+        result
+    }
+
+    /// Run one mutation's filesystem work (write, fsync, rename, history) on
+    /// the blocking pool, so a slow or hung config filesystem stalls this
+    /// actor rather than a runtime worker thread.
+    ///
+    /// The persister moves into the closure and back, so mutations stay
+    /// strictly ordered and the state never forks. If this task is dropped
+    /// mid-wait (runtime shutdown), the started work still runs to
+    /// completion with the state it owns; every file operation it performs
+    /// is individually atomic, as it was on the worker thread.
+    async fn off_runtime<R: Send + 'static>(
+        self,
+        work: impl FnOnce(&mut Self) -> R + Send + 'static,
+    ) -> (Self, R) {
+        match tokio::task::spawn_blocking(move || {
+            let mut persister = self;
+            let result = work(&mut persister);
+            (persister, result)
+        })
+        .await
+        {
+            Ok(settled) => settled,
+            // Preserve the pre-existing behaviour of a panic in this work:
+            // it ends the persister task.
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
         }
     }
 
