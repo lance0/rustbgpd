@@ -4747,7 +4747,9 @@ re-evaluated. Operators do not need to follow up with a manual `softreset`
 after a chain swap.
 
 `[global]` identity and daemon-wide flags (ASN, router-id, listen
-port, cluster-id, admission and multipath knobs),
+port, cluster-id, the RFC 8212 posture tuple, blackhole-discard admission
+limits and multipath knobs; `dynamic_neighbor_limit`, `honor_graceful_shutdown`
+and `honor_blackhole` are the reload-applied exceptions),
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
 `[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
 `[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and

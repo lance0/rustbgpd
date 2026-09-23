@@ -867,9 +867,13 @@ is waiting on a mutation, and it still leaves the same durable state behind.
 
 **Restart-required surfaces** (logged at reload, surfaced under
 "Restart-required" in `--diff`): `[global]` ASN/router-id/cluster-id,
+the RFC 8212 `config_epoch` / `ebgp_requires_policy` tuple,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
-`[mrt]`, and `apply_bum_enforcement`. EVPN table edits are
+`[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
+`[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and
+`apply_bum_enforcement`. The [reload matrix](reload-matrix.md) is the full
+per-field list. EVPN table edits are
 coordinator-gated rather than blanket restart-required: SIGHUP uses the
 same daemon actor converger as `EvpnService.ApplyEvpnRuntime` for supported
 L2VNI/IP-VRF/ES shapes, additive build-up, atomic tenant teardown,
