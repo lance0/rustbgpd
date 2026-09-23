@@ -501,6 +501,52 @@ fn measure_adj_rib_in(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     }
 }
 
+/// Isolate the allocator-visible Loc-RIB storage from the two Adj-RIB-In
+/// copies in `full_rib`. Attribute interning is used during construction and
+/// then dropped before the live-byte snapshot, leaving only the selected
+/// routes and their shared attribute body owned by the Loc-RIB. The intern
+/// count is still reported as the row's attribute-set count, since that shared
+/// body is what the attribute-container model prices.
+fn measure_loc_rib_only(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+    let attrs = typical_attributes(1);
+    let baseline = ALLOC.allocated();
+    ALLOC.reset_peak();
+    let start = Instant::now();
+
+    let mut intern = AttrInternTable::new();
+    let mut loc = LocRib::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        let mut route = make_route(*prefix, 1, &attrs);
+        intern.intern(&mut route.attributes);
+        loc.recompute(*prefix, std::iter::once(&route));
+    }
+    let attribute_sets = intern.len();
+    drop(intern);
+
+    let elapsed_ms = start.elapsed().as_millis();
+    let live_bytes = ALLOC.allocated() - baseline;
+    let peak_bytes = ALLOC.peak() - baseline;
+    let stats = ComponentStats {
+        adj_in_attr_intern_entries: attribute_sets,
+        ..loc_stats(&loc)
+    };
+    let route_copies = stats.loc_routes;
+    drop(loc);
+
+    MemoryRow {
+        profile,
+        shape: "loc_rib_only",
+        prefixes: prefixes.len(),
+        input_peers: 0,
+        output_peers: 0,
+        route_copies,
+        live_bytes,
+        peak_bytes,
+        elapsed_ms,
+        stats,
+    }
+}
+
 fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let attrs1 = typical_attributes(1);
     let attrs2 = typical_attributes(2);
@@ -763,10 +809,11 @@ fn measure_rr_fanout_representative(profile: &'static str, prefixes: &[Prefix]) 
 }
 
 fn profile_rows(profile: &'static str, sizes: &[usize]) -> Vec<MemoryRow> {
-    let mut rows = Vec::with_capacity(sizes.len() * 6);
+    let mut rows = Vec::with_capacity(sizes.len() * 7);
     for &size in sizes {
         let prefixes = generate_prefixes(size);
         rows.push(measure_adj_rib_in(profile, &prefixes));
+        rows.push(measure_loc_rib_only(profile, &prefixes));
         rows.push(measure_full_rib(profile, &prefixes));
         rows.push(measure_full_rib_diverse(profile, &prefixes));
         rows.push(measure_full_rib_representative(profile, &prefixes));
@@ -808,7 +855,7 @@ fn configured_profile() -> (&'static str, Vec<usize>) {
 #[test]
 fn memory_profile_schema_quick() {
     let rows = profile_rows("schema", &[512]);
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
 
     let adj = rows.iter().find(|row| row.shape == "adj_rib_in").unwrap();
     assert_eq!(adj.prefixes, 512);
@@ -831,6 +878,17 @@ fn memory_profile_schema_quick() {
         std::mem::size_of::<Vec<PathAttribute>>(),
         std::mem::size_of::<usize>() * 3
     );
+
+    let loc = rows.iter().find(|row| row.shape == "loc_rib_only").unwrap();
+    assert_eq!(loc.input_peers, 0);
+    assert_eq!(loc.output_peers, 0);
+    assert_eq!(loc.route_copies, 512);
+    assert_eq!(loc.stats.loc_routes, 512);
+    assert_eq!(loc.stats.adj_in_routes, 0);
+    assert_eq!(loc.stats.adj_out_routes, 0);
+    assert_eq!(loc.stats.adj_in_attr_intern_entries, 1);
+    assert!(loc.live_bytes > 0);
+    assert!(loc.peak_bytes >= loc.live_bytes);
 
     let full = rows.iter().find(|row| row.shape == "full_rib").unwrap();
     assert_eq!(full.input_peers, 2);
