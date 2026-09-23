@@ -263,6 +263,7 @@ pub struct VrpManager {
     /// Sender for ASPA table snapshots to the RIB manager.
     aspa_rib_tx: Option<mpsc::Sender<AspaTableUpdate>>,
     readiness_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
+    connectivity_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
     cache_inventory: Option<CacheInventoryAttachment>,
 }
 
@@ -282,6 +283,7 @@ impl VrpManager {
             rib_tx,
             aspa_rib_tx: None,
             readiness_observer: None,
+            connectivity_observer: None,
             cache_inventory: None,
         }
     }
@@ -308,6 +310,34 @@ impl VrpManager {
     ) -> Self {
         self.readiness_observer = Some(Box::new(observer));
         self
+    }
+
+    /// Observe a configured cache's RTR session going up (`true`) or down
+    /// (`false`), from the same transitions that set
+    /// [`CacheState::connected`]. Independent of readiness: a disconnected
+    /// cache keeps its retained contribution until expiry. Fires only for
+    /// caches registered through [`CacheInventoryAttachment`].
+    #[must_use]
+    pub fn with_connectivity_observer(
+        mut self,
+        observer: impl Fn(SocketAddr, bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.connectivity_observer = Some(Box::new(observer));
+        self
+    }
+
+    fn set_connected(&mut self, server: SocketAddr, connected: bool) {
+        let Some(state) = self
+            .cache_inventory
+            .as_mut()
+            .and_then(|i| i.states.get_mut(&server))
+        else {
+            return;
+        };
+        state.connected = connected;
+        if let Some(observer) = &self.connectivity_observer {
+            observer(server, connected);
+        }
     }
 
     /// Main event loop.
@@ -390,25 +420,16 @@ impl VrpManager {
 
     async fn handle_enhanced_update(&mut self, update: EnhancedVrpUpdate) {
         match update {
-            EnhancedVrpUpdate::Connected { server } => {
-                if let Some(state) = self
-                    .cache_inventory
-                    .as_mut()
-                    .and_then(|i| i.states.get_mut(&server))
-                {
-                    state.connected = true;
-                }
-            }
+            EnhancedVrpUpdate::Connected { server } => self.set_connected(server, true),
             EnhancedVrpUpdate::Disconnected { server, flush } => {
-                if let Some(state) = self
-                    .cache_inventory
-                    .as_mut()
-                    .and_then(|i| i.states.get_mut(&server))
+                self.set_connected(server, false);
+                if flush
+                    && let Some(state) = self
+                        .cache_inventory
+                        .as_mut()
+                        .and_then(|i| i.states.get_mut(&server))
                 {
-                    state.connected = false;
-                    if flush {
-                        state.accepted = None;
-                    }
+                    state.accepted = None;
                 }
                 if flush {
                     self.handle_update(VrpUpdate::ServerDown { server }).await;
@@ -1328,6 +1349,84 @@ mod tests {
         assert!(!flushed.connected);
         assert!(flushed.accepted.is_none());
         assert_eq!(mgr.connected_servers(), 0);
+    }
+
+    /// Connectivity and readiness are separate per-cache signals: an
+    /// ordinary disconnect drops connectivity while the retained
+    /// contribution stays ready, and neither expiry nor a flush reconnects.
+    /// Driving connectivity from the readiness transitions makes the
+    /// disconnected-but-ready assertion red.
+    #[tokio::test]
+    async fn connectivity_observer_is_independent_of_readiness() {
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (attachment, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
+        let gauges = Arc::new(Mutex::new(HashMap::<(&str, SocketAddr), bool>::new()));
+        let (ready_sink, connected_sink) = (Arc::clone(&gauges), Arc::clone(&gauges));
+        let mut mgr = VrpManager::new(legacy_rx, rib_tx)
+            .with_cache_inventory(attachment)
+            .with_readiness_observer(move |server, ready| {
+                ready_sink.lock().unwrap().insert(("ready", server), ready);
+            })
+            .with_connectivity_observer(move |server, connected| {
+                connected_sink
+                    .lock()
+                    .unwrap()
+                    .insert(("connected", server), connected);
+            });
+        let full = || EnhancedVrpUpdate::Full {
+            server: server1(),
+            entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+            aspa_records: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 11,
+            accepted_at: Instant::now(),
+        };
+        let state = |gauges: &Mutex<HashMap<(&str, SocketAddr), bool>>| {
+            let gauges = gauges.lock().unwrap();
+            (
+                gauges.get(&("connected", server1())).copied(),
+                gauges.get(&("ready", server1())).copied(),
+            )
+        };
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
+            .await;
+        assert_eq!(state(&gauges), (Some(true), None));
+        mgr.handle_enhanced_update(full()).await;
+        assert_eq!(state(&gauges), (Some(true), Some(true)));
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: false,
+        })
+        .await;
+        assert_eq!(state(&gauges), (Some(false), Some(true)));
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Expired { server: server1() })
+            .await;
+        assert_eq!(state(&gauges), (Some(false), Some(false)));
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
+            .await;
+        mgr.handle_enhanced_update(full()).await;
+        assert_eq!(state(&gauges), (Some(true), Some(true)));
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: true,
+        })
+        .await;
+        assert_eq!(state(&gauges), (Some(false), Some(false)));
+
+        // Only configured caches have a connectivity series.
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server2() })
+            .await;
+        assert!(
+            !gauges
+                .lock()
+                .unwrap()
+                .contains_key(&("connected", server2()))
+        );
     }
 
     #[tokio::test]

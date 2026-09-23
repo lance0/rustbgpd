@@ -1098,21 +1098,40 @@ When all caches are down, the VRP table is empty and all routes have
 validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and
 prefer `Valid`, leaving `NotFound` as a neutral fallback.
-`rbgp doctor` probes every configured cache from the `rbgp` process
-(`rpki.cache.<addr>.reachable_from_cli`). That raw connect is explicitly a
-CLI-network-vantage connectivity check and warns on failure. The single
+
+A lost RTR session does not change the validation table until the effective
+expire passes, so readiness and the VRP count stay green through the outage.
+Watch the session itself:
+
+- `bgp_rpki_cache_connected{cache}` is `1` while the daemon has an RTR session
+  to that configured cache and `0` otherwise, including at startup and while
+  the retained contribution is still in use.
+- The shipped `RpkiCacheDisconnected` alert fires after 15 minutes at `0`.
+- `rbgp rpki caches` shows each cache as `connected`, `retained` (session
+  down, contribution still in use), `syncing`, or `disconnected`, with the
+  age in seconds of the last accepted End of Data. The contribution drops
+  out once that age reaches
+  `bgp_rpki_cache_effective_expire_seconds{cache}`.
+
+`rbgp doctor` reads the same inventory from the daemon (`ListCaches`). The
+daemon-side `rpki.cache.<addr>.session` check is green while the session is
+established and warns when it is down, stating whether a contribution is
+still retained and its age. That check needs a token that can read RPKI
+cache state; without one it warns that the state is unavailable. The
 daemon-side `rpki.vrp_table` check is green only when the merged VRP count is
 nonzero and every configured cache reports retained accepted complete
 End-of-Data readiness; it names configured caches whose readiness is `0`
-separately from caches missing from the metric snapshot. Neither result proves
-that an RTR TCP connection is currently established.
+separately from caches missing from the metric snapshot. Doctor also probes
+every configured cache from the `rbgp` process
+(`rpki.cache.<addr>.reachable_from_cli`); that raw connect reflects only the
+CLI's network vantage and warns on failure.
 
 `bgp_rpki_cache_end_of_data_ready{cache}` is `0` at startup, becomes `1` only
 after an accepted, complete, validated End of Data (including an empty table),
 and remains `1` while that cache's retained contribution stays usable through
 disconnect or resynchronization. It returns to `0` after flush or expiry. This
-is cache readiness, not connectivity, merged-table availability, policy
-matchability, or a startup gate.
+is cache readiness, not connectivity (`bgp_rpki_cache_connected`), merged-table
+availability, policy matchability, or a startup gate.
 
 ### BMP collector unreachable
 
@@ -2261,6 +2280,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
+| `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, including while its retained contribution is still in use |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, `skipped_state_unknown`, or `failed`. A state-query timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
 
@@ -2544,7 +2564,8 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 |-------|----------------|-------------------|
 | `bgp.listener` | Daemon up: TCP connect to the configured BGP addresses and listen port. Daemon down: test-bind the port and release it | A failed local explicit-address probe is red; remote CLI reachability failures are yellow. `CAP_NET_BIND_SERVICE` is needed for ports below 1024; port-in-use on a test-bind is yellow |
 | `rpki.vrp_table` | With configured caches and a reachable daemon, requires a nonzero complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot and retained accepted complete End-of-Data readiness for every configured cache | yellow when the merged table is zero/missing/malformed/unavailable or a configured cache is not ready/missing from the readiness snapshot; this is retained readiness, not current RTR connectivity |
-| `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.vrp_table` for the daemon's VRP state |
+| `rpki.cache.<addr>.session` | With configured caches and a reachable daemon, the daemon's `ListCaches` row for each `[rpki] cache_servers` entry | yellow when the RTR session is down (the detail says whether a contribution is still retained and its age), when the cache has no inventory row, or when `ListCaches` fails, for example because the token cannot read RPKI cache state |
+| `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.cache.<addr>.session` and `rpki.vrp_table` for the daemon's state |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |

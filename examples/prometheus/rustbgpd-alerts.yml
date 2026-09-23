@@ -376,6 +376,24 @@ groups:
             independently; other configured caches may still be ready and
             contributing to the merged validation table.
 
+      - alert: RpkiCacheDisconnected
+        # Connectivity, not readiness: RFC 8210 section 6 retention keeps
+        # bgp_rpki_cache_end_of_data_ready at 1 through the outage, so
+        # RpkiCacheEndOfDataNotReady fires only after the effective expire.
+        expr: bgp_rpki_cache_connected == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RPKI cache {{ $labels.cache }} RTR session is down"
+          description: >-
+            rustbgpd on {{ $labels.instance }} has had no RTR session to cache
+            {{ $labels.cache }} for 15 minutes. Its last accepted contribution
+            stays in use until the effective expire
+            (bgp_rpki_cache_effective_expire_seconds) passes, then drops out of
+            the merged validation table. Run rbgp rpki caches for the
+            retained contribution's age and check the cache and the path to it.
+
       - alert: BgpEventOutboxDegraded
         # Latches to 1 on any durability-impacting drop, decode/codec
         # failure, or DB-open failure; does not auto-clear (operator

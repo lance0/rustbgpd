@@ -2632,6 +2632,7 @@ Prometheus metrics exposed at the configured metrics endpoint:
 | `bgp_rpki_vrp_count{af="ipv4\|ipv6"}` | Current VRP entries by address family |
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective expire interval per cache after the two-day maximum and `max_expire_interval` are applied |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Retained validated End-of-Data readiness per cache; includes empty tables and remains ready through reconnect until flush or expiry |
+| `bgp_rpki_cache_connected{cache}` | Whether an RTR session to the cache is established; `0` while a disconnected cache's retained contribution is still in use |
 
 `NotFound` includes startup before validated data and the state after all
 applicable retained cache contributions flush or expire. The readiness gauge
