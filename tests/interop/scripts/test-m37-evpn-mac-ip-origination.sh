@@ -142,20 +142,13 @@ wait_until() {
 # Tests
 # ---------------------------------------------------------------------------
 
-PASS=0
-FAIL=0
-TOTAL=0
-
 assert() {
     local desc=${1:?}
     local cmd=${2:?}
-    TOTAL=$((TOTAL + 1))
     if eval "$cmd"; then
-        echo "PASS — $desc"
-        PASS=$((PASS + 1))
+        ok "$desc"
     else
-        echo "FAIL — $desc"
-        FAIL=$((FAIL + 1))
+        fail "$desc"
     fi
 }
 
@@ -208,6 +201,4 @@ assert "MAC-only Type 2 withdrawn on FDB del" \
 # Summary
 # ---------------------------------------------------------------------------
 
-echo ""
-echo "M37+IP smoke: $PASS/$TOTAL passed, $FAIL failed."
-[[ $FAIL -eq 0 ]]
+print_summary
