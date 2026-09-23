@@ -171,6 +171,36 @@ fn golden_files_match() {
     assert!(rendered.warnings.is_empty(), "{:?}", rendered.warnings);
 }
 
+/// Route-server-client export keeps extended communities, so an RFC 8097
+/// tag on import reaches every member (draft-ietf-sidrops-avoid-rpki-state-in-bgp §6).
+#[test]
+fn hygiene_never_tags_rpki_validation_state() {
+    for reject_invalid in [true, false] {
+        let mut value = healthy_value();
+        set_path(
+            &mut value,
+            &[
+                "cfg",
+                "filtering",
+                "rpki_bgp_origin_validation",
+                "reject_invalid",
+            ],
+            reject_invalid.into(),
+        );
+        let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+        assert!(
+            rendered.files["config.toml"].contains("[rpki]"),
+            "OV must be on"
+        );
+        let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+        assert!(
+            !hygiene.contains("add ext-community OV_"),
+            "rs-hygiene.rpol tags RFC 8097 validation state toward members \
+             (reject_invalid = {reject_invalid}):\n{hygiene}"
+        );
+    }
+}
+
 #[test]
 fn receipt_carries_cardinalities_and_fingerprint() {
     let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
