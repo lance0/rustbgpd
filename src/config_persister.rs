@@ -3,8 +3,11 @@
 //! Runs as a single tokio task, receiving mutations via an mpsc channel.
 //! Each mutation is applied to the in-memory config, serialized to TOML,
 //! and atomically written (temp file + rename) to the config path.
-//! The filesystem work for each mutation runs on the blocking pool, off the
-//! runtime workers.
+//! The filesystem work for each mutation, and the discard of a stage still
+//! outstanding when the channel closes, runs on the blocking pool, off the
+//! runtime workers. Two paths stay on the calling thread: the boot history
+//! record in [`ConfigPersister::new_accepted`], and the best-effort temp-file
+//! removal in `StagedWrite`'s drop if this task is aborted mid-stage.
 
 #![deny(unsafe_code)]
 
@@ -193,6 +196,9 @@ impl ConfigPersister {
                 }
             }
         }
+        // Every sender is gone. Remove a stage nobody will commit here rather
+        // than in `StagedWrite`'s drop on this worker.
+        let _ = persister.off_runtime(Self::discard_staged).await;
     }
 
     fn replace(&mut self, new_config: Arc<AcceptedConfigSnapshot>) {
@@ -246,6 +252,10 @@ impl ConfigPersister {
     /// mid-wait (runtime shutdown), the started work still runs to
     /// completion with the state it owns; every file operation it performs
     /// is individually atomic, as it was on the worker thread.
+    ///
+    /// Not covered: if this task is aborted or dropped between mutations
+    /// with a stage outstanding, `StagedWrite`'s drop removes the temp file
+    /// best-effort on whichever thread drops the task.
     async fn off_runtime<R: Send + 'static>(
         self,
         work: impl FnOnce(&mut Self) -> R + Send + 'static,
@@ -983,5 +993,44 @@ log_format = "json"
                 .collect::<Vec<_>>(),
             ["10.0.0.2".to_string(), "10.0.0.3".to_string()]
         );
+    }
+
+    /// A stage still outstanding when every sender is gone is discarded
+    /// before `run` returns, so its secret-bearing temp file never outlives
+    /// the persister.
+    #[tokio::test]
+    async fn closing_the_channel_discards_an_outstanding_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+
+        let (tx, rx) = mpsc::channel(1);
+        let handle = tokio::spawn(ConfigPersister::new(rx, path.clone(), config, None).run());
+        let mut replacement = minimal_config();
+        replacement.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let (ack, staged) = oneshot::channel();
+        tx.send(ConfigMutation::StageConfigAck(
+            AcceptedConfigSnapshot::from_config_for_test(replacement),
+            ack,
+        ))
+        .await
+        .unwrap();
+        staged.await.unwrap().unwrap();
+        let mut temp = path.clone().into_os_string();
+        temp.push(".tmp");
+        assert!(
+            std::path::Path::new(&temp).exists(),
+            "stage wrote its temp file"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+        assert!(
+            !std::path::Path::new(&temp).exists(),
+            "an uncommitted stage must not outlive the persister"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original, "nothing published");
     }
 }
