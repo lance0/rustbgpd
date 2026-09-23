@@ -56,11 +56,7 @@ fn parse_nonzero_asn(value: &str) -> Result<u32, String> {
 /// a scope-selecting `--neighbor` must name one.
 fn parse_scope_neighbor(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
-        return Err(
-            "neighbor address must not be empty; use --global or --all for the \
-                    daemon-wide scope"
-                .to_string(),
-        );
+        return Err("neighbor address must not be empty".to_string());
     }
     Ok(value.to_string())
 }

@@ -204,7 +204,7 @@ async fn empty_scope_neighbor_is_a_usage_error_before_transport() {
             assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
             let error = stderr(&output);
             assert!(
-                error.contains("neighbor address must not be empty"),
+                error.contains("'--neighbor <NEIGHBOR>': neighbor address must not be empty\n"),
                 "{args:?}: {error}"
             );
             assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
