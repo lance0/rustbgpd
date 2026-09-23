@@ -188,7 +188,7 @@ start_target_capture() {
     docker exec "$TARGET" sh -c 'rm -f /tmp/m92.pcap'
     docker exec -d "$TARGET" sh -c \
         'tshark -i eth1 -w /tmp/m92.pcap tcp port 179 >/tmp/m92-tshark.log 2>&1'
-    sleep 2
+    wait_capture_ready "$TARGET" /tmp/m92.pcap /tmp/m92-tshark.log
     docker exec -d "$TARGET" sh -c \
         'bird -d -c /config/bird.conf >/tmp/m92-bird.log 2>&1'
     poll 45 "BIRD incumbent session Established" bird_established incumbent
@@ -306,6 +306,18 @@ if errors:
 PY
 }
 
+# A failed round check exits like the bare call did, but leaves the counts
+# line and the capture's shape in the log first.
+check_capture_eor_order() {
+    local pdml=${1:?} out
+    if out=$(check_eor_order "$pdml" 2>&1); then
+        return 0
+    fi
+    printf '%s\n' "$out" >&2
+    capture_summary "$TARGET" /tmp/m92.pcap
+    exit 1
+}
+
 check_same_frame_tuple_fixture() {
     local fixture="$WORK/same-frame-tuples.pdml"
     python3 - "$fixture" <<'PY'
@@ -405,9 +417,9 @@ run_round() {
     stop_capture
     export_pdml 192.0.2.10 "$WORK/${round}-incumbent.pdml"
     export_pdml 192.0.2.9 "$WORK/${round}-candidate.pdml"
-    check_eor_order "$WORK/${round}-incumbent.pdml" >/dev/null
+    check_capture_eor_order "$WORK/${round}-incumbent.pdml"
     ok "$round GoBGP IPv4/IPv6 EoRs follow final family NLRIs by (frame,PDU)"
-    check_eor_order "$WORK/${round}-candidate.pdml" >/dev/null
+    check_capture_eor_order "$WORK/${round}-candidate.pdml"
     ok "$round rustbgpd IPv4/IPv6 EoRs follow final family NLRIs by (frame,PDU)"
     if run_diff "$round" "$expected"; then
         ok "$round differential exit $expected with exact semantic verdict"

@@ -2366,7 +2366,7 @@ fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
         sha256(&interop_path(
             "scripts/test-m92-gobgp-v47-rs-differential.sh"
         )),
-        "60980d52db0d12df0d821b25cf7b724636d056ef708c59cee4041dcb51bf7ea1",
+        "f495a931cacd31cbafe1f34d9d3f42911613f8ac65b3c20e1e27a01cd1a8ad97",
         "M103 must not edit the M92 driver"
     );
 
@@ -2497,7 +2497,7 @@ fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
         .0;
     assert!(
         round
-            .find("check_eor_order \"$WORK/${round}-incumbent.pdml\"")
+            .find("check_capture_eor_order \"$WORK/${round}-incumbent.pdml\"")
             .unwrap()
             < round.find("if run_diff \"$round\"").unwrap(),
         "M103 must authorize the incumbent EoR before capture/diff"

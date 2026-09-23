@@ -357,9 +357,10 @@ wait_rpki_vrps() {
 start_sink() {
     log "Starting raw BMP sink + tshark capture in $SINK..."
     docker exec -d "$SINK" python3 /usr/local/bin/bmp-raw-sink.py
+    docker exec "$SINK" rm -f /tmp/m81.pcap
     docker exec -d "$SINK" sh -c \
         'tshark -i eth0 -w /tmp/m81.pcap "port 11019 or port 11020" >/tmp/tshark.log 2>&1'
-    sleep 2
+    wait_capture_ready "$SINK" /tmp/m81.pcap /tmp/tshark.log
 }
 
 # ---------------------------------------------------------------------------

@@ -96,7 +96,7 @@ start_bgp_capture() {
     docker exec "$LEFT" sh -lc 'rm -f /tmp/m53-bgp.pcap /tmp/m53-tcpdump.log'
     docker exec -d "$LEFT" sh -lc \
         'tcpdump -i eth1 -s 0 -w /tmp/m53-bgp.pcap "tcp port 179" >/tmp/m53-tcpdump.log 2>&1'
-    sleep 1
+    wait_capture_ready "$LEFT" /tmp/m53-bgp.pcap /tmp/m53-tcpdump.log
 }
 
 stop_bgp_capture() {
