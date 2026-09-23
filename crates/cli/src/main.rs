@@ -247,9 +247,10 @@ enum Command {
         #[command(subcommand)]
         action: Option<NeighborAction>,
 
-        /// Append summary columns to the list: MsgRcvd, MsgSent, Flaps,
-        /// RRC (route-reflector client), Slow (`!` marks a slow peer), and
-        /// State/PfxRcd (prefix count when Established). Display-only; JSON
+        /// Append summary columns to the list: Source (static or dynamic),
+        /// MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!`
+        /// marks a slow peer), and State/PfxRcd (prefix count when
+        /// Established). Display-only; JSON
         /// is unaffected by --wide and may omit optional false healthy-state fields
         #[arg(long, conflicts_with = "address")]
         wide: bool,

@@ -113,7 +113,7 @@ rbgp config import <source> [--format bird|frr|gobgp] [--out <path>]
 
 ```bash
 rbgp neighbor
-rbgp neighbor --wide                        # add MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd columns
+rbgp neighbor --wide                        # add Source/MsgRcvd/MsgSent/Flaps/RRC/Slow/State/PfxRcd columns
 rbgp summary                                # alias for neighbor list
 rbgp neighbor <addr>
 rbgp neighbor <addr> --compare <NEIGHBOR>   # compare live update-group membership
