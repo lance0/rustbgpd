@@ -1855,9 +1855,11 @@ const VALIDATION_TAGS: [(&str, &str, &str); 4] = [
 ];
 
 /// arouteserver's internal RPKI origin-validation communities as
-/// `(key, scrub term)`. The renderer never sets them (the daemon tags RFC 8097
-/// extended communities instead), and `scrub_communities_in()` removes them on
-/// receipt, so a member-sent copy must not reach other clients.
+/// `(key, scrub term)`. The renderer never sets them, and it adds no RFC 8097
+/// validation-state extended community either: route-server-client export
+/// keeps extended communities, so any tag would reach every member.
+/// `scrub_communities_in()` removes them on receipt, so a member-sent copy
+/// must not reach other clients.
 const RPKI_OV_COMMUNITIES: [(&str, &str); 3] = [
     ("rpki_bgp_origin_validation_valid", "scrub-rpki-ov-valid"),
     (
@@ -3117,34 +3119,25 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
         ctx.cfg.blackhole_filtering.policy_ipv6.is_some(),
     );
 
+    // No RFC 8097 validation-state tag: route-server-client export keeps
+    // extended communities, so every member would receive it
+    // (draft-ietf-sidrops-avoid-rpki-state-in-bgp §6).
     let rpki = &filtering.rpki_bgp_origin_validation;
-    if rpki.enabled {
+    if rpki.enabled && rpki.reject_invalid {
         let guard = inactive_family_guard(ctx);
-        if rpki.reject_invalid {
-            let _ = writeln!(
-                terms,
-                "    term reject-rpki-invalid {{ if {guard}route.rpki == invalid {{ reject }} }}"
-            );
-            if ctx.cfg.blackhole_filtering.policy_ipv4.is_none() {
-                tests.push_str(if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
-                    "test rpki-invalid-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
-                } else {
-                    "test rpki-invalid-is-rejected {\n    route { family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
-                });
-            } else if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
-                tests.push_str(
-                    "test rpki-invalid-is-rejected {\n    route { family ipv6-unicast; prefix 2001:db8::/32; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n",
-                );
-            }
-        }
-        terms.push_str(
-            "    # RFC 8097 origin-validation extended communities for members.\n\
-             \x20   term tag-ov-valid { if route.rpki == valid { add ext-community OV_VALID } }\n\
-             \x20   term tag-ov-not-found { if route.rpki == not-found { add ext-community OV_NOT_FOUND } }\n",
+        let _ = writeln!(
+            terms,
+            "    term reject-rpki-invalid {{ if {guard}route.rpki == invalid {{ reject }} }}"
         );
-        if !rpki.reject_invalid {
-            terms.push_str(
-                "    term tag-ov-invalid { if route.rpki == invalid { add ext-community OV_INVALID } }\n",
+        if ctx.cfg.blackhole_filtering.policy_ipv4.is_none() {
+            tests.push_str(if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
+                "test rpki-invalid-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
+            } else {
+                "test rpki-invalid-is-rejected {\n    route { family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n"
+            });
+        } else if ctx.cfg.blackhole_filtering.policy_ipv6.is_none() {
+            tests.push_str(
+                "test rpki-invalid-is-rejected {\n    route { family ipv6-unicast; prefix 2001:db8::/32; as-path \"3333\"; rpki invalid }\n    expect rs-hygiene == reject\n}\n",
             );
         }
     }

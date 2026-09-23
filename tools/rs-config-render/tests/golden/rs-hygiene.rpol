@@ -54,9 +54,6 @@ policy rs-hygiene {
     # Accepted v6 prefix lengths: 12-48.
     term reject-v6-len-outside-window { if route.prefix in rs-v6-len-outside-window { reject } }
     term reject-rpki-invalid { if route.rpki == invalid { reject } }
-    # RFC 8097 origin-validation extended communities for members.
-    term tag-ov-valid { if route.rpki == valid { add ext-community OV_VALID } }
-    term tag-ov-not-found { if route.rpki == not-found { add ext-community OV_NOT_FOUND } }
 }
 
 # In-language tests, run by `rbgp policy check`.

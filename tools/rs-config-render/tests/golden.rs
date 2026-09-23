@@ -171,6 +171,81 @@ fn golden_files_match() {
     assert!(rendered.warnings.is_empty(), "{:?}", rendered.warnings);
 }
 
+/// Route-server-client export keeps extended communities, so an RFC 8097
+/// tag on import reaches every member (draft-ietf-sidrops-avoid-rpki-state-in-bgp §6).
+#[test]
+fn hygiene_never_tags_rpki_validation_state() {
+    for reject_invalid in [true, false] {
+        let mut value = healthy_value();
+        set_path(
+            &mut value,
+            &[
+                "cfg",
+                "filtering",
+                "rpki_bgp_origin_validation",
+                "reject_invalid",
+            ],
+            reject_invalid.into(),
+        );
+        let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+        assert!(
+            rendered.files["config.toml"].contains("[rpki]"),
+            "OV must be on"
+        );
+        let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+        assert!(
+            !hygiene.contains("add ext-community OV_"),
+            "rs-hygiene.rpol tags RFC 8097 validation state toward members \
+             (reject_invalid = {reject_invalid}):\n{hygiene}"
+        );
+    }
+}
+
+/// Pins today's behavior: `reject_invalid: false` drops both RPKI-invalid
+/// rejects, so invalid routes are accepted and announced to members
+/// (arouteserver withholds them on export instead).
+#[test]
+fn rpki_invalid_rejects_follow_reject_invalid() {
+    for reject_invalid in [true, false] {
+        for blackhole in [false, true] {
+            let mut value = healthy_value();
+            set_path(
+                &mut value,
+                &[
+                    "cfg",
+                    "filtering",
+                    "rpki_bgp_origin_validation",
+                    "reject_invalid",
+                ],
+                reject_invalid.into(),
+            );
+            if blackhole {
+                set_blackhole_policy(&mut value, "policy_ipv4", Some("propagate-unchanged"));
+                set_path(
+                    &mut value,
+                    &["cfg", "communities", "blackholing", "std"],
+                    serde_yaml::Value::String("65500:666".to_owned()),
+                );
+            }
+            let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
+            let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+            assert_eq!(
+                hygiene.contains("term reject-rpki-invalid "),
+                reject_invalid,
+                "reject_invalid = {reject_invalid}, blackhole = {blackhole}:\n{hygiene}"
+            );
+            if blackhole {
+                let client = &rendered.files["policy/client-as4242-1.rpol"];
+                assert_eq!(
+                    client.contains("term reject-ordinary-rpki-invalid "),
+                    reject_invalid,
+                    "reject_invalid = {reject_invalid}:\n{client}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn receipt_carries_cardinalities_and_fingerprint() {
     let rendered = render(&to_yaml(&healthy_value()), &rtr_options()).expect("healthy render");
