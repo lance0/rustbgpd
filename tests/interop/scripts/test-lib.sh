@@ -639,15 +639,16 @@ prober_max_gap_ms() {
 
 # wait_capture_ready CONTAINER PCAP LOG [TIMEOUT_SECONDS]
 wait_capture_ready() {
-    local container=${1:?} pcap=${2:?} capture_log=${3:?} timeout=${4:-30} i
-    for ((i = 0; i < timeout * 5; i++)); do
-        if docker exec "$container" test -e "$pcap"; then
+    local container=${1:?} pcap=${2:?} capture_log=${3:?} timeout=${4:-30}
+    local deadline=$((SECONDS + timeout))
+    while ((SECONDS < deadline)); do
+        if timeout 5 docker exec "$container" test -e "$pcap"; then
             return 0
         fi
         sleep 0.2
     done
     echo "ERROR: packet capture in $container did not create $pcap within ${timeout}s" >&2
-    docker exec "$container" cat "$capture_log" >&2 || true
+    timeout 5 docker exec "$container" cat "$capture_log" >&2 || true
     return 1
 }
 
