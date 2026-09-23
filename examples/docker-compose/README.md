@@ -49,7 +49,7 @@ session without an explicit import policy rejects incoming routes:
 
 ```bash
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
-  policy chain clear-import --global
+  policy chain clear-import --global --yes
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
 ```
 
@@ -74,7 +74,7 @@ Restore the demo's permit policy and verify that the prefix returns:
 
 ```bash
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
-  policy chain set-import --global lab-permit-all-import
+  policy chain set-import --global --yes lab-permit-all-import
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
   rib --prefix 192.168.1.0/24 --explain
 ```
