@@ -3,12 +3,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use prometheus::{Encoder, TextEncoder};
+use rustbgpd_api::accept_backoff::AcceptBackoff;
 use rustbgpd_api::health_probe::{CORE_READINESS_DEADLINE, CoreReadinessProbe};
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::{Stream, StreamExt};
+use tracing::{debug, info, warn};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -45,7 +48,26 @@ pub async fn serve_metrics(
 ) {
     let MetricsListener { addr, listener } = server;
     info!(%addr, "metrics server listening");
+    serve_incoming(
+        TcpListenerStream::new(listener),
+        format!("metrics {addr}"),
+        metrics,
+        readiness_probe,
+    )
+    .await;
+}
 
+async fn serve_incoming<S>(
+    incoming: S,
+    name: String,
+    metrics: BgpMetrics,
+    readiness_probe: CoreReadinessProbe,
+) where
+    S: Stream<Item = std::io::Result<TcpStream>> + Unpin,
+{
+    // Delays the next accept after EMFILE-class errors and logs them
+    // rate-limited; a bare retry would spin on a still-readable listener.
+    let mut incoming = AcceptBackoff::new(incoming, name);
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
@@ -56,19 +78,18 @@ pub async fn serve_metrics(
             return;
         };
 
-        let (stream, peer) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(error = %e, "metrics server accept error");
-                continue;
-            }
+        let stream = match incoming.next().await {
+            Some(Ok(stream)) => stream,
+            Some(Err(_)) => continue,
+            None => return,
         };
 
+        let peer = stream.peer_addr().ok();
         let metrics = metrics.clone();
         let readiness_probe = readiness_probe.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, &metrics, &readiness_probe).await {
-                debug!(client = %peer, error = %e, "metrics connection error");
+                debug!(client = ?peer, error = %e, "metrics connection error");
             }
             drop(permit);
         });
@@ -76,7 +97,7 @@ pub async fn serve_metrics(
 }
 
 async fn handle_connection(
-    stream: tokio::net::TcpStream,
+    stream: TcpStream,
     metrics: &BgpMetrics,
     readiness_probe: &CoreReadinessProbe,
 ) -> std::io::Result<()> {
@@ -503,5 +524,34 @@ mod tests {
 
         // The semaphore should now have 0 available permits
         assert_eq!(semaphore.available_permits(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn persistent_emfile_backs_off_instead_of_spinning() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A listener stuck at EMFILE: every poll fails at once. The stream
+        // ends after 1000 polls so a missing backoff fails the assertion
+        // instead of hanging the test.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counter = polls.clone();
+        let incoming = tokio_stream::iter(std::iter::from_fn(move || {
+            (counter.fetch_add(1, Ordering::SeqCst) < 1000)
+                .then(|| Err(std::io::Error::from_raw_os_error(libc::EMFILE)))
+        }));
+        let served = tokio::time::timeout(
+            Duration::from_secs(10),
+            serve_incoming(
+                incoming,
+                "metrics test".into(),
+                BgpMetrics::new(),
+                unused_probe(),
+            ),
+        )
+        .await;
+        assert!(served.is_err(), "backoff must keep the accept loop waiting");
+        // 0, 100, 300, 700, 1500 ms, then once per second up to 9500 ms.
+        assert_eq!(polls.load(Ordering::SeqCst), 13);
     }
 }

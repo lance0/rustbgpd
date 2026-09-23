@@ -20,14 +20,14 @@ const DEFAULT_LISTEN_BACKLOG: i32 = 1024;
 const TCP_AO_ROTATION_CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// First backoff after an accept failure on exhausted resources.
-const ACCEPT_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(100);
+pub const ACCEPT_BACKOFF_INITIAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// Backoff cap — the loop keeps probing at this cadence while the
 /// exhaustion persists.
-const ACCEPT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+pub const ACCEPT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How the accept loop reacts to one `accept(2)` error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AcceptErrorClass {
+pub enum AcceptErrorClass {
     /// Process/host resource exhaustion (EMFILE, ENFILE, ENOMEM,
     /// ENOBUFS): the condition outlives one accept call, so retrying
     /// immediately hot-spins. Back off before the next accept.
@@ -40,7 +40,11 @@ enum AcceptErrorClass {
     Transient,
 }
 
-fn accept_error_class(err: &std::io::Error) -> AcceptErrorClass {
+/// Classify one `accept(2)` error. Shared with the management-plane
+/// listeners (gRPC, metrics) so every accept loop agrees on which errors
+/// must back off.
+#[must_use]
+pub fn accept_error_class(err: &std::io::Error) -> AcceptErrorClass {
     match err.raw_os_error() {
         Some(libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::ENOBUFS) => {
             AcceptErrorClass::ResourceExhausted
