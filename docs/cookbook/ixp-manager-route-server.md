@@ -676,11 +676,20 @@ and the adapter at this commit:
   carry the `RS:1000:*` and `RS:1001:*` informational tags IXP Manager
   v7.4's templates set on them, so its looking-glass badges (RPKI VALID,
   IRRDB VALID and the rest) match. A rejected route carries only the
-  adapter's `RS:1101:*` reject reason: IXP Manager also tags filtered routes
-  with `RS:1001:1000`/`1001`/`1002` (IRRDB filtered loose/strict, prefix
-  empty) and keeps any informational tag set before the rejecting check, and
-  rustbgpd does not reproduce those tags. `RS:1001:1200` (same-AS next hop)
-  is covered by the next-hop item below.
+  adapter's `RS:1101:*` reject reason. This divergence is deliberate. IXP
+  Manager's import filter tags a filtered route and accepts it into a
+  per-member table, so the route keeps `RS:1001:1000`/`1001`/`1002` (IRRDB
+  filtered loose/strict, prefix empty) and any informational tag an earlier
+  check set, such as `RS:1000:2` before the IRRDB prefix check. In rustbgpd a
+  rejecting term discards the route; the daemon retains the route as received,
+  with the deciding term as its reason, and the adapter derives the one
+  `RS:1101:*` value from that reason. Reproducing the extra tags would mean
+  either accepting filtered routes and withholding them on export, which
+  changes what the import policy filters, or handing the adapter per-member
+  render facts (loose or strict IRRDB, RPKI on or off) it does not have. The
+  filtered-prefix page still shows the reject reason. `RS:1001:1002` has no
+  counterpart in any case: the renderer refuses an empty IRRDB answer.
+  `RS:1001:1200` (same-AS next hop) is covered by the next-hop item below.
 - **The bounded UI-filter subset.** Advertise actions and ordered receive
   AS_IS/deny/PREPEND, including reachable overlap compiled into at most
   4096 disjoint cells, 256 rows per client, 4096 total; 255 prepends
