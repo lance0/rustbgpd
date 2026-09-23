@@ -44,8 +44,8 @@ points:
   killed, or lose its gRPC connection independently.
 - **Performance overhead** — Go's GC adds latency jitter; under DDoS
   conditions, you want predictable response times.
-- **Go-flavored API** — GoBGP's protos use `google.protobuf.Any` extensively,
-  making typed clients in other languages awkward.
+- **Go-flavored API** — GoBGP's v3 protos used `google.protobuf.Any`
+  extensively, making typed clients in other languages awkward.
 
 After building and operating prefixd, the requirements for a better BGP backend
 became clear. rustbgpd is that backend — designed from day one for the
@@ -101,7 +101,8 @@ Traffic dropped at line rate
 - Single binary, no sidecar container needed
 - gRPC API designed for automation, not human CLI use
 
-**Example config** ([`examples/ddos-mitigation/config.toml`](../../examples/ddos-mitigation/config.toml)):
+**Example config** (a simplified excerpt; the full, differently chained file is
+[`examples/ddos-mitigation/config.toml`](../../examples/ddos-mitigation/config.toml)):
 
 <!-- use-case-config:ddos-mitigation -->
 
@@ -294,7 +295,8 @@ selected unicast best routes into explicit non-reserved kernel tables.
 - Audit trail via BMP export to your collector
 - No config file edits, no SIGHUP, no restart
 
-**Example config** ([`examples/hosting-provider/config.toml`](../../examples/hosting-provider/config.toml)):
+**Example config** (abridged from
+[`examples/hosting-provider/config.toml`](../../examples/hosting-provider/config.toml)):
 
 <!-- use-case-config:hosting-provider -->
 
@@ -469,7 +471,8 @@ IX peer C  ──┘
 - **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
   route was selected over alternatives
 
-**Example config** ([`examples/route-collector/config.toml`](../../examples/route-collector/config.toml)):
+**Example config** (abridged from
+[`examples/route-collector/config.toml`](../../examples/route-collector/config.toml)):
 
 <!-- use-case-config:route-collector -->
 
@@ -607,7 +610,7 @@ topology:
         - cp -n /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
     frr:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - frr.conf:/etc/frr/frr.conf:ro
   links:

@@ -333,8 +333,11 @@ separately from allocator-tracked live bytes. A positive modeled delta is a
 warning that the slice representation is larger before allocator size classes
 or locality effects.
 
-Requirements: `bash`, `git`, `cargo`, and `python3`. The compared refs must
-already include the structured `memory_profile_high_n` harness.
+Requirements: `bash`, `git`, `cargo`, `flock`, and `python3`. The compared
+refs must already include the structured `memory_profile_high_n` harness. A
+base ref that predates a shape, such as v0.71.0 for `loc_rib_only`, has no row
+for it; the comparison reports `missing-row`, which fails
+`--fail-on-regression`.
 
 ```bash
 bench/compare-rib-memory.sh \

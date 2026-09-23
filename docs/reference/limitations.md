@@ -33,6 +33,12 @@ surfaces; it does not promote the rest of the project out of alpha.
   well-formed default-topology nodes or links that shift another ORR client's
   best-path selection. This is inherent to the RFC 9107 union model — the
   MT/Flex isolation above scopes topology inputs, not speakers.
+- FlowSpec (SAFI 133, IPv4 and IPv6) is control plane only: rules are
+  received, injected, and distributed, but rustbgpd installs no FlowSpec
+  filters in a dataplane. RFC 9117 feasibility validation of received rules
+  is opt-in (`[flowspec] validation = "rfc9117"`; the default is `"off"`); see
+  [ADR-0135](../adr/0135-flowspec-feasibility.md). VPN FlowSpec (SAFI 134) is
+  not implemented.
 - Confederations are not implemented.
 - RFC 5004 (prefer the existing external best path) is not implemented. Path
   selection is deterministic: below the eBGP-over-iBGP step, ties are broken

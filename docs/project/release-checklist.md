@@ -51,8 +51,9 @@ applicable to the release diff actually ran before tagging.
 - [ ] **Public docs contract** — `.github/workflows/public-docs-contract.yml`
       is green. It runs unfiltered on every pull request and main-branch push,
       covering metric consumers and metric release notes, public tracker-ID and
-      artifact-home-path hygiene, site ingest sources, SIGHUP architecture route
-      coverage, pinned IXP Manager docs, release-checklist source paths, and
+      artifact-home-path hygiene, whole-tree Markdown claims against the code,
+      site ingest sources, SIGHUP architecture route coverage, pinned IXP
+      Manager docs, release-checklist source paths, and
       performance receipt provenance and freshness. Its `markdown-pinned-tests`
       job runs the Rust tests that read a changed Markdown file, as listed in
       `.github/markdown-test-pins.json`.
@@ -898,9 +899,10 @@ Before rolling any versions:
     standalone config schema, plus per-arch `checksums-<arch>.txt`
     (covering the tarball and packages).
     Each tarball contains `rustbgpd`, `rbgp`, `rs-config-render`,
-    `birdwatcher-adapter`, `LICENSE-MIT`, and `LICENSE-APACHE` plus the
-    systemd unit under `share/systemd/` (presence is asserted by the
-    workflow; the runtime image likewise ships both licenses at `/`).
+    `birdwatcher-adapter`, `LICENSE-MIT`, `LICENSE-APACHE`, `LICENSES.md`,
+    and `rustbgpd.schema.json` plus the systemd unit under `share/systemd/`
+    (the workflow asserts the presence of each except the schema; the runtime
+    image likewise ships both licenses at `/`).
     The version-less filenames are what powers the static
     `releases/latest/download/` URLs in `docs/how-to/deployment.md`; if the
     filenames drift, deployment.md silently breaks for new operators.

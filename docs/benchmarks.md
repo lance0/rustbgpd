@@ -779,13 +779,12 @@ without async/channel overhead.
 | 10,000 | 3.37 ms | 0.34 µs | −61.5% |
 | 50,000 | 39.0 ms | 0.78 µs | −49.2% |
 
-Scaling is roughly linear (O(N)) thanks to the secondary prefix index. The
+The secondary prefix index removed the O(N²) behavior, but per-prefix cost
+still grows with table size: 0.34 µs at 10k and 0.78 µs at 50k. The
 scale/memory sprint roughly halved the end-to-end pipeline on top of that
 (`SmallVec` index + `FxHash` + coalesced multi-chunk distribution). Versus the
 ancient pre-index O(N²) era the 50 k pipeline took 7.1 s; it is 39 ms now.
-
-Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
-complete the pipeline in ~0.7 s.
+No full-table (900 k) pipeline row is measured.
 
 ### Distribution Fanout (route-reflector / route-server scale)
 
@@ -1347,8 +1346,11 @@ Capacity hints (pre-sizing AdjRibOut/LocRib HashMaps) were tested and shown to
 be neutral on the bgperf2 raw cgroup-usage surface, confirming the remaining
 HashMap overhead is structural (power-of-2 rounding), not rehash churn.
 
-Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
-No obvious accidental overhead remains.
+In the v0.4.x-era profile, the remaining memory was HashMap bucket arrays
+(~78%) and actual Route data (~19%), with no obvious accidental overhead. The
+dense `RouteSlab` storage later replaced the per-route `HashMap` buckets in
+`AdjRibIn`/`AdjRibOut`; the structured high-N profile under
+[Memory Footprint](#memory-footprint) is the current attribution.
 
 ### Where the July 2026 memory step went — single-commit attribution
 
@@ -1494,10 +1496,9 @@ insert extrapolation.
 8-candidate Add-Path selection completes in ~167ns per prefix, and the common
 early-exit path is much cheaper. Best-path is not a bottleneck.
 
-**Pipeline scaling** — With the secondary prefix index, the pipeline scales
-linearly. 50k prefixes x 2 peers completes in 39ms. Extrapolated full-table
-(900k) would take ~0.7s for a complete 2-peer recomputation — well within
-operational requirements.
+**Pipeline scaling** — The secondary prefix index removed the O(N²) pipeline
+cost. 50k prefixes x 2 peers completes in 39ms, though per-prefix cost grows
+from 0.34µs at 10k to 0.78µs at 50k; no full-table pipeline row is measured.
 
 **Route churn** — A 1k-prefix announce/withdraw cycle completes in ~254us.
 Real-world churn involves far fewer prefixes per UPDATE (typically 1-50), so

@@ -459,6 +459,18 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    Valid nested unknown/reserved values remain opaque; see the
    [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
 
+   The `0.21.0` compatibility line pairs with FSM `0.8` and RPKI `0.3`. It
+   adds error-context parse and validation entry points
+   (`UpdateMessage::parse_revised_observed_with_error_context` and
+   `validate::validate_update_attributes_with_context`) and the typed
+   `DecodeError::ProhibitedAsSet` and `DecodeError::TruncatedAttributeHeader`
+   variants; a truncated attribute header now maps to UPDATE Malformed
+   Attribute List. The FlowSpec action helpers read negative, negative-zero,
+   and NaN traffic rates as zero, and the NOTIFICATION descriptions cover
+   every registered code and subcode. `0.21.1` and `0.21.2` are
+   documentation-only patches: the FlowSpec Terminal Action bit meaning and
+   the shutdown-communication length cap.
+
 2. **`rustbgpd-fsm`.** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
@@ -508,7 +520,10 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    step. It advertises the RFC 8950 1/128/2 tuple whenever VPNv4 is configured
    and limits `add_path_families` / `extended_nexthop_families` to the
    negotiated MultiProtocol intersection. The `0.8.0` line pairs with wire
-   `0.21.0` with no direct FSM API or behavior change.
+   `0.21.0` with no direct FSM API or behavior change. `0.8.1` limits
+   `NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol
+   intersection, and `0.8.2` is documentation-only: the embedding
+   application owns the ranges of its local timer settings.
 
 3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
    Why it is independent:
@@ -530,6 +545,10 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      constructors and fields remain available. `ProviderAuth` and `VrpUpdate`
      remain exhaustive. See the crate's [enum policy](../../crates/rpki/README.md#enum-exhaustiveness)
      for migration details. These changes add no variants or runtime behavior.
+   - RPKI `0.3.1` adds no public item. `RtrClient::new` bounds configured RTR
+     timers to the RFC 8210 §6 ranges with a warning: a zero refresh or retry
+     is raised to 1 second, a zero expire or `max_expire_interval` is raised
+     to 600 seconds, and either above 172800 seconds is clamped to it.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish

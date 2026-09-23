@@ -123,7 +123,7 @@ Follow development plans, contribution guidance, and release history.
 | [Contributing](../CONTRIBUTING.md) | Build, test, and submit a change. |
 | [Support](../SUPPORT.md) | Get help and check platform support. |
 | [Report a vulnerability](../SECURITY.md) | Report a security issue privately. |
-| [Changelog](../CHANGELOG.md) | Unreleased changes and the current release. |
+| [Changelog](../CHANGELOG.md) | Unreleased changes and releases since 0.68.0; pending entries live in `changelog.d/`. |
 | [Older releases](project/changelog/older-releases.md) | Archived release notes. |
 | [Roadmap history](project/roadmap-history.md) | Completed development phases. |
 | [Milestone history](project/milestones.md) | Archived build orders and exit criteria. |

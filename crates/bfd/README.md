@@ -1,6 +1,6 @@
 # rustbgpd-bfd
 
-RFC 5880 BFD (Bidirectional Forwarding Detection) control-packet codec and a
+RFC 5880 BFD (Bidirectional Forwarding Detection) control-packet codec and an
 **asynchronous** session state machine — pure and sans-IO, in the
 same spirit as `rustbgpd-fsm`: the state machine consumes packet/timer **events**
 and produces packet/timer/state-change **actions**. It never reads a clock, opens
