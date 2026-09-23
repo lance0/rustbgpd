@@ -11864,6 +11864,64 @@ remote_asn = 65002
         );
     }
 
+    /// A runtime mutation rewrites the main file canonically, making an
+    /// omitted epoch or boolean explicit. An unedited SIGHUP of that file
+    /// must not report a restart-required posture change: the effective
+    /// posture never moved. A real posture edit on top of it still pins and
+    /// reports. Comparing the raw tuple in the pin makes the first assertion
+    /// red for every cell.
+    #[tokio::test]
+    async fn sighup_after_crud_canonical_rewrite_reports_no_posture_pin() {
+        let cells = [
+            // The `--init-config` lab shape: epoch omitted, boolean explicit.
+            baseline_toml().replace(
+                "listen_port = 179",
+                "listen_port = 179\nebgp_requires_policy = true",
+            ),
+            // Legacy omission of both.
+            baseline_toml().to_string(),
+            // ADR-0119 activated cell: epoch 2, boolean omitted.
+            format!("config_epoch = 2\n{}", baseline_toml()),
+        ];
+        for cell in &cells {
+            let (runtime, disk) =
+                reload_then_persist_policy_after_desired_refresh_from(cell, cell).await;
+            let live = runtime.rfc8212_posture();
+            assert_ne!(
+                (disk.config_epoch, disk.global.ebgp_requires_policy),
+                (runtime.config_epoch, runtime.global.ebgp_requires_policy),
+                "the canonical rewrite must change the raw tuple, or this cell proves nothing: {cell}"
+            );
+
+            let mut unedited = disk.clone();
+            assert!(
+                !config::pin_rfc8212_posture_startup_only(&mut unedited, &runtime),
+                "an unedited SIGHUP after a runtime mutation must not report a pin: {cell}"
+            );
+            assert_eq!(unedited.rfc8212_posture(), live, "{cell}");
+
+            let mut flipped = disk.clone();
+            flipped.global.ebgp_requires_policy = Some(!live.policy_effective);
+            assert!(
+                config::pin_rfc8212_posture_startup_only(&mut flipped, &runtime),
+                "a real ebgp_requires_policy change must still pin: {cell}"
+            );
+            assert_eq!(flipped.rfc8212_posture(), live, "{cell}");
+        }
+
+        // Epoch 1 -> 2 with the boolean omitted flips the effective value.
+        let (runtime, disk) =
+            reload_then_persist_policy_after_desired_refresh_from(&cells[1], &cells[1]).await;
+        let mut upgraded = disk;
+        upgraded.config_epoch = Some(crate::config::ConfigEpoch::V2);
+        upgraded.global.ebgp_requires_policy = None;
+        assert!(config::pin_rfc8212_posture_startup_only(
+            &mut upgraded,
+            &runtime
+        ));
+        assert_eq!(upgraded.rfc8212_posture(), runtime.rfc8212_posture());
+    }
+
     // SoftResetIn-on-import-policy-change coverage is now PM-side:
     // `update_runtime_policies` fires `soft_reset_in` automatically
     // when import policy materially changes, for any peer in

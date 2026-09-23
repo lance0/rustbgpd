@@ -242,10 +242,18 @@ fn rfc8212_representation_only_diff_and_pin_cover_the_complete_raw_tuple() {
             .contains(&"[global].ebgp_requires_policy".to_string())
     );
 
+    // The fully explicit epoch-1/false tuple is the canonical writer's form of
+    // the live omitted tuple: the running tuple is retained, nothing reported.
     let mut running = explicit;
-    assert!(super::pin_rfc8212_posture_startup_only(&mut running, &old));
+    assert!(!super::pin_rfc8212_posture_startup_only(&mut running, &old));
     assert_eq!(running.rfc8212_posture(), old.rfc8212_posture());
     assert!(!super::diff_config(&old, &running).has_any_changes());
+
+    // A partial representation edit is not that form: pinned and reported.
+    let mut partial = parse(&rfc8212_representation_toml(Some("1"), None)).unwrap();
+    assert!(super::pin_rfc8212_posture_startup_only(&mut partial, &old));
+    assert_eq!(partial.rfc8212_posture(), old.rfc8212_posture());
+    assert!(!super::diff_config(&old, &partial).has_any_changes());
 }
 
 /// The raw RFC 8212 fields must remain optional in input without advertising

@@ -600,7 +600,9 @@ candidate as restart-required; `rustbgpd --diff` and the v1 runtime
 configuration transaction name representation-only epoch/presence changes as
 well as `[global].ebgp_requires_policy`, rather than only the `[global]`
 section. The v1 transaction rejects such a candidate outright instead of
-persisting or partly adopting it.
+persisting or partly adopting it. A runtime mutation rewrites the file with the
+explicit effective epoch and boolean; reloading that unedited file keeps the
+running tuple and logs nothing, because the effective posture did not change.
 
 ---
 
