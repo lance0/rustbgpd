@@ -45,7 +45,7 @@ releases rather than carried forward from older measurements.
 | BGP-LS (RFC 9552) | Yes | Partial | ADR-0077 slice negotiates BGP-LS / BGP-LS VPN, stores opaque RFC 9552 NLRI/TLV objects, exposes them through `ListBgpLsRoutes` / `rbgp rib bgpls`, and reflects them to eligible negotiated peers; the received topology also feeds the RFC 9107 ORR SPF engine (`rbgp topology`, ADR-0095). Local IGP topology production remains deferred |
 | SR Policy | Yes | No | |
 | SRv6 MUP | Yes | No | |
-| Route Target Constraints (RFC 4684) | Yes | Yes | Strict per-peer VPN reflection filtering (a negotiated peer with empty interest receives nothing), RFC-faithful 96-bit prefix matching, self-originated default membership, RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
+| Route Target Constraints (RFC 4684) | Yes | Yes | Strict per-peer VPN and EVPN reflection filtering (a negotiated peer with empty interest receives nothing; EVPN Type 4 routes match on their ES-Import RT per RFC 7432 §7.6), RFC-faithful 96-bit prefix matching, self-originated default membership, RFC-minimal deltas on membership change. M75 receipt — which also surfaced a GoBGP `vrf del` segfault triggered by default-RTC peers |
 
 ## Core Protocol
 

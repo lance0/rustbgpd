@@ -1039,7 +1039,7 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
     handle.await.unwrap();
 }
 
-/// LAN-190 §E: `rtc_vpn_filter` resolves the RFC 4684 VPN outbound filter
+/// LAN-190 §E: `rtc_export_filter` resolves the RFC 4684 VPN outbound filter
 /// directly. Two contracts pinned: (1) an RTC-negotiated peer with no
 /// membership recorded resolves to the STRICT EMPTY filter (advertise
 /// nothing), never fail-open; (2) the filter keys off the `sendable`
@@ -1047,7 +1047,7 @@ async fn vpn_not_advertised_to_rtc_peer_with_empty_membership() {
 /// sendable set lacking RTC resolves to `None` (unfiltered) even when a
 /// membership is still recorded for the peer.
 #[test]
-fn rtc_vpn_filter_strict_empty_and_argument_driven() {
+fn rtc_export_filter_strict_empty_and_argument_driven() {
     let (_tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1056,7 +1056,7 @@ fn rtc_vpn_filter_strict_empty_and_argument_driven() {
 
     // (1) RTC negotiated, no membership recorded → strict empty, not fail-open.
     assert_eq!(
-        manager.rtc_vpn_filter(peer, Some(&sendable_rtc)),
+        manager.rtc_export_filter(peer, Some(&sendable_rtc)),
         Some(RtcMembership::default()),
         "no membership must resolve to strict empty, not fail-open"
     );
@@ -1068,14 +1068,17 @@ fn rtc_vpn_filter_strict_empty_and_argument_driven() {
     };
     manager.peer_rt_membership.insert(peer, membership.clone());
     assert_eq!(
-        manager.rtc_vpn_filter(peer, Some(&sendable_rtc)),
+        manager.rtc_export_filter(peer, Some(&sendable_rtc)),
         Some(membership)
     );
 
     // (2) Argument-driven: a sendable set lacking RTC (or absent) resolves
     // to None even though a membership is still recorded for the peer.
-    assert_eq!(manager.rtc_vpn_filter(peer, Some(&sendable_no_rtc)), None);
-    assert_eq!(manager.rtc_vpn_filter(peer, None), None);
+    assert_eq!(
+        manager.rtc_export_filter(peer, Some(&sendable_no_rtc)),
+        None
+    );
+    assert_eq!(manager.rtc_export_filter(peer, None), None);
 }
 
 /// When a matching RTC NLRI arrives, the withheld VPN route is announced as a
@@ -1741,6 +1744,387 @@ async fn rtc_membership_unchanged_skips_restage() {
         resend.is_err(),
         "unchanged RTC membership must skip the dirty resync entirely"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+// ---------------------------------------------------------------------
+// RFC 4684 applied to EVPN (RFC 7432 §7.10; §7.6 for the ES-Import RT).
+// ---------------------------------------------------------------------
+
+const EVPN_ES_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x44];
+
+fn with_ext_communities(mut route: EvpnRibRoute, ecs: Vec<ExtendedCommunity>) -> EvpnRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(ecs));
+    route
+}
+
+/// Type 4 Ethernet Segment route carrying only its ES-Import RT.
+fn make_evpn_es_route(peer: Ipv4Addr) -> EvpnRibRoute {
+    let mut route = make_evpn_imet(peer, 0);
+    route.route = EvpnRoute::Es(rustbgpd_wire::EvpnEs {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        esi: EthernetSegmentIdentifier([3, 2, 0, 0, 0, 0, 0x44, 0, 0, 1]),
+        originator_ip: IpAddr::V4(peer),
+    });
+    with_ext_communities(route, vec![ExtendedCommunity::es_import_rt(EVPN_ES_MAC)])
+}
+
+/// RT membership NLRI (/96) for the Type 4 ES-Import RT.
+fn es_import_interest(peer: Ipv4Addr) -> crate::route::RtcRibRoute {
+    make_rtc_rib_route_with_nlri(
+        peer,
+        rustbgpd_wire::RtcNlri::new(
+            65001,
+            ExtendedCommunity::es_import_rt(EVPN_ES_MAC).as_u64(),
+            96,
+        )
+        .unwrap(),
+    )
+}
+
+/// Bring up an eBGP peer with the given sendable set; returns its receiver
+/// undrained.
+async fn families_peer_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    sendable_families: Vec<(Afi, Safi)>,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families,
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    out_rx
+}
+
+async fn next_update(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> OutboundRouteUpdate {
+    tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("expected an outbound update within 2s")
+        .expect("outbound channel open")
+}
+
+fn sorted_evpn_keys(routes: &[EvpnRibRoute]) -> Vec<rustbgpd_wire::EvpnRouteKey> {
+    let mut keys: Vec<_> = routes.iter().map(EvpnRibRoute::key).collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// A peer that negotiated RT-Constrain and EVPN receives only the EVPN
+/// routes its RT membership covers: nothing before interest (strict empty,
+/// the VPN rule), one tenant per matching RT, withdraw on membership
+/// withdraw, a Type 4 route via its ES-Import RT, and a route with no RT
+/// only under the default NLRI. A peer without RTC is unfiltered.
+#[tokio::test]
+async fn evpn_rtc_membership_filters_tenants_and_route_types() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let tenant_a = with_ext_communities(make_evpn_imet(src, 100), vec![rt(100)]);
+    let tenant_b = with_ext_communities(make_evpn_imet(src, 200), vec![rt(200)]);
+    let es = make_evpn_es_route(src);
+    let no_rt = make_evpn_imet(src, 300);
+    let (key_a, key_b, key_es, key_no_rt) = (tenant_a.key(), tenant_b.key(), es.key(), no_rt.key());
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(src),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![tenant_a, tenant_b, es, no_rt],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Not RTC-negotiated: unfiltered initial dump.
+    let plain = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let mut plain_rx = families_peer_up(&tx, plain, evpn_sendable()).await;
+    let dump = next_update(&mut plain_rx).await;
+    assert_eq!(
+        sorted_evpn_keys(&dump.evpn_announce),
+        {
+            let mut all = vec![key_a, key_b, key_es, key_no_rt];
+            all.sort_unstable();
+            all
+        },
+        "a peer without RT-Constrain receives every EVPN route"
+    );
+
+    // RTC-negotiated, no interest yet: strict empty.
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut sendable = evpn_sendable();
+    sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let dump = next_update(&mut out_rx).await;
+    assert!(dump.rtc_announce.iter().any(|r| r.nlri.is_default()));
+    assert!(
+        dump.evpn_announce.is_empty(),
+        "empty RT membership must withhold every EVPN route"
+    );
+    let eor = next_update(&mut out_rx).await;
+    assert!(eor.end_of_rib.contains(&(Afi::L2Vpn, Safi::Evpn)));
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let update = next_update(&mut out_rx).await;
+    assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_a]);
+    assert!(update.evpn_withdraw.is_empty());
+
+    send_rtc_interest(&tx, target, &[200]).await;
+    let update = next_update(&mut out_rx).await;
+    assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_b]);
+    assert!(update.evpn_withdraw.is_empty());
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![],
+        withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
+    })
+    .await
+    .unwrap();
+    let update = next_update(&mut out_rx).await;
+    assert!(update.evpn_announce.is_empty());
+    assert_eq!(update.evpn_withdraw, vec![key_a]);
+
+    // RFC 7432 §7.6: the ES-Import RT is subject to RT-Constrain.
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![es_import_interest(target)],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let update = next_update(&mut out_rx).await;
+    assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_es]);
+
+    // Default membership admits everything, including a route with no RT.
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![make_rtc_rib_route_with_nlri(
+            target,
+            rustbgpd_wire::RtcNlri::DEFAULT,
+        )],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let update = next_update(&mut out_rx).await;
+    let mut expected = vec![key_a, key_no_rt];
+    expected.sort_unstable();
+    assert_eq!(sorted_evpn_keys(&update.evpn_announce), expected);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A peer that also negotiated VPN is update-grouped, and its membership
+/// change takes the group VPN delta walk. EVPN is never group-staged, so the
+/// change must still restage the peer's EVPN routes.
+#[tokio::test]
+async fn evpn_rtc_membership_change_restages_evpn_for_vpn_grouped_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let tenant_a = with_ext_communities(make_evpn_imet(src, 100), vec![rt(100)]);
+    let key_a = tenant_a.key();
+    evpn_routes_received_from(&tx, src, tenant_a).await;
+
+    let target = Ipv4Addr::new(10, 0, 0, 2);
+    let mut sendable = vpn_rtc_sendable();
+    sendable.push((Afi::L2Vpn, Safi::Evpn));
+    let mut out_rx = families_peer_up(&tx, IpAddr::V4(target), sendable).await;
+    let dump = next_update(&mut out_rx).await;
+    assert!(dump.evpn_announce.is_empty());
+    let _eor = next_update(&mut out_rx).await;
+    let (reply, group) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerUpdateGroup {
+        peer: IpAddr::V4(target),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        group.await.unwrap().starts_with("group:"),
+        "the VPN + RTC peer must take the grouped membership-delta path"
+    );
+
+    send_rtc_interest(&tx, target, &[100]).await;
+    let update = next_update(&mut out_rx).await;
+    assert_eq!(sorted_evpn_keys(&update.evpn_announce), vec![key_a]);
+
+    tx.send(RibUpdate::RtcRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(target),
+        announced: vec![],
+        withdrawn: vec![make_rtc_rib_route(target, 100, 100).key()],
+    })
+    .await
+    .unwrap();
+    let update = next_update(&mut out_rx).await;
+    assert_eq!(update.evpn_withdraw, vec![key_a]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+async fn evpn_routes_received_from(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: Ipv4Addr,
+    route: EvpnRibRoute,
+) {
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+/// RFC 7432 §7.6 ES-Import matching: the RT bits under the prefix decide,
+/// with no origin-AS stand-in; other type-0x06 communities never match.
+#[test]
+fn es_import_rt_matches_membership_on_rt_bits() {
+    let es_import = ExtendedCommunity::es_import_rt(EVPN_ES_MAC);
+    let membership = |nlri| RtcMembership {
+        has_default: false,
+        entries: vec![nlri],
+    };
+    let exact = rustbgpd_wire::RtcNlri::new(64999, es_import.as_u64(), 96).unwrap();
+    let other_mac = rustbgpd_wire::RtcNlri::new(
+        64999,
+        ExtendedCommunity::es_import_rt([0x02, 0, 0, 0, 0, 0x45]).as_u64(),
+        96,
+    )
+    .unwrap();
+    let origin_only = rustbgpd_wire::RtcNlri::new(64999, 0, 32).unwrap();
+    assert!(membership(exact).matches_any(&[es_import]));
+    assert!(!membership(other_mac).matches_any(&[es_import]));
+    assert!(membership(origin_only).matches_any(&[es_import]));
+    // MAC Mobility (type 0x06, sub-type 0x00) is not a Route Target.
+    assert!(!membership(origin_only).matches_any(&[ExtendedCommunity::mac_mobility(false, 1)]));
+}
+
+/// RT membership changes that land while EVPN selection is deferred (RFC
+/// 4724 restarting speaker) must be reflected once the gate releases — for a
+/// VPN-grouped RTC peer (group delta path) and a per-peer RTC peer (dirty
+/// resync path) alike. The peers widen to {100, 200} and narrow back to
+/// {200} inside the deferral window; after release each receives tenant B
+/// only, and tenant A never reaches the wire.
+#[tokio::test(start_paused = true)]
+async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release() {
+    let evpn = (Afi::L2Vpn, Safi::Evpn);
+    let waiter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_hours(1),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: waiter,
+                families: vec![evpn],
+            }],
+        });
+    let handle = tokio::spawn(manager.run());
+    let sync = async |tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr| {
+        let (reply, group) = oneshot::channel();
+        tx.send(RibUpdate::QueryPeerUpdateGroup {
+            peer: IpAddr::V4(peer),
+            reply,
+        })
+        .await
+        .unwrap();
+        group.await.unwrap()
+    };
+
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let tenant_a = with_ext_communities(make_evpn_imet(src, 100), vec![rt(100)]);
+    let tenant_b = with_ext_communities(make_evpn_imet(src, 200), vec![rt(200)]);
+    let (key_a, key_b) = (tenant_a.key(), tenant_b.key());
+    evpn_routes_received_from(&tx, src, tenant_a).await;
+    evpn_routes_received_from(&tx, src, tenant_b).await;
+
+    let grouped = Ipv4Addr::new(10, 0, 0, 2);
+    let mut grouped_sendable = vpn_rtc_sendable();
+    grouped_sendable.push(evpn);
+    let per_peer = Ipv4Addr::new(10, 0, 0, 3);
+    let mut per_peer_sendable = evpn_sendable();
+    per_peer_sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut rxs = vec![
+        families_peer_up(&tx, IpAddr::V4(grouped), grouped_sendable).await,
+        families_peer_up(&tx, IpAddr::V4(per_peer), per_peer_sendable).await,
+    ];
+    assert!(sync(&tx, grouped).await.starts_with("group:"));
+
+    for peer in [grouped, per_peer] {
+        send_rtc_interest(&tx, peer, &[100]).await;
+        send_rtc_interest(&tx, peer, &[200]).await;
+        tx.send(RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            announced: vec![],
+            withdrawn: vec![make_rtc_rib_route(peer, 100, 100).key()],
+        })
+        .await
+        .unwrap();
+    }
+    sync(&tx, grouped).await;
+    for out_rx in &mut rxs {
+        while let Ok(update) = out_rx.try_recv() {
+            assert!(
+                update.evpn_announce.is_empty() && !update.end_of_rib.contains(&evpn),
+                "EVPN must stay held while its selection is deferred"
+            );
+        }
+    }
+
+    tokio::time::advance(Duration::from_hours(1)).await;
+    for (peer, out_rx) in [grouped, per_peer].into_iter().zip(&mut rxs) {
+        let mut announced = Vec::new();
+        loop {
+            let update = next_update(out_rx).await;
+            assert!(
+                !update.evpn_announce.iter().any(|r| r.key() == key_a),
+                "{peer}: tenant A is outside the post-deferral membership"
+            );
+            assert!(update.evpn_withdraw.is_empty(), "{peer}");
+            announced.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+            if update.end_of_rib.contains(&evpn) {
+                break;
+            }
+        }
+        assert_eq!(announced, vec![key_b], "{peer}");
+    }
 
     drop(tx);
     handle.await.unwrap();

@@ -790,7 +790,7 @@ impl RibManager {
             .map(rustbgpd_policy::PolicyChain::share);
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-        let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
+        let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
         let rs_control_asn = self.peer_rs_control.get(&peer).copied();
@@ -941,6 +941,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
+                    rtc_filter.as_ref(),
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     false, // route refresh re-emits via empty refresh_view

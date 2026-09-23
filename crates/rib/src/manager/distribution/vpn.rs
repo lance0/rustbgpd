@@ -1043,7 +1043,7 @@ impl RibManager {
             let export_pol = self
                 .export_policy_for(peer)
                 .map(rustbgpd_policy::PolicyChain::share);
-            let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
+            let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
             let add_path_send_max = if peer_add_path {
                 self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0)
             } else {

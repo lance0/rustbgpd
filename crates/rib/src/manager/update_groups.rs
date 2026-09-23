@@ -1849,9 +1849,9 @@ impl RibManager {
 
     /// A grouped member's Φ — the RFC 4684 VPN filter resolved from its
     /// RT membership (`Some` iff the peer negotiated SAFI 132, absent
-    /// membership ⇒ strict empty; the [`Self::rtc_vpn_filter`] rule).
+    /// membership ⇒ strict empty; the [`Self::rtc_export_filter`] rule).
     pub(in crate::manager) fn member_rt_filter(&self, peer: IpAddr) -> Option<RtcMembership> {
-        self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer))
+        self.rtc_export_filter(peer, self.peer_sendable_families.get(&peer))
     }
 
     /// The membership-delta path for a grouped VPN member whose Φ

@@ -1282,7 +1282,7 @@ impl RibManager {
                 .collect::<Vec<_>>()
         });
         let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-        let rtc_filter = self.rtc_vpn_filter(peer, negotiated_sendable.as_ref());
+        let rtc_filter = self.rtc_export_filter(peer, negotiated_sendable.as_ref());
         // RFC 5291 §6 initial-advertisement gate: suppress route advertisement
         // for families still awaiting the peer's first ROUTE-REFRESH. For a
         // non-GR peer the EoR is still emitted (an honest "empty table so
@@ -1676,6 +1676,7 @@ impl RibManager {
                 sendable.as_ref(),
                 llgr.as_ref(),
                 export_pol.as_ref(),
+                rtc_filter.as_ref(),
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // initial dump — equality check is correct
