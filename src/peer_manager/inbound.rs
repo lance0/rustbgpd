@@ -750,6 +750,15 @@ impl PeerManager {
         }
     }
 
+    /// Resolve an inbound candidate that has received the peer's OPEN
+    /// against the configured (primary) session.
+    ///
+    /// RFC 4271 §6.8: "a connection collision cannot be detected with
+    /// connections that are in Idle, Connect, or Active states", and a
+    /// collision with an Established connection closes the new one. The
+    /// identifier comparison therefore applies only while the primary is in
+    /// `OpenSent` or `OpenConfirm`. The primary's state is read here, when the
+    /// OPEN arrives, because it can change after the inbound was accepted.
     pub(super) async fn resolve_collision(
         &mut self,
         peer_key: PeerKey,
@@ -757,6 +766,10 @@ impl PeerManager {
         peer_asn: u32,
     ) {
         let peer_addr = peer_key.address;
+        let Some(primary_state) = self.resolve_by_primary_state(&peer_key).await else {
+            return;
+        };
+
         let local_id = u32::from(self.router_id);
         let remote_id = u32::from(remote_router_id);
         let equal_router_ids = local_id == remote_id;
@@ -777,22 +790,12 @@ impl PeerManager {
                     self.local_asn,
                     peer_asn,
                     equal_router_ids,
+                    primary_state = primary_state.as_str(),
+                    rule = "identifier_comparison",
                     "collision: local wins, dropping inbound"
                 );
-                if let Some(pending) = self
-                    .peers
-                    .get_mut(&peer_key)
-                    .and_then(|m| m.pending_inbound.take())
-                {
-                    self.quiesce_retiring_session(
-                        &peer_key,
-                        pending.session_id,
-                        pending.handle,
-                        "local-wins collision loser",
-                        true,
-                    )
+                self.drop_collision_candidate(&peer_key, "local-wins collision loser")
                     .await;
-                }
             }
             std::cmp::Ordering::Less => {
                 // Remote wins — dump existing, accept inbound
@@ -803,20 +806,13 @@ impl PeerManager {
                     self.local_asn,
                     peer_asn,
                     equal_router_ids,
+                    primary_state = primary_state.as_str(),
+                    rule = "identifier_comparison",
                     "collision: remote wins, replacing with inbound"
                 );
-                let promoted = {
-                    let managed = self.peers.get_mut(&peer_key);
-                    managed.and_then(|managed| {
-                        let pending = managed.pending_inbound.take()?;
-                        let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
-                        let old_session_id = managed.session_id;
-                        managed.session_id = pending.session_id;
-                        Some((old_handle, old_session_id, pending.session_id))
-                    })
-                };
-                if let Some((old_handle, old_session_id, new_session_id)) = promoted {
-                    self.register_session(new_session_id, &peer_key);
+                if let Some((old_handle, old_session_id, new_session_id)) =
+                    self.promote_pending_inbound_handle(&peer_key)
+                {
                     self.finish_inbound_promotion(
                         &peer_key,
                         old_session_id,
@@ -836,23 +832,98 @@ impl PeerManager {
                     router_id = %self.router_id,
                     self.local_asn,
                     peer_asn,
+                    primary_state = primary_state.as_str(),
+                    rule = "identifier_comparison",
                     "collision: equal router-id and AS, dropping inbound"
                 );
-                if let Some(pending) = self
-                    .peers
-                    .get_mut(&peer_key)
-                    .and_then(|m| m.pending_inbound.take())
-                {
-                    self.quiesce_retiring_session(
-                        &peer_key,
-                        pending.session_id,
-                        pending.handle,
-                        "equal-identity collision loser",
-                        true,
-                    )
+                self.drop_collision_candidate(&peer_key, "equal-identity collision loser")
                     .await;
-                }
             }
+        }
+    }
+
+    /// Apply the rules that do not compare identifiers. Returns the
+    /// primary's state when it is `OpenSent` or `OpenConfirm` and the caller
+    /// must compare; otherwise the candidate has been promoted or dropped.
+    async fn resolve_by_primary_state(&mut self, peer_key: &PeerKey) -> Option<SessionState> {
+        let peer_addr = peer_key.address;
+        let managed = self.peers.get(peer_key)?;
+
+        let primary_state = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
+            StateQueryOutcome::State(state) => state.fsm_state,
+            // The primary task has exited: it has no connection either.
+            StateQueryOutcome::SessionGone => SessionState::Idle,
+            StateQueryOutcome::TimedOut => {
+                // As on accept: a wedged primary may be Established, so a
+                // missed deadline must not tear it down. The remote retries.
+                info!(
+                    peer = %peer_addr,
+                    primary_state = "unknown",
+                    rule = "primary_state_unknown",
+                    "collision: primary state query timed out, dropping inbound"
+                );
+                self.drop_collision_candidate(peer_key, "unknown-primary collision loser")
+                    .await;
+                return None;
+            }
+        };
+
+        match primary_state {
+            SessionState::Idle | SessionState::Connect | SessionState::Active => {
+                let enabled = self.peers.get(peer_key).is_some_and(|m| m.enabled);
+                if enabled && !self.bfd_withholding(&peer_addr) {
+                    info!(
+                        peer = %peer_addr,
+                        primary_state = primary_state.as_str(),
+                        rule = "no_primary_connection",
+                        "collision: no primary connection, promoting inbound"
+                    );
+                    // No Cease 6/7: the primary has no established TCP
+                    // connection to send it on. Its shutdown aborts any
+                    // outbound connect attempt and reconnect timer.
+                    self.promote_pending_inbound(peer_key).await;
+                } else {
+                    info!(
+                        peer = %peer_addr,
+                        primary_state = primary_state.as_str(),
+                        rule = "no_primary_connection",
+                        "collision: no primary connection but BGP is held, dropping inbound"
+                    );
+                    self.drop_collision_candidate(peer_key, "held-peer collision candidate")
+                        .await;
+                }
+                None
+            }
+            SessionState::Established => {
+                info!(
+                    peer = %peer_addr,
+                    primary_state = primary_state.as_str(),
+                    rule = "primary_established",
+                    "collision: primary established, dropping inbound"
+                );
+                self.drop_collision_candidate(peer_key, "established-primary collision loser")
+                    .await;
+                None
+            }
+            SessionState::OpenSent | SessionState::OpenConfirm => Some(primary_state),
+        }
+    }
+
+    /// Close the pending inbound candidate with Cease 6/7.
+    async fn drop_collision_candidate(&mut self, peer_key: &PeerKey, context: &'static str) {
+        if let Some(pending) = self
+            .peers
+            .get_mut(peer_key)
+            .and_then(|m| m.pending_inbound.take())
+        {
+            self.quiesce_retiring_session(
+                peer_key,
+                pending.session_id,
+                pending.handle,
+                context,
+                true,
+            )
+            .await;
         }
     }
 
