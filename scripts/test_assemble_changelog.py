@@ -157,6 +157,7 @@ class AssembleChangelogTests(unittest.TestCase):
             r"\\\`[guide](../docs/x.md) and `code`": r"\\\`[guide](docs/x.md) and `code`",
             # An escaped backslash leaves the following backtick run unescaped.
             r"\\`[guide](../docs/x.md)`": r"\\`[guide](../docs/x.md)`",
+            r"`x`\\`[guide](../docs/x.md)`": r"`x`\\`[guide](../docs/x.md)`",
             # A backslash inside a span is literal and does not escape the closer.
             r"`C:\` [guide](../docs/x.md) `code`": r"`C:\` [guide](docs/x.md) `code`",
         }

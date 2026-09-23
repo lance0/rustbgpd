@@ -60,7 +60,7 @@ CONFLICT_MARKER = re.compile(r"(?m)^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)")
 # of backslashes before it is consumed; inside a span a backslash is literal.
 # Not a Markdown parser: fragments hold prose, links, and code.
 FRAGMENT_RELATIVE_LINK = re.compile(
-    r"(?s)(?<![`\\])(?:\\\\)*(?P<tick>`+)(?!`).*?(?<!`)(?P=tick)(?!`)|\]\(\.\./"
+    r"(?s)(?<!\\)(?:\\\\)*(?<!`)(?P<tick>`+)(?!`).*?(?<!`)(?P=tick)(?!`)|\]\(\.\./"
 )
 
 
