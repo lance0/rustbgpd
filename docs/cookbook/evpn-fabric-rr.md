@@ -154,6 +154,13 @@ shows the stopping gate. An FRR leaf missing `neighbor X activate` under
 `address-family l2vpn evpn` can establish a session while receiving no EVPN
 routes, as demonstrated by the M29 fixture.
 
+A third stop, *rt_membership*, applies when the destination leaf also
+negotiated `rtc`: it receives only EVPN routes with a Route Target inside the
+RT membership it advertised (Type 4 routes match on their ES-Import RT), and
+nothing until it advertises some. `rbgp rib rtc --neighbor <leaf>` lists the
+membership that leaf sent; the default (zero-length) membership restores the
+unfiltered feed.
+
 **Vendor NOS quirks.** From the M82 SR Linux leg: SR Linux enforces
 one EVI per mac-vrf (bundle identity = shared RT + Ethernet Tag,
 per-BD RDs) and needs an explicit `transport local-address` on the BGP
