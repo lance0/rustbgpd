@@ -609,7 +609,7 @@ containerlab is the test harness — not "where feasible," but the default. Ever
 
 ### Fuzzing
 
-22 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
+23 libFuzzer targets across seven crates, each with its own `fuzz/` workspace:
 
 - `crates/wire/fuzz` (13) — OPEN / UPDATE / message and Route Refresh
   decoding, Route Distinguisher parsing, and per-family NLRI decoders
@@ -620,6 +620,8 @@ containerlab is the test harness — not "where feasible," but the default. Ever
 - `crates/bfd/fuzz` (1) — BFD control-packet decoding.
 - `crates/rpki/fuzz` (1) — RTR PDU decoding.
 - `crates/evpn/fuzz` (1) — Route Target parsing.
+- `crates/cli/fuzz` (1) — the `rbgp diff snapshot` BMP and MRT capture
+  adapters.
 
 Run them per crate — `cd` into the owning crate and use `cargo fuzz list` /
 `cargo fuzz run <target>` on the pinned nightly. Seed corpora are tracked

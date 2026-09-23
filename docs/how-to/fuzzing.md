@@ -4,9 +4,11 @@
 
 rustbgpd fuzzes untrusted decode surfaces with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer). There are
-six fuzz crates, one per fuzzed workspace crate:
+seven fuzz crates, one per fuzzed workspace crate:
 
 - `crates/bfd/fuzz` — the BFD control-packet codec (`rustbgpd-bfd`)
+- `crates/cli/fuzz` — the `rbgp diff snapshot from-bmp` and `from-mrt`
+  capture adapters (`rustbgpctl`)
 - `crates/wire/fuzz` — the BGP wire codec (`rustbgpd-wire`)
 - `crates/policy/fuzz` — the `.rpol` policy-language frontend
   (`rustbgpd-policy`)
@@ -15,8 +17,9 @@ six fuzz crates, one per fuzzed workspace crate:
   (`rustbgpd-mrt`)
 - `crates/rpki/fuzz` — the RTR PDU codec (`rustbgpd-rpki`)
 
-BMP (`crates/bmp`) is encode-only — rustbgpd never decodes BMP from the
-network — so it has no fuzz surface.
+The daemon's BMP crate (`crates/bmp`) is encode-only — rustbgpd never decodes
+BMP from the network — so it has no fuzz surface. The offline BMP capture
+reader behind `rbgp diff snapshot from-bmp` is fuzzed through `crates/cli/fuzz`.
 
 ## Targets
 
@@ -31,7 +34,7 @@ network — so it has no fuzz surface.
 | `decode_evpn` | wire | RFC 7432 EVPN route types 1–5 | value round-trip |
 | `encode_evpn` | wire | Constructor-space EVPN encode (inputs the decoder alone cannot reach) | encode is a function |
 | `encode_update` | wire | Bounded canonical structured IPv4 UPDATEs with encoder-admitted path attributes and NLRI | full encode length is exact; decode consumes all bytes with no malformed attributes; canonical value and re-encoding are stable |
-| `decode_bgpls` | wire | RFC 9552 BGP-LS NLRI (+ VPN flavor) and attr-29 TLVs | value round-trip (the M73 byte-fidelity promise, generalized) |
+| `decode_bgpls` | wire | RFC 9552 BGP-LS NLRI (+ VPN flavor) and attr-29 TLVs, plus every topology accessor the ORR topology build reads (node keys, link descriptors, IP reachability, metrics) | value round-trip (the M73 byte-fidelity promise, generalized); accessors never panic |
 | `decode_vpn` | wire | VPNv4/VPNv6 NLRI: RD, label stacks, RFC 8277 §2.4 withdraw compatibility parsing | value round-trip (preserve-verbatim promise) |
 | `decode_labeled` | wire | RFC 8277 labeled-unicast (SAFI 4), announce + withdraw, legacy + Add-Path | announce: lossless round-trip; withdraw: second-generation idempotence (the encoder normalizes to the 0x800000 compatibility field by design) |
 | `decode_rtc` | wire | RFC 4684 RT-Constrain NLRI (AFI 1/SAFI 132), default + 32..96-bit prefixes | lossless round-trip |
@@ -44,6 +47,7 @@ network — so it has no fuzz surface.
 | `snapshot_reader_drain` | mrt | arbitrary MRT framing plus arbitrary records after a valid empty peer-index table | reader construction and full iteration never panic |
 | `warm_bundle_manifest` | mrt | real owner-checked `manifest.json` load through JSON decoding, V1 structure, boot identity, freshness, and safe snapshot lookup/error handling | loader never panics |
 | `decode_rtr_pdu` | rpki | RFC 8210 / 8210bis PDU framing and all supported payloads | decoder never panics; campaign inputs are capped at 65,535 bytes |
+| `ribsnap_convert` | cli | the same in-memory conversion `rbgp diff snapshot from-mrt` and `from-bmp` run after reading the file: `TABLE_DUMP_V2` records and attributes; BMP framing, per-peer headers, Peer Up OPENs, statistics, and embedded UPDATE folding | each conversion returns a refusal or a snapshot, never panics; a snapshot's trailer counts its route records; inputs are capped at 65,536 bytes |
 
 "Round-trip" targets assert the promise the interop labs pin for specific
 bytes (M73 BGP-LS byte fidelity, M74 VPN preserve-verbatim) over the whole
@@ -110,7 +114,7 @@ availability does not change the result of the completed test campaign.
 ## CI
 
 `.github/workflows/fuzz.yml` runs nightly (04:00 UTC) and on manual
-dispatch: every target in all six fuzz crates for 120 seconds each, starting
+dispatch: every target in all seven fuzz crates for 120 seconds each, starting
 from tracked seeds or the validated prior wire corpus. The job has a 90-minute
 bound, does not cancel an older lineage writer, and retains failure artifacts
 for 14 days. Budget choice:
@@ -147,7 +151,7 @@ which cannot meet rustbgpd's fail-closed corpus-reuse rule. ClusterFuzzLite's
 Rust integration also documents AddressSanitizer as the only supported
 sanitizer, so the manual workflow does not claim unsupported coverage mode.
 
-`scripts/check_fuzz_target_inventory.py` gates the exact 22-target inventory in
+`scripts/check_fuzz_target_inventory.py` gates the exact 23-target inventory in
 the ordinary PR/push `CI / core` job (which feeds the aggregate `CI / check`
 result), before a manual ClusterFuzzLite build,
 and again inside the shared fuzzer build path. It compares cargo metadata and
@@ -162,7 +166,7 @@ step order, and outage behavior.
 
 ## When the nightly goes red
 
-The nightly steps run in order — wire, policy, EVPN, MRT, BFD, RTR — and the
+The nightly steps run in order — wire, policy, EVPN, MRT, BFD, RTR, CLI — and the
 first failing step ends the job. **Every later crate is skipped and the wire
 corpus is not sealed**, so a red night costs coverage well beyond the target
 that actually failed. Triage it rather than waiting to see whether it clears.
@@ -261,7 +265,7 @@ identical to one nobody noticed, and it hides the crates that never ran.
 
 The standard OSS-Fuzz project files are staged in `fuzz/oss-fuzz/`
 (`project.yaml`, `Dockerfile`, `build.sh`). OSS-Fuzz and ClusterFuzzLite both
-delegate to `fuzz/build-fuzzers.sh`, which validates and builds all six fuzz
+delegate to `fuzz/build-fuzzers.sh`, which validates and builds all seven fuzz
 crates with `cargo fuzz build -O --debug-assertions`. The crates share one
 Cargo target directory so compatible sanitizer build-std and dependency
 artifacts can be reused across crate builds. The integration ships each
@@ -272,7 +276,7 @@ in the upstream Rust builder image and must remain at or above the workspace
 MSRV. They also install cargo-fuzz 0.13.2 explicitly because the Ubuntu 24.04
 Rust builder does not bundle it.
 
-The shared build uses one explicit Cargo target directory for all six fuzz
+The shared build uses one explicit Cargo target directory for all seven fuzz
 crates and fails unless every expected executable exists before copying it to
 the integration output. Per-target libFuzzer options travel with the binaries,
 and the reviewed BGP dictionary travels with all 12 binary wire targets, so

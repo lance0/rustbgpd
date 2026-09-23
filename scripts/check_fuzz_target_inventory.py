@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
     "crates/bfd": ("decode_bfd_control",),
+    "crates/cli": ("ribsnap_convert",),
     "crates/evpn": ("parse_rt",),
     "crates/mrt": ("snapshot_reader_drain", "warm_bundle_manifest"),
     "crates/policy": ("compile_chain", "dataset_parse", "explain_walk", "rpol_compile"),
@@ -37,7 +38,7 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
         "parse_rd",
     ),
 }
-EXPECTED_COUNT = 22
+EXPECTED_COUNT = 23
 WIRE_NIGHTLY_MAX_LENS = {
     "decode_bgpls": 4_096,
     "decode_evpn": 4_096,
@@ -92,6 +93,7 @@ WIRE_HOSTED_CONTRACTS = {
 }
 CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/bfd": ("decode_bfd_control", 256),
+    "crates/cli": ("ribsnap_convert", 65_536),
     "crates/rpki": ("decode_rtr_pdu", 65_535),
 }
 WIRE_DICTIONARY_TARGETS = tuple(
@@ -186,6 +188,10 @@ EXPECTED_SEEDS: dict[str, bytes] = {
 }
 EXPECTED_SEED_SHA256 = {
     "crates/bfd/fuzz/seeds/decode_bfd_control/valid_down": "8d957e98d56df1f958c656f227080d6292b08650f28282a86efebc8c19f0ef1a",
+    # Written from the from-bmp golden capture and from-mrt sample dump
+    # fixtures in crates/cli/src/ribsnap_bmp.rs and ribsnap.rs.
+    "crates/cli/fuzz/seeds/ribsnap_convert/bmp_golden_capture": "e37ecbeb7572f44e3513c0f6836f9fb6a4f8531db3148528956e85c81662fe24",
+    "crates/cli/fuzz/seeds/ribsnap_convert/mrt_sample_dump": "ef0fbd5ef7c5e2493ca2861e63376677317063eab33840446f430d08f781f4a7",
     "crates/rpki/fuzz/seeds/decode_rtr_pdu/reset_query_v1": "3f33bec1b1e4e0e57201c2ff1b686e818650c8fc291d24d3076e571ae73b309c",
     "crates/wire/fuzz/seeds/decode_bgpls/known_node": "de440b029fb1601647c130a36a9deb92c1d9cf47d65541264baa1ec2d4ac3a18",
     "crates/wire/fuzz/seeds/decode_evpn/imet_v4": "02eaa7c86172f117702c97ae2bcdc9fe093a99309fd327d77941aa2c321ffb77",
@@ -340,6 +346,21 @@ def validate_inventory(
         raise InventoryError("; ".join(errors))
 
 
+def campaign_block(workflow: str, crate: str) -> str | None:
+    """Return the run body of the one nightly step that changes into `crate`.
+
+    The body cannot extend across a step boundary, so a bound or target
+    check never passes on text that belongs to another crate's campaign.
+    """
+    match = re.search(
+        r"(?ms)^      - name: [^\n]+\n        run: \|\n"
+        rf"(?P<body>(?:(?!^      - name:).)*?^\s+cd {re.escape(crate)}$"
+        r".*?)(?=^      - name:|\Z)",
+        workflow,
+    )
+    return None if match is None else match.group("body")
+
+
 def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
     """Keep newly inventoried crates on both hosted and nightly paths."""
     builder_roster = "for dir in " + " ".join(EXPECTED_TARGETS) + "; do"
@@ -428,13 +449,9 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
             )
 
     for crate, (target, max_len) in CAMPAIGN_BOUNDS.items():
-        crate_block = re.search(
-            rf"(?ms)^      - name: [^\n]+\n        run: \|\n(?P<body>.*?cd {re.escape(crate)}.*?)(?=^      - name:|\Z)",
-            workflow,
-        )
-        if crate_block is None:
+        body = campaign_block(workflow, crate)
+        if body is None:
             raise InventoryError(f"nightly workflow has no {crate} campaign")
-        body = crate_block.group("body")
         if f"grep -Fxq {target}" not in body:
             raise InventoryError(f"nightly workflow does not require {crate}/{target}")
         if f"-max_len={max_len}" not in body:
@@ -644,6 +661,7 @@ def validate_seed_corpus(seed_contents: Mapping[str, bytes]) -> None:
 def repository_seed_contents() -> dict[str, bytes]:
     seed_roots = {
         "crates/bfd/fuzz/seeds": {"decode_bfd_control"},
+        "crates/cli/fuzz/seeds": {"ribsnap_convert"},
         "crates/rpki/fuzz/seeds": {"decode_rtr_pdu"},
         "crates/wire/fuzz/seeds": set(EXPECTED_TARGETS["crates/wire"]),
     }

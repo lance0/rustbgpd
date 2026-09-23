@@ -45,6 +45,7 @@ class FuzzTargetInventoryTests(unittest.TestCase):
             ("snapshot_reader_drain", "warm_bundle_manifest"),
         )
         self.assertEqual(actual["crates/bfd"], ("decode_bfd_control",))
+        self.assertEqual(actual["crates/cli"], ("ribsnap_convert",))
         self.assertEqual(actual["crates/rpki"], ("decode_rtr_pdu",))
 
     def test_every_single_manifest_target_omission_is_rejected(self) -> None:
@@ -338,8 +339,14 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
         for crate, (_, max_len) in inventory.CAMPAIGN_BOUNDS.items():
             with self.subTest(crate=crate):
+                # Mutate only this crate's step: another campaign can share
+                # the same bound (MRT and CLI both use 65,536).
+                block = inventory.campaign_block(workflow, crate)
+                self.assertIsNotNone(block)
                 mutated = workflow.replace(
-                    f"-max_len={max_len}", f"-max_len={max_len + 1}", 1
+                    block,
+                    block.replace(f"-max_len={max_len}", f"-max_len={max_len + 1}"),
+                    1,
                 )
                 with self.assertRaisesRegex(inventory.InventoryError, "max_len"):
                     inventory.validate_pipeline_enrollment(builder, mutated)
