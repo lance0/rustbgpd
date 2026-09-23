@@ -112,7 +112,7 @@ jobs:
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
             dict_args=()
             [ "$t" != parse_rd ] && dict_args+=("-dict=fuzz/bgp.dict")
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len="$max_len" "${dict_args[@]}"
+            cargo fuzz run "$t" "fuzz/corpus/$t" ${seeds:+"$seeds"} -- -max_total_time=120 -max_len="$max_len" "${dict_args[@]}"
           done
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |
@@ -128,7 +128,7 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=8192
+            cargo fuzz run "$t" "fuzz/corpus/$t" ${seeds:+"$seeds"} -- -max_total_time=120 -max_len=8192
           done
       - name: Fuzz EVPN parsers (2 minutes per target)
         run: |
@@ -147,7 +147,7 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=1024
+            cargo fuzz run "$t" "fuzz/corpus/$t" ${seeds:+"$seeds"} -- -max_total_time=120 -max_len=1024
           done
       - name: Fuzz MRT snapshot and warm-bundle readers (2 minutes per target)
         run: |
@@ -166,7 +166,7 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=65536
+            cargo fuzz run "$t" "fuzz/corpus/$t" ${seeds:+"$seeds"} -- -max_total_time=120 -max_len=65536
           done
       - name: Fuzz BFD control decoder (2 minutes)
         run: |
