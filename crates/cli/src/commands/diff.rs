@@ -30,10 +30,9 @@ use rustbgpctl::ribdiff::{
     self, AsPathSegment, AsSegmentKind, DiffClass, DiffLimits, DiffReport, FamilyId, Nlri,
     PathAttrs, PeerId, RoutePath, RouteSet, SnapshotMeta, UnknownAttr, Verdict,
 };
+use rustbgpctl::ribsnap::SNAPSHOT_SCHEMA;
 use serde::Deserialize;
 use tokio::time::Instant;
-
-pub use rustbgpctl::ribsnap::SNAPSHOT_SCHEMA;
 
 /// Complete inputs, no semantic differences.
 pub const EXIT_IN_SYNC: i32 = 0;
