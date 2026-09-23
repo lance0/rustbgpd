@@ -1794,12 +1794,14 @@ message TestPolicyRequest {
   // policies; call-form with u32 arguments for parameterized ones,
   // e.g. "customer-in(200)".
   string policy = 2;
-  // "import" evaluates over Adj-RIB-In routes (optionally one peer's);
-  // "export" evaluates over Loc-RIB best routes.
+  // "import" evaluates over the post-policy Adj-RIB-In (optionally one
+  // peer's): only routes the current import policy accepted, so routes a
+  // candidate would newly admit are not visible. "export" evaluates over
+  // Loc-RIB best routes.
   string direction = 3;
   // Optional peer address. For import: restrict the snapshot to this
-  // peer's Adj-RIB-In. For export: evaluate as if advertising to this
-  // peer (peer context fields in guards see its address).
+  // peer's post-policy Adj-RIB-In. For export: evaluate as if advertising
+  // to this peer (peer context fields in guards see its address).
   string peer = 4;
   // Address family filter. UNSPECIFIED evaluates IPv4 + IPv6 unicast;
   // only the unicast families are supported in V1.

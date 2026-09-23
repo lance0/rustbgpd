@@ -825,12 +825,14 @@ enum PolicyAction {
         /// arguments for parameterized policies, e.g. "customer-in(200)"
         #[arg(long)]
         policy: String,
-        /// Evaluation direction: import (Adj-RIB-In) or export
-        /// (Loc-RIB best routes)
+        /// Evaluation direction: import (post-policy Adj-RIB-In: only
+        /// routes the current import policy accepted) or export (Loc-RIB
+        /// best routes)
         #[arg(long)]
         direction: String,
         /// Neighbor address: restricts the import snapshot to one
-        /// peer's Adj-RIB-In, or sets the export evaluation target
+        /// peer's post-policy Adj-RIB-In, or sets the export evaluation
+        /// target
         #[arg(long = "neighbor", visible_alias = "peer")]
         neighbor: Option<String>,
         /// Address family filter (ipv4_unicast, ipv6_unicast)

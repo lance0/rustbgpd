@@ -1546,8 +1546,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l policy -d 'Policy to evaluate: a name, or a call-form with u32 arguments for parameterized policies, e.g. "customer-in(200)"' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l direction -d 'Evaluation direction: import (Adj-RIB-In) or export (Loc-RIB best routes)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l neighbor -l peer -d 'Neighbor address: restricts the import snapshot to one peer\'s Adj-RIB-In, or sets the export evaluation target' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l direction -d 'Evaluation direction: import (post-policy Adj-RIB-In: only routes the current import policy accepted) or export (Loc-RIB best routes)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l neighbor -l peer -d 'Neighbor address: restricts the import snapshot to one peer\'s post-policy Adj-RIB-In, or sets the export evaluation target' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l limit -d 'Maximum routes to evaluate (0 = all)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l show-changes -d 'Maximum before/after attribute diffs to show' -r

@@ -2947,9 +2947,9 @@ _arguments "${_arguments_options[@]}" : \
 (test)
 _arguments "${_arguments_options[@]}" : \
 '--policy=[Policy to evaluate\: a name, or a call-form with u32 arguments for parameterized policies, e.g. "customer-in(200)"]:POLICY:_default' \
-'--direction=[Evaluation direction\: import (Adj-RIB-In) or export (Loc-RIB best routes)]:DIRECTION:_default' \
-'--neighbor=[Neighbor address\: restricts the import snapshot to one peer'\''s Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
-'--peer=[Neighbor address\: restricts the import snapshot to one peer'\''s Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
+'--direction=[Evaluation direction\: import (post-policy Adj-RIB-In\: only routes the current import policy accepted) or export (Loc-RIB best routes)]:DIRECTION:_default' \
+'--neighbor=[Neighbor address\: restricts the import snapshot to one peer'\''s post-policy Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
+'--peer=[Neighbor address\: restricts the import snapshot to one peer'\''s post-policy Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
 '-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '--limit=[Maximum routes to evaluate (0 = all)]:LIMIT:_default' \

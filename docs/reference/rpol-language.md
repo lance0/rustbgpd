@@ -1557,10 +1557,17 @@ Changes (up to 2):
     communities + 65001:999
 ```
 
-- `--direction import` evaluates Adj-RIB-In routes (all peers, or one
-  with `--neighbor`); `--direction export` evaluates Loc-RIB best routes,
-  with `--neighbor` setting the peer context guards see (`peer.address`,
-  `peer.asn`, `peer.group`).
+- `--direction import` evaluates the routes the current import policy
+  accepted: the post-policy Adj-RIB-In (all peers, or one with
+  `--neighbor`), with the attributes the current policy set. Routes the
+  current policy rejects are not stored there, so the dry run shows
+  which accepted routes a candidate would reject or modify, but not
+  which routes it would newly admit. Inspect currently rejected routes
+  with `rbgp rib received PEER --rejected`, which keeps only the most
+  recent rejections per peer (`[policy.reject_retention]`).
+- `--direction export` evaluates Loc-RIB best routes, with `--neighbor`
+  setting the peer context guards see (`peer.address`, `peer.asn`,
+  `peer.group`).
 - `--family ipv4_unicast|ipv6_unicast` filters the snapshot; V1 scope
   is IPv4/IPv6 unicast routes (other families are not walked).
 - `--limit N` caps how many routes are evaluated; `--show-changes N`
