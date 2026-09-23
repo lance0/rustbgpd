@@ -633,7 +633,6 @@ impl PeerSession {
     ) -> impl Iterator<Item = (Prefix, u32)> + 'a {
         let body_eligible = !self.is_scoped_link_local_peer();
         let negotiated_families = self.negotiated_families();
-        let extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
         let body = parsed
             .announced
             .iter()
@@ -651,7 +650,6 @@ impl PeerSession {
                 mp.safi == Safi::Unicast
                     && matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
                     && negotiated_families.contains(&family)
-                    && (family != (Afi::Ipv4, Safi::Unicast) || extended_nexthop_ipv4)
             })
             .flat_map(|mp| {
                 mp.announced
@@ -673,7 +671,7 @@ impl PeerSession {
     ///
     /// Only forms the import loops below would accept are inspected —
     /// the same gates as [`Self::eligible_unicast_announcements`]
-    /// (negotiated family, IPv4-MP extended next-hop, no body NLRI on a
+    /// (negotiated family, no body NLRI on a
     /// scoped link-local session). `body_next_hop` is the value the
     /// body-NLRI import loop evaluates: the decoded wire `NEXT_HOP`
     /// when present, else the session's own address — which is
@@ -706,7 +704,6 @@ impl PeerSession {
                 || mp.safi != Safi::Unicast
                 || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
                 || !self.negotiated_families().contains(&family)
-                || family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4()
             {
                 continue;
             }
@@ -898,6 +895,45 @@ impl PeerSession {
                 .get(&(Afi::Ipv4, Safi::Unicast))
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
+    }
+    /// RFC 8950 §4: an IPv6 (16/32-octet) next hop on IPv4-unicast NLRI is
+    /// usable only with negotiated Extended Next Hop; a 4-octet IPv4 next
+    /// hop is plain RFC 4760 and needs only the family. The NLRI is still
+    /// reliably located (the decoder accepts every RFC 8950 length), so the
+    /// breach is a semantic next-hop error: Invalid `NEXT_HOP`, treat-as-withdraw
+    /// (RFC 7606 §7.3, §2), matching the other semantic MP next-hop checks.
+    fn check_ipv4_mp_next_hop_family(
+        &self,
+        attrs: &[PathAttribute],
+    ) -> Result<
+        (),
+        (
+            rustbgpd_wire::validate::UpdateError,
+            u8,
+            MalformedUpdateReason,
+        ),
+    > {
+        if self.use_extended_nexthop_ipv4() {
+            return Ok(());
+        }
+        for attr in attrs {
+            if let PathAttribute::MpReachNlri(mp) = attr
+                && (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+                && let IpAddr::V6(next_hop) = mp.next_hop
+                && self.negotiated_families().contains(&(mp.afi, mp.safi))
+            {
+                return Err((
+                    rustbgpd_wire::validate::UpdateError {
+                        subcode: rustbgpd_wire::notification::update_subcode::INVALID_NEXT_HOP,
+                        data: next_hop.octets().to_vec(),
+                        disposition: ErrorDisposition::TreatAsWithdraw,
+                    },
+                    rustbgpd_wire::constants::attr_type::MP_REACH_NLRI,
+                    MalformedUpdateReason::InvalidNextHop,
+                ));
+            }
+        }
+        Ok(())
     }
     pub(super) fn is_scoped_link_local_peer(&self) -> bool {
         matches!(self.peer_ip, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
@@ -1482,6 +1518,7 @@ impl PeerSession {
             let reason = malformed_subcode_reason(context.error.subcode);
             (context.error, context.type_code, reason)
         })
+        .and_then(|()| self.check_ipv4_mp_next_hop_family(&parsed.attributes))
         .and_then(|()| {
             rustbgpd_wire::validate::validate_as_path_ceiling(
                 &parsed.attributes,
@@ -2206,13 +2243,6 @@ impl PeerSession {
                         );
                         continue;
                     }
-                    if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {
-                        warn!(
-                            peer = %self.peer_label,
-                            "Ignoring IPv4 MP_REACH_NLRI without negotiated Extended Next Hop"
-                        );
-                        continue;
-                    }
                     // ASPA state for this MP_REACH family. Per draft v27 §6.2,
                     // `ValidationSnapshot::validate_aspa` returns `Unknown` for
                     // anything outside IPv4/IPv6 unicast — so FlowSpec and
@@ -2783,13 +2813,6 @@ impl PeerSession {
                 PathAttribute::MpUnreachNlri(mp) => {
                     let family = (mp.afi, mp.safi);
                     if !self.negotiated_families().contains(&family) {
-                        continue;
-                    }
-                    if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {
-                        warn!(
-                            peer = %self.peer_label,
-                            "Ignoring IPv4 MP_UNREACH_NLRI without negotiated Extended Next Hop"
-                        );
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));

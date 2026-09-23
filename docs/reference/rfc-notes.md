@@ -1142,6 +1142,31 @@ carries inactive (absent), unlimited (zero), or finite.
   rejected replacement withdraws any previously advertised route; ordinary
   IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
   The peer's receive capability is not an inbound admission requirement.
+- Inbound, IPv4 unicast may use `MP_REACH_NLRI` / `MP_UNREACH_NLRI` on any
+  session that negotiated the family. Extended Next Hop governs only the
+  next-hop encoding, not whether the AFI/SAFI is allowed (§4). A 4-octet IPv4
+  next hop is accepted without the capability, and IPv4 `MP_UNREACH_NLRI`
+  withdrawals are always applied. Earlier releases ignored both forms when
+  Extended Next Hop was not negotiated, so a withdrawal sent that way left the
+  route in place.
+- A 16- or 32-octet (IPv6) next hop on IPv4-unicast NLRI without negotiated
+  Extended Next Hop breaks the §4 precondition. The UPDATE is
+  treat-as-withdraw with Invalid NEXT_HOP (3/8), the same disposition as other
+  semantically invalid MP next hops: its IPv4 routes are withdrawn from the
+  Adj-RIB-In and the session stays Established. It is counted in
+  `bgp_update_malformed_total{disposition="treat_as_withdraw"}` with cause
+  `type_code="14"`, `reason="invalid_next_hop"`. Earlier releases dropped such
+  an UPDATE with only a log line, leaving any earlier route for the prefix in
+  place.
+- Interpretation: RFC 7606 §7.11 asks for session reset or AFI/SAFI disable
+  when the next-hop length is not the one expected, because the NLRI then
+  cannot be located. rustbgpd implements RFC 8950, so the decoder expects and
+  parses 16/32 octets for IPv4 unicast and the NLRI is located reliably; what
+  is wrong is the next hop's use without the capability, a semantic error.
+  Treat-as-withdraw also avoids a reset loop against speakers that put an
+  IPv6 next hop on IPv4 routes without checking the capability. BIRD makes
+  the same call; ExaBGP and OpenBGPD reset the session; FRR and GoBGP accept
+  the route.
 - See ADR-0037 for the IPv4-unicast behavior.
 
 ---
