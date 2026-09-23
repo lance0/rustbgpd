@@ -6,3 +6,5 @@
 
 pub mod importer;
 pub mod ribdiff;
+pub mod ribsnap;
+pub mod ribsnap_bmp;

@@ -59,9 +59,9 @@ use rustbgpd_wire::nlri::Prefix;
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::UpdateMessage;
 
-use crate::output;
-
-use super::ribsnap::{Cursor, EXIT_OK, EXIT_REFUSED, SnapRoute, route_record_json};
+use crate::ribsnap::{
+    Cursor, EXIT_REFUSED, SNAPSHOT_SCHEMA, SnapRoute, route_record_json, write_snapshot,
+};
 
 // BMP message types (RFC 7854 §4.1).
 const BMP_MSG_ROUTE_MONITORING: u8 = 0;
@@ -147,13 +147,7 @@ fn emit_bmp_snapshot(
             for note in notes {
                 eprintln!("note: {note}");
             }
-            match output::write_bytes(writer, snapshot.as_bytes()) {
-                Ok(()) => EXIT_OK,
-                Err(error) => {
-                    output::report_write_error("BMP snapshot output", &error);
-                    EXIT_REFUSED
-                }
-            }
+            write_snapshot(writer, snapshot.as_bytes(), "BMP snapshot output")
         }
         Err(e) => {
             eprintln!("Error: {e}");
@@ -189,7 +183,33 @@ fn run_with_limits(
         ));
     }
     let data = std::fs::read(opts.file).map_err(|e| format!("cannot read {display}: {e}"))?;
+    convert_with_limits(opts, &peer_filter, &data, limits)
+}
 
+/// Convert an in-memory capture into the snapshot text and notes under the
+/// default hard bounds: everything `from-bmp` does after parsing `--peer`
+/// and reading the file. Also the entry point for the `ribsnap_convert`
+/// fuzz target.
+///
+/// # Errors
+///
+/// Returns the refusal message for any framing, decode, sequence,
+/// completeness, or bound failure.
+pub fn convert(
+    opts: &FromBmpOpts<'_>,
+    peer_filter: &BTreeSet<IpAddr>,
+    data: &[u8],
+) -> Result<(String, Vec<String>), String> {
+    convert_with_limits(opts, peer_filter, data, Limits::default())
+}
+
+fn convert_with_limits(
+    opts: &FromBmpOpts<'_>,
+    peer_filter: &BTreeSet<IpAddr>,
+    data: &[u8],
+    limits: Limits,
+) -> Result<(String, Vec<String>), String> {
+    let display = opts.file.display();
     let mut importer = Importer::default();
     let mut offset = 0_usize;
     let mut index = 0_usize;
@@ -236,7 +256,7 @@ fn run_with_limits(
         offset += length;
     }
 
-    importer.finish(opts, &peer_filter)
+    importer.finish(opts, peer_filter)
 }
 
 /// Family key for the state maps — the two families `rbgp-ribsnap/1`
@@ -674,7 +694,7 @@ impl Importer {
         }
         let header = serde_json::json!({
             "record": "header",
-            "schema": super::diff::SNAPSHOT_SCHEMA,
+            "schema": SNAPSHOT_SCHEMA,
             "source": source,
             "generation": opts.generation,
         });
@@ -1121,7 +1141,7 @@ pub(crate) mod test_fixture {
     use rustbgpd_wire::constants::attr_type;
     use rustbgpd_wire::open::OpenMessage;
 
-    pub(crate) use super::super::ribsnap::test_fixture::as_path_attr;
+    pub(crate) use crate::ribsnap::test_fixture::as_path_attr;
 
     /// Encode one path attribute with its canonical RFC flags (the wire
     /// decoder validates flags per type, unlike the MRT fixture path).
@@ -1486,6 +1506,7 @@ pub(crate) mod test_fixture {
 mod tests {
     use super::test_fixture::*;
     use super::*;
+    use crate::ribsnap::EXIT_OK;
     use rustbgpd_wire::capability::AddPathMode as Mode;
     use std::io::Write;
 

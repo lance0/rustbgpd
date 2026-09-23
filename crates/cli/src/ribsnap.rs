@@ -31,9 +31,13 @@ use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
-use crate::output;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
 use rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop;
+
+/// Versioned identifier of the NDJSON snapshot schema (the `schema` field
+/// of the header record) that the adapters emit and `rbgp diff advertised`
+/// accepts.
+pub const SNAPSHOT_SCHEMA: &str = "rbgp-ribsnap/1";
 
 /// Snapshot emitted.
 pub const EXIT_OK: i32 = 0;
@@ -99,15 +103,24 @@ pub fn from_mrt(opts: &FromMrtOpts<'_>) -> i32 {
 
 fn emit_mrt_snapshot(result: Result<String, String>, writer: &mut dyn std::io::Write) -> i32 {
     match result {
-        Ok(snapshot) => match output::write_bytes(writer, snapshot.as_bytes()) {
-            Ok(()) => EXIT_OK,
-            Err(error) => {
-                output::report_write_error("MRT snapshot output", &error);
-                EXIT_REFUSED
-            }
-        },
+        Ok(snapshot) => write_snapshot(writer, snapshot.as_bytes(), "MRT snapshot output"),
         Err(e) => {
             eprintln!("Error: {e}");
+            EXIT_REFUSED
+        }
+    }
+}
+
+/// Write an already-rendered snapshot byte-for-byte and flush it (shared by
+/// the MRT and BMP adapters). A closed pipe exits 2 quietly; every other
+/// output failure is reported.
+pub(crate) fn write_snapshot(writer: &mut dyn std::io::Write, bytes: &[u8], context: &str) -> i32 {
+    match writer.write_all(bytes).and_then(|()| writer.flush()) {
+        Ok(()) => EXIT_OK,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("Error: cannot write {context}: {error}");
+            }
             EXIT_REFUSED
         }
     }
@@ -134,7 +147,18 @@ fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
         .map_err(|e| format!("invalid --peer address {:?}: {e}", opts.peer))?;
     let data = std::fs::read(opts.file)
         .map_err(|e| format!("cannot read {}: {e}", opts.file.display()))?;
-    let routes = parse_mrt(&data).map_err(|e| format!("{}: {e}", opts.file.display()))?;
+    convert(opts, peer, &data)
+}
+
+/// Convert an in-memory dump into the snapshot text: everything `from-mrt`
+/// does after validating `--view`/`--peer` and reading the file. Also the
+/// entry point for the `ribsnap_convert` fuzz target.
+///
+/// # Errors
+///
+/// Returns the refusal message for any malformed or truncated dump.
+pub fn convert(opts: &FromMrtOpts<'_>, peer: IpAddr, data: &[u8]) -> Result<String, String> {
+    let routes = parse_mrt(data).map_err(|e| format!("{}: {e}", opts.file.display()))?;
     Ok(render(opts, peer, &routes))
 }
 
@@ -149,7 +173,7 @@ fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute
     }
     let header = serde_json::json!({
         "record": "header",
-        "schema": super::diff::SNAPSHOT_SCHEMA,
+        "schema": SNAPSHOT_SCHEMA,
         "source": source,
         "generation": opts.generation,
     });
@@ -512,7 +536,7 @@ fn parse_as_path(mut value: &[u8]) -> Result<Vec<u32>, String> {
 #[cfg(test)]
 pub(crate) mod test_fixture {
     //! Hand-encoded `TABLE_DUMP_V2` bytes shared by the unit tests and
-    //! the golden-fixture tests in `commands::diff`.
+    //! BMP fixture builder.
 
     use super::*;
 
