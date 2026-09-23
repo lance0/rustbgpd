@@ -3315,7 +3315,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             },
     } = &cli.command
     {
-        let opts = commands::ribsnap::FromMrtOpts {
+        let opts = rustbgpctl::ribsnap::FromMrtOpts {
             file,
             view,
             peer,
@@ -3323,7 +3323,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             source: source.as_deref(),
             generation: *generation,
         };
-        std::process::exit(commands::ribsnap::from_mrt(&opts));
+        std::process::exit(rustbgpctl::ribsnap::from_mrt(&opts));
     }
 
     // `diff snapshot from-bmp` is likewise a pure offline adapter.
@@ -3340,13 +3340,13 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             },
     } = &cli.command
     {
-        let opts = commands::ribsnap_bmp::FromBmpOpts {
+        let opts = rustbgpctl::ribsnap_bmp::FromBmpOpts {
             file,
             peers: peer,
             source: source.as_deref(),
             generation: *generation,
         };
-        std::process::exit(commands::ribsnap_bmp::from_bmp(&opts));
+        std::process::exit(rustbgpctl::ribsnap_bmp::from_bmp(&opts));
     }
 
     // `doctor` must produce a bundle even when the daemon is down, so it
