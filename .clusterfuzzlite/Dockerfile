@@ -13,6 +13,18 @@
 # limitations under the License.
 
 FROM gcr.io/oss-fuzz-base/base-builder-rust:ubuntu-24-04
+# crates/cli's build script compiles the gRPC protos, so the rbgp fuzz crate
+# needs protoc. Same pinned archive and digest as the CI installer
+# (.github/pinned-archives.sha256).
+RUN curl -sSfL --connect-timeout 10 --max-time 120 \
+        --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 180 \
+        -o /tmp/protoc.zip \
+        https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip \
+    && echo "f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80  /tmp/protoc.zip" | sha256sum -c - \
+    && unzip -q -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
+    && rm -f /tmp/protoc.zip \
+    && test "$(protoc --version)" = "libprotoc 25.3"
+ENV PROTOC=/usr/local/bin/protoc
 COPY . $SRC/rustbgpd
 WORKDIR $SRC/rustbgpd
 RUN toolchain="$(cat fuzz/rust-nightly.txt)" \
