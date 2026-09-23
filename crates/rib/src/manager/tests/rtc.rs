@@ -2035,3 +2035,97 @@ fn es_import_rt_matches_membership_on_rt_bits() {
     // MAC Mobility (type 0x06, sub-type 0x00) is not a Route Target.
     assert!(!membership(origin_only).matches_any(&[ExtendedCommunity::mac_mobility(false, 1)]));
 }
+
+/// RT membership changes that land while EVPN selection is deferred (RFC
+/// 4724 restarting speaker) must be reflected once the gate releases — for a
+/// VPN-grouped RTC peer (group delta path) and a per-peer RTC peer (dirty
+/// resync path) alike. The peers widen to {100, 200} and narrow back to
+/// {200} inside the deferral window; after release each receives tenant B
+/// only, and tenant A never reaches the wire.
+#[tokio::test(start_paused = true)]
+async fn evpn_rtc_membership_change_during_selection_deferral_applies_on_release() {
+    let evpn = (Afi::L2Vpn, Safi::Evpn);
+    let waiter = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_selection_deferral(crate::SelectionDeferralConfig {
+            timeout: Duration::from_hours(1),
+            waiters: vec![crate::SelectionDeferralWaiterConfig {
+                peer: waiter,
+                families: vec![evpn],
+            }],
+        });
+    let handle = tokio::spawn(manager.run());
+    let sync = async |tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr| {
+        let (reply, group) = oneshot::channel();
+        tx.send(RibUpdate::QueryPeerUpdateGroup {
+            peer: IpAddr::V4(peer),
+            reply,
+        })
+        .await
+        .unwrap();
+        group.await.unwrap()
+    };
+
+    let src = Ipv4Addr::new(10, 0, 0, 1);
+    let tenant_a = with_ext_communities(make_evpn_imet(src, 100), vec![rt(100)]);
+    let tenant_b = with_ext_communities(make_evpn_imet(src, 200), vec![rt(200)]);
+    let (key_a, key_b) = (tenant_a.key(), tenant_b.key());
+    evpn_routes_received_from(&tx, src, tenant_a).await;
+    evpn_routes_received_from(&tx, src, tenant_b).await;
+
+    let grouped = Ipv4Addr::new(10, 0, 0, 2);
+    let mut grouped_sendable = vpn_rtc_sendable();
+    grouped_sendable.push(evpn);
+    let per_peer = Ipv4Addr::new(10, 0, 0, 3);
+    let mut per_peer_sendable = evpn_sendable();
+    per_peer_sendable.push((Afi::Ipv4, Safi::RtConstrain));
+    let mut rxs = vec![
+        families_peer_up(&tx, IpAddr::V4(grouped), grouped_sendable).await,
+        families_peer_up(&tx, IpAddr::V4(per_peer), per_peer_sendable).await,
+    ];
+    assert!(sync(&tx, grouped).await.starts_with("group:"));
+
+    for peer in [grouped, per_peer] {
+        send_rtc_interest(&tx, peer, &[100]).await;
+        send_rtc_interest(&tx, peer, &[200]).await;
+        tx.send(RibUpdate::RtcRoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(peer),
+            announced: vec![],
+            withdrawn: vec![make_rtc_rib_route(peer, 100, 100).key()],
+        })
+        .await
+        .unwrap();
+    }
+    sync(&tx, grouped).await;
+    for out_rx in &mut rxs {
+        while let Ok(update) = out_rx.try_recv() {
+            assert!(
+                update.evpn_announce.is_empty() && !update.end_of_rib.contains(&evpn),
+                "EVPN must stay held while its selection is deferred"
+            );
+        }
+    }
+
+    tokio::time::advance(Duration::from_hours(1)).await;
+    for (peer, out_rx) in [grouped, per_peer].into_iter().zip(&mut rxs) {
+        let mut announced = Vec::new();
+        loop {
+            let update = next_update(out_rx).await;
+            assert!(
+                !update.evpn_announce.iter().any(|r| r.key() == key_a),
+                "{peer}: tenant A is outside the post-deferral membership"
+            );
+            assert!(update.evpn_withdraw.is_empty(), "{peer}");
+            announced.extend(update.evpn_announce.iter().map(EvpnRibRoute::key));
+            if update.end_of_rib.contains(&evpn) {
+                break;
+            }
+        }
+        assert_eq!(announced, vec![key_b], "{peer}");
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}

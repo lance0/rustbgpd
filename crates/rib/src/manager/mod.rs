@@ -4130,11 +4130,21 @@ impl RibManager {
             self.apply_rtc_membership_delta_to_grouped_member(peer, gid, &old, &new);
             // EVPN is never group-staged, so the VPN delta walk does not
             // cover it: restage the peer's EVPN view under the new Φ. A
-            // dirty peer's pending resync already does; deferred EVPN
-            // selection is skipped exactly as the dirty resync skips it.
-            if !self.dirty_peers.contains(&peer)
-                && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
-            {
+            // dirty peer's pending resync already does. While EVPN
+            // selection is deferred nothing EVPN has been selected or
+            // advertised (the startup gate is one-shot and the only Loc-RIB
+            // EVPN writer returns early), and release distributes every key
+            // as new under the then-current Φ, so skipping loses nothing.
+            let evpn_deferred = self.selection_deferred((Afi::L2Vpn, Safi::Evpn));
+            debug_assert!(
+                !evpn_deferred
+                    || self
+                        .adj_ribs_out
+                        .get(&peer)
+                        .is_none_or(|rib_out| rib_out.evpn_len() == 0),
+                "EVPN advertised while EVPN selection is still deferred"
+            );
+            if !self.dirty_peers.contains(&peer) && !evpn_deferred {
                 let readiness = self.replacement_readiness.clone();
                 let mut checkpoint = || {
                     replacement_readiness_checkpoint_at(&readiness, "selection_evpn", false);
