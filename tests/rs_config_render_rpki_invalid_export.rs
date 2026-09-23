@@ -1,8 +1,8 @@
 //! Real-daemon regression for rendered arouteserver-mode RPKI handling with
 //! `rpki_bgp_origin_validation.reject_invalid: false`.
 //!
-//! ARouteServer keeps INVALID routes in that mode but never announces them to
-//! clients. The rendered config runs in a real `rustbgpd` against an
+//! ARouteServer keeps INVALID routes in that mode but never announces ordinary
+//! ones to clients. The rendered config runs in a real `rustbgpd` against an
 //! in-process RTR cache and raw eBGP members (`tests/support/
 //! rs_config_render_rpki_export.py`). One member announces an RPKI-invalid, a
 //! valid and a not-found route. Each check requires the invalid route in that
@@ -13,8 +13,9 @@
 //!   the route valid (it is announced) and invalid again (it is withdrawn).
 //! - `blackhole-site`: active IPv4 blackhole filtering and a site-local
 //!   neighbor export hook that accepts everything. An authorized blackhole
-//!   request stays announced although its /32 is RPKI-invalid: ARouteServer
-//!   does not origin-validate blackhole requests.
+//!   request is invalid by maxLength but, as RFC 7999 §3.3 and ARouteServer
+//!   require, still follows each client's blackhole export policy: 127.0.0.3
+//!   receives it, and 127.0.0.4, with `announce_to_client: false`, does not.
 
 mod support;
 
@@ -23,19 +24,19 @@ use rs_config_render::{Options, SiteLocalFile, SiteLocalInput, render, render_si
 const FIXTURE: &str = include_str!("../tools/rs-config-render/tests/fixtures/context-small.yml");
 
 fn context(blackhole: bool) -> String {
-    let client = |id: &str, asn: u32, ip: &str| {
+    let client = |id: &str, asn: u32, ip: &str, announce: bool| {
         serde_yaml::from_str::<serde_yaml::Value>(&format!(
             "{{id: {id}, asn: {asn}, ip: '{ip}', description: {id}, cfg: {{rfc8950: false, \
-             blackhole_filtering: {{announce_to_client: true}}, filtering: {{irrdb: \
+             blackhole_filtering: {{announce_to_client: {announce}}}, filtering: {{irrdb: \
              {{as_set_bundle_ids: [AS4242_bundle]}}, max_prefix: {{limit_ipv4: 100, limit_ipv6: 0}}}}}}}}"
         ))
         .unwrap()
     };
     let mut value: serde_yaml::Value = serde_yaml::from_str(FIXTURE).unwrap();
     value["clients"] = serde_yaml::Value::Sequence(vec![
-        client("AS4242_1", 4242, "127.0.0.2"),
-        client("AS4243_1", 4243, "127.0.0.3"),
-        client("AS4244_1", 4244, "127.0.0.4"),
+        client("AS4242_1", 4242, "127.0.0.2", true),
+        client("AS4243_1", 4243, "127.0.0.3", true),
+        client("AS4244_1", 4244, "127.0.0.4", !blackhole),
     ]);
     value["asns"] = serde_yaml::from_str(
         "{AS4242: {as_sets: [AS-A]}, AS4243: {as_sets: [AS-A]}, AS4244: {as_sets: [AS-A]}}",
@@ -119,11 +120,11 @@ fn run(scenario: &str) {
 }
 
 #[test]
-fn rpki_invalid_routes_are_kept_but_never_exported_and_follow_vrp_changes() {
+fn ordinary_rpki_invalid_routes_are_kept_but_not_exported_and_follow_vrp_changes() {
     run("plain");
 }
 
 #[test]
-fn rpki_invalid_routes_are_not_exported_through_site_hooks_or_blackhole_policy() {
+fn ordinary_rpki_invalid_routes_are_not_exported_through_site_hooks_or_blackhole_policy() {
     run("blackhole-site");
 }

@@ -206,7 +206,8 @@ fn hygiene_never_tags_rpki_validation_state() {
 /// `reject_invalid: true` rejects RPKI-invalid routes on import.
 /// `reject_invalid: false` keeps them, and `rs-rpki-invalid-export` leads
 /// every export chain, ahead of site hooks and blackhole policy, so no client
-/// receives them.
+/// receives an ordinary invalid route. Authorized BLACKHOLE requests pass on
+/// to the client's blackhole export policy.
 #[test]
 fn rpki_invalid_rejects_follow_reject_invalid() {
     let site = SiteLocalInput {
@@ -264,7 +265,7 @@ fn rpki_invalid_rejects_follow_reject_invalid() {
             assert_eq!(
                 hygiene.contains(
                     "policy rs-rpki-invalid-export {\n\
-                     \x20   # Blackhole requests are not origin-validated.\n\
+                     \x20   # Authorized blackhole requests are not origin-validated.\n\
                      \x20   term announce-blackhole-request { if (route.family == ipv4-unicast) && route.communities has BLACKHOLE { accept } }\n\
                      \x20   term deny-rpki-invalid { if route.rpki == invalid { reject } }\n}"
                 ),

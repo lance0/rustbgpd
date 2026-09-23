@@ -1038,7 +1038,8 @@ struct ResolvedClient<'a> {
     blackhole: Option<ResolvedBlackhole>,
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
-    /// Lead the export chain with [`RPKI_INVALID_EXPORT`].
+    /// Lead the export chain with [`RPKI_INVALID_EXPORT`], which denies
+    /// ordinary RPKI-invalid routes.
     deny_rpki_invalid_export: bool,
     tag_and_reject: bool,
     /// IPv4 unicast rides this IPv6 session with an IPv6 next hop.
@@ -2665,7 +2666,8 @@ fn render_toml(
         }
     }
     out.push_str(if deny_rpki_invalid_export(ctx) {
-        "]\n# RPKI-invalid routes stay in the Adj-RIB-In but are never announced.\n\
+        "]\n# Ordinary RPKI-invalid routes stay in the Adj-RIB-In but are never\n\
+         # announced; authorized BLACKHOLE requests are exempt (RFC 7999 §3.3).\n\
          export_chain = [\"rs-rpki-invalid-export\", \"rs-transparent-export\"]\n"
     } else {
         "]\nexport_chain = [\"rs-transparent-export\"]\n"
@@ -3235,11 +3237,12 @@ fn render_pref_len_window(
     }
 }
 
-/// Export policy that keeps RPKI-invalid routes from every client.
+/// Export policy that keeps ordinary RPKI-invalid routes from every client;
+/// authorized BLACKHOLE requests are exempt.
 const RPKI_INVALID_EXPORT: &str = "rs-rpki-invalid-export";
 
 /// With `reject_invalid: false`, ARouteServer keeps INVALID routes but never
-/// announces them to clients. With `reject_invalid: true` the shared import
+/// announces ordinary ones to clients. With `reject_invalid: true` the shared import
 /// hygiene rejects them, and a VRP change re-runs import through Route Refresh.
 fn deny_rpki_invalid_export(ctx: &Context) -> bool {
     let rpki = &ctx.cfg.filtering.rpki_bgp_origin_validation;
@@ -3247,8 +3250,10 @@ fn deny_rpki_invalid_export(ctx: &Context) -> bool {
 }
 
 /// Leads every client's export chain, ahead of site hooks and blackhole
-/// policy. Authorized blackhole requests carry `BLACKHOLE` after client import
-/// and pass: ARouteServer does not origin-validate them, and their
+/// policy, and denies ordinary RPKI-invalid routes. Authorized blackhole
+/// requests carry `BLACKHOLE` after client import and pass on to the client's
+/// blackhole export policy: RFC 7999 §3.3 keeps origin validation from
+/// blocking them, ARouteServer does not origin-validate them, and their
 /// more-specifics are usually INVALID by maxLength.
 fn render_rpki_invalid_export(ctx: &Context, out: &mut String, tests: &mut String) {
     let blackhole = &ctx.cfg.blackhole_filtering;
@@ -3261,14 +3266,15 @@ fn render_rpki_invalid_export(ctx: &Context, out: &mut String, tests: &mut Strin
     }
     let _ = write!(
         out,
-        "\n# RPKI-invalid routes stay in the Adj-RIB-In but are never announced to\n\
-         # clients. This policy leads every client's export chain.\n\
+        "\n# Ordinary RPKI-invalid routes stay in the Adj-RIB-In but are never\n\
+         # announced to clients; authorized BLACKHOLE requests are exempt\n\
+         # (RFC 7999 §3.3). This policy leads every client's export chain.\n\
          policy {RPKI_INVALID_EXPORT} {{\n"
     );
     if !families.is_empty() {
         let _ = writeln!(
             out,
-            "    # Blackhole requests are not origin-validated.\n\
+            "    # Authorized blackhole requests are not origin-validated.\n\
              \x20   term announce-blackhole-request {{ if ({}) && route.communities has BLACKHOLE {{ accept }} }}",
             families.join(" || ")
         );
@@ -3276,7 +3282,7 @@ fn render_rpki_invalid_export(ctx: &Context, out: &mut String, tests: &mut Strin
     out.push_str("    term deny-rpki-invalid { if route.rpki == invalid { reject } }\n}\n");
     let _ = write!(
         tests,
-        "test rpki-invalid-is-not-exported {{\n    route {{ family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }}\n    expect {RPKI_INVALID_EXPORT} == reject\n}}\n\
+        "test ordinary-rpki-invalid-is-not-exported {{\n    route {{ family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }}\n    expect {RPKI_INVALID_EXPORT} == reject\n}}\n\
          test rpki-not-found-is-exported {{\n    route {{ family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\" }}\n    expect {RPKI_INVALID_EXPORT} == accept\n}}\n"
     );
     let request = if blackhole.policy_ipv4.is_some() {

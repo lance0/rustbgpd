@@ -275,10 +275,14 @@ def main():
         rows = document if isinstance(document, list) else document["routes"]
         return {row["prefix"]: row.get("validation_state", "") for row in rows}
 
+    def want(peer, exported):
+        # 127.0.0.4 has announce_to_client: false in the blackhole scenario.
+        return exported - {BLACKHOLE} if blackhole and peer == 4 else exported
+
     def observe(label, exported):
-        """Every receiver's Adj-RIB-Out, on the wire and over gRPC, is exactly `exported`."""
+        """Each receiver's Adj-RIB-Out, on the wire and over gRPC, is exactly `want(peer, exported)`."""
         try:
-            wait(lambda: all(routes[peer] == exported for peer in RECEIVERS), label)
+            wait(lambda: all(routes[peer] == want(peer, exported) for peer in RECEIVERS), label)
         except AssertionError:
             pass  # the checks below name what differs
         adj_in = rib("received", ANNOUNCER)
@@ -293,8 +297,8 @@ def main():
         if blackhole:
             assert adj_in[BLACKHOLE] == "invalid", (label, "announcer Adj-RIB-In", adj_in)
         for peer in RECEIVERS:
-            assert routes[peer] == exported, (label, f"127.0.0.{peer} received on the wire", sorted(routes[peer]))
-            assert sent[peer] == exported, (label, f"127.0.0.{peer} Adj-RIB-Out", sorted(sent[peer]))
+            assert routes[peer] == want(peer, exported), (label, f"127.0.0.{peer} received on the wire", sorted(routes[peer]))
+            assert sent[peer] == want(peer, exported), (label, f"127.0.0.{peer} Adj-RIB-Out", sorted(sent[peer]))
 
     try:
         bgp_port = bound_bgp_port(log_path, daemon)
@@ -307,9 +311,10 @@ def main():
             drain(.2)
         for update in routes_to_send:
             sessions[ANNOUNCER].sendall(update)
-        # The invalid route is retained (Adj-RIB-In) but reaches no member.
-        # An authorized blackhole request is not origin-validated (ARouteServer
-        # parity), so it is still announced although its /32 is RPKI-invalid.
+        # The ordinary invalid route is retained (Adj-RIB-In) but reaches no
+        # member. An authorized blackhole request is not origin-validated (RFC
+        # 7999 §3.3, ARouteServer parity): its /32 is RPKI-invalid by maxLength
+        # yet follows each client's blackhole export policy.
         expected = {VALID, NOT_FOUND} | ({BLACKHOLE} if blackhole else set())
         observe("initial", expected)
         if not blackhole:
