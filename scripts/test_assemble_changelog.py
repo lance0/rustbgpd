@@ -150,6 +150,20 @@ class AssembleChangelogTests(unittest.TestCase):
             text,
         )
 
+    def test_escaped_backticks_do_not_open_a_code_span(self):
+        cases = {
+            # An escaped backtick is literal, so it cannot pair with a later span.
+            r"\`[guide](../docs/x.md) and `code`": r"\`[guide](docs/x.md) and `code`",
+            r"\\\`[guide](../docs/x.md) and `code`": r"\\\`[guide](docs/x.md) and `code`",
+            # An escaped backslash leaves the following backtick run unescaped.
+            r"\\`[guide](../docs/x.md)`": r"\\`[guide](../docs/x.md)`",
+            # A backslash inside a span is literal and does not escape the closer.
+            r"`C:\` [guide](../docs/x.md) `code`": r"`C:\` [guide](docs/x.md) `code`",
+        }
+        for fragment, expected in cases.items():
+            with self.subTest(fragment=fragment):
+                self.assertEqual(assemble.root_relative_links(fragment), expected)
+
     def test_duplicate_detection_compares_the_root_relative_link(self):
         changelog = CHANGELOG.replace(
             "- Existing fixed entry, hard-wrapped over",

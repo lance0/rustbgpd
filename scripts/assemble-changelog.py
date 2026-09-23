@@ -56,8 +56,12 @@ SUBSECTION = re.compile(r"(?m)^### [^\n]*$")
 CONFLICT_MARKER = re.compile(r"(?m)^(?:<{7}|={7}|>{7}|\|{7})(?:\s|$)")
 # A link target relative to `changelog.d/`, which becomes root-relative, or an
 # inline code span (a whole backtick run closed by an equal run), whose literal
-# text is kept. Not a Markdown parser: fragments hold prose, links, and code.
-FRAGMENT_RELATIVE_LINK = re.compile(r"(?s)(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|\]\(\.\./")
+# text is kept. The opening run must not be backslash-escaped, so any even run
+# of backslashes before it is consumed; inside a span a backslash is literal.
+# Not a Markdown parser: fragments hold prose, links, and code.
+FRAGMENT_RELATIVE_LINK = re.compile(
+    r"(?s)(?<![`\\])(?:\\\\)*(?P<tick>`+)(?!`).*?(?<!`)(?P=tick)(?!`)|\]\(\.\./"
+)
 
 
 class Fragment(NamedTuple):
@@ -94,7 +98,7 @@ def parse_fragment(name: str, text: str) -> Fragment:
 
 def root_relative_links(body: str) -> str:
     """Drop the leading `../` of link targets outside inline code spans."""
-    return FRAGMENT_RELATIVE_LINK.sub(lambda m: m.group() if m.group(1) else "](", body)
+    return FRAGMENT_RELATIVE_LINK.sub(lambda m: m.group() if m.group("tick") else "](", body)
 
 
 def load_fragments(root: Path) -> list[Fragment]:
