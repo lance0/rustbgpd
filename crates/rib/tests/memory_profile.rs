@@ -504,7 +504,9 @@ fn measure_adj_rib_in(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
 /// Isolate the allocator-visible Loc-RIB storage from the two Adj-RIB-In
 /// copies in `full_rib`. Attribute interning is used during construction and
 /// then dropped before the live-byte snapshot, leaving only the selected
-/// routes and their shared attribute body owned by the Loc-RIB.
+/// routes and their shared attribute body owned by the Loc-RIB. The intern
+/// count is still reported as the row's attribute-set count, since that shared
+/// body is what the attribute-container model prices.
 fn measure_loc_rib_only(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     let attrs = typical_attributes(1);
     let baseline = ALLOC.allocated();
@@ -518,12 +520,16 @@ fn measure_loc_rib_only(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow
         intern.intern(&mut route.attributes);
         loc.recompute(*prefix, std::iter::once(&route));
     }
+    let attribute_sets = intern.len();
     drop(intern);
 
     let elapsed_ms = start.elapsed().as_millis();
     let live_bytes = ALLOC.allocated() - baseline;
     let peak_bytes = ALLOC.peak() - baseline;
-    let stats = loc_stats(&loc);
+    let stats = ComponentStats {
+        adj_in_attr_intern_entries: attribute_sets,
+        ..loc_stats(&loc)
+    };
     let route_copies = stats.loc_routes;
     drop(loc);
 
@@ -880,6 +886,7 @@ fn memory_profile_schema_quick() {
     assert_eq!(loc.stats.loc_routes, 512);
     assert_eq!(loc.stats.adj_in_routes, 0);
     assert_eq!(loc.stats.adj_out_routes, 0);
+    assert_eq!(loc.stats.adj_in_attr_intern_entries, 1);
     assert!(loc.live_bytes > 0);
     assert!(loc.peak_bytes >= loc.live_bytes);
 

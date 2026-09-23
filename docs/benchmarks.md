@@ -1073,7 +1073,7 @@ RUSTBGPD_RIB_MEMORY_PROFILE=full \
   --test memory_profile memory_profile_high_n -- --ignored --nocapture
 
 # Explicit size override. Checked *before* RUSTBGPD_RIB_MEMORY_PROFILE and
-# reported as profile "custom". Tiny sizes smoke all six shape rows in
+# reported as profile "custom". Tiny sizes smoke all seven shape rows in
 # milliseconds instead of minutes — mechanics only, never comparison evidence.
 RUSTBGPD_RIB_MEMORY_SIZES=1000 \
   cargo test -p rustbgpd-rib --features bench-internals \
