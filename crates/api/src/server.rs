@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use crate::authz::{AuthTier, LOCAL_OPERATOR_PRINCIPAL, PrincipalRole, uds_mode_is_owner_only};
 use crate::authz_runtime::{GrpcAuthAuditContext, GrpcAuthnKind, GrpcAuthzLayer};
 use crate::bfd_service::BfdService;
-use crate::config_service::ConfigService;
+use crate::config_service::{ConfigService, MAX_CONFIRM_ID_CHARS, MAX_CONFIRM_TIMEOUT_SECONDS};
 use crate::connect_info::RustbgpdTcpStream;
 use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::credentials::CredentialStore;
@@ -359,9 +359,6 @@ impl From<RuntimeConfigCoordinatorClosed> for ConfigTransactionApplyError {
     }
 }
 
-const MAX_CONFIG_CONFIRM_ID_CHARS: usize = 128;
-const MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
-
 /// Validate the request metadata shared by unary and streamed config apply.
 ///
 /// Streamed apply calls this before consuming its single-use plan token, so a
@@ -391,9 +388,9 @@ pub fn validate_config_transaction_apply_metadata(
                 "confirm_id is required".to_string(),
             ));
         }
-        if request.confirm_id.chars().count() > MAX_CONFIG_CONFIRM_ID_CHARS {
+        if request.confirm_id.chars().count() > MAX_CONFIRM_ID_CHARS {
             return Err(ConfigTransactionApplyError::InvalidArgument(format!(
-                "confirm_id must be at most {MAX_CONFIG_CONFIRM_ID_CHARS} characters"
+                "confirm_id must be at most {MAX_CONFIRM_ID_CHARS} characters"
             )));
         }
         if request.confirm_id.chars().any(char::is_control) {
@@ -401,9 +398,9 @@ pub fn validate_config_transaction_apply_metadata(
                 "confirm_id must not contain control characters".to_string(),
             ));
         }
-        if request.confirm_timeout_seconds > MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS {
+        if request.confirm_timeout_seconds > MAX_CONFIRM_TIMEOUT_SECONDS {
             return Err(ConfigTransactionApplyError::InvalidArgument(format!(
-                "confirm_timeout_seconds must be <= {MAX_CONFIG_CONFIRM_TIMEOUT_SECONDS}"
+                "confirm_timeout_seconds must be <= {MAX_CONFIRM_TIMEOUT_SECONDS}"
             )));
         }
     }
