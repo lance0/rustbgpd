@@ -136,7 +136,13 @@ its per-change regression tests and main CI. The
 [2026-09-21 run](../soaks/soak-rs-flagship-24h-2026-09-21.md) then qualified
 the v0.71.0 tag under the current gates (on-host verdict, no reanalysis; every
 gate passes, with the slowest `policy stats` read at 1969 ms, 31 ms under its
-2 s deadline), so the published flagship receipt now describes v0.71.0. The
+2 s deadline), so the published flagship receipt now describes v0.71.0.
+v0.72.0 (2026-09-23) is a minor release adding opt-in RFC 9117 FlowSpec
+feasibility validation, ASPA lookup and path-verification diagnostics, RTR
+cache session reporting, RT-Constrain filtering of EVPN export, and a
+route-reflector starter example, with best-path, session, shutdown, and
+config-transaction fixes. It ships on its per-change regression tests and main
+CI; the published flagship receipt still describes v0.71.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

@@ -3,7 +3,7 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.3.2 - Unreleased
+## 0.3.2 - 2026-09-23
 
 - `RtrClient::new` now clamps a `RtrClientConfig::retry_interval` above
   the RFC 8210 §6 maximum of 7200 seconds down to 7200 seconds and logs a

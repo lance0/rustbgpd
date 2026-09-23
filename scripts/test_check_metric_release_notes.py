@@ -226,12 +226,12 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             check.release_section(changelog, "0.71.0")
 
     def test_workspace_release_change_requires_explicit_target_review(self):
-        check.validate_workspace_release("0.71.0")
+        check.validate_workspace_release("0.72.0")
         with self.assertRaisesRegex(
             ValueError,
             "roll the baseline to that release in the post-release commit",
         ):
-            check.validate_workspace_release("99.0.0")
+            check.validate_workspace_release("0.72.1")
 
     def test_exceptions_are_reasoned_narrow_and_nonredundant(self):
         with self.assertRaisesRegex(ValueError, "specific reasons"):

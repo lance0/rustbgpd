@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.72.0] — 2026-09-23
+
 ### Added
 
 - Opt-in received FlowSpec feasibility validation against the unicast RIB,
@@ -63,6 +65,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- This release publishes `rustbgpd-rpki` 0.3.1 → 0.3.2, a patch on the
+  `0.3` line that adds `AspaTable::providers`,
+  `aspa_verify::validation_context` and
+  `VrpManager::with_connectivity_observer`, publishes the first accepted empty
+  VRP and ASPA tables, and caps a configured RTR `retry_interval` at the
+  RFC 8210 §6 maximum of 7200 seconds. No public item was removed or changed.
+  `rustbgpd-rpki` 0.3.2 requires wire 0.21.2 or later on the 0.21 line.
+  `rustbgpd-wire` 0.21.2 and `rustbgpd-fsm` 0.8.2 are not republished this
+  cycle: their source changes since those releases are documentation and test
+  fixtures only.
 - The v1 stable-surface inventory now pins the RFC 8212 posture pair: root
   `config_epoch` (with its `ConfigEpoch` type) joins the stable `Config`
   fields and `[global] ebgp_requires_policy` joins the stable `Global`
