@@ -44,7 +44,9 @@ pub mod server;
 #[cfg(test)]
 mod test_support;
 
-pub use config_service::update_group_impact_to_proto;
+pub use config_service::{
+    MAX_CONFIRM_ID_CHARS, MAX_CONFIRM_TIMEOUT_SECONDS, update_group_impact_to_proto,
+};
 pub use evpn_service::EvpnService;
 pub use neighbor_service::NeighborService;
 pub use policy_service::PolicyService;

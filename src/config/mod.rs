@@ -1603,17 +1603,17 @@ const fn access_mode_compatibility_max_tier(access_mode: GrpcAccessMode) -> Grpc
     }
 }
 
-const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
-const TRANSACTION_DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
-const TRANSACTION_NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
-const TRANSACTION_NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
-const TRANSACTION_NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
-const TRANSACTION_PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
-const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
-const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
-const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
-const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
-const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
+pub(crate) const TRANSACTION_FIB_SECTION: &str = "[[fib_tables]]";
+pub(crate) const TRANSACTION_DYNAMIC_SECTION: &str = "[[dynamic_neighbors]]";
+pub(crate) const TRANSACTION_NEIGHBOR_ADD_SECTION: &str = "[[neighbors]] add";
+pub(crate) const TRANSACTION_NEIGHBOR_DELETE_SECTION: &str = "[[neighbors]] delete";
+pub(crate) const TRANSACTION_NEIGHBOR_MODIFY_SECTION: &str = "[[neighbors]] modify";
+pub(crate) const TRANSACTION_PEER_GROUP_CATALOG_SECTION: &str = "[peer_groups] catalog";
+pub(crate) const TRANSACTION_POLICY_DEFINITIONS_SECTION: &str = "[policy] definitions";
+pub(crate) const TRANSACTION_POLICY_NEIGHBOR_SETS_SECTION: &str = "[policy] neighbor_sets";
+pub(crate) const TRANSACTION_POLICY_GLOBAL_CHAINS_SECTION: &str = "[policy] global chains";
+pub(crate) const TRANSACTION_POLICY_LIVE_IMPACT_SECTION: &str = "[policy] live impact";
+pub(crate) const TRANSACTION_SESSION_RESHAPE_SECTION: &str = "effective neighbor session reshape";
 const TRANSACTION_EXTERNAL_POLICY_INPUTS_SECTION: &str =
     "[policy] external inputs (rpol_files / datasets; deploy files and apply via SIGHUP reload)";
 

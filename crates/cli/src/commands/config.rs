@@ -22,6 +22,9 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+// Client-side copies of the daemon's confirmed-transaction bounds. The CLI
+// cannot depend on `rustbgpd-api` at runtime (it would pull the server and RIB
+// crates into the binary), so a test pins these to the daemon's definitions.
 const MAX_CONFIRM_ID_CHARS: usize = 128;
 const MAX_CONFIRM_TIMEOUT_SECONDS: u32 = 86_400;
 const MAX_UNARY_CONFIG_REQUEST_BYTES: usize = 4_194_304;
@@ -2147,6 +2150,15 @@ nested = [{ label = "first", values = [3, 1, 3] }, { label = "second", values = 
             .expect_err("empty local metadata must fail before file access or RPC");
             assert!(matches!(err, CliError::Argument(ref message) if message == expected));
         }
+    }
+
+    #[test]
+    fn client_confirm_bounds_match_the_daemon() {
+        assert_eq!(MAX_CONFIRM_ID_CHARS, rustbgpd_api::MAX_CONFIRM_ID_CHARS);
+        assert_eq!(
+            MAX_CONFIRM_TIMEOUT_SECONDS,
+            rustbgpd_api::MAX_CONFIRM_TIMEOUT_SECONDS
+        );
     }
 
     #[tokio::test]

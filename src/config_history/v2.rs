@@ -25,6 +25,10 @@ const MAX_MODULES: usize = 64;
 const MAX_IMPORTS: usize = 4096;
 const MAX_DATASETS: usize = 65_536;
 const MAX_TEXT: usize = 64 * 1024;
+// Part of the v2 history format, deliberately not shared with the live
+// source-provenance digest: retained v2 envelopes must keep verifying if the
+// live digest ever moves to a new domain. Today the two must be equal, because
+// a retained v2 record is checked against the live snapshot's source digest.
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 static WRITER_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
@@ -1013,6 +1017,14 @@ fn limit(name: &str, bytes: usize) -> io::Error {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn v2_source_digest_domain_matches_the_live_source_digest() {
+        assert_eq!(
+            SOURCE_DIGEST_DOMAIN,
+            crate::config::source_provenance::SOURCE_DIGEST_DOMAIN
+        );
+    }
 
     fn sample() -> Envelope {
         let normalized_toml = "asn = 64512\n".to_string();

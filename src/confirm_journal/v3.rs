@@ -26,6 +26,10 @@ use crate::config_history;
 use crate::config_history::v2::{self as history_v2, LosslessPath, Manifest};
 
 const VERSION: u32 = 3;
+// Part of the v3 journal format, deliberately not the live request bound: a
+// v3 record must decode the same way in every release that reads v3. It must
+// still equal the live bound, or the journal would reject a confirm id the
+// transaction accepted; raising the live bound needs a new journal version.
 const MAX_CONFIRM_ID_CHARS: usize = 128;
 pub(crate) const MAX_RAW_BYTES: usize = 384 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 34 * 1024 * 1024;
@@ -1519,6 +1523,11 @@ mod tests {
 
     use super::*;
     use crate::test_support::tier_authorized_uds_test_config;
+
+    #[test]
+    fn v3_confirm_id_bound_matches_the_live_request_bound() {
+        assert_eq!(MAX_CONFIRM_ID_CHARS, rustbgpd_api::MAX_CONFIRM_ID_CHARS);
+    }
 
     fn private(path: &Path) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
