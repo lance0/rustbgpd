@@ -122,7 +122,7 @@ pub enum RouteAspaState {
 /// and in the EXTRA section of `rbgp man`.
 const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     0  success\n  \
-    1  error (argument validation, connection, daemon, or runtime failure)\n  \
+    1  error (argument validation, declined confirmation, connection, daemon, or runtime failure)\n  \
     2  parser or usage error\n\n\
     Detailed contracts after parsing (also in each subcommand's --help):\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
@@ -464,10 +464,17 @@ enum Command {
     Metrics,
 
     /// Request daemon shutdown
+    ///
+    /// Stops the daemon and drops every BGP session. When stdin and stdout
+    /// are both terminals, asks for confirmation first; `--yes` skips it.
     Shutdown {
         /// Shutdown reason
         #[arg(long)]
         reason: Option<String>,
+
+        /// Skip the confirmation prompt (asked only on a terminal)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Trigger an on-demand MRT dump
@@ -476,17 +483,27 @@ enum Command {
     /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates
     ///
     /// Applies to one neighbor (`--neighbor X`) or every
-    /// currently-managed peer (omit `--neighbor`). Receivers that honor
+    /// currently-managed peer (`--all`). Receivers that honor
     /// RFC 8326 will set local_pref = 0 on tagged paths, draining
-    /// traffic ahead of planned maintenance.
+    /// traffic ahead of planned maintenance. An all-peers change asks for
+    /// confirmation when stdin and stdout are terminals; `--yes` skips it.
     Gshut {
-        /// Neighbor address; omit to toggle for all peers.
-        #[arg(long = "neighbor", visible_alias = "peer")]
+        /// Neighbor address. Omitting both this and --all toggles every
+        /// peer; that form is deprecated, so pass --all instead
+        #[arg(long = "neighbor", visible_alias = "peer", conflicts_with = "all")]
         neighbor: Option<String>,
+
+        /// Toggle every currently-managed peer
+        #[arg(long)]
+        all: bool,
 
         /// Clear instead of enabling.
         #[arg(long)]
         clear: bool,
+
+        /// Skip the confirmation prompt for an all-peers change (asked only on a terminal)
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Live TUI dashboard
@@ -929,31 +946,59 @@ enum PolicyChainAction {
     },
     /// Replace the import chain
     ///
-    /// An empty list is rejected — use `clear-import` instead. Apply
-    /// globally by omitting `--neighbor`.
+    /// An empty list is rejected — use `clear-import` instead. Pass
+    /// `--global` or `--neighbor`; a global change asks for confirmation
+    /// when stdin and stdout are terminals.
     SetImport {
-        /// Neighbor address (omit for global)
-        #[arg(long, visible_alias = "peer")]
-        neighbor: Option<String>,
+        #[command(flatten)]
+        scope: ChainScope,
         /// Ordered policy names that compose the chain
         policies: Vec<String>,
     },
-    /// Replace the export chain.
+    /// Replace the export chain
+    ///
+    /// An empty list is rejected — use `clear-export` instead. Pass
+    /// `--global` or `--neighbor`; a global change asks for confirmation
+    /// when stdin and stdout are terminals.
     SetExport {
-        #[arg(long, visible_alias = "peer")]
-        neighbor: Option<String>,
+        #[command(flatten)]
+        scope: ChainScope,
+        /// Ordered policy names that compose the chain
         policies: Vec<String>,
     },
-    /// Clear the import chain entirely.
+    /// Clear the import chain entirely
+    ///
+    /// Pass `--global` or `--neighbor`; a global change asks for
+    /// confirmation when stdin and stdout are terminals.
     ClearImport {
-        #[arg(long, visible_alias = "peer")]
-        neighbor: Option<String>,
+        #[command(flatten)]
+        scope: ChainScope,
     },
-    /// Clear the export chain entirely.
+    /// Clear the export chain entirely
+    ///
+    /// Pass `--global` or `--neighbor`; a global change asks for
+    /// confirmation when stdin and stdout are terminals.
     ClearExport {
-        #[arg(long, visible_alias = "peer")]
-        neighbor: Option<String>,
+        #[command(flatten)]
+        scope: ChainScope,
     },
+}
+
+/// Which chain a `policy chain` set or clear changes.
+#[derive(Args)]
+struct ChainScope {
+    /// Neighbor address. Omitting both this and --global changes the global
+    /// chain; that form is deprecated, so pass --global instead
+    #[arg(long, visible_alias = "peer", conflicts_with = "global")]
+    neighbor: Option<String>,
+
+    /// Change the global chain, used by every neighbor without its own chain
+    #[arg(long)]
+    global: bool,
+
+    /// Skip the confirmation prompt for a global change (asked only on a terminal)
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -3116,6 +3161,107 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+const CHAIN_SCOPE_WARNING: &str = "warning: omitting --neighbor selects the global chain; \
+    pass --global (this will become an error in a future release)";
+const GSHUT_SCOPE_WARNING: &str = "warning: omitting --neighbor selects all peers; \
+    pass --all (this will become an error in a future release)";
+
+/// A mutation that changes every session at once.
+struct DaemonWideChange {
+    question: String,
+    yes: bool,
+    omitted_scope_warning: Option<&'static str>,
+}
+
+fn daemon_wide_change(command: &Command, addr: &str) -> Option<DaemonWideChange> {
+    match command {
+        Command::Shutdown { yes, .. } => Some(DaemonWideChange {
+            question: format!(
+                "Shut down the rustbgpd daemon at {addr}? This drops every BGP session."
+            ),
+            yes: *yes,
+            omitted_scope_warning: None,
+        }),
+        Command::Gshut {
+            neighbor: None,
+            all,
+            clear,
+            yes,
+        } => Some(DaemonWideChange {
+            question: format!(
+                "{} GRACEFUL_SHUTDOWN for ALL peers on {addr}?",
+                if *clear { "Clear" } else { "Enable" }
+            ),
+            yes: *yes,
+            omitted_scope_warning: (!all).then_some(GSHUT_SCOPE_WARNING),
+        }),
+        Command::Policy {
+            action: PolicyAction::Chain { action },
+        } => {
+            let (verb, direction, scope) = match action {
+                PolicyChainAction::Show { .. } => return None,
+                PolicyChainAction::SetImport { scope, .. } => ("Replace", "import", scope),
+                PolicyChainAction::SetExport { scope, .. } => ("Replace", "export", scope),
+                PolicyChainAction::ClearImport { scope } => ("Clear", "import", scope),
+                PolicyChainAction::ClearExport { scope } => ("Clear", "export", scope),
+            };
+            scope.neighbor.is_none().then(|| DaemonWideChange {
+                question: format!(
+                    "{verb} the GLOBAL {direction} chain on {addr}? \
+                     This affects every neighbor without its own chain."
+                ),
+                yes: scope.yes,
+                omitted_scope_warning: (!scope.global).then_some(CHAIN_SCOPE_WARNING),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Warn about an omitted scope and, when stdin and stdout are both
+/// terminals and `--yes` is absent, ask before a daemon-wide change.
+/// Non-interactive runs never prompt.
+fn confirm_daemon_wide(command: &Command, addr: &str) -> Result<(), CliError> {
+    use std::io::IsTerminal;
+    let Some(change) = daemon_wide_change(command, addr) else {
+        return Ok(());
+    };
+    if let Some(warning) = change.omitted_scope_warning {
+        eprintln!("{warning}");
+    }
+    let interactive =
+        !change.yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    confirm(
+        interactive,
+        &change.question,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
+    )
+}
+
+fn confirm(
+    interactive: bool,
+    question: &str,
+    input: &mut impl std::io::BufRead,
+    prompt: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    if !interactive {
+        return Ok(());
+    }
+    write!(prompt, "{question} [y/N] ")?;
+    prompt.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    if !answer.ends_with('\n') {
+        writeln!(prompt)?;
+    }
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(CliError::Argument("aborted; nothing was changed".into()))
+    }
+}
+
 fn validate_json_version(cli: &Cli) -> Result<(), CliError> {
     if cli.json_version.is_none() {
         return Ok(());
@@ -3406,6 +3552,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     {
         commands::watch::validate_events_watch_filter(categories, event_types, *from_event_id)?;
     }
+    confirm_daemon_wide(&cli.command, &cli.addr)?;
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -4400,11 +4547,13 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             commands::control::metrics(connection).await
         }
-        Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
-        Command::MrtDump => commands::control::mrt_dump(connection, json).await,
-        Command::Gshut { neighbor, clear } => {
-            commands::neighbor::set_graceful_shutdown(connection, neighbor, !clear, json).await
+        Command::Shutdown { reason, .. } => {
+            commands::control::shutdown(connection, reason, json).await
         }
+        Command::MrtDump => commands::control::mrt_dump(connection, json).await,
+        Command::Gshut {
+            neighbor, clear, ..
+        } => commands::neighbor::set_graceful_shutdown(connection, neighbor, !clear, json).await,
         Command::Top { interval } => {
             if json {
                 eprintln!("warning: --json has no effect on `top`; it is an interactive TUI");
@@ -4464,40 +4613,40 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 PolicyChainAction::Show { neighbor } => {
                     commands::policy::chain_show(connection, neighbor.as_deref(), json).await
                 }
-                PolicyChainAction::SetImport { neighbor, policies } => {
+                PolicyChainAction::SetImport { scope, policies } => {
                     commands::policy::chain_set(
                         connection,
                         commands::policy::ChainDirection::Import,
-                        neighbor.as_deref(),
+                        scope.neighbor.as_deref(),
                         policies,
                         json,
                     )
                     .await
                 }
-                PolicyChainAction::SetExport { neighbor, policies } => {
+                PolicyChainAction::SetExport { scope, policies } => {
                     commands::policy::chain_set(
                         connection,
                         commands::policy::ChainDirection::Export,
-                        neighbor.as_deref(),
+                        scope.neighbor.as_deref(),
                         policies,
                         json,
                     )
                     .await
                 }
-                PolicyChainAction::ClearImport { neighbor } => {
+                PolicyChainAction::ClearImport { scope } => {
                     commands::policy::chain_clear(
                         connection,
                         commands::policy::ChainDirection::Import,
-                        neighbor.as_deref(),
+                        scope.neighbor.as_deref(),
                         json,
                     )
                     .await
                 }
-                PolicyChainAction::ClearExport { neighbor } => {
+                PolicyChainAction::ClearExport { scope } => {
                     commands::policy::chain_clear(
                         connection,
                         commands::policy::ChainDirection::Export,
-                        neighbor.as_deref(),
+                        scope.neighbor.as_deref(),
                         json,
                     )
                     .await
@@ -7745,10 +7894,112 @@ printf '%s\n' "${COMPREPLY[@]}"
     #[test]
     fn test_parse_shutdown() {
         let cli = Cli::try_parse_from(["rbgp", "shutdown", "--reason", "maintenance"]).unwrap();
-        if let Command::Shutdown { reason } = cli.command {
+        if let Command::Shutdown { reason, .. } = cli.command {
             assert_eq!(reason.unwrap(), "maintenance");
         } else {
             panic!("expected Shutdown command");
+        }
+    }
+
+    #[test]
+    fn confirm_prompts_only_when_interactive_and_accepts_only_yes() {
+        // Non-interactive: never reads input or writes a prompt.
+        let mut prompt = Vec::new();
+        confirm(false, "Q?", &mut std::io::Cursor::new("n\n"), &mut prompt).unwrap();
+        assert!(prompt.is_empty());
+
+        for answer in ["y\n", "Y\n", "yes\n", " YES \n"] {
+            let mut prompt = Vec::new();
+            confirm(true, "Q?", &mut std::io::Cursor::new(answer), &mut prompt)
+                .unwrap_or_else(|error| panic!("{answer:?}: {error}"));
+            assert_eq!(String::from_utf8(prompt).unwrap(), "Q? [y/N] ");
+        }
+        for answer in ["\n", "n\n", "no\n", "yy\n", "ye\n", ""] {
+            let mut prompt = Vec::new();
+            let error = confirm(true, "Q?", &mut std::io::Cursor::new(answer), &mut prompt)
+                .expect_err(answer);
+            assert!(matches!(error, CliError::Argument(_)), "{answer:?}");
+            assert_eq!(error.to_string(), "aborted; nothing was changed");
+            // End of input leaves the cursor on the prompt line; move off it.
+            let expected = if answer.is_empty() {
+                "Q? [y/N] \n"
+            } else {
+                "Q? [y/N] "
+            };
+            assert_eq!(String::from_utf8(prompt).unwrap(), expected, "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_wide_changes_name_endpoint_scope_and_deprecation() {
+        let addr = "unix:///run/rustbgpd/grpc.sock";
+        let change = |args: &str| {
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            daemon_wide_change(&cli.command, addr)
+                .map(|change| (change.question, change.yes, change.omitted_scope_warning))
+        };
+        let chain_question = |verb: &str, direction: &str| {
+            format!(
+                "{verb} the GLOBAL {direction} chain on {addr}? \
+                 This affects every neighbor without its own chain."
+            )
+        };
+        assert_eq!(
+            change("rbgp policy chain clear-import"),
+            Some((
+                chain_question("Clear", "import"),
+                false,
+                Some(CHAIN_SCOPE_WARNING)
+            ))
+        );
+        assert_eq!(
+            change("rbgp policy chain clear-export --global -y"),
+            Some((chain_question("Clear", "export"), true, None))
+        );
+        assert_eq!(
+            change("rbgp policy chain set-import --global p1"),
+            Some((chain_question("Replace", "import"), false, None))
+        );
+        assert_eq!(
+            change("rbgp policy chain set-export --yes p1"),
+            Some((
+                chain_question("Replace", "export"),
+                true,
+                Some(CHAIN_SCOPE_WARNING)
+            ))
+        );
+        assert_eq!(
+            change("rbgp shutdown"),
+            Some((
+                format!("Shut down the rustbgpd daemon at {addr}? This drops every BGP session."),
+                false,
+                None
+            ))
+        );
+        assert_eq!(
+            change("rbgp gshut"),
+            Some((
+                format!("Enable GRACEFUL_SHUTDOWN for ALL peers on {addr}?"),
+                false,
+                Some(GSHUT_SCOPE_WARNING)
+            ))
+        );
+        assert_eq!(
+            change("rbgp gshut --all --clear --yes"),
+            Some((
+                format!("Clear GRACEFUL_SHUTDOWN for ALL peers on {addr}?"),
+                true,
+                None
+            ))
+        );
+        for scoped in [
+            "rbgp policy chain clear-import --neighbor 10.0.0.2",
+            "rbgp policy chain set-export --peer 10.0.0.2 p1",
+            "rbgp policy chain show",
+            "rbgp gshut --neighbor 10.0.0.2",
+            "rbgp neighbor",
+        ] {
+            assert_eq!(change(scoped), None, "{scoped}");
         }
     }
 
@@ -8208,11 +8459,12 @@ printf '%s\n' "${COMPREPLY[@]}"
         if let Command::Policy {
             action:
                 PolicyAction::Chain {
-                    action: PolicyChainAction::SetImport { neighbor, policies },
+                    action: PolicyChainAction::SetImport { scope, policies },
                 },
         } = cli.command
         {
-            assert_eq!(neighbor.as_deref(), Some("10.0.0.2"));
+            assert_eq!(scope.neighbor.as_deref(), Some("10.0.0.2"));
+            assert!(!scope.global && !scope.yes);
             assert_eq!(policies, vec!["p1".to_string(), "p2".to_string()]);
         } else {
             panic!("expected Policy Chain SetImport");

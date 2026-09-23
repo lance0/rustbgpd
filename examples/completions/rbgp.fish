@@ -1449,6 +1449,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l json-version -d '
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s y -l yes -d 'Skip the confirmation prompt (asked only on a terminal)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l no-color -d 'Disable colored output'
@@ -1463,14 +1464,16 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s j -l json -d 'Out
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address; omit to toggle for all peers' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l all -d 'Toggle every currently-managed peer'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l clear -d 'Clear instead of enabling'
+complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s y -l yes -d 'Skip the confirmation prompt for an all-peers change (asked only on a terminal)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l no-color -d 'Disable colored output'

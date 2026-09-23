@@ -2809,6 +2809,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'-y[Skip the confirmation prompt (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -2834,14 +2836,17 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (gshut)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[Neighbor address; omit to toggle for all peers]:NEIGHBOR:_default' \
-'--peer=[Neighbor address; omit to toggle for all peers]:NEIGHBOR:_default' \
+'(--all)--neighbor=[Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead]:NEIGHBOR:_default' \
+'(--all)--peer=[Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--all[Toggle every currently-managed peer]' \
 '--clear[Clear instead of enabling]' \
+'-y[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3059,13 +3064,16 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (set-import)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[Neighbor address (omit for global)]:NEIGHBOR:_default' \
-'--peer=[Neighbor address (omit for global)]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--global[Change the global chain, used by every neighbor without its own chain]' \
+'-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3077,31 +3085,37 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (set-export)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[]:NEIGHBOR:_default' \
-'--peer=[]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--global[Change the global chain, used by every neighbor without its own chain]' \
+'-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-'*::policies:_default' \
+'*::policies -- Ordered policy names that compose the chain:_default' \
 && ret=0
 ;;
 (clear-import)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[]:NEIGHBOR:_default' \
-'--peer=[]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--global[Change the global chain, used by every neighbor without its own chain]' \
+'-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3112,13 +3126,16 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (clear-export)
 _arguments "${_arguments_options[@]}" : \
-'--neighbor=[]:NEIGHBOR:_default' \
-'--peer=[]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--global[Change the global chain, used by every neighbor without its own chain]' \
+'-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
+'--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
