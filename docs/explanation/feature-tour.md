@@ -6,7 +6,7 @@ The full-depth version of the README's highlights: what each headline
 feature actually contains, with the receipts and reference pages behind
 it. If you want the one-screen version, read the
 [README](../../README.md); if you want the design rationale, read
-[DESIGN.md](design.md) and the [ADRs](../adr).
+the [design document](design.md) and the [ADRs](../adr).
 
 ## API-first control plane
 
@@ -15,9 +15,10 @@ Full gRPC control surface across thirteen services (twelve native
 thin CLI (`rbgp`) with colored tables, dynamic column alignment, and
 human-readable uptimes. Dynamic peer management, dynamic-neighbor and
 FIB-table CRUD, route injection, policy CRUD, peer groups, BFD
-inspection, bounded point-in-time RPKI origin validation, EVPN
-instance queries, streaming events, and daemon control without
-restarts. Service-by-service reference: [API.md](../reference/api.md); CLI command
+inspection, bounded point-in-time RPKI origin validation, ASPA
+provider lookup and path verification (`rbgp rpki aspa`,
+`rbgp rpki verify-path`), EVPN instance queries, streaming events, and
+daemon control without restarts. Service-by-service reference: [gRPC API reference](../reference/api.md); CLI command
 map: [`crates/cli/README.md`](../../crates/cli/README.md).
 
 ## Native route explainability
@@ -34,8 +35,9 @@ surface: [explain.md](../how-to/explain.md).
 
 MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/
 Notification GR, Route Refresh/Enhanced Route Refresh, receive-side
-Prefix ORF, FlowSpec, Route Reflector, large and extended communities.
-Per-RFC conformance notes: [RFC_NOTES.md](../reference/rfc-notes.md).
+Prefix ORF, FlowSpec (with opt-in RFC 9117 feasibility validation),
+Route Reflector, large and extended communities.
+Per-RFC conformance notes: [RFC implementation notes](../reference/rfc-notes.md).
 
 ## Typed, compiled policy language (`.rpol`)
 
@@ -74,8 +76,8 @@ collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a
 Birdwatcher-shaped status/peer/accepted/filtered/noexport REST subset
 via the external `examples/birdwatcher-adapter`, structured JSON logging, and
 per-peer counters. The explain surfaces have their own catalog:
-[explain.md](../how-to/explain.md). gNMI operator guide: [GNMI.md](../reference/gnmi.md);
-Grafana dashboard: [GRAFANA.md](../how-to/grafana.md).
+[explain.md](../how-to/explain.md). gNMI operator guide: [gNMI / OpenConfig telemetry](../reference/gnmi.md);
+Grafana dashboard: [setup guide](../how-to/grafana.md).
 
 ## Update-group fanout
 
@@ -118,4 +120,4 @@ substrate, not as unicast `Prefix` shortcuts or MPLS dataplane creep.
 depend only on `wire` among the workspace crates; all three are published as
 daemon-independent crates for Rust BGP tooling that does not need the full
 router. See
-[EMBEDDING.md](../reference/embedding.md).
+the [embedding guide](../reference/embedding.md).

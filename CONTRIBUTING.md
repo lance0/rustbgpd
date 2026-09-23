@@ -21,9 +21,9 @@ cargo test --workspace
 ## Code Style
 
 ```bash
-cargo fmt                          # Format
-cargo clippy -- -D warnings        # Lint with warnings as errors
-cargo test --workspace             # All tests
+cargo fmt                                              # Format
+cargo clippy --workspace --all-targets -- -D warnings  # Lint with warnings as errors
+cargo test --workspace                                 # All tests
 ```
 
 All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
@@ -452,6 +452,10 @@ crates/
   cli/                   # rbgp — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
+examples/                # Runnable configurations and client examples
+labs/                    # Containerlab labs (quickstart, RR, IXP, monitoring)
+tools/                   # Companion tools: rs-config-render, MCP server
+integrations/            # Third-party integrations (IXP Manager)
 docs/README.md           # Documentation table of contents
   tutorials/             # Learn by running an example
   how-to/                # Task guides and contributor procedures

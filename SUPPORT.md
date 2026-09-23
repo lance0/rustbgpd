@@ -31,6 +31,8 @@ kernel-independent crates and transport or socket abstractions with non-Linux
 fallbacks may remain portable and testable; that does not expand daemon
 platform support.
 
+## RFC 8212 posture
+
 RFC 8212 enforcement ([ADR-0112](docs/adr/0112-rfc-8212-ebgp-requires-policy.md))
 is opt-in for configs without `config_epoch` and for `config_epoch = 1`. Under
 [ADR-0119](docs/adr/0119-rfc-8212-secure-default-config-epoch.md) (activation
@@ -38,7 +40,9 @@ shipped), a `config_epoch = 2` config that omits `[global].ebgp_requires_policy`
 enforces it by default (policy source `epoch_2_default`). An explicit boolean
 keeps its stated value in every epoch. Migration is Linux-only and requires an
 explicit config path; downgrade also requires an explicitly selected exact
-v0.64.0 validator binary.
+v0.64.0 validator binary. The pair (`config_epoch` and
+`[global].ebgp_requires_policy`) and its epoch-dependent default are part of
+the [v1 stable contract](docs/reference/v1-stable-contract.md#stable-surfaces).
 
 ## Reporting an ordinary bug
 

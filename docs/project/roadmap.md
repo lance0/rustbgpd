@@ -50,8 +50,8 @@ those.
 | EVPN-VXLAN: symmetric IRB (Type-5 / L3VNI, 9136 §4.4.2) | Partial (alpha) | Receive-side GW-IP overlay-index recursion shipped; native GW-IP + ESI overlay-index origination shipped; single-active ESI overlay-index receive v1 shipped; all-active ESI overlay-index Type 5 writer shipped with same-host netns proof and M72 real-peer proof (ADR-0087/0090, FRR consume-side M68 for GW-IP, GoBGP receive-side M71 for single-active ESI recursion, GoBGP ×2 receive-side M72 for all-active ESI recursion) |
 | FIB / dataplane: unicast Linux FIB install, ECMP, weighted multipath, BLACKHOLE discard | Shipped | Opt-in `[[fib_tables]]` (ADR-0061/0066/0068) |
 | Security: TCP MD5, GTSM, TCP-AO keyrings + live successor install/selection/deprecated-key deletion, native gRPC mTLS + tier authz | Shipped | TCP-AO BIRD-interop incl. observation-gated live rotation, deletion, and process-crash recovery from every durable phase config (M43); ADR-0062/0064 |
-| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped |
-| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped |
+| RPKI origin validation (6811 + 8210) | Partial | VRP table and policy match shipped; RTR epoch/reconnect-retention/identity/transaction-bound corrections shipped; M84 multi-cache RTR/ASPA epoch conformance lab shipped; per-cache RTR session visibility (`bgp_rpki_cache_connected`, `RpkiCacheDisconnected` alert, `rbgp doctor` session check) added |
+| ASPA verification | Partial | Role-aware verification and policy match shipped; RTR v2 replacement/withdrawal semantics shipped; M84 RTR/ASPA epoch conformance lab shipped; `rbgp rpki aspa` provider lookup and `rbgp rpki verify-path` added |
 | Policy: prefix lists, named chains, actions, community/AS_PATH/validation match | Shipped | GoBGP-style chain evaluation; opt-in RFC 8212 explicit-policy enforcement (`ebgp_requires_policy`, ADR-0112) and per-peer outbound prefix limits (ADR-0113) shipped in v0.61.0 |
 | Policy: `.rpol` typed compiled language (ADR-0096) | Shipped | Named sets, `u32` parameters, in-language tests (`rbgp policy check`), live-RIB dry run (`rbgp policy test`), per-term explain traces + live hit counters (`rbgp policy stats`); M80 FRR route-map parity receipt |
 | BFD async + RFC 5882 coupling | Partial | M51 receipt revalidated green on current main by #1093 (`8b8f76e8`); receive-work budgeting and remote-AdminDown coupling corrections shipped; RFC 5883 multihop shipped with the M108 routed-loopback FRR receipt; authentication remains demand/interoperability gated by ADR-0117 |
@@ -135,8 +135,8 @@ peer-group hot reloads and RIB readiness and distribution fixes; it ships on
 its per-change regression tests and main CI. The
 [2026-09-21 run](../soaks/soak-rs-flagship-24h-2026-09-21.md) then qualified
 the v0.71.0 tag under the current gates (on-host verdict, no reanalysis; every
-gate passes, with the slowest `policy stats` read 31 ms inside its 2 s
-deadline), so the published flagship receipt now describes v0.71.0. The
+gate passes, with the slowest `policy stats` read at 1969 ms, 31 ms under its
+2 s deadline), so the published flagship receipt now describes v0.71.0. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.
@@ -365,9 +365,11 @@ proof on the activated cell in hosted CI.
 - **Route-server adoption polish** — the ADR-0101/M83 profile shipped the
   secure preset: RFC 7947 transparency, Add-Path and `per_client_best`
   path-hiding mitigation, RFC 9234 OTC toward members (including dynamic /
-  gRPC-added peers), ASPA/ROV/reject-AS_SET hygiene, RFC 8097 OV_* tagging,
-  and a curated `examples/route-server` profile. The canonical semantic diff
-  engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
+  gRPC-added peers), ASPA/ROV/reject-AS_SET hygiene, and a curated
+  `examples/route-server` profile. The example and `rs-config-render` no
+  longer add RFC 8097 OV_* communities toward members, per
+  draft-ietf-sidrops-avoid-rpki-state-in-bgp §6; `.rpol` can still set them.
+  The canonical semantic diff engine, `rbgp diff`, BIRD/FRR/GoBGP/MRT adapters, and BMP Adj-RIB-Out import
   are also shipped, as is the ARouteServer target (`tools/rs-config-render`).
   The birdwatcher adapter's Alice-LG contract is complete
   (status/peer/accepted/filtered/noexport views; reject reasons via
@@ -1565,7 +1567,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
   `kernel-dataplane` workflow for
   the EVPN VTEP / IRB / adoption / multihoming / VLAN / overlay-index receipts
   plus the FIB, BFD, TCP-AO, BGP-unnumbered, and BLACKHOLE kernel receipts; see
-  `INTEROP.md` for the current hosted list. Large-scale churn (M33) is a
+  [docs/interop.md](../interop.md#ci-coverage) for the current hosted list. Large-scale churn (M33) is a
   manual soak harness under `tests/soak/`.
 - **[docs/operational-proof.md](../operational-proof.md)** — the consolidated
   operator-facing receipt index for CI interop, hosted dataplane, benchmarks,
@@ -1583,8 +1585,8 @@ If you need these features, combine rustbgpd with purpose-built tools.
 
 ### Infrastructure
 
-GitHub Actions CI (fmt / clippy / test on every push/PR), nightly wire-decoder
-fuzz CI, a multi-stage Docker image, containerlab interop topologies, automated
+GitHub Actions CI (fmt / clippy / test on every push/PR), a nightly cargo-fuzz
+campaign across seven crates, a multi-stage Docker image, containerlab interop topologies, automated
 M-series interop scripts, cross-compiled linux-amd64/arm64 binary releases, and
 crates.io publishing for `rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki`
 (other crates remain internal).
