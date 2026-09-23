@@ -26,7 +26,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Results distinguish unavailable ASPA data, missing attestations, and
   authoritative empty data; verification reuses the ingress verifier and
   reports the first proven invalid customer/provider pair when available.
-
 - `examples/route-reflector/config.toml`: a starter for an IPv4/IPv6 unicast
   route reflector with a client peer group, a dynamic client range, a
   non-client peer to the second reflector, Add-Path send, and GR/LLGR
@@ -35,12 +34,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still waits for the runtime-config coordinator without giving up its single
   acquisition, and while waiting the transaction stays `pending`, no rollback
   failure is recorded and the revert journal is untouched.
-  **Operator-visible:** ten minutes past the deadline the daemon logs
-  `confirmed config transaction auto-revert is overdue: waiting for the
-  runtime-config coordinator` (repeated every ten minutes), and `rbgp config
-  status` / `GetConfigTransactionStatus` `human_text` says the automatic
-  rollback timed out at the deadline and is waiting for the coordinator until
-  the rollback runs or the transaction is confirmed, aborted, or re-armed.
+- `ListEvpnNexthops` and `rbgp evpn nexthops` now report
+  `l3_orphan_nexthops_count` and `l3_pending_delete_count` (text output:
+  `l3-orphan-nexthops`, `l3-pending-deletes`) for L3 (all-active Type 5)
+  FDB nexthops. Previously an L3 nexthop or nexthop group whose kernel
+  delete kept failing was retried but did not appear on any status
+  surface, because the existing `pending_delete_count` and
+  `orphan_nexthops_count` fields count only L2 FDB nexthop IDs. Those two
+  fields keep their L2 meaning.
+- In IXP Manager mode, `rs-config-render` now adds IXP Manager v7.4's
+  informational large communities to accepted routes, where its BIRD
+  templates add them: `RS:1000:1` RPKI valid, `RS:1000:2` RPKI unknown,
+  `RS:1000:3` RPKI not checked, `RS:1001:1` IRRDB valid and `RS:1001:2` IRRDB
+  not checked. An RPKI-valid route skips the IRRDB prefix check, so it carries
+  only `RS:1000:1`. The existing `ixp-manager-own-as-export-scrub` removes the
+  tags toward members, as IXP Manager's export filter does.
+- `bgp_rpki_cache_connected{cache}` reports whether the daemon has an RTR
+  session to each configured cache (`1` connected, `0` otherwise, seeded at
+  `0`). An ordinary session loss keeps the cache's contribution until the
+  effective expire (default 7200 seconds, up to two days), so
+  `bgp_rpki_cache_end_of_data_ready` and `bgp_rpki_vrp_count` stay unchanged
+  and the existing alerts fired only after expiry. A flush (a fatal Error
+  Report or corrupt data) still drops the contribution at once. The shipped
+  `RpkiCacheDisconnected` alert (warning, 15 minutes at `0`) and a
+  daemon-side `rbgp doctor` check, `rpki.cache.<addr>.session`, read from
+  `ListCaches`, now report the outage while the retained data is still in
+  use. See [RPKI cache unreachable](docs/reference/operations.md#rpki-cache-unreachable).
 
 ### Changed
 
@@ -57,6 +76,132 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the `rustbgpd --check --strict` readiness advisory for legacy omission, raw
   presence, canonicalization, and the restart-required boundary are
   unchanged, and the rest of `[global]` is not promoted.
+- The example `BgpPeerAdjRibInEmpty` alert rule now sums `bgp_rib_prefixes`
+  across its `all`, `evpn` and `flowspec` series per peer, so an Established
+  peer that sends only EVPN or only FlowSpec routes no longer fires it.
+  VPN, labeled-unicast, BGP-LS and RTC paths are not counted by the gauge, so
+  a peer that sends only those families still fires; silence the rule for
+  such peers as for send-only peers.
+- Release notes for a change now start as one fragment file under
+  `changelog.d/` instead of an edit to the `[Unreleased]` section, so
+  concurrent pull requests no longer conflict on `CHANGELOG.md`. Release
+  preparation runs `scripts/assemble-changelog.py`, which merges the fragments
+  into `[Unreleased]` in category order and deletes them; the metric
+  release-note check reads `[Unreleased]` plus every fragment, and
+  `just gate-release --mode release` refuses a release commit while a fragment
+  remains. The published changelog format is unchanged.
+- `rbgp shutdown`, a global `rbgp policy chain set-import`, `set-export`,
+  `clear-import` or `clear-export`, and an all-peers `rbgp gshut` now ask
+  for confirmation when stdin and stdout are both terminals. The prompt
+  names the target endpoint and the scope, for example `Clear the GLOBAL
+  import chain on unix:///var/lib/rustbgpd/grpc.sock? This affects every
+  neighbor without its own chain. [y/N]`; any answer other than `y` or
+  `yes` aborts with exit code 1 and changes nothing. `-y`/`--yes` skips the
+  prompt. The chain commands gain `--global` and `gshut` gains `--all` to
+  select the daemon-wide scope explicitly; each conflicts with `--neighbor`.
+  An empty or blank `--neighbor` on these commands is now a usage error
+  (exit 2) instead of reaching the daemon, where an empty `gshut` address
+  meant every peer.
+- `rbgp doctor --pre-upgrade` now quotes the daemon's status text in the
+  `upgrade.transaction` detail for a confirmed transaction that is pending
+  with a deadline, as it already did for applying, rollback-failed, and
+  ambiguous transactions. An overdue automatic rollback now reports there,
+  not only in `rbgp config status`, that it is waiting for the runtime-config
+  coordinator.
+- The `[[ethernet_segments]]` link-drain hold-off key is now
+  `recovery_delay_seconds`, matching the other `_seconds` timer keys. The
+  earlier spelling `recovery_delay_secs` is still accepted as an alias, so
+  existing configs load unchanged, and the JSON Schema keeps it as a
+  deprecated property with the same bounds so schema-validating editors
+  accept it too.
+- `ListFibTables` (`rbgp fib-table list`) no longer acquires the exclusive
+  runtime-config coordinator lock across its actor query. The configured table
+  set is read directly from the authoritative committed configuration snapshot,
+  so operator reads during apply-before-persist, failed persistence, or
+  transaction rollback expose only the coherent committed table set, never an
+  uncommitted candidate. While an actor read is in flight or stalled, unrelated
+  config mutations and SIGHUP reloads can acquire the coordinator and complete
+  without waiting on the FIB reconciler.
+- `ListFibTables` (`rbgp fib-table list`) no longer sends a `GetTables` query
+  to the FIB reconciler. It serves the committed table set and checks only
+  whether the reconciler's command channel is open, so concurrent reads can no
+  longer fill the command queue that `SetFibTable` and `DeleteFibTable` use.
+  `runtime_available = true` now means the reconciler was started and its
+  command channel is open; it is not a responsiveness guarantee. Use the
+  mutation response and `ListFibRoutes` for the actual apply outcome. A closed
+  channel still returns retryable `UNAVAILABLE`, and a reconciler that never
+  started still reports `runtime_available = false`.
+- Log events name a BGP peer's address in one event field, `peer`. Events
+  from the peer manager, reload and the TCP listener used four other names,
+  which are renamed: `address` to `peer` (peer-manager lifecycle and policy
+  events, and the reload `neighbor added`, `neighbor changed`,
+  `neighbor removed` and `neighbor hot-applied in place` events);
+  `peer_addr` to `peer` (peer-manager inbound connections, session
+  notifications and dynamic-peer dead-lettering); `peer_ip` to `peer`
+  (inbound connection admission and the listener's `inbound TCP connection`
+  event); and `addr` to `peer` (peer-manager graceful-shutdown toggles,
+  export-knob refresh and daemon-shutdown teardown). The session span field
+  `peer_addr` is unchanged.
+- Smaller log-format changes that follow the same convention: `esi` fields
+  now use the `01:02:…` text form everywhere, instead of a Debug byte array
+  or struct in EVPN segment, projection and dataplane-reconcile events; VRF
+  route `prefix` fields in dataplane-reconcile events and the blackhole
+  kernel-drift event use the prefix text form instead of Debug output;
+  dataplane-reconcile errors are logged as `error` instead of `e`; and the
+  two startup policy-resolution failures log the error as an `error` field
+  instead of in the message. Events from a BGP session's connect path and
+  socket writer now carry the session's `peer` span, so the per-peer
+  `RUST_LOG` span filter and `log_level` also select them.
+- The route-server example's `hygiene.rpol` no longer adds RFC 8097 `OV_*`
+  origin-validation-state extended communities. Route-server-client export
+  keeps extended communities, so every member received the tag, and
+  [draft-ietf-sidrops-avoid-rpki-state-in-bgp §6](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-avoid-rpki-state-in-bgp-12#section-6)
+  says operators MUST NOT signal RPKI-derived validation state over eBGP
+  across administrative boundaries. The tag also turned an RTR cache outage
+  into a replacement UPDATE for every tagged route to every member. Accept
+  and reject decisions are unchanged, and rpol can still add `OV_*`
+  communities. `rs-config-render` in IXP Manager mode embeds this file, so
+  its rendered `policy/ixp-hygiene.rpol` drops the same terms.
+- In arouteserver mode, `rs-config-render` no longer adds RFC 8097 `OV_*`
+  origin-validation-state extended communities in `rs-hygiene.rpol`. The
+  `tag-ov-valid` and `tag-ov-not-found` terms, and `tag-ov-invalid` when
+  `reject_invalid` is off, are gone. Route-server-client export keeps
+  extended communities, so every member received the tag, and
+  [draft-ietf-sidrops-avoid-rpki-state-in-bgp §6](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-avoid-rpki-state-in-bgp-12#section-6)
+  says "Operators MUST NOT signal RPKI-derived validation states using BGP
+  Path Attributes carried over EBGP sessions across administrative
+  boundaries." The renderer now matches ARouteServer as well as the draft:
+  ARouteServer 1.23.2 tags RFC 8097 state internally, but BIRD and OpenBGPD
+  strip non-transitive extended communities on eBGP export, so its clients
+  never receive it. The `reject-rpki-invalid` term is kept, and no accept
+  or reject decision changes.
+- RT-Constrain (RFC 4684) membership now filters EVPN export as well as
+  VPNv4/VPNv6. A peer that negotiated both RT-Constrain and L2VPN EVPN
+  receives only the EVPN routes whose Route Targets fall inside its
+  advertised membership (RFC 7432 §7.10); Type 4 Ethernet Segment routes
+  match on their ES-Import Route Target (RFC 7432 §7.6). A membership
+  change announces or withdraws the affected EVPN routes without a session
+  reset, and `rbgp evpn explain` reports the `rt_membership` gate. Peers
+  that did not negotiate RT-Constrain stay unfiltered, and there is no new
+  configuration.
+- A further SIGINT or SIGTERM during coordinated shutdown now fail-stops an
+  owned runtime-config settlement instead of waiting out its budget: the
+  owner is fenced with the new closed reason `operator_forced` and the daemon
+  exits 70 through the existing settlement watchdog path after the five-second
+  grace, leaving the pending transaction on disk for boot-time recovery. A
+  signal after an RPC-initiated shutdown escalates the same way; with no
+  owner the signal keeps its "stop waiting" meaning and the exit status is
+  unchanged.
+- Peer-scoped views now return `NOT_FOUND` (`neighbor <address> not found`)
+  when they find no rows and the address names no known peer, instead of an
+  empty result. This covers `ListReceivedRoutes` with a neighbor,
+  `ListAdvertisedRoutes`, received-mode `ListFlowSpecRoutes`,
+  `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`
+  with `received_from` or `advertised_to`, and `GetBfdSessions` with a peer.
+  A known peer is a configured neighbor, an accepted dynamic peer, or an
+  address whose Adj-RIB-In still retains Graceful Restart stale routes; it
+  keeps its `OK` empty result when down or silent. See
+  [unknown peers](docs/reference/api.md#unknown-peers-in-peer-scoped-views).
 
 ### Fixed
 
@@ -67,21 +212,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RIB, took part in best-path selection in every address family, and was
   evaluated by the RFC 4456 reflection-loop check. Internal (iBGP) neighbors
   are unchanged.
-  **Operator-visible:** best-path selection between external peers can change
-  where a peer was sending these attributes, because a received ORIGINATOR_ID
-  no longer replaces that peer's BGP Identifier in the identifier tie-break and
-  a received CLUSTER_LIST no longer lengthens its path in the cluster-list
-  tie-break. Such a peer's routes are also no longer dropped as reflection
-  loops when the attributes carry the local router ID or cluster ID.
-  Each removal increments
-  `bgp_path_attribute_discarded_total{type_code="9"}` or `{type_code="10"}`,
-  so that counter is no longer limited to `discard_path_attributes`; an
-  attribute covered by both counts once. Pre-policy BMP still mirrors the
-  UPDATE as received. Unchanged: an ORIGINATOR_ID or CLUSTER_LIST with the
-  wrong Optional/Transitive flag class is treat-as-withdraw from any neighbor
-  (RFC 7606 §3 (c)), so that UPDATE's routes are withdrawn, not kept without
-  the attribute.
-
 - Aborting a commit-confirmed config transaction (`rbgp config abort`, gNMI
   commit cancel) and the confirm-timeout auto-revert no longer fail when a BGP
   session goes up or down inside the confirm window. The rollback replayed the
@@ -90,31 +220,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FAILED_PRECONDITION` ("runtime config snapshot changed"), left the
   transaction `abort_failed` / `auto_revert_failed`, and kept the config
   mutation fence closed until the candidate was confirmed or the daemon was
-  restarted. **Operator-visible:** rollback of a pending confirmed transaction
-  now restores the recorded pre-commit snapshot without a token check; a
-  caller's own Plan→Apply token still goes stale on a session change and must
-  be re-planned.
+  restarted.
 - Coordinated shutdown can no longer wait forever on runtime-config work that
   nothing owns. A coordinator permit held outside settlement ownership (a read
   stalled on an unresponsive actor) and the join of a SIGHUP task with no owner
   are each bounded at five seconds; previously either could keep the daemon
   from exiting until the service manager sent `SIGKILL`.
-  **Operator-visible:** `SIGTERM`/`SIGINT` now always reach teardown unless an
-  owned runtime-config mutation is still settling, which keeps its 30-minute
-  watchdog and exit 70 unless a further signal arrives (see the
-  `operator_forced` entry under Changed). When the five-second bound expires
-  the daemon logs an error naming what it stopped waiting for, skips the
-  optional warm checkpoint, and continues; the exit status does not change.
-  A second `SIGTERM` or `SIGINT` during shutdown now means "stop waiting": it
-  skips the waits that have no deadline (the unowned permit, the EVPN IMET
-  sweep, the peer-manager drain, the BMP shutdown enqueue, and the RIB event
-  stage) while bounded kernel, BFD, and event-history cleanup still runs. An
-  owned mutation is handled separately, as that Changed entry describes. A
-  runtime-config mutation or SIGHUP reload that obtains the coordinator only
-  after shutdown has begun is refused
-  (`UNAVAILABLE`, `runtime config coordinator is closed`) before it changes
-  anything, so nothing starts mutating behind a wait shutdown gave up on.
-  `TimeoutStopSec=32min` in the shipped unit is unchanged.
 - With `[flowspec] validation = "rfc9117"`, a received FlowSpec rule that
   arrives again unchanged (route refresh, graceful-restart re-sync, periodic
   re-send) now stays selected instead of being withdrawn from downstream peers
@@ -136,11 +247,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged. Controller paths keep the same immediate-collection rule as
   sessions: small tables and a withdrawal that empties the injected table
   still collect immediately.
-- Publish the first accepted empty VRP and ASPA tables to validation consumers,
-  allowing RPKI operator queries to report authoritative empty data correctly.
-  Identical replays remain suppressed, and pre-accept disconnects do not
-  fabricate available data.
-- Keep live RIB readiness responsive during selection-deferral release and
+- The first accepted empty VRP and ASPA tables are now published to validation
+  consumers, so RPKI operator queries report authoritative empty data
+  correctly. Identical replays remain suppressed, and pre-accept disconnects do
+  not fabricate available data.
+- Live RIB readiness stays responsive during selection-deferral release and
   collision-failback staging, including all released route families. Readiness
   reports the current unicast Loc-RIB count while general reads and mutations
   remain queued; family convergence and table-before-EoR ordering are preserved.
@@ -174,15 +285,425 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rows, so every retained event that matches the subscription is delivered and
   every evicted id is covered by a gap event's `missed_count`. That count is
   over the global committed stream, not the filtered subset, so it can exceed
-  the number of matching events lost. **Operator-visible:** a subscriber can
-  now receive the cursor-gap `BGP_EVENT_TYPE_STREAM_LAGGED` event mid-replay,
-  not only as the first response; its `missed_count` covers exactly the evicted
-  ids (global committed stream), and its reason reads
-  `retention evicted events during replay`.
-  `bgp_event_outbox_cursor_gap_total` counts each such event. A cursor whose
-  whole replay range was already evicted, leaving the store empty, now gets the
-  leading gap event too, and no gap count includes ids above the replay
-  watermark, which still arrive from the live stream.
+  the number of matching events lost.
+- `bgp_as_path_loop_detected_total` now counts the EVPN routes and FlowSpec
+  rules of an UPDATE discarded for an `AS_PATH` loop. Those announcements
+  were already discarded, but the counter skipped them, so a looped UPDATE
+  carrying only EVPN or FlowSpec NLRI left it unchanged.
+- The config JSON Schema rejected the BGP `role` values `"rs"` and
+  `"rs-client"`, which the daemon accepts as aliases of `"route_server"` and
+  `"route_server_client"`, so schema-validating editors flagged working
+  configs. The schema now lists both spellings. The reference docs now present
+  the snake_case names as canonical, since the daemon writes those names when
+  it saves a config, and list the short forms as aliases.
+- An inbound connection that has received the peer's OPEN is no longer closed
+  with Cease 6/7 as a "local wins" connection collision while the configured
+  session has no connection of its own (Idle, Connect or Active). The BGP
+  Identifier comparison now applies only against a session in OpenConfirm or
+  OpenSent, and the session's state is read when the OPEN arrives rather than
+  when the connection was accepted. Previously a neighbor with the lower BGP
+  Identifier that connected first could be torn down on every attempt while
+  the local outbound retry kept losing to it, so the session could stay down
+  for as long as that race repeated. A session that is already Established
+  still keeps its connection and the new one is closed. RFC 4271 §6.8 makes
+  the OpenSent case optional: "A BGP speaker MAY also examine connections in
+  an OpenSent state if it knows the BGP Identifier of the peer by means
+  outside of the protocol." rustbgpd deliberately counts the identifier in the
+  inbound connection's OPEN as that knowledge, as FRR does, so that two
+  speakers following the same rule cannot both close their connections in a
+  simultaneous open.
+- The config JSON Schema advertised a minimum of 0 for
+  `duplicate_mac_detection.window_seconds`, `threshold`, and
+  `recovery_seconds`, so schema-driven editors accepted values the daemon
+  rejects. The schema now carries the validator's bounds: each field is at
+  least 1, and `recovery_seconds` is at most 31536000. The Ethernet Segment
+  `recovery_delay_seconds` schema entry now carries its maximum of 3600.
+- Removing a gNMI dial-out target on reload now removes its
+  `gnmi_dialout_queue_depth` and `gnmi_dialout_last_publish_timestamp_seconds`
+  series for good. Previously, a response the transport was still sending when
+  the target was removed could recreate those series. `/metrics` then exported
+  a stale series for a target that no longer existed, until the daemon
+  restarted.
+- IPv4-unicast `MP_UNREACH_NLRI` withdrawals and `MP_REACH_NLRI`
+  announcements with a 4-octet IPv4 next hop are now applied on sessions that
+  did not negotiate Extended Next Hop (RFC 4760, RFC 8950 §4). Previously both
+  were ignored with a log line, so a peer that withdrew IPv4 routes this way
+  left them in the Adj-RIB-In, and a route server kept advertising them until
+  the session reset.
+- The comments printed by `rustbgpd --init-config lab` now match the profile's
+  RFC 8212 enforcement. Omitting the written-out permit-all chains rejects
+  routes rather than permitting them, and deleting one leaves the session
+  Established with no routes in that direction rather than stopping it. The
+  run hint names `config.toml`, the file the quickstart saves.
+- A live policy-impact config transaction whose peer manager accepted the
+  live policy re-apply but dropped its reply could be reported as an
+  ordinary `UNAVAILABLE` error, although sessions may already have been
+  running the candidate policy. For a confirmed apply, this also removed the
+  commit-confirm revert authority. The lost acknowledgement is now an
+  `acknowledgement_lost` recovery fence, as it already was for the reverse
+  (rollback) apply: the revert authority is retained, config mutations are
+  blocked, and the daemon exits 70 for supervised recovery.
+- A live policy-impact config transaction whose post-commit runtime
+  snapshot re-plan failed (the peer manager was unavailable or dropped the
+  reply) was reported as an ordinary clean error even though the candidate
+  was already durable and live. For a confirmed apply, this removed the
+  commit-confirm revert authority, so the unconfirmed candidate could no
+  longer roll back automatically. The failure is now a `known_divergence`
+  recovery fence: the revert authority is retained, config mutations are
+  blocked, and the daemon exits 70 for supervised recovery, as it does for
+  other post-commit finalization failures.
+- The gRPC TCP, gRPC Unix-socket and metrics listeners no longer spin a
+  runtime worker when `accept()` fails with EMFILE, ENFILE, ENOMEM or ENOBUFS.
+  They now back off like the BGP listener, from 100 ms doubling to a 1 s cap
+  and resetting on the next accepted connection. Previously each failed
+  accept was retried immediately. The metrics listener also logged every
+  failure at `ERROR`.
+- `SetPeerGroup` without an MD5 password reads the existing group to keep
+  its password, and that read now uses the 2-second peer-manager read bound
+  that `GetPeerGroup` uses instead of the 10-minute mutation bound. A
+  stalled peer manager now fails the request after 2 seconds with
+  `DEADLINE_EXCEEDED` and nothing applied, instead of holding the
+  runtime-config lock, and every other config mutation, for up to 10
+  minutes. The config persister's writes, fsyncs and renames also moved
+  off the async runtime worker threads, so a hung config filesystem no
+  longer ties up one of those threads.
+- A daemon shutting down after a component failure no longer writes a second,
+  spurious panic report when a config-persistence write was still queued. The
+  runtime cancels that queued write at shutdown, and the persister treated the
+  cancellation as a panic. The cancelled write is still not reported as
+  published.
+- Best-path selection now treats a route received with the `LLGR_STALE`
+  community as least preferred, as RFC 9494 §4.3/§4.4 requires, in IPv4
+  and IPv6 unicast and every route-reflection family (VPN, labeled unicast,
+  EVPN, FlowSpec, BGP-LS and RTC). Previously only routes this speaker had
+  itself moved into long-lived stale state were demoted, so a path another
+  helper had already tagged competed on `LOCAL_PREF` and the later steps,
+  and a reflector could select and reflect it over a fresh alternative. Two
+  least-preferred routes still fall back to normal tie-breaking.
+- `rs-config-render recover rollback --apply` exited 5 (`rollback did not
+  settle`) and left `current` on the rollback target when the daemon rejected
+  the rollback's reload without runtime effect, although the daemon was still
+  running the generation it had before. The verb now uses the same
+  `rbgp metrics` proof as `activate` (one new `rejected_no_effect` SIGHUP
+  outcome from the same process, no settlement in progress, checked again
+  after `current` is re-pointed back). With that proof, or when the activation
+  command could not start, it restores `current` to the generation it rolled
+  away from and changes nothing else.
+- An `[rpki] cache_servers[].retry_interval` above the RFC 8210 §6 maximum of
+  7200 seconds is now applied as 7200 seconds. Retry paces reconnects before
+  any End of Data can lower it, so a larger value parked the first reconnect
+  at a far-future deadline and the daemon never retried a cache that was down
+  at startup. Values from 1 to 7200 seconds are unchanged.
+- In arouteserver mode, `rs-config-render` now also scrubs the other
+  fixed-value communities arouteserver's `scrub_communities_in()` removes from
+  received routes: the internal `rpki_bgp_origin_validation_valid`,
+  `rpki_bgp_origin_validation_unknown`, `rpki_bgp_origin_validation_invalid`
+  and `reject_cause_map_*` communities, and every `custom_communities` entry.
+  The renderer sets none of them, but a member-sent copy used to reach other
+  clients unchanged. `reject_cause` is still not scrubbed, because rpol cannot
+  remove its `dyn_val` range; see the filter-pipeline cookbook,
+  `docs/cookbook/ixp-filter-pipeline.md`.
+- In arouteserver mode with `rpki_bgp_origin_validation.reject_invalid:
+  false`, `rs-config-render` accepted RPKI-invalid routes and announced them
+  to every member through the permit-all export chain. ARouteServer keeps
+  such routes but never announces ordinary ones to clients. The rendered
+  `rs-hygiene.rpol` now defines `rs-rpki-invalid-export`, which leads every
+  client's export chain, ahead of site-local hooks and the blackhole export
+  policy, and rejects ordinary RPKI-invalid routes. They stay in the
+  Adj-RIB-In for `rbgp rib received` and explain, and a VRP change re-runs
+  export, so a route that becomes valid is announced and one that becomes
+  invalid is withdrawn. Authorized BLACKHOLE requests are exempt, as in
+  ARouteServer and
+  [RFC 7999 §3.3](https://www.rfc-editor.org/rfc/rfc7999.html#section-3.3):
+  they are not origin-validated and follow each client's blackhole export
+  policy. `reject_invalid: true` output is unchanged.
+- In arouteserver mode, `rs-config-render` now scrubs every configured
+  `*_validated_*` tag community (`route_validated_via_white_list`,
+  `prefix_validated_via_rpki_roas`, `prefix_validated_via_arin_whois_db_dump`,
+  `prefix_validated_via_registrobr_whois_db_dump`) from received routes,
+  whether or not `irrdb.tag_as_set` is on or the feature that sets the tag is
+  enabled, as arouteserver's `scrub_communities_in()` does. Previously only
+  the white-list and ROA tags were scrubbed, and only when the render also set
+  them, so a member could send a lookalike validation tag that other clients
+  received unchanged.
+- An unparseable directive in `RUST_LOG` no longer discards the whole
+  variable. The daemon previously fell back to `info` without saying so when
+  any directive failed to parse; it now keeps the valid directives and drops
+  only the bad ones.
+- A SIGHUP after any runtime mutation no longer logs false restart-required
+  `ERROR` lines ("config_epoch or [global].ebgp_requires_policy differs from
+  the live config", and "[global] changed" when the boolean was omitted) on
+  every reload until restart. The canonical rewrite makes an omitted
+  `config_epoch` or `ebgp_requires_policy` explicit without changing the
+  effective posture: epoch 1 with the boolean omitted becomes explicit
+  `false`, and epoch 2 with the boolean omitted becomes explicit `true`. The
+  reload now keeps the running values silently in that case. A real epoch or
+  enforcement-mode edit is still pinned and logged as restart-required.
+- A config store that never acknowledges a staged runtime-config candidate
+  no longer fail-stops the daemon. Before this fix, a hung or very slow
+  config filesystem kept the owned mutation waiting until the 30-minute
+  settlement budget expired, fenced it as `budget_expired` and exited 70,
+  although nothing had been applied. Waits before the first runtime effect
+  now end at a pre-effect deadline that reserves a tenth of the budget, up
+  to 30 seconds, before the budget expires. The mutation fails as
+  `UNAVAILABLE`, the late stage is discarded, and the daemon keeps running.
+  This covers the stage acknowledgement in FIB-table, neighbor, peer-group
+  and policy CRUD and config transactions, the FIB-table read in FIB-table
+  CRUD and in config transactions, the config-transaction persistence-slot
+  reservation, the peer-manager handoff in FIB-table, neighbor, peer-group
+  and policy CRUD until the command is accepted, and the peer-group `Set`
+  read.
+- `rbgp top` now exits when its terminal hangs up, for example when an SSH
+  session drops or a tmux server dies. Previously it kept running at a full
+  core and ignored SIGTERM and SIGHUP until killed with SIGKILL. Keys are now
+  read on a separate thread that watches the terminal for hangup, so the
+  display loop and the termination signals no longer wait behind a terminal
+  read. An `rbgp` command that fails after its terminal has hung up now exits
+  with status 1 instead of panicking with status 101.
+
+### Documentation
+
+- The operations reference and deployment guide gave the per-peer `RUST_LOG`
+  filter as `peer{peer_addr=10.0.0.1}=debug`. That form does not parse, so
+  it never selected the peer's events; how the daemon now handles an
+  unparseable directive is in the `RUST_LOG` entry under Fixed. Both now
+  give the bracketed `[peer{peer_addr=10.0.0.1}]=debug`. The operations
+  reference also says which events the span filter selects, and shows how to
+  select a peer's out-of-span events from the JSON log by the `peer` field.
+  CONTRIBUTING gains a logging-style section covering field names, `%` and
+  `?`, error fields and levels.
+- The `rbgp policy test` reference and `--help` text and the `TestPolicy`
+  API reference now state that an import dry run evaluates the retained
+  post-policy Adj-RIB-In: routes admitted by import policy when they were
+  received or last re-evaluated. Under an active GR/LLGR window, or before a
+  Route Refresh replay re-evaluates routes after an import-policy change, it
+  can hold routes the installed chain would now reject. The dry run does not
+  show routes a candidate would newly admit;
+  `rbgp rib received PEER --rejected` lists recent rejections within the
+  `[policy.reject_retention]` bound. See the
+  [`.rpol` reference](docs/reference/rpol-language.md#live-rib-policy-dry-runs).
+- The [quickstart](docs/tutorials/quickstart.md) now brings up a throwaway
+  FRR test peer and shows the expected `rbgp summary` output. Its reload
+  preview and explain commands run as written, the link-local neighbor is
+  marked as a placeholder, `rbgp doctor` runs before `rbgp shutdown --yes`,
+  and the kernel-dataplane drop-in moved out of the main install block.
+- The operations reference's `grpc_authz` audit queries read `tier`,
+  `result` and `principal` at the top level of each JSON log line, but the
+  daemon nests event fields under `.fields`, so the operator-only, denial and
+  per-principal queries matched nothing. They now read `.fields.*` and skip
+  the plain-text startup banner that shares the unit's journal. The same page
+  now describes current `RUST_LOG` handling (bad directives are dropped and
+  reported, valid ones kept), the management-listener accept-backoff log lines,
+  and the `rbgp top` terminal requirement.
+- Reference corrections: the settlement-watchdog guide's ten-minute
+  pre-ownership bound covers Confirm, Abort, Rollback and gNMI `Set` as well
+  as Apply; the policy resolution order now covers RFC 8212 deny-all for eBGP;
+  the reload matrix notes that an unedited canonical rewrite no longer pins the
+  RFC 8212 posture; `ListBlackholeDiscards` lists the emitted `reason` values;
+  `GetIpVrf` shows real not-ready lines; the Grafana guide says jemalloc is
+  the default allocator; and a known-issues entry describing a FlowSpec AFI
+  defect that does not exist was removed.
+- The `bgp_rib_prefixes` help text and the
+  [operations reference](docs/reference/operations.md) now name the
+  `afi_safi` values the gauge actually carries: `all` is IPv4 and IPv6
+  unicast combined, with each Add-Path path counted individually, and `evpn`
+  and `flowspec` are those tables; there is no per-family series such as
+  `ipv4_unicast`, so a selector for one matches nothing. The reference rows
+  for `bgp_rib_loc_prefixes` and `bgp_rib_adj_out_prefixes` note that their
+  `all` value is unicast too, and the example `BgpPeerAdjRibInEmpty` rule's
+  comment no longer describes `all` as an aggregate across every family.
+
+### Upgrade notes
+
+- **Downgrade to 0.71.0 needs a config edit.** The daemon's canonical config
+  writer always emits the new `[flowspec]` table (`validation = "off"` when
+  unset), and 0.71.0 rejects that table as an unknown field. After this
+  release persists the config once (any durable runtime change, such as
+  gRPC neighbor CRUD, a config transaction, or a rollback), 0.71.0 refuses
+  to start on it. Before rolling
+  the binary back, delete the `[flowspec]` table from the persisted file or
+  restore an older copy; restoring an older copy discards API-made changes
+  since the upgrade. Config-history rows written by this release cannot be
+  restored by 0.71.0 either. A persisted `[[ethernet_segments]]`
+  `recovery_delay_secs` is also written back as `recovery_delay_seconds`,
+  which 0.71.0 does not accept. The earlier spelling is still read as an
+  alias, and the reference docs and validation errors now use the new name.
+- `rbgp top` now requires a terminal on both stdin and stdout and checks this
+  before connecting. With either redirected (`rbgp top < /dev/null`,
+  `rbgp top > file`, `rbgp top | cat`) it exits 1 with `rbgp top needs an
+  interactive terminal on stdin and stdout`, where it previously wrote escape
+  codes into the file or drew through the pipe. An `rbgp` command that fails
+  after its terminal hangs up exits 1 instead of panicking with status 101.
+- `rbgp shutdown`, the global `rbgp policy chain set-import`, `set-export`,
+  `clear-import` and `clear-export`, and an all-peers `rbgp gshut` prompt for
+  confirmation when stdin and stdout are both terminals; an interactive shell
+  script running them on a terminal now stops at the prompt unless it passes
+  `--yes`. Non-interactive runs never prompt. Omitting both `--neighbor` and
+  the new `--global`/`--all` scope flag still selects the daemon-wide scope
+  but prints a deprecation warning on stderr; a future release makes that a
+  usage error (exit 2), so scripts should pass `--global` or `--all` now. An
+  empty or blank `--neighbor` on these commands is now a usage error (exit 2).
+  See the [operations reference](docs/reference/operations.md).
+- Peer-scoped views return `NOT_FOUND` for an address that names no known
+  peer. `rbgp rib received|advertised`, `rbgp evpn received|advertised`,
+  `rbgp flowspec received` and `rbgp bfd show` exit 1 with `Error: not found:
+  neighbor <address> not found` in text, `-j`, `--count` and `--json-lines`
+  output, where they previously printed an empty table or a zero count and
+  exited 0. API clients that treated an empty listing as "no such peer"
+  receive the status instead; the Birdwatcher adapter answers 404.
+- An IPv6 next hop on IPv4-unicast NLRI from a peer that did not negotiate
+  Extended Next Hop is now a malformed `MP_REACH_NLRI`: the session resets
+  with UPDATE Message Error / Optional Attribute Error (RFC 7606 §7.11),
+  counted in `bgp_update_malformed_total`, where the UPDATE was previously
+  ignored with a log line. A peer that sends that form without the
+  capability, such as GoBGP or ExaBGP over IPv6 transport to a neighbor
+  configured for IPv4 unicast only, now has its session reset; see
+  [the RFC notes](docs/reference/rfc-notes.md#rfc-8950--extended-next-hop).
+- RT-Constrain now filters EVPN export. A reflector client that negotiates
+  RT-Constrain and EVPN receives no EVPN routes until it advertises RT
+  membership, and then only the tenants it asked for; the default
+  (zero-length) membership restores the unfiltered feed. Before this release
+  such a peer received every EVPN route the export policy permitted.
+- Best-path selection can change in three places. A route received with the
+  `LLGR_STALE` community now loses to any fresh or GR-stale alternative,
+  whatever the LLGR state of its session, and explain reports the step as
+  `llgr_stale_community` (see the [explain guide](docs/how-to/explain.md)).
+  Between external peers, a received ORIGINATOR_ID no longer replaces the
+  peer's BGP Identifier in the identifier tie-break and a received
+  CLUSTER_LIST no longer lengthens the cluster-list tie-break, and such a
+  peer's routes are no longer dropped as reflection loops when the attributes
+  carry the local router ID or cluster ID. Each removal increments
+  `bgp_path_attribute_discarded_total{type_code="9"}` or `{type_code="10"}`,
+  so that counter is no longer limited to `discard_path_attributes`; pre-policy
+  BMP still mirrors the UPDATE as received.
+- Log events name a BGP peer's address in one field, `peer`. The previous
+  `address`, `peer_addr`, `peer_ip` and `addr` event fields are renamed, so a
+  log pipeline or alert that selects on them must select on `peer`; the
+  session span field `peer_addr` is unchanged. The gRPC
+  `grpc_tls_client_certificate` and `grpc_tls_client_certificate_expiry`
+  events rename `peer_addr` to `client` (the client's `address:port`, omitted
+  when unavailable), and the metrics endpoint's `metrics connection error`
+  event renames `peer` to `client`. The `adding peer from config` and
+  shutdown-time `rejecting inbound BGP connection` events log `peer` as the
+  bare address, and the rejected unconfigured link-local inbound event logs
+  the bare address with `port` and `scope_id` fields.
+- The gRPC TCP, gRPC Unix-socket and metrics listeners back off on descriptor
+  or memory exhaustion. The per-failure `metrics server accept error` record
+  is replaced by `listener accept failing; backing off` at `ERROR`, naming the
+  listener, logged on the first failure and then about once a minute while
+  exhaustion persists; `listener accept recovered` at `INFO` marks the end. A
+  listening socket that becomes unusable logs `listener socket unusable;
+  stopping its accept loop` and stops; for gRPC, that shuts the daemon down
+  through the existing listener-exit handling. Transient per-connection
+  accept errors now log at `DEBUG`.
+- Other log changes: collision log lines carry a `rule` field
+  (`no_primary_connection`, `primary_established`, `primary_state_unknown` or
+  `identifier_comparison`) and the primary's state; an RTR `retry_interval`
+  above 7200 seconds logs `RTR configured timer outside the §6 range,
+  bounded` with the configured and applied values; each unparseable
+  `RUST_LOG` directive is reported as one `warning:` line on stderr at startup
+  and on SIGHUP (the reload also logs a `warn` event), and a `RUST_LOG` that
+  is empty, comma-only or whitespace-only is now treated as unset (`info`)
+  instead of disabling all logging. The confirm-window automatic rollback
+  logs `confirmed config transaction auto-revert is overdue: waiting for the
+  runtime-config coordinator` ten minutes past the deadline, repeated every
+  ten minutes, and `rbgp config status` / `GetConfigTransactionStatus`
+  `human_text` says the same until the rollback runs or the transaction is
+  confirmed, aborted or re-armed.
+- Recovery fences and exit 70. A live policy-impact config transaction whose
+  re-apply reply is lost, or whose post-commit re-plan fails, no longer
+  returns `UNAVAILABLE`: it records `fence_reason="acknowledgement_lost"` or
+  `"known_divergence"`, blocks config mutations, exits 70 for supervised
+  recovery, and a confirmed apply boot-reverts from its retained authority on
+  restart (`known_divergence` also turns readiness red). A further SIGINT or
+  SIGTERM during coordinated shutdown fences an owned runtime-config
+  settlement with the new `fence_reason="operator_forced"`, logs the signal
+  line at `ERROR`, and ends in exit 70, which `Restart=on-failure` restarts; a
+  unit stopped with `systemctl stop` is not restarted. Conversely, a stalled
+  config store now yields an `UNAVAILABLE` error ("config persistence did not
+  stage the candidate in time", nothing applied) instead of exit 70; waits
+  after the first runtime effect keep the fail-stop contract. See
+  [settlement-watchdog.md](docs/how-to/settlement-watchdog.md#the-fence-reasons)
+  and [ADR-0127](docs/adr/0127-config-transaction-settlement-watchdog.md).
+- Shutdown: `SIGTERM`/`SIGINT` now always reach teardown unless an owned
+  runtime-config mutation is still settling. An unowned coordinator permit or
+  SIGHUP join is bounded at five seconds, after which the daemon logs what it
+  stopped waiting for, skips the optional warm checkpoint and continues; the
+  exit status is unchanged. A second `SIGTERM` or `SIGINT` with no owned
+  mutation means "stop waiting": it skips the waits that have no deadline
+  (the unowned permit, the EVPN IMET sweep, the peer-manager drain, the BMP
+  shutdown enqueue, and the RIB event stage) while bounded kernel, BFD, and
+  event-history cleanup still runs. A runtime-config mutation or SIGHUP reload that obtains the
+  coordinator after shutdown has begun is refused with `UNAVAILABLE`
+  (`runtime config coordinator is closed`) before it changes anything.
+  `TimeoutStopSec=32min` in the shipped unit is unchanged.
+- Config transaction abort and the confirm-timeout auto-revert restore the
+  recorded pre-commit snapshot without a token check, so a session flap no
+  longer fails them; a caller's own Plan→Apply token still goes stale on a
+  session change and must be re-planned. Config transaction confirm, abort
+  and rollback fail after ten minutes waiting for the coordinator with
+  `DEADLINE_EXCEEDED`, and gNMI `Set` with `UNAVAILABLE`, without any effect.
+- `rbgp fib-table list` no longer takes the runtime-config coordinator or
+  queries the FIB reconciler. It no longer blocks concurrent config
+  transactions or SIGHUP reloads, never shows an uncommitted candidate table,
+  and returns the committed tables immediately against a wedged reconciler
+  instead of waiting up to ten minutes. `runtime_available = true` now means
+  the reconciler was started and its command channel is open, not that it is
+  responsive; use the mutation response and `ListFibRoutes` for the apply
+  outcome.
+- `rbgp doctor --pre-upgrade` quotes the daemon's status text in the
+  `upgrade.transaction` detail for a pending transaction ("Confirmed config
+  transaction is awaiting confirmation.") and the following instruction now
+  starts "Confirm it", in human and `--json` output; the check's status and
+  exit code are unchanged. A shutdown after a component failure writes one
+  crash report to `<runtime_state_dir>/crash/` and `rbgp doctor` bundles, not
+  an extra "`JoinError` reason is not a panic" report.
+- `SubscribeFromEvent` can now deliver the cursor-gap
+  `BGP_EVENT_TYPE_STREAM_LAGGED` event mid-replay, not only as the first
+  response, with reason `retention evicted events during replay`; its
+  `missed_count` covers exactly the evicted ids of the global committed
+  stream. `bgp_event_outbox_cursor_gap_total` counts each such event. A
+  cursor whose whole replay range was already evicted, leaving the store
+  empty, now gets the leading gap event too, and no gap count includes ids
+  above the replay watermark, which still arrive from the live stream.
+- Metrics and alerts: the example `BgpPeerAdjRibInEmpty` alert no longer
+  carries an `afi_safi="all"` label, so routes or silences that match on it
+  need updating. `bgp_as_path_loop_detected_total` now advances for
+  loop-rejected EVPN and FlowSpec announcements and is described as announced
+  NLRI of every address family. New series: `bgp_rpki_cache_connected{cache}`
+  with the shipped `RpkiCacheDisconnected` alert and the `rbgp doctor` check
+  `rpki.cache.<addr>.session`; `fence_reason="operator_forced"` on the
+  settlement metrics; `work_unit="flowspec_validation"` on the RIB actor-work
+  histogram; and the `selection_release` seam of
+  `bgp_rib_readiness_query_wait_seconds`, which now records selection-deferral
+  release waits that were previously counted under the export-policy
+  transition seam. The opt-in `rbgp-json` envelope advances to version 1.1.
+- `rustbgpd.schema.json` gains `"rs"` and `"rs-client"` in the BGP role enum
+  and carries the validator's `minimum`/`maximum` bounds for
+  `duplicate_mac_detection` and `recovery_delay_seconds`; accepted configs are
+  unchanged.
+- `rs-config-render` output changes on the next render, and candidate hashes
+  change with it. In IXP Manager mode, accepted routes carry IXP Manager's
+  informational large communities, so looking-glass badges such as RPKI VALID
+  and IRRDB VALID appear after cutover; rejected routes still carry only the
+  adapter's `RS:1101:*` reason (see the
+  [IXP Manager cookbook](docs/cookbook/ixp-manager-route-server.md#the-boundary)).
+  In both modes the rendered hygiene policy and the route-server example stop
+  tagging RFC 8097 `OV_*` validation-state communities, so a member policy
+  that matched them loses that signal; configs derived from the example can
+  drop the `tag-ov-valid`, `tag-ov-not-found` and `tag-ov-invalid` terms and
+  their tests. In arouteserver mode, `reject_invalid: false` sites gain an
+  export policy that stops announcing ordinary RPKI-invalid routes to
+  members; `rs-hygiene.rpol` gains `scrub-rpki-ov-*`, `scrub-reject-cause-map`,
+  `scrub-custom-communities` and per-tag `scrub-*-tag` terms; an `ext` form
+  or malformed value of those communities or of the ARIN or registro.br tag,
+  and a client's non-empty `attach_custom_communities`, are refused with
+  exit 2; and a configured `rejected_route_announced_by` is refused under
+  every `reject_policy`. `rs-config-render recover rollback --apply` now exits
+  2 (`current restored, nothing changed`) when the daemon rejected the
+  rollback's reload without runtime effect, or 5 with `restoring current
+  could not be re-proven` (see the
+  [manual-recovery runbook](docs/cookbook/activation-manual-recovery.md#2-keep-the-candidate-or-roll-back)).
 
 ## [0.71.0] — 2026-09-20
 
