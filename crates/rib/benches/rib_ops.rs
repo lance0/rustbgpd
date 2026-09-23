@@ -797,6 +797,18 @@ fn bench_best_path_cmp(c: &mut Criterion) {
         });
     });
 
+    // Full tiebreak over rich attributes: 32 COMMUNITIES (none of them
+    // LLGR_STALE), extended/large communities, ORIGINATOR_ID, CLUSTER_LIST.
+    let a3 = make_route_with_attributes(prefix, 1, Arc::new(rich_attributes(1)));
+    let b3 = make_route_with_attributes(prefix, 2, Arc::new(rich_attributes(2)));
+    group.bench_function("rich_full_tiebreak", |bench| {
+        bench.iter(|| {
+            for _ in 0..1000 {
+                std::hint::black_box(best_path_cmp(&a3, &b3));
+            }
+        });
+    });
+
     group.finish();
 }
 
@@ -903,6 +915,24 @@ fn bench_loc_rib_steady(c: &mut Criterion) {
             },
             |mut rib| {
                 std::hint::black_box(rib.recompute(prefix, std::iter::empty::<&Route>()));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    // Route-server shape: one prefix with 32 rich-attribute paths that tie
+    // down to the peer-address step; the installed best is unchanged.
+    let rich_paths: Vec<Route> = (1..=32)
+        .map(|i| make_route_with_attributes(prefix, i, Arc::new(rich_attributes(1))))
+        .collect();
+    group.bench_function("unchanged_32_rich_paths", |b| {
+        b.iter_batched(
+            || {
+                let mut rib = Box::new(LocRib::new());
+                assert!(rib.recompute(prefix, rich_paths.iter()));
+                rib
+            },
+            |mut rib| {
+                std::hint::black_box(rib.recompute(prefix, rich_paths.iter()));
             },
             BatchSize::SmallInput,
         );

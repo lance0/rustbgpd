@@ -12,7 +12,7 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // Aliased to the std name so the storage types read unchanged.
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
-use crate::best_path::{best_path_cmp, compare_bgp_identifier};
+use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
@@ -125,10 +125,13 @@ impl LocRib {
         prefix: Prefix,
         candidates: impl Iterator<Item = &'a Route>,
     ) -> bool {
+        // Rank each candidate once, so the LLGR_STALE community scan runs
+        // N times rather than twice per comparison.
         let best = candidates
             .filter(|route| crate::srv6::unicast_eligible(route))
-            .min_by(|a, b| best_path_cmp(a, b))
-            .cloned();
+            .map(|route| (route, stale_rank(route)))
+            .min_by(|&(a, rank_a), &(b, rank_b)| best_path_cmp_ranked(a, rank_a, b, rank_b))
+            .map(|(route, _)| route.clone());
 
         if let Some(new_best) = best {
             // Detect preference-relevant changes AND same-peer payload
@@ -789,14 +792,11 @@ impl LocRib {
     }
 }
 
-/// Three-tier stale ranking for EVPN: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Three-tier stale ranking for EVPN: fresh (0) > GR-stale (1) > LLGR-stale (2),
+/// via [`crate::best_path::stale_tier`] (a received `LLGR_STALE` ranks 2).
 /// Lower value = more preferred.
 fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 /// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
@@ -827,7 +827,8 @@ pub(crate) fn evpn_cmp_with_reason(
 ) -> (Ordering, crate::best_path::BestPathReason) {
     use crate::best_path::BestPathReason as R;
     // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
-    //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
+    //    per RFC 4724 §4.2 / RFC 9494 §4.3/§4.4; a received LLGR_STALE
+    //    community ranks as LLGR-stale. LLGR promotion clears
     //    `is_stale` and sets `is_llgr_stale` (see AdjRibIn::promote_evpn_to_llgr_stale),
     //    so a single rank function avoids the inversion that two independent
     //    bool comparisons would cause when the bools are not nested.
@@ -835,9 +836,21 @@ pub(crate) fn evpn_cmp_with_reason(
     //    Runs BEFORE the Type 2 MAC Mobility head — otherwise a stale route
     //    with a higher MAC Mobility sequence (or sticky bit) would beat a
     //    fresh alternative inside the head and skip this check entirely.
-    match evpn_stale_rank(a).cmp(&evpn_stale_rank(b)) {
+    let (tier_a, tier_b) = (evpn_stale_rank(a), evpn_stale_rank(b));
+    match tier_a.cmp(&tier_b) {
         Ordering::Equal => {}
-        other => return (other, R::StalePreference),
+        Ordering::Less => {
+            return (
+                Ordering::Less,
+                crate::best_path::stale_tier_reason(tier_b, b.is_llgr_stale),
+            );
+        }
+        Ordering::Greater => {
+            return (
+                Ordering::Greater,
+                crate::best_path::stale_tier_reason(tier_a, a.is_llgr_stale),
+            );
+        }
     }
 
     // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
@@ -917,6 +930,12 @@ pub(crate) fn evpn_reason_detail(
             evpn_stale_rank(a),
             evpn_stale_rank(b)
         ),
+        R::LlgrStaleCommunity => format!(
+            "freshness rank {} versus {} (fresh=0, GR-stale=1, LLGR-stale=2; \
+             received LLGR_STALE community)",
+            evpn_stale_rank(a),
+            evpn_stale_rank(b)
+        ),
         R::EvpnMacMobility => {
             let (a_sticky, a_sequence) = extract_mac_mobility(a);
             let (b_sticky, b_sequence) = extract_mac_mobility(b);
@@ -970,11 +989,7 @@ fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
 /// unicast `best_path::stale_rank` — separate `is_stale` / `is_llgr_stale`
 /// comparisons would invert because LLGR promotion clears `is_stale`.
 fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
@@ -1097,11 +1112,7 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
 }
 
 fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 fn bgpls_origin(route: &BgpLsRibRoute) -> Origin {
@@ -1233,11 +1244,7 @@ fn vpn_cmp_chain(
 }
 
 fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 fn vpn_origin(route: &VpnRibRoute) -> Origin {
@@ -1370,11 +1377,7 @@ fn labeled_cmp_chain(
 }
 
 fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 fn labeled_origin(route: &LabeledRibRoute) -> Origin {
@@ -1458,11 +1461,7 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
 }
 
 fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
-    if route.is_llgr_stale {
-        2
-    } else {
-        u8::from(route.is_stale)
-    }
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
 }
 
 fn rtc_origin(route: &RtcRibRoute) -> Origin {
@@ -3350,6 +3349,125 @@ mod tests {
         llgr.is_stale = false;
         llgr.is_llgr_stale = true;
         assert_eq!(evpn_tiebreak_simple(&fresh, &llgr), Ordering::Less);
+    }
+
+    // ---- Received LLGR_STALE is least preferred (RFC 9494 §4.3/§4.4) ----
+    //
+    // Each pair: `tagged` arrived carrying LLGR_STALE with LOCAL_PREF 200
+    // and its local `is_llgr_stale` flag clear; `fresh` is untagged with
+    // LOCAL_PREF 100. The fresh route must win in every family.
+
+    fn llgr_stale_community() -> PathAttribute {
+        PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE])
+    }
+
+    fn tag_llgr_stale(attributes: &mut Arc<Vec<PathAttribute>>) {
+        Arc::make_mut(attributes).push(llgr_stale_community());
+    }
+
+    #[test]
+    fn unicast_received_llgr_stale_loses_to_fresh_v4_and_v6() {
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24);
+        let v6 = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
+        for prefix in [Prefix::V4(v4), Prefix::V6(v6)] {
+            let mut tagged = make_route(1, v4, 200);
+            let mut fresh = make_route(2, v4, 100);
+            for route in [&mut tagged, &mut fresh] {
+                route.prefix = prefix;
+                route.origin_type = RouteOrigin::Ibgp;
+            }
+            tag_llgr_stale(&mut tagged.attributes);
+            let mut loc = LocRib::new();
+            assert!(loc.recompute(prefix, [&tagged, &fresh].into_iter()));
+            assert_eq!(
+                loc.get(&prefix).unwrap().peer,
+                fresh.peer,
+                "{prefix}: received LLGR_STALE must be least preferred"
+            );
+        }
+    }
+
+    #[test]
+    fn vpn_received_llgr_stale_loses_to_fresh() {
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = nlri.key();
+        let mut tagged = make_vpn_route(nlri.clone(), 1, 200);
+        tag_llgr_stale(&mut tagged.attributes);
+        let fresh = make_vpn_route(nlri, 2, 100);
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_vpn(key, [&tagged, &fresh].into_iter()));
+        assert_eq!(loc.get_vpn(&key).unwrap().peer, fresh.peer);
+    }
+
+    /// §4.4 boundary: two received-tagged VPN routes tie-break normally.
+    #[test]
+    fn vpn_two_received_llgr_stale_tie_break_normally() {
+        let nlri = vpn_nlri([10, 0, 1, 0], 24, 100);
+        let key = nlri.key();
+        let mut high = make_vpn_route(nlri.clone(), 1, 200);
+        let mut low = make_vpn_route(nlri, 2, 100);
+        tag_llgr_stale(&mut high.attributes);
+        tag_llgr_stale(&mut low.attributes);
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_vpn(key, [&low, &high].into_iter()));
+        assert_eq!(loc.get_vpn(&key).unwrap().peer, high.peer);
+    }
+
+    #[test]
+    fn rr_families_received_llgr_stale_loses_to_fresh() {
+        let mut results = Vec::new();
+
+        let labeled = labeled_nlri([10, 0, 1, 0], 24, 100);
+        let mut tagged = make_labeled_route(labeled.clone(), 1, 200);
+        tag_llgr_stale(&mut tagged.attributes);
+        let fresh = make_labeled_route(labeled, 2, 100);
+        results.push(("labeled", labeled_tiebreak(&fresh, &tagged)));
+
+        let rtc = rtc_test_nlri(100);
+        let mut tagged = make_rtc_route(rtc, 1, 200);
+        tag_llgr_stale(&mut tagged.attributes);
+        let fresh = make_rtc_route(rtc, 2, 100);
+        results.push(("rtc", rtc_tiebreak(&fresh, &tagged)));
+
+        let mut tagged = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 1);
+        Arc::make_mut(&mut tagged.attributes).push(PathAttribute::LocalPref(200));
+        tag_llgr_stale(&mut tagged.attributes);
+        let mut fresh = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 2);
+        Arc::make_mut(&mut fresh.attributes).push(PathAttribute::LocalPref(100));
+        results.push(("bgp-ls", bgpls_tiebreak(&fresh, &tagged)));
+
+        let tagged = make_flowspec_route(
+            1,
+            1,
+            vec![PathAttribute::LocalPref(200), llgr_stale_community()],
+            RouteOrigin::Ibgp,
+        );
+        let fresh =
+            make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ibgp);
+        results.push(("flowspec", flowspec_tiebreak(&fresh, &tagged)));
+
+        // `make_evpn_type2` seeds LOCAL_PREF 100; raise the tagged one.
+        let mut tagged = make_evpn_type2(1, vec![llgr_stale_community()]);
+        let attributes = Arc::make_mut(&mut tagged.attributes);
+        attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
+        attributes.push(PathAttribute::LocalPref(200));
+        let fresh = make_evpn_type2(2, vec![]);
+        results.push(("evpn", evpn_tiebreak_simple(&fresh, &tagged)));
+        let losers: Vec<_> = results
+            .iter()
+            .filter(|(_, ordering)| *ordering != Ordering::Less)
+            .collect();
+        assert!(
+            losers.is_empty(),
+            "the fresh route must beat the received LLGR_STALE route: {losers:?}"
+        );
+        assert_eq!(
+            evpn_cmp_with_reason(&tagged, &fresh),
+            (
+                Ordering::Greater,
+                crate::best_path::BestPathReason::LlgrStaleCommunity
+            )
+        );
     }
 
     /// Regression: a GR-stale Type 2 route with a HIGHER MAC Mobility

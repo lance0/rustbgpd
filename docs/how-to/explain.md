@@ -69,7 +69,10 @@ carried ORIGINATOR_ID and as `lower_bgp_identifier` when at least one
 side was compared by its advertising peer's BGP Identifier (RFC 4456 §9
 substitution); it precedes `shorter_cluster_list`, and a locally
 originated route, which has no BGP Identifier, wins it against any
-session-learned route (detail `bgp_identifier local < ...`):
+session-learned route (detail `bgp_identifier local < ...`). A path that
+arrived carrying the `LLGR_STALE` community is least preferred (RFC 9494
+§4.3/§4.4) and reports as `llgr_stale_community`; `stale_preference` names
+local GR or LLGR stale state:
 
 ```console
 $ rbgp rib --prefix 203.0.113.0/24 --explain
