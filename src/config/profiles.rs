@@ -37,7 +37,7 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
 /// posture is a choice.
 const LAB: &str = r#"# rustbgpd "lab" profile — a minimal local setup for experimenting on
 # one machine. Edit the ASNs and addresses for your topology, then:
-#   rustbgpd config-lab.toml          # (after saving this output)
+#   rustbgpd config.toml              # (after saving this output)
 #   rbgp -s unix:///tmp/rustbgpd/grpc.sock neighbor
 
 [global]
@@ -49,9 +49,10 @@ listen_port = 179
 runtime_state_dir = "/tmp/rustbgpd"
 # RFC 8212: an eBGP neighbor with no explicit policy carries nothing in
 # that direction. The chains below are what make this session pass
-# traffic, so deleting one stops the session instead of quietly falling
-# back to permit-all. Startup-only — SIGHUP keeps the running value, so
-# changing it takes a daemon restart.
+# traffic, so deleting one leaves the session up but carrying no routes
+# in that direction instead of quietly falling back to permit-all.
+# Startup-only — SIGHUP keeps the running value, so changing it takes a
+# daemon restart.
 ebgp_requires_policy = true
 
 [global.telemetry]
@@ -78,10 +79,10 @@ mode = 0o600
 # Replace both with real prefix / AS_PATH / community rules before this
 # config peers with anything you do not own.
 #
-# They are spelled out rather than omitted on purpose: omitting them is the
-# same permit-all, and nothing downstream can then tell an operator who meant
-# it from one who forgot. Written out, `rustbgpd --check --strict` is clean
-# and this comment is the record of the choice.
+# They are spelled out rather than omitted on purpose: with
+# ebgp_requires_policy = true above, omitting them rejects every route under
+# RFC 8212 instead of permitting it. Written out, `rustbgpd --check --strict`
+# is clean and this comment is the record of the choice.
 [policy.definitions.lab-permit-all-import]
 default_action = "permit"
 
@@ -388,6 +389,27 @@ mod tests {
                 toml.contains(pointer),
                 "route-server profile must point operators to {pointer}"
             );
+        }
+    }
+
+    #[test]
+    fn lab_profile_comments_match_its_rfc8212_posture() {
+        let toml = profile_toml("lab").expect("lab profile must resolve");
+        let config =
+            Config::load_toml_with_diagnostics(toml, "lab").expect("lab profile must validate");
+
+        // The comments explain what enforcement does to a missing chain;
+        // they are only true while enforcement is on and both chains exist.
+        assert_eq!(config.global.ebgp_requires_policy, Some(true));
+        assert_eq!(config.policy.import_chain, ["lab-permit-all-import"]);
+        assert_eq!(config.policy.export_chain, ["lab-permit-all-export"]);
+        // The quickstart saves this output as `config.toml`.
+        assert!(toml.contains("#   rustbgpd config.toml "));
+        // Claims observed false under RFC 8212 enforcement: omission
+        // rejects instead of permitting, and a missing chain leaves the
+        // session Established with no routes in that direction.
+        for stale in ["same permit-all", "stops the session", "config-lab.toml"] {
+            assert!(!toml.contains(stale), "lab profile still says {stale:?}");
         }
     }
 
