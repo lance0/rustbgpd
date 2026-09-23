@@ -4,7 +4,9 @@
 //! fixture proves the implausible-set abort and every other case is a
 //! targeted mutation of the same context.
 
-use rs_config_render::{Exit, Options, RenderError, render};
+use rs_config_render::{
+    Exit, Options, RenderError, SiteLocalFile, SiteLocalInput, render, render_site_local,
+};
 use rustbgpd_policy::rpol::run_rpol_tests;
 
 const FIXTURE: &str = include_str!("fixtures/context-small.yml");
@@ -201,11 +203,25 @@ fn hygiene_never_tags_rpki_validation_state() {
     }
 }
 
-/// Pins today's behavior: `reject_invalid: false` drops both RPKI-invalid
-/// rejects, so invalid routes are accepted and announced to members
-/// (arouteserver withholds them on export instead).
+/// `reject_invalid: true` rejects RPKI-invalid routes on import.
+/// `reject_invalid: false` keeps them, and `rs-rpki-invalid-export` leads
+/// every export chain, ahead of site hooks and blackhole policy, so no client
+/// receives them.
 #[test]
 fn rpki_invalid_rejects_follow_reject_invalid() {
+    let site = SiteLocalInput {
+        merge: SiteLocalFile {
+            source_path: "merge.toml".into(),
+            bytes: b"[policy]\nexport_chain = [\"site-all\"]\n\
+                     [[neighbors]]\naddress = \"192.0.2.11\"\nexport_policy_chain = [\"site-peer\"]\n"
+                .to_vec(),
+        },
+        policies: vec![SiteLocalFile {
+            source_path: "site.rpol".into(),
+            bytes: b"policy site-all { term t { accept } }\npolicy site-peer { term t { accept } }\n"
+                .to_vec(),
+        }],
+    };
     for reject_invalid in [true, false] {
         for blackhole in [false, true] {
             let mut value = healthy_value();
@@ -227,19 +243,95 @@ fn rpki_invalid_rejects_follow_reject_invalid() {
                     serde_yaml::Value::String("65500:666".to_owned()),
                 );
             }
+            let case = format!("reject_invalid = {reject_invalid}, blackhole = {blackhole}");
             let rendered = render(&to_yaml(&value), &rtr_options()).expect("render");
             let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
             assert_eq!(
                 hygiene.contains("term reject-rpki-invalid "),
                 reject_invalid,
-                "reject_invalid = {reject_invalid}, blackhole = {blackhole}:\n{hygiene}"
+                "{case}:\n{hygiene}"
             );
             if blackhole {
                 let client = &rendered.files["policy/client-as4242-1.rpol"];
                 assert_eq!(
                     client.contains("term reject-ordinary-rpki-invalid "),
                     reject_invalid,
-                    "reject_invalid = {reject_invalid}:\n{client}"
+                    "{case}:\n{client}"
+                );
+            }
+
+            let export = !reject_invalid;
+            assert_eq!(
+                hygiene.contains(
+                    "policy rs-rpki-invalid-export {\n\
+                     \x20   # Blackhole requests are not origin-validated.\n\
+                     \x20   term announce-blackhole-request { if (route.family == ipv4-unicast) && route.communities has BLACKHOLE { accept } }\n\
+                     \x20   term deny-rpki-invalid { if route.rpki == invalid { reject } }\n}"
+                ),
+                export && blackhole,
+                "{case}:\n{hygiene}"
+            );
+            assert_eq!(
+                hygiene.contains(
+                    "policy rs-rpki-invalid-export {\n\
+                     \x20   term deny-rpki-invalid { if route.rpki == invalid { reject } }\n}"
+                ),
+                export && !blackhole,
+                "{case}:\n{hygiene}"
+            );
+            assert_eq!(
+                hygiene.contains("expect rs-rpki-invalid-export == reject"),
+                export,
+                "{case}"
+            );
+            let report = run_rpol_tests(hygiene).unwrap();
+            assert!(report.all_passed(), "{case}: {:?}", report.failures);
+
+            let head = if export {
+                "\"rs-rpki-invalid-export\", "
+            } else {
+                ""
+            };
+            let base = if blackhole {
+                "rs-blackhole-export-1"
+            } else {
+                "rs-transparent-export"
+            };
+            let config = &rendered.files["config.toml"];
+            assert!(
+                config.contains(&format!(
+                    "\nexport_chain = [{head}\"rs-transparent-export\"]\n"
+                )),
+                "{case}:\n{config}"
+            );
+            if blackhole {
+                assert!(
+                    config.contains(&format!("\nexport_policy_chain = [{head}\"{base}\"]\n")),
+                    "{case}:\n{config}"
+                );
+            }
+
+            let with_site =
+                render_site_local(&to_yaml(&value), &rtr_options(), &site).expect("site render");
+            let config = &with_site.files["config.toml"];
+            let peer = format!("[{head}\"site-all\", \"site-peer\", \"{base}\"]");
+            let other = format!("[{head}\"site-all\", \"{base}\"]");
+            assert!(
+                config.contains(&format!("\nexport_policy_chain = {peer}\n")),
+                "{case}:\n{config}"
+            );
+            let chains: Vec<String> = with_site.receipt["site_local"]["final_neighbors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["export_policy_chain"].to_string().replace(',', ", "))
+                .collect();
+            assert_eq!(chains[0], peer, "{case}");
+            if !blackhole {
+                assert_eq!(chains[1], other, "{case}");
+                assert!(
+                    config.contains(&format!("\nexport_policy_chain = {other}\n")),
+                    "{case}:\n{config}"
                 );
             }
         }

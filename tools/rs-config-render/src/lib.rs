@@ -1038,6 +1038,8 @@ struct ResolvedClient<'a> {
     blackhole: Option<ResolvedBlackhole>,
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
+    /// Lead the export chain with [`RPKI_INVALID_EXPORT`].
+    deny_rpki_invalid_export: bool,
     tag_and_reject: bool,
     /// IPv4 unicast rides this IPv6 session with an IPv6 next hop.
     rfc8950: bool,
@@ -1217,8 +1219,11 @@ fn validate_site_local(
         .map_err(|error| RenderError::Refused(vec![format!("merge TOML is not UTF-8: {error}")]))?;
     let merge: SiteMerge = toml::from_str(merge_text)
         .map_err(|error| RenderError::Refused(vec![format!("invalid merge TOML: {error}")]))?;
-    let mut generated =
-        BTreeSet::from(["rs-hygiene".to_owned(), "rs-transparent-export".to_owned()]);
+    let mut generated = BTreeSet::from([
+        "rs-hygiene".to_owned(),
+        "rs-transparent-export".to_owned(),
+        RPKI_INVALID_EXPORT.to_owned(),
+    ]);
     generated.extend(
         clients
             .iter()
@@ -2488,6 +2493,7 @@ fn resolve_clients<'a>(
             },
             reject_rpki_invalid: ctx.cfg.filtering.rpki_bgp_origin_validation.enabled
                 && ctx.cfg.filtering.rpki_bgp_origin_validation.reject_invalid,
+            deny_rpki_invalid_export: deny_rpki_invalid_export(ctx),
             tag_and_reject,
             rfc8950,
             white_list_routes,
@@ -2658,7 +2664,12 @@ fn render_toml(
             let _ = writeln!(out, "    \"{path}\",");
         }
     }
-    out.push_str("]\nexport_chain = [\"rs-transparent-export\"]\n");
+    out.push_str(if deny_rpki_invalid_export(ctx) {
+        "]\n# RPKI-invalid routes stay in the Adj-RIB-In but are never announced.\n\
+         export_chain = [\"rs-rpki-invalid-export\", \"rs-transparent-export\"]\n"
+    } else {
+        "]\nexport_chain = [\"rs-transparent-export\"]\n"
+    });
 
     for rc in clients {
         let slug = &rc.slug;
@@ -2751,7 +2762,12 @@ fn render_toml(
                 rc.slug
             );
             if let Some(export) = client_exports.get(&rc.slug) {
-                let _ = writeln!(out, "export_policy_chain = [\"{export}\"]");
+                let head = if rc.deny_rpki_invalid_export {
+                    format!("\"{RPKI_INVALID_EXPORT}\", ")
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(out, "export_policy_chain = [{head}\"{export}\"]");
             }
         }
         if rc.add_path {
@@ -2789,7 +2805,11 @@ fn site_chains(
             .flat_map(|hook| hook.import_policy_chain.iter().cloned()),
     );
     import.push(format!("client-{}", client.slug));
-    let mut export = site.merge.policy.export_chain.clone();
+    let mut export = Vec::new();
+    if client.deny_rpki_invalid_export {
+        export.push(RPKI_INVALID_EXPORT.to_owned());
+    }
+    export.extend(site.merge.policy.export_chain.iter().cloned());
     export.extend(
         hooks
             .into_iter()
@@ -3149,6 +3169,9 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     out.push_str("policy rs-hygiene {\n");
     out.push_str(&terms);
     out.push_str("}\n");
+    if deny_rpki_invalid_export(ctx) {
+        render_rpki_invalid_export(ctx, &mut out, &mut tests);
+    }
     if !tests.is_empty() {
         out.push('\n');
         out.push_str("# In-language tests, run by `rbgp policy check`.\n");
@@ -3208,6 +3231,66 @@ fn render_pref_len_window(
         let _ = write!(
             tests,
             "test {tag}-default-route-is-rejected {{\n    route {{ prefix {root} }}\n    expect rs-hygiene == reject\n}}\n"
+        );
+    }
+}
+
+/// Export policy that keeps RPKI-invalid routes from every client.
+const RPKI_INVALID_EXPORT: &str = "rs-rpki-invalid-export";
+
+/// With `reject_invalid: false`, ARouteServer keeps INVALID routes but never
+/// announces them to clients. With `reject_invalid: true` the shared import
+/// hygiene rejects them, and a VRP change re-runs import through Route Refresh.
+fn deny_rpki_invalid_export(ctx: &Context) -> bool {
+    let rpki = &ctx.cfg.filtering.rpki_bgp_origin_validation;
+    rpki.enabled && !rpki.reject_invalid
+}
+
+/// Leads every client's export chain, ahead of site hooks and blackhole
+/// policy. Authorized blackhole requests carry `BLACKHOLE` after client import
+/// and pass: ARouteServer does not origin-validate them, and their
+/// more-specifics are usually INVALID by maxLength.
+fn render_rpki_invalid_export(ctx: &Context, out: &mut String, tests: &mut String) {
+    let blackhole = &ctx.cfg.blackhole_filtering;
+    let mut families = Vec::new();
+    if blackhole.policy_ipv4.is_some() {
+        families.push("route.family == ipv4-unicast");
+    }
+    if blackhole.policy_ipv6.is_some() {
+        families.push("route.family == ipv6-unicast");
+    }
+    let _ = write!(
+        out,
+        "\n# RPKI-invalid routes stay in the Adj-RIB-In but are never announced to\n\
+         # clients. This policy leads every client's export chain.\n\
+         policy {RPKI_INVALID_EXPORT} {{\n"
+    );
+    if !families.is_empty() {
+        let _ = writeln!(
+            out,
+            "    # Blackhole requests are not origin-validated.\n\
+             \x20   term announce-blackhole-request {{ if ({}) && route.communities has BLACKHOLE {{ accept }} }}",
+            families.join(" || ")
+        );
+    }
+    out.push_str("    term deny-rpki-invalid { if route.rpki == invalid { reject } }\n}\n");
+    let _ = write!(
+        tests,
+        "test rpki-invalid-is-not-exported {{\n    route {{ family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\"; rpki invalid }}\n    expect {RPKI_INVALID_EXPORT} == reject\n}}\n\
+         test rpki-not-found-is-exported {{\n    route {{ family ipv4-unicast; prefix 203.0.113.0/24; as-path \"3333\" }}\n    expect {RPKI_INVALID_EXPORT} == accept\n}}\n"
+    );
+    let request = if blackhole.policy_ipv4.is_some() {
+        Some(("ipv4-unicast", "203.0.113.66/32"))
+    } else {
+        blackhole
+            .policy_ipv6
+            .is_some()
+            .then_some(("ipv6-unicast", "2001:db8::66/128"))
+    };
+    if let Some((family, prefix)) = request {
+        let _ = write!(
+            tests,
+            "test rpki-invalid-blackhole-request-is-exported {{\n    route {{ family {family}; prefix {prefix}; communities [BLACKHOLE]; as-path \"3333\"; rpki invalid }}\n    expect {RPKI_INVALID_EXPORT} == accept\n}}\n"
         );
     }
 }
