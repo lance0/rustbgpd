@@ -312,6 +312,15 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   are equal for an eBGP collision, RFC 6286 §2.3 keeps the connection
   initiated by the speaker with the larger AS number, including a
   four-octet AS number.
+- The comparison applies only while the configured session is in
+  OpenSent or OpenConfirm, with the peer's identifier taken from the
+  inbound connection's OPEN. The configured session's state is read when
+  that OPEN arrives, not when the connection was accepted.
+- A configured session in Idle, Connect or Active has no connection to
+  collide with (RFC 4271 §6.8), so the inbound connection replaces it
+  without a Cease; its outbound connect attempt and reconnect timer stop.
+- A configured session that is already Established keeps its connection;
+  the inbound one is closed with Cease 6/7.
 
 ### §8 — Finite State Machine
 
