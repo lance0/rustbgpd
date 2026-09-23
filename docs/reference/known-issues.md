@@ -29,8 +29,8 @@ resolved.
   retrying the read. Typed admission reduces specific actor waits; the
   [operator-read design](../adr/0132-operator-read-path.md) adds temporary RIB
   summaries for synchronous policy replacement and dataset reevaluation,
-  plus read service between queued RIB work units. Final phase coverage and
-  qualifying soak remain outstanding. General RIB queries retain their
+  plus read service between queued RIB work units. Final phase coverage
+  remains outstanding. General RIB queries retain their
   consistency fences, incomplete restoration can fence live peer-manager
   reads, and remaining import-read latency can still arise in peer-manager
   selection, publication collection, or response delivery. Installed import
@@ -39,9 +39,18 @@ resolved.
   The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
   records CPU placement, complete call results and remaining stale observations.
   The paired native rollback cell passes on both baseline and candidate; it
-  does not establish a general deadline guarantee. This issue stays open
-  until the final phase coverage and qualifying soak pass on the final runtime
-  candidate. Retrying an operator command does not
+  does not establish a general deadline guarantee. The route-server flagship
+  soak, which runs `rbgp policy stats --direction both` every 5 s through
+  serialized SIGHUP reloads, passed on v0.70.0
+  ([2026-09-14](../soaks/soak-rs-flagship-24h-2026-09-14.md), a pass under
+  the current gates on reanalysis; the original on-host verdict failed a
+  since-superseded metrics-cadence rule) and on the v0.71.0 tag
+  ([2026-09-21](../soaks/soak-rs-flagship-24h-2026-09-21.md)). In the
+  v0.71.0 run the slowest `policy stats` read took 1969 ms, 31 ms under the
+  2 s deadline. Both runs are IPv4-only; no dual-stack soak has run, and a
+  soak covers only the tag it ran on. This issue stays open until the final
+  phase coverage passes on the final runtime candidate. Retrying an operator
+  command does not
   turn a failed management-soak sample into a pass. See the
   [policy stats contract](api.md#policyservice).
 
@@ -311,7 +320,8 @@ resolved.
   `docs/project/roadmap.md`.
 
 - **RFC 8326 initiator toggle does not persist across daemon restart.**
-  `rbgp gshut --peer X` flips a runtime bool on `ManagedPeer`
+  `rbgp gshut --neighbor X` (or `rbgp gshut --all --yes` for every peer)
+  flips a runtime bool on `ManagedPeer`
   + the corresponding session, and triggers a RIB refresh so the
   community appears on the wire. The toggle survives session flaps
   and collision-replaces during the daemon's lifetime, but is lost
@@ -500,10 +510,3 @@ resolved.
   `true`), silently discarding the original flag on round-trip. This is
   safe for all normal use but means a decode→encode cycle is not
   perfectly lossless for malformed inputs with incorrect flags.
-- **FlowSpec AFI defaults to IPv4 when no destination prefix component.**
-  A FlowSpec rule with no destination prefix component (e.g., "drop all
-  UDP") received on an IPv6 FlowSpec session is stored with
-  `afi: Afi::Ipv4` implicitly via the MpReachNlri AFI. This is correct
-  per wire semantics (the AFI comes from the MP_REACH attribute, not the
-  rule itself) but worth noting — the AFI is always set correctly from
-  the MP_REACH/MP_UNREACH framing.

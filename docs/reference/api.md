@@ -2136,11 +2136,17 @@ Returns one row per currently observed best route carrying the RFC 7999
 `BLACKHOLE` community when the opt-in FIB reconciler is active. `state` is a
 `BlackholeDiscardState` enum (`BLACKHOLE_DISCARD_STATE_INSTALLED`,
 `BLACKHOLE_DISCARD_STATE_REJECTED`, or `BLACKHOLE_DISCARD_STATE_FAILED`);
-`reason` carries values such as `installed`, `owned`, `broad_prefix`,
-`not_ebgp`, `active_limit_exceeded`, `install_rate_limited`,
-`foreign_route_exists`, `lookup_failed`, `remove_failed`, or the kernel
-install error string. Both limit reasons are retryable and may transition to
-installed when active capacity or a token becomes available.
+`reason` carries values such as `installed`, `owned`, `adopted`,
+`adopted_pending_reap`, `broad_prefix`, `not_ebgp`, `active_limit_exceeded`,
+`install_rate_limited`, `route_churn_deferred`, `foreign_route_exists`,
+`ownership_state_unavailable`, `dump_failed`, `remove_failed`, `reap_failed`,
+or the kernel install error string. Both limit reasons are retryable and may
+transition to installed when active capacity or a token becomes available.
+Discard routes adopted from a previous run at startup are also listed: a
+leftover that no BGP route has claimed yet appears as `adopted_pending_reap`
+with an unspecified peer (`0.0.0.0` or `::`) until it is reaped (`reap_failed`
+if the kernel removal fails); one that a BLACKHOLE best route re-claims is
+reported as `adopted` with that route's peer.
 An empty list means either the reconciler is disabled or no BLACKHOLE-marked
 best routes are currently visible.
 
@@ -3049,8 +3055,11 @@ rbgp evpn managed-netdevs --json
 
 Returns the same row as `ListIpVrfs` plus, when `readiness_state` is
 not `Ready`, the `not_ready_reasons` list — one entry per failing
-ADR-0058 §3 predicate (e.g., `vrf_table_id_mismatch`,
-`l3vxlan_router_mac_mismatch`). `remote_prefix_drop_counts` reports the
+ADR-0058 §3 predicate, such as
+`vrf table_id mismatch (observed 0, configured 100)` or
+`l3vxlan device down`. These are human-readable lines, not machine tokens;
+structured consumers should use `readiness_state` and the row's field values.
+`remote_prefix_drop_counts` reports the
 current bounded receive-side Type 5 projection drops for this IP-VRF.
 
 ```bash

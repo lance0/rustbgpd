@@ -14,7 +14,8 @@ lives in the source — `neighbor_runtime_equal()`, `config_field_impact()`,
 `src/config/mod.rs`), `reload.rs` (the route dispatch, the sequential
 changed-neighbor hot/rebuild partition, `pin_unreconciled_daemon_runtime_fields`, and the
 per-section error/warn arms) together with the pinning helpers
-`pin_tcp_ao_startup_only_runtime` / `pin_bfd_startup_only_runtime` it
+`pin_tcp_ao_startup_only_runtime` / `pin_bfd_startup_only_runtime` /
+`pin_rfc8212_posture_startup_only` it
 invokes from `src/config/mod.rs`, and
 the parse-time `ConfigError` family in `src/config/validation.rs`. If
 the matrix and the code disagree, the code is right and the matrix has a
@@ -343,11 +344,13 @@ Disjoint unprotected range edits can still reload normally.
 
 The `[global]` section is mostly restart-required because its values
 feed daemon-wide subsystems (router-id, listen socket, telemetry sinks)
-that are stood up once at startup. Two flags are hot-pluggable.
+that are stood up once at startup. Three fields are not restart-required:
+`honor_graceful_shutdown`, `honor_blackhole` (with a FIB-discard caveat), and
+`dynamic_neighbor_limit`.
 
 | Field | Class | Notes |
 |---|---|---|
-| root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Epoch 2 with an omitted boolean resolves to the activated secure default: effective `true`, source `epoch_2_default`. |
+| root `config_epoch` | restart-required | ADR-0119 semantic epoch. Omission means epoch 1. A SIGHUP reports and pins raw/effective/source drift with the RFC 8212 boolean tuple. Epoch 2 with an omitted boolean resolves to the activated secure default: effective `true`, source `epoch_2_default`. Exception: a SIGHUP of a file carrying exactly the canonical form of the running tuple (the explicit effective epoch and boolean the daemon writes after a runtime mutation) keeps the running tuple without logging an `ERROR`, because the effective posture did not change. A partial edit or a changed effective value is still pinned and logged. |
 | `asn` | restart-required | Identity. |
 | `router_id` | restart-required | Identity. Advertised in every OPEN. |
 | `listen_port` | restart-required | The listen socket is created at startup. |
@@ -355,7 +358,7 @@ that are stood up once at startup. Two flags are hot-pluggable.
 | `cluster_id` | restart-required | RFC 4456 cluster identity; affects every iBGP advertisement. |
 | `honor_graceful_shutdown` | live | Hot-applied by `reload.rs`. Re-evaluates the GShut LOCAL_PREF de-preference against existing Adj-RIB-In on toggle. |
 | `honor_blackhole` | live (with FIB-discard caveat) | Hot-applied when `[global] install_blackhole_discard` is false. When the FIB-discard reconciler is configured (`install_blackhole_discard = true` and the FIB table is set up), `honor_blackhole` is **restart-required** — toggling it would change the discard-spawn-gate decision made at startup. Logged as `ERROR` during reload in that case. |
-| `ebgp_requires_policy` | restart-required | ADR-0112/0119 RFC 8212 enforcement mode and raw-presence verdict. Pinned with `config_epoch` as one startup tuple: a SIGHUP reports value or representation drift in `--diff` and the v1 transaction rejection, logs an `ERROR`, and keeps the running import/export treatment and source verdict at startup. |
+| `ebgp_requires_policy` | restart-required | ADR-0112/0119 RFC 8212 enforcement mode and raw-presence verdict. Pinned with `config_epoch` as one startup tuple: a SIGHUP reports value or representation drift in `--diff` and the v1 transaction rejection, logs an `ERROR`, and keeps the running import/export treatment and source verdict at startup. Exception: a SIGHUP of a file carrying exactly the canonical form of the running tuple (the explicit effective epoch and boolean the daemon writes after a runtime mutation) keeps the running tuple without logging an `ERROR`, because the effective posture did not change. A partial edit or a changed effective value is still pinned and logged. |
 | `install_blackhole_discard` | restart-required | The RFC 7999 kernel-discard reconciler spawns once at startup. |
 | `allow_blackhole_broad_prefixes` | restart-required | Same — feeds the discard-spawn gate. |
 | `blackhole_discard_max_active` | restart-required | The reconciler captures the active-discard cap at startup; SIGHUP pins the running value. |

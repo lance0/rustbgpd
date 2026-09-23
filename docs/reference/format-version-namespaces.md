@@ -43,8 +43,11 @@ The namespaces deliberately do not share one policy:
   process-local; the only supported operation is passing one back verbatim
   for equality comparison. Never parse a token or depend on its prefix, and
   re-plan after a daemon restart.
-- **Additive frozen formats** (support bundle, streamed frame): frozen public
-  machine formats evolve additively under the stable-surface inventory.
+- **Additive frozen format** (support bundle): the frozen public machine
+  format evolves additively under the stable-surface inventory.
+- **Exact version** (streamed config frame): ingress frames must carry exactly
+  the current `FRAME_VERSION`; the frame is outside the initial v1 frozen
+  inventory.
 
 Changing a reader floor, a token algorithm, the frozen bundle format, or the
 streamed frame version is a separately reviewed behavior change owned by the

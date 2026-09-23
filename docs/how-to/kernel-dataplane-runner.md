@@ -119,6 +119,10 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   kernel module, and skip otherwise: `l3_multipath`,
   `managed_ip_vrf_ready`, `l3_all_active_writer`, `foreign_state_l3`, and
   `l3_route_event`, `l3_single_path_cycle`, and `l3_foreign_route_cycle`.
+  Between `fib_runtime` and `bfd_runtime`, the job also runs a supplementary
+  `bfd_runtime_ipv4` step with `AF_INET6` denied by a seccomp profile, proving
+  the IPv4 BFD path does not depend on that family. It is deliberately outside
+  the canonical selector receipt and the counts below.
 
 The job always publishes a stable `netns-selector-receipt` JSON artifact and a
 concise job summary. A selector is recorded only after its harness invocation

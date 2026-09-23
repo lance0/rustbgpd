@@ -8,8 +8,9 @@ rustbgpd exposes `gnmi.gNMI` for a strict OpenConfig BGP operational-state
 subset. It is intended for collectors and tools such as `gnmic` that already
 speak gNMI/OpenConfig.
 
-This is not a full OpenConfig router model. The v1 surface is deliberately
-narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
+This is not a full OpenConfig router model, and `gnmi.gNMI` is outside the
+narrow [v1 stability contract](v1-stable-contract.md). The current surface is
+deliberately narrow: `Capabilities`, `Get`, and `Subscribe` for BGP global and neighbor
 state, plus a small `Set` subset for durable static BGP neighbor, peer-group,
 and dynamic-neighbor-prefix config. `Set` maps supported OpenConfig mutations onto the ADR-0076 transaction model:
 payloads are redacted in audit logs, delete / replace / update operations are
@@ -283,7 +284,7 @@ accepted.
 - **Unsupported leaves.** Any other path under `ON_CHANGE` returns
   `UNIMPLEMENTED` with a message naming the supported leaf. The
   counter leaves (`messages/*`) and the `enabled` leaf stay
-  SAMPLE/POLL-only in v1.
+  SAMPLE/POLL-only.
 - **Loss.** Broadcast lag or a later producer-side EHM loss closes the stream
   with `DATA_LOSS`, including during the initial snapshot or `sync_response`.
   To repair the gap, reconnect without `updates_only` and consume a full initial
@@ -293,10 +294,10 @@ accepted.
   every ON_CHANGE stream rather than risking a silently incomplete view.
 - **Mixed-mode subscriptions.** A `SubscriptionList` that mixes
   `SAMPLE` and `ON_CHANGE` subscriptions is rejected with
-  `UNIMPLEMENTED` — the v1 dispatch picks one mode per stream.
+  `UNIMPLEMENTED` — the current dispatch picks one mode per stream.
 
-Broad subtree requests are bounded; v1 does not use gNMI to stream
-the full route table.
+Broad subtree requests are bounded; the current surface does not use gNMI
+to stream the full route table.
 
 A concrete keyed-neighbor subscription whose successful peer snapshot does not
 contain that neighbor emits no update for the cycle; sync still completes and

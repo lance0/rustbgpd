@@ -52,7 +52,9 @@ the daemon before the handler runs:
 
 ```text
 permission denied: listener max_tier sensitive_read does not permit
-operator_only RPC /rustbgpd.v1.InjectionService/AddPath
+operator_only RPC /rustbgpd.v1.InjectionService/AddPath; this cap is an
+intentional per-listener ceiling — raise max_tier on this listener in the
+daemon config and restart the daemon, or use a listener without the cap
 ```
 
 gRPC authorization is startup configuration. Changing it needs a daemon

@@ -13,7 +13,7 @@ codec claim.
 - CSV: `https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv`
 - Registry snapshot: 2026-09-22 (live-verified 2026-09-22)
 - SHA-256: `b04771e1948af2e2682bae76ecff9b957c7c4ccc93e32b31efcec086281005a0`
-- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10, 7.16](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9012 §§2, 13](https://www.rfc-editor.org/rfc/rfc9012), [RFC 6368 §5](https://www.rfc-editor.org/rfc/rfc6368), [RFC 9234 §§5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
+- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10, 7.16](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9012 §§2, 13](https://www.rfc-editor.org/rfc/rfc9012), [RFC 6368 §5](https://www.rfc-editor.org/rfc/rfc6368), [RFC 9234 §5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
 
 Manual live comparison (never run by normal CI): download the CSV with
 `curl -fsSL https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv -o /tmp/bgp-parameters-2.csv`, run

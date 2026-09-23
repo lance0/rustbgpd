@@ -363,8 +363,10 @@ specific method if the model warrants it.
    `ApplyEvpnRuntime`, `SetPeerGroup`, and gNMI `Set` request summaries mask
    credential-bearing fields, including candidate TOML that may contain
    `md5_password` or `tcp_ao.key`. The default enforcement flip shipped in
-   v0.24.0; the external review still needs durable audit sink / retention
-   guidance and optional proto credential markers.
+   v0.24.0. Retention guidance for the log-based audit trail is in
+   [operations.md](operations.md#grpc-audit-and-resource-guardrails); a
+   durable in-daemon audit sink and optional proto credential markers remain
+   open.
 
 ## Code matrix
 

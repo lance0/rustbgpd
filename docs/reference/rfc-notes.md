@@ -771,9 +771,6 @@ Interpretation decisions:
 
 ---
 
-## Interpretation Decisions
-
----
 
 ## RFC 4760 — Multiprotocol Extensions for BGP-4
 
@@ -798,8 +795,8 @@ AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLR
   of address data).
 - When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
   (type 3) is not required — the next-hop is carried inside the MP attribute.
-  `validate_update_attributes()` relaxes the NEXT_HOP mandatory check when
-  `has_mp_nlri` is true.
+  `validate_update_attributes()` requires NEXT_HOP only for an eBGP UPDATE
+  that carries body NLRI (`is_ebgp && has_body_nlri`).
 
 ### §4 — MP_UNREACH_NLRI (Type 15)
 
@@ -933,7 +930,7 @@ RFC suggestion (step 7 or later) but matches GoBGP and FRR behavior.
 **Two-phase timer:**
 1. Initial timer = `restart_time` (peer's advertised value). This is the
    window for the peer to re-establish the TCP session.
-2. On `PeerUp` during GR, timer resets to `stale_routes_time` (local
+2. On `PeerUp` during GR, timer resets to `gr_stale_routes_time` (local
    config, default 360s). This is the window for the peer to send
    End-of-RIB markers.
 
@@ -1159,6 +1156,8 @@ normalized limit whose presence distinguishes active unlimited from inactive.
 The raw `effective_send_max` sentinel is gone: `PathsLimitState` field number
 and name 5 are reserved, and optional `effective_send_limit` (field 6) alone
 carries inactive (absent), unlimited (zero), or finite.
+
+### Base Add-Path
 
 - Capability code 69. Per-family Send/Receive/Both modes.
 - Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
@@ -1752,7 +1751,8 @@ carries inactive (absent), unlimited (zero), or finite.
   active BGP).
 - **Bidirectional VTEP interop (M37):** validated end-to-end against
   Linux 6.17 + FRR 10.3.1 via
-  `tests/interop/m37-evpn-local-origination.clab.yml`. rustbgpd as
+  `tests/interop/m37-evpn-local-origination.clab.yml` (the topology now
+  pins FRR 10.7.1). rustbgpd as
   VTEP originator, FRR as consumer. 4/4 PASS: Type 3 IMET originated
   at startup, Type 2 originated within ~3 s of `bridge fdb add`,
   Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET

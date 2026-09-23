@@ -56,6 +56,13 @@ move with it.
      (generation, sequential, or rejected route).
    - A restart-required global field that SIGHUP must not advance belongs in
      `pin_unreconciled_daemon_runtime_fields` in `src/reload.rs`.
+   - A new restart-required top-level section has touchpoints the compiler
+     does not enforce: a `ConfigDiff` flag set in `diff_config`, the
+     `ConfigDiff::has_restart_required_changes` check, the restart-required
+     sections in `classify_config_transaction_v1`, the JSON and text diff
+     renderers (`config_diff_json_value`, `format_config_diff_with_style`),
+     and a `src/reload.rs` arm that logs the `ERROR` and pins the section to
+     its running value.
 
 4. **Runtime behavior**
    - Wire the field through the runtime model that consumes it.
