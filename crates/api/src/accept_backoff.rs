@@ -5,8 +5,9 @@
 //! EMFILE/ENFILE the listener stays readable and every poll fails at once.
 //! Tonic's serve loop drops accept errors and polls again, which spins a
 //! runtime worker. [`AcceptBackoff`] wraps the accepted-connection stream
-//! and, after a non-transient error, delays the next poll with the BGP
-//! listener's backoff (100 ms doubling to a 1 s cap, reset on success).
+//! and, after a resource-exhaustion error, delays the next poll with the BGP
+//! listener's backoff (100 ms doubling to a 1 s cap, reset on success). A
+//! fatal error (the listening socket itself is unusable) ends the stream.
 
 use std::io;
 use std::pin::Pin;
@@ -27,7 +28,8 @@ const LOG_EVERY_FAILURES: u64 = 60;
 /// Stream adapter that backs off after resource-exhaustion accept errors.
 ///
 /// Errors are still yielded so the caller sees them; the adapter only
-/// delays the poll that follows one. It logs the first failure of an
+/// delays the poll that follows one. A fatal error ends the stream
+/// instead, since no later accept on that socket can succeed. It logs the first failure of an
 /// episode, then about one line a minute while it persists, and a
 /// recovery line on the next accepted connection.
 pub struct AcceptBackoff<S> {
@@ -80,13 +82,24 @@ where
                 AcceptErrorClass::Transient => {
                     debug!(listener = %this.listener, error = %e, "listener accept error");
                 }
-                class => {
+                AcceptErrorClass::Fatal => {
+                    // The listening socket itself is unusable; no later accept
+                    // can succeed. End the stream, as the BGP listener drops
+                    // such a socket. Tonic's serve returns and the gRPC
+                    // supervisor fail-stops the daemon; the metrics task ends.
+                    error!(
+                        listener = %this.listener,
+                        error = %e,
+                        "listener socket unusable; stopping its accept loop"
+                    );
+                    return Poll::Ready(None);
+                }
+                AcceptErrorClass::ResourceExhausted => {
                     this.failures += 1;
                     if this.failures == 1 || this.failures.is_multiple_of(LOG_EVERY_FAILURES) {
                         error!(
                             listener = %this.listener,
                             error = %e,
-                            class = ?class,
                             failures = this.failures,
                             backoff_ms = u64::try_from(this.next_backoff.as_millis()).unwrap_or(u64::MAX),
                             "listener accept failing; backing off"
@@ -141,6 +154,17 @@ mod tests {
         assert!(drained.is_err(), "backoff must keep the stream pending");
         // 0, 100, 300, 700, 1500 ms, then once per second up to 9500 ms.
         assert_eq!(polls.load(Ordering::SeqCst), 13);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fatal_error_ends_the_stream() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut incoming =
+            AcceptBackoff::new(failing_stream(libc::EBADF, polls.clone(), 1000), "test");
+        let start = Instant::now();
+        assert!(incoming.next().await.is_none());
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

@@ -10,4 +10,8 @@
   is replaced by `listener accept failing; backing off` at `ERROR`, naming
   the listener. It is logged on the first failure and then about once a
   minute while exhaustion persists; `listener accept recovered` at `INFO`
-  marks the end. Transient per-connection accept errors now log at `DEBUG`.
+  marks the end. If the listening socket itself becomes unusable (EBADF,
+  ENOTSOCK, EINVAL, EOPNOTSUPP), the listener logs `listener socket unusable;
+  stopping its accept loop` and stops; for gRPC, that shuts the daemon down
+  through the existing gRPC listener-exit handling. Transient per-connection
+  accept errors now log at `DEBUG`.

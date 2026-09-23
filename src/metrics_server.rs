@@ -554,4 +554,27 @@ mod tests {
         // 0, 100, 300, 700, 1500 ms, then once per second up to 9500 ms.
         assert_eq!(polls.load(Ordering::SeqCst), 13);
     }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn unusable_listener_socket_stops_the_accept_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counter = polls.clone();
+        let incoming = tokio_stream::iter(std::iter::from_fn(move || {
+            (counter.fetch_add(1, Ordering::SeqCst) < 1000)
+                .then(|| Err(std::io::Error::from_raw_os_error(libc::EBADF)))
+        }));
+        let start = tokio::time::Instant::now();
+        serve_incoming(
+            incoming,
+            "metrics test".into(),
+            BgpMetrics::new(),
+            unused_probe(),
+        )
+        .await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
 }
