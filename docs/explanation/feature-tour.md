@@ -100,7 +100,7 @@ BGP-LS receive/reflection/API export (RFC 9552), VPNv4/VPNv6 L3VPN
 route-reflection (RFC 4364 / RFC 4659, SAFI 128 — RR/controller-feed
 with RD, MPLS label stack, next-hop, and Route Targets preserved
 verbatim; no VRF import or MPLS FIB), RT-Constrain (RFC 4684, SAFI 132
-— strict per-peer VPN reflection filtering), and IPv4/IPv6
+— strict per-peer VPN and EVPN reflection filtering), and IPv4/IPv6
 labeled-unicast route-reflection (RFC 8277, SAFI 4 — label stack and
 next-hop preserved verbatim) have shipped under ADR-0077, and
 **Optimal Route Reflection (RFC 9107, ADR-0095)** computes per-client

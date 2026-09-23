@@ -3513,7 +3513,8 @@ acceptance signal, so an `already_advertised` pass never means the peer
 holds the route — a peer that treats the updates as withdrawn (RFC 7606)
 stays Established with none of them. The VPN ladder
 follows the live VPN staging order and adds `rt_membership`
-(RFC 4684); the labeled-unicast ladder follows the live labeled staging
+(RFC 4684), as does the EVPN export ladder of `rbgp evpn explain`; the
+labeled-unicast ladder follows the live labeled staging
 order (`family` first, no `rt_membership`/`orf`). A family still held by
 the initial-ORF gate (RFC 5291 section 6) stops at `orf_gate` before any
 per-prefix work.

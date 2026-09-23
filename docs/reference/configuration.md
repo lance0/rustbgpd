@@ -1476,8 +1476,10 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv4_labeled_unicast"` — IPv4 labeled-unicast (AFI 1, SAFI 4, RFC 8277)
 - `"ipv6_labeled_unicast"` — IPv6 labeled-unicast (AFI 2, SAFI 4, RFC 8277)
 - `"rtc"` — Route Target Constrain (AFI 1, SAFI 132, RFC 4684). Strict
-  per-peer VPN reflection filtering: a negotiated peer with empty RTC
-  interest receives nothing, with RFC-faithful 96-bit prefix matching.
+  per-peer VPN and EVPN reflection filtering: a negotiated peer with empty
+  RTC interest receives nothing, with RFC-faithful 96-bit prefix matching.
+  EVPN routes are filtered by their Route Targets (RFC 7432 §7.10), and
+  Type 4 Ethernet Segment routes by their ES-Import RT (§7.6).
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:

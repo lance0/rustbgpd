@@ -86,8 +86,8 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   shape applies only to ORR single-best.
 - For RTC (SAFI 132), `NO_ADVERTISE` suppression has a wider blast radius than
   for other families. An RT-membership NLRI suppressed by community policy is
-  withdrawn like any other route, and a receiver that filters VPN
-  advertisements by RT-Constrain membership then prunes every VPN route
+  withdrawn like any other route, and a receiver that filters VPN or EVPN
+  advertisements by RT-Constrain membership then prunes every route
   carrying that Route Target; rustbgpd's own RFC 4684 outbound gate reacts the
   same way toward a peer whose membership no longer covers an RT. The
   mechanics are correct and fail-closed — the amplification is inherent to

@@ -172,6 +172,7 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        rtc_filter: Option<&crate::manager::RtcMembership>,
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
@@ -189,6 +190,7 @@ impl RibManager {
             sendable,
             llgr,
             export_pol,
+            rtc_filter,
             evpn_announce,
             evpn_withdraw,
             force,
@@ -215,6 +217,7 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
+        rtc_filter: Option<&crate::manager::RtcMembership>,
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
@@ -357,6 +360,51 @@ impl RibManager {
                 crate::update::ExportGateVerdict::Pass,
                 || "LLGR export restriction cleared".to_string(),
             );
+
+            // RFC 4684 §6 outbound gate, applied to EVPN per RFC 7432 §7.10:
+            // a peer that negotiated RT-Constrain only receives EVPN routes
+            // carrying a Route Target inside its advertised membership
+            // (`None` = SAFI 132 not negotiated ⇒ unfiltered). Type 4 ES
+            // routes match on their ES-Import RT (RFC 7432 §7.6). Same
+            // membership and matcher as the VPN gate.
+            if let Some(membership) = rtc_filter {
+                if !membership.matches_any(best.extended_communities()) {
+                    target.gate(
+                        "rt_membership",
+                        "rt_membership_miss",
+                        crate::update::ExportGateVerdict::Stop,
+                        || {
+                            "no Route Target of this route falls inside the peer's \
+                             advertised RT-Constrain membership (RFC 4684)"
+                                .to_string()
+                        },
+                    );
+                    if rib_out.get_evpn(key).is_some() {
+                        evpn_withdraw.push(*key);
+                    }
+                    continue;
+                }
+                target.gate(
+                    "rt_membership",
+                    "rt_membership",
+                    crate::update::ExportGateVerdict::Pass,
+                    || {
+                        "a Route Target of this route falls inside the peer's advertised \
+                         RT-Constrain membership (RFC 4684)"
+                            .to_string()
+                    },
+                );
+            } else {
+                target.gate(
+                    "rt_membership",
+                    "rt_membership",
+                    crate::update::ExportGateVerdict::NotApplicable,
+                    || {
+                        "peer did not negotiate RT-Constrain — EVPN export is unfiltered"
+                            .to_string()
+                    },
+                );
+            }
 
             // Split horizon: don't send an EVPN route back to its source peer.
             // Parallel to the unicast guard earlier in this module. Without
@@ -593,10 +641,6 @@ impl RibManager {
     /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
     /// the selection changed, stage announces/withdraws for each outbound
     /// peer that negotiated the L2VPN/EVPN family.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "EVPN recompute keeps best-path, events, and outbound staging consistent"
-    )]
     pub(in crate::manager) fn recompute_and_distribute_evpn(
         &mut self,
         affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
@@ -718,78 +762,94 @@ impl RibManager {
             .collect();
         for peer in peers {
             checkpoint();
-            if self.outbound_channel_gone(peer) {
-                self.drop_gone_dirty_peer(peer);
-                continue;
-            }
-            let sendable = self.peer_sendable_families.get(&peer).cloned();
-            let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
-            if !sendable.as_ref().is_some_and(|f| {
-                f.contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn))
-            }) {
-                continue;
-            }
-
-            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
-            let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
-            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
-            let target_peer_asn = self.peer_asn.get(&peer).copied();
-            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
-            let export_pol = self
-                .export_policy_for(peer)
-                .map(rustbgpd_policy::PolicyChain::share);
-            let target_peer_label = peer.to_string();
-            let metrics = self.metrics.clone();
-
-            let loc_rib_len = self.loc_rib.len();
-            let rib_out = self
-                .adj_ribs_out
-                .entry(peer)
-                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
-            let policy_stats = self.export_policy_stats.entry(peer).or_default();
-
-            let mut evpn_announce = Vec::new();
-            let mut evpn_withdraw = Vec::new();
-            Self::stage_evpn_routes_with_checkpoint(
-                &self.loc_rib,
-                rib_out,
-                &self.peer_is_rr_client,
-                &changed_keys,
-                &mut crate::manager::distribution::ExportTarget::Peer {
-                    peer,
-                    peer_asn: target_peer_asn,
-                    peer_group: target_peer_group,
-                    metrics: &metrics,
-                    policy_stats,
-                    peer_label: &target_peer_label,
-                },
-                target_is_ebgp,
-                interpret_rfc1997,
-                target_is_rr_client,
-                self.cluster_id,
-                sendable.as_ref(),
-                llgr.as_ref(),
-                export_pol.as_ref(),
-                &mut evpn_announce,
-                &mut evpn_withdraw,
-                false, // EVPN delta path — equality check is correct
-                &mut checkpoint,
-            );
-
-            if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
-                && !self.try_send_and_commit_outbound_update(
-                    peer,
-                    OutboundCommitBatch {
-                        evpn_announce,
-                        evpn_withdraw,
-                        ..OutboundCommitBatch::default()
-                    },
-                )
-            {
-                warn!(%peer, "outbound channel full — EVPN update deferred");
-                self.mark_outbound_dirty(peer);
-            }
+            self.distribute_evpn_keys_to_peer(peer, &changed_keys, &mut checkpoint);
         }
         super::super::retire_hash_set(&mut changed_keys, &mut checkpoint);
+    }
+
+    /// Stage `keys` toward one outbound peer and send/commit the delta,
+    /// marking the peer dirty when its channel is full. A no-op for a peer
+    /// that did not negotiate EVPN. Shared by best-path distribution and
+    /// the RT-Constrain membership-change restage.
+    pub(in crate::manager) fn distribute_evpn_keys_to_peer(
+        &mut self,
+        peer: IpAddr,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        if self.outbound_channel_gone(peer) {
+            self.drop_gone_dirty_peer(peer);
+            return;
+        }
+        let sendable = self.peer_sendable_families.get(&peer).cloned();
+        let llgr = self.peer_advertised_llgr_families.get(&peer).cloned();
+        if !sendable
+            .as_ref()
+            .is_some_and(|f| f.contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn)))
+        {
+            return;
+        }
+
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+        let interpret_rfc1997 = self.peer_interpret_rfc1997.contains(&peer);
+        let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+        let target_peer_asn = self.peer_asn.get(&peer).copied();
+        let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+        let export_pol = self
+            .export_policy_for(peer)
+            .map(rustbgpd_policy::PolicyChain::share);
+        let target_peer_label = peer.to_string();
+        let metrics = self.metrics.clone();
+        let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
+
+        let loc_rib_len = self.loc_rib.len();
+        let rib_out = self
+            .adj_ribs_out
+            .entry(peer)
+            .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+        let policy_stats = self.export_policy_stats.entry(peer).or_default();
+
+        let mut evpn_announce = Vec::new();
+        let mut evpn_withdraw = Vec::new();
+        Self::stage_evpn_routes_with_checkpoint(
+            &self.loc_rib,
+            rib_out,
+            &self.peer_is_rr_client,
+            keys,
+            &mut crate::manager::distribution::ExportTarget::Peer {
+                peer,
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group,
+                metrics: &metrics,
+                policy_stats,
+                peer_label: &target_peer_label,
+            },
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            self.cluster_id,
+            sendable.as_ref(),
+            llgr.as_ref(),
+            export_pol.as_ref(),
+            rtc_filter.as_ref(),
+            &mut evpn_announce,
+            &mut evpn_withdraw,
+            false, // EVPN delta path — equality check is correct
+            checkpoint,
+        );
+
+        if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
+            && !self.try_send_and_commit_outbound_update(
+                peer,
+                OutboundCommitBatch {
+                    evpn_announce,
+                    evpn_withdraw,
+                    ..OutboundCommitBatch::default()
+                },
+            )
+        {
+            warn!(%peer, "outbound channel full — EVPN update deferred");
+            self.mark_outbound_dirty(peer);
+        }
     }
 }

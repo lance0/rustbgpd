@@ -6,13 +6,14 @@ use super::{
 };
 
 impl RibManager {
-    /// Resolve the RFC 4684 VPN outbound filter for `peer`: `Some` iff the
+    /// Resolve the RFC 4684 outbound filter for `peer`, shared by VPN and
+    /// EVPN (RFC 7432 §7.10) export: `Some` iff the
     /// peer negotiated `(IPv4, RtConstrain)`; a somehow-absent membership
     /// entry resolves to the strict empty filter (advertise nothing) rather
     /// than fail-open. Returns an owned clone because every caller holds a
     /// `&mut` Adj-RIB-Out borrow through `self` while staging (the ORF
     /// precedent) — memberships are small, present only for RTC peers.
-    pub(in crate::manager) fn rtc_vpn_filter(
+    pub(in crate::manager) fn rtc_export_filter(
         &self,
         peer: IpAddr,
         sendable: Option<&Vec<(Afi, Safi)>>,

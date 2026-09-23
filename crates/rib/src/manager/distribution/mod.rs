@@ -6515,7 +6515,7 @@ impl RibManager {
                 .and_then(|vantage| self.orr.spf.get(vantage))
                 .map(|spf| (&self.orr.topology, spf));
             let per_client_best = self.peer_per_client_best.contains(&peer);
-            let rtc_filter = self.rtc_vpn_filter(peer, sendable.as_ref());
+            let rtc_filter = self.rtc_export_filter(peer, sendable.as_ref());
             let orf_gated = self
                 .peer_orf_pending
                 .get(&peer)
@@ -6743,6 +6743,7 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
+                    rtc_filter.as_ref(),
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     is_force,

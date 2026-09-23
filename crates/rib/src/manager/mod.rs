@@ -450,12 +450,25 @@ impl RtcMembership {
     /// membership (SAFI 132 negotiated, no interest received yet) matches
     /// nothing — the strict RFC 4684 rule, so a route with no Route Target
     /// at all only passes via the default NLRI.
+    ///
+    /// RFC 7432 §7.6 makes the EVPN ES-Import RT (type 0x06, sub-type
+    /// 0x02) a Route Target that RT-Constrain MUST apply to. It has no
+    /// global administrator to stand in for the origin AS, so it matches
+    /// on the RT bits under the prefix alone (the ADR-0077 upgrade path).
     fn matches_any(&self, rts: &[rustbgpd_wire::ExtendedCommunity]) -> bool {
         if self.has_default {
             return true;
         }
-        rts.iter()
-            .any(|&rt| self.entries.iter().any(|nlri| nlri.matches(rt)))
+        rts.iter().any(|&rt| {
+            self.entries.iter().any(|nlri| {
+                nlri.matches(rt)
+                    || (rt.as_es_import_rt().is_some()
+                        && (rt.as_u64() ^ nlri.route_target_bits)
+                            .checked_shr(96 - u32::from(nlri.prefix_len))
+                            .unwrap_or(0)
+                            == 0)
+            })
+        })
     }
 }
 
@@ -4112,9 +4125,37 @@ impl RibManager {
         }
         if let Some(gid) = self.vpn_grouped_member_of(peer) {
             // Absent prior membership on a live RTC registration
-            // resolves to strict empty — the `rtc_vpn_filter` rule.
+            // resolves to strict empty — the `rtc_export_filter` rule.
             let old = old.unwrap_or_default();
             self.apply_rtc_membership_delta_to_grouped_member(peer, gid, &old, &new);
+            // EVPN is never group-staged, so the VPN delta walk does not
+            // cover it: restage the peer's EVPN view under the new Φ. A
+            // dirty peer's pending resync already does; deferred EVPN
+            // selection is skipped exactly as the dirty resync skips it.
+            if !self.dirty_peers.contains(&peer)
+                && !self.selection_deferred((Afi::L2Vpn, Safi::Evpn))
+            {
+                let readiness = self.replacement_readiness.clone();
+                let mut checkpoint = || {
+                    replacement_readiness_checkpoint_at(&readiness, "selection_evpn", false);
+                };
+                let mut keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
+                    .loc_rib
+                    .iter_evpn()
+                    .inspect(|_| checkpoint())
+                    .map(crate::route::EvpnRibRoute::key)
+                    .collect();
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    keys.extend(
+                        rib_out
+                            .iter_evpn()
+                            .inspect(|_| checkpoint())
+                            .map(crate::route::EvpnRibRoute::key),
+                    );
+                }
+                self.distribute_evpn_keys_to_peer(peer, &keys, &mut checkpoint);
+                retire_hash_set(&mut keys, &mut checkpoint);
+            }
         } else {
             self.mark_outbound_dirty(peer);
             self.distribute_changes(&HashSet::new(), &HashSet::new());
