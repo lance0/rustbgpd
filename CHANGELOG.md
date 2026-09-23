@@ -101,15 +101,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from exiting until the service manager sent `SIGKILL`.
   **Operator-visible:** `SIGTERM`/`SIGINT` now always reach teardown unless an
   owned runtime-config mutation is still settling, which keeps its 30-minute
-  watchdog and exit 70 exactly as before. When the five-second bound expires
+  watchdog and exit 70 unless a further signal arrives (see the
+  `operator_forced` entry under Changed). When the five-second bound expires
   the daemon logs an error naming what it stopped waiting for, skips the
   optional warm checkpoint, and continues; the exit status does not change.
   A second `SIGTERM` or `SIGINT` during shutdown now means "stop waiting": it
   skips the waits that have no deadline (the unowned permit, the EVPN IMET
   sweep, the peer-manager drain, the BMP shutdown enqueue, and the RIB event
-  stage) while bounded kernel, BFD, and event-history cleanup still runs. It
-  does not cut short an owned mutation. A runtime-config mutation or SIGHUP
-  reload that obtains the coordinator only after shutdown has begun is refused
+  stage) while bounded kernel, BFD, and event-history cleanup still runs. An
+  owned mutation is handled separately, as that Changed entry describes. A
+  runtime-config mutation or SIGHUP reload that obtains the coordinator only
+  after shutdown has begun is refused
   (`UNAVAILABLE`, `runtime config coordinator is closed`) before it changes
   anything, so nothing starts mutating behind a wait shutdown gave up on.
   `TimeoutStopSec=32min` in the shipped unit is unchanged.
@@ -147,12 +149,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recorded under the new `selection_release` seam of
   `bgp_rib_readiness_query_wait_seconds` instead of the export-policy
   transition reason and seam.
-- `ListFibTables` (`rbgp fib-table list`) no longer waits without limit for
-  the FIB reconciler. A reconciler that accepted the read and never answered
-  left the list waiting for as long as the client kept waiting. The read now
-  fails `UNAVAILABLE` after ten minutes, so the stall is bounded at ten
-  minutes rather than removed. The same deadline covers the table read that
-  begins `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction.
+- `SetFibTable`, `DeleteFibTable` and a FIB-table config transaction no
+  longer wait without limit for the FIB reconciler's table read that begins
+  them. A reconciler that accepted the read and never answered left the
+  mutation waiting for as long as the client kept waiting. The read now fails
+  after ten minutes, so the stall is bounded at ten minutes rather than
+  removed. `ListFibTables` no longer queries the reconciler at all; see its
+  Changed entries.
 - Config transaction confirm, abort and rollback, and gNMI `Set`, no longer
   wait without limit for the runtime-config coordinator. After ten minutes
   they fail before taking ownership and without any runtime or persisted
