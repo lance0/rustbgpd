@@ -16,6 +16,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 - Publish the first accepted empty VRP and ASPA tables so operator queries
   distinguish authoritative empty data from unavailable data. Identical
   replays remain suppressed; disconnects before any acceptance remain unavailable.
+- Add `VrpManager::with_connectivity_observer`, called with a configured
+  cache's address and `true` or `false` when its RTR session goes up or
+  down. It is independent of the readiness observer: an ordinary disconnect
+  retains the cache's contribution until expiry, while a flush drops it at
+  once.
 - Add `AspaTable::providers`, a borrowed sorted merged-provider lookup that
   distinguishes an absent customer from a present empty set and preserves AS0.
 - Add `aspa_verify::validation_context` to derive the local-role first-AS

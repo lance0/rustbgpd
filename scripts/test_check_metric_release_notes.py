@@ -24,7 +24,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         added, removed = check.validate_release_notes(baseline, current, section)
 
         self.assertEqual(len(baseline), 218)
-        self.assertEqual(added, set())
+        self.assertEqual(added, {"bgp_rpki_cache_connected"})
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):

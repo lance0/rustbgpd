@@ -30,13 +30,15 @@ use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::policy_service_client::PolicyServiceClient;
+use crate::proto::rpki_service_client::RpkiServiceClient;
 use crate::proto::{
     BfdSession, BfdSessionState, ConfigTransactionConfirmationStatus,
     ConfigTransactionStatusResponse, GetBfdSessionsRequest, GetConfigTransactionStatusRequest,
     GetEffectiveConfigRequest, GetGlobalRequest, GetValidationPolicyPostureRequest,
     GetValidationPolicyPostureResponse, HealthRequest, ListDynamicNeighborsRequest,
-    ListNeighborsRequest, ListPolicyEventsRequest, ListSessionEventsRequest, MetricsRequest,
-    ValidationPolicyDimensionPosture, ValidationPolicyDisposition,
+    ListNeighborsRequest, ListPolicyEventsRequest, ListRpkiCachesRequest, ListRpkiCachesResponse,
+    ListSessionEventsRequest, MetricsRequest, ValidationPolicyDimensionPosture,
+    ValidationPolicyDisposition,
 };
 
 /// Bounded recent slice pulled from each event history for triage. The
@@ -1309,6 +1311,84 @@ fn rpki_vrp_table_check(configured_caches: &[String], metrics: Option<&str>) -> 
     })
 }
 
+/// One `rpki.cache.<addr>.session` check per configured cache, from the
+/// daemon's own `ListCaches` inventory. An ordinary disconnect retains the
+/// cache's contribution until the effective expire, so readiness and the
+/// merged VRP count stay green through the outage; this is the daemon-side
+/// session signal. Retention is reported from the row's `accepted` state,
+/// which a flush or expiry clears, never assumed from the disconnect.
+fn rpki_cache_session_checks(
+    configured_caches: &[String],
+    inventory: Result<&ListRpkiCachesResponse, &str>,
+) -> Vec<Check> {
+    configured_caches
+        .iter()
+        .map(|configured| {
+            let row = inventory.as_ref().ok().and_then(|inventory| {
+                let addr = configured.parse::<std::net::SocketAddr>().ok()?;
+                inventory
+                    .caches
+                    .iter()
+                    .find(|row| row.address.parse::<std::net::SocketAddr>() == Ok(addr))
+            });
+            let (status, detail) = match (inventory, row) {
+                (Err(error), _) => (
+                    CheckStatus::Warn,
+                    format!("daemon-side RTR session state unavailable: {error}"),
+                ),
+                (Ok(inventory), None) if !inventory.complete => (
+                    CheckStatus::Warn,
+                    format!(
+                        "daemon-side RTR session state unknown: the RPKI cache inventory is \
+                         incomplete ({} omitted) and does not include this cache",
+                        inventory.omitted
+                    ),
+                ),
+                (Ok(_), None) => (
+                    CheckStatus::Warn,
+                    "the daemon's RPKI cache inventory has no row for this configured cache; \
+                     run rbgp rpki caches"
+                        .to_string(),
+                ),
+                (Ok(_), Some(row)) => match (row.connected, &row.accepted) {
+                    (true, Some(accepted)) => (
+                        CheckStatus::Ok,
+                        format!(
+                            "RTR session established; last End of Data accepted {}s ago",
+                            accepted.age_seconds
+                        ),
+                    ),
+                    (true, None) => (
+                        CheckStatus::Ok,
+                        "RTR session established; no End of Data accepted yet".to_string(),
+                    ),
+                    (false, Some(accepted)) => (
+                        CheckStatus::Warn,
+                        format!(
+                            "RTR session down; the contribution accepted {}s ago is retained and \
+                             still used for validation until a reconnect replaces or flushes it \
+                             or the effective expire (bgp_rpki_cache_effective_expire_seconds) \
+                             passes; run rbgp rpki caches",
+                            accepted.age_seconds
+                        ),
+                    ),
+                    (false, None) => (
+                        CheckStatus::Warn,
+                        "RTR session down and no contribution is retained (flushed, expired, or \
+                         never synchronized); run rbgp rpki caches"
+                            .to_string(),
+                    ),
+                },
+            };
+            Check {
+                name: format!("rpki.cache.{configured}.session"),
+                status,
+                detail,
+            }
+        })
+        .collect()
+}
+
 /// One bounded TCP connect, immediately dropped on success.
 async fn probe_tcp(addr: String) -> Result<(), String> {
     match tokio::time::timeout(
@@ -1542,9 +1622,9 @@ async fn reachability_checks(
             name: format!("rpki.cache.{addr}.reachable_from_cli"),
             label: "RTR cache".to_string(),
             addr,
-            advice: "inspect the daemon-side rpki.vrp_table check and RTR logs for actual \
-                     cache state; troubleshoot the CLI path only when rbgp and rustbgpd are \
-                     expected to share a network vantage",
+            advice: "inspect the daemon-side rpki.cache.<addr>.session and rpki.vrp_table \
+                     checks for actual cache state; troubleshoot the CLI path only when rbgp \
+                     and rustbgpd are expected to share a network vantage",
             cli_vantage: true,
         });
     }
@@ -2624,6 +2704,26 @@ async fn run_with_deadlines(
                                 rpki_vrp_table_check(&rpki_caches, metrics_text.as_deref())
                             {
                                 reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            if !rpki_caches.is_empty() {
+                                let mut rpki = RpkiServiceClient::with_interceptor(
+                                    connection.channel(),
+                                    connection.interceptor(),
+                                );
+                                let inventory = rpc_with_timeout(
+                                    "ListCaches",
+                                    read_budget,
+                                    rpki.list_caches(ListRpkiCachesRequest {}),
+                                )
+                                .await
+                                .map(tonic::Response::into_inner)
+                                .map_err(|e| format!("ListCaches RPC failed: {e}"));
+                                for check in rpki_cache_session_checks(
+                                    &rpki_caches,
+                                    inventory.as_ref().map_err(String::as_str),
+                                ) {
+                                    reporter.record(check.name, check.status, check.detail)?;
+                                }
                             }
                             if let Some(check) = authz_enforcement_check(&document) {
                                 reporter.record(check.name, check.status, check.detail)?;
@@ -4576,6 +4676,94 @@ paths = ["x"]
         assert!(config_addresses(&future, &["rpki", "cache_servers"]).is_empty());
     }
 
+    /// Two caches, one connected and one disconnected with a retained
+    /// contribution: readiness and the merged count stay green, so the
+    /// pre-existing `rpki.vrp_table` check passes this fixture. The session
+    /// check is what warns; mapping a retained disconnect to `Ok` makes the
+    /// retained-cache assertion red.
+    #[test]
+    fn rpki_cache_session_check_warns_on_disconnected_retained_cache() {
+        let caches = vec![
+            "192.0.2.1:8282".to_string(),
+            "[2001:0db8::1]:8282".to_string(),
+        ];
+        let metrics = "bgp_rpki_vrp_count{af=\"ipv4\"} 10\n\
+                       bgp_rpki_vrp_count{af=\"ipv6\"} 20\n\
+                       bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1\n\
+                       bgp_rpki_cache_end_of_data_ready{cache=\"[2001:db8::1]:8282\"} 1";
+        assert_eq!(
+            rpki_vrp_table_check(&caches, Some(metrics)).unwrap().status,
+            CheckStatus::Ok
+        );
+
+        let accepted = |age_seconds| {
+            Some(crate::proto::AcceptedRpkiCacheState {
+                vrp_v4_count: 5,
+                vrp_v6_count: 10,
+                age_seconds,
+                ..Default::default()
+            })
+        };
+        let inventory = ListRpkiCachesResponse {
+            caches: vec![
+                crate::proto::RpkiCacheState {
+                    address: "192.0.2.1:8282".to_string(),
+                    connected: true,
+                    accepted: accepted(30),
+                },
+                crate::proto::RpkiCacheState {
+                    address: "[2001:db8::1]:8282".to_string(),
+                    connected: false,
+                    accepted: accepted(900),
+                },
+            ],
+            complete: true,
+            omitted: 0,
+        };
+        let checks = rpki_cache_session_checks(&caches, Ok(&inventory));
+        let summary: Vec<_> = checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.status))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("rpki.cache.192.0.2.1:8282.session", CheckStatus::Ok),
+                ("rpki.cache.[2001:0db8::1]:8282.session", CheckStatus::Warn),
+            ]
+        );
+        assert!(checks[1].detail.contains("accepted 900s ago is retained"));
+        assert!(checks[1].detail.contains("rbgp rpki caches"));
+
+        // Down with nothing retained, a missing row, and a failed RPC all
+        // warn rather than pass silently.
+        let mut empty = inventory.clone();
+        empty.caches[1].accepted = None;
+        empty.caches.remove(0);
+        let checks = rpki_cache_session_checks(&caches, Ok(&empty));
+        assert_eq!(checks[0].status, CheckStatus::Warn);
+        assert!(checks[0].detail.contains("no row"));
+        assert_eq!(checks[1].status, CheckStatus::Warn);
+        assert!(checks[1].detail.contains("no contribution is retained"));
+        // A truncated listing is not evidence that the cache is missing.
+        let mut truncated = empty.clone();
+        truncated.complete = false;
+        truncated.omitted = 3;
+        let checks = rpki_cache_session_checks(&caches, Ok(&truncated));
+        assert_eq!(checks[0].status, CheckStatus::Warn);
+        assert!(
+            checks[0]
+                .detail
+                .contains("inventory is incomplete (3 omitted)")
+        );
+        // A flushed cache reports no retained contribution: the detail
+        // follows the row's accepted state, not the disconnect.
+        assert!(!checks[1].detail.contains("accepted"));
+        let failed = rpki_cache_session_checks(&caches, Err("ListCaches RPC failed: denied"));
+        assert!(failed.iter().all(|check| check.status == CheckStatus::Warn
+            && check.detail.contains("RPC failed: denied")));
+    }
+
     /// Red proofs: zero-as-OK and dropping the configured guard fail below.
     #[test]
     fn rpki_vrp_table_check_distinguishes_configuration_and_snapshot_state() {
@@ -6317,8 +6505,8 @@ paths = ["x"]
             format!(
                 "RTR cache {dead} unreachable from the rbgp CLI network vantage \
                  (Connection refused (os error 111)) — this is not daemon-side connectivity \
-                 evidence; inspect the daemon-side rpki.vrp_table check and RTR logs for \
-                 actual cache state; troubleshoot the CLI path only when rbgp and rustbgpd \
+                 evidence; inspect the daemon-side rpki.cache.<addr>.session and \
+                 rpki.vrp_table checks for actual cache state; troubleshoot the CLI path only when rbgp and rustbgpd \
                  are expected to share a network vantage"
             )
         );

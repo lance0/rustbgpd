@@ -3290,6 +3290,30 @@ fn observe_rpki_task_exit(
     }
 }
 
+/// Seed and drive the per-cache readiness and connectivity gauges from the
+/// VRP manager. They are distinct signals: after an ordinary disconnect a
+/// cache stays ready until the effective expire; a flush drops both.
+fn observe_rpki_cache_metrics(
+    manager: rustbgpd_rpki::VrpManager,
+    metrics: &BgpMetrics,
+    caches: &[std::net::SocketAddr],
+) -> rustbgpd_rpki::VrpManager {
+    for cache in caches {
+        let label = cache.to_string();
+        metrics.set_rpki_cache_end_of_data_ready(&label, false);
+        metrics.set_rpki_cache_connected(&label, false);
+    }
+    let readiness = metrics.clone();
+    let connectivity = metrics.clone();
+    manager
+        .with_readiness_observer(move |server, ready| {
+            readiness.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
+        })
+        .with_connectivity_observer(move |server, connected| {
+            connectivity.set_rpki_cache_connected(&server.to_string(), connected);
+        })
+}
+
 fn register_rpki_task_kind(registry: &mut BTreeMap<Id, RpkiTaskKind>, id: Id, task: RpkiTaskKind) {
     assert!(
         registry.insert(id, task).is_none(),
@@ -4292,17 +4316,17 @@ async fn run<T>(
             .filter_map(|server| server.address.parse().ok())
             .collect();
         let (cache_inventory, cache_update_handle, cache_query_handle) =
-            rustbgpd_rpki::CacheInventoryAttachment::new(configured_cache_addrs);
+            rustbgpd_rpki::CacheInventoryAttachment::new(configured_cache_addrs.iter().copied());
         rpki_cache_queries = Some(cache_query_handle);
 
         // Spawn VRP + ASPA manager
-        let readiness_metrics = metrics.clone();
-        let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx)
-            .with_cache_inventory(cache_inventory)
-            .with_aspa_tx(aspa_table_tx)
-            .with_readiness_observer(move |server, ready| {
-                readiness_metrics.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
-            });
+        let vrp_mgr = observe_rpki_cache_metrics(
+            rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx)
+                .with_cache_inventory(cache_inventory)
+                .with_aspa_tx(aspa_table_tx),
+            &metrics,
+            &configured_cache_addrs,
+        );
         let mut rpki_tasks = JoinSet::new();
         let mut rpki_task_registry = BTreeMap::new();
         let handle = rpki_tasks.spawn(async move {
@@ -4396,7 +4420,6 @@ async fn run<T>(
             };
             let expire_metrics = metrics.clone();
             let cache_label = addr.to_string();
-            metrics.set_rpki_cache_end_of_data_ready(&cache_label, false);
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
                 .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
@@ -6643,6 +6666,161 @@ mod tests {
     use crate::test_support::{
         assert_tier_authorized_test_config, tier_authorized_uds_test_config,
     };
+
+    fn rpki_cache_gauge(metrics: &BgpMetrics, name: &str, cache: &str) -> Option<f64> {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == name)?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.value() == cache)
+            })
+            .map(|metric| metric.get_gauge().value())
+    }
+
+    async fn read_rtr_pdu(stream: &mut tokio::net::TcpStream) -> rustbgpd_rpki::rtr_codec::RtrPdu {
+        use tokio::io::AsyncReadExt as _;
+        let mut header = [0u8; 8];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let mut buf = header.to_vec();
+        buf.resize(len, 0);
+        stream.read_exact(&mut buf[8..]).await.unwrap();
+        rustbgpd_rpki::rtr_codec::RtrPdu::decode(&buf).unwrap().0
+    }
+
+    async fn write_rtr_pdus(
+        stream: &mut tokio::net::TcpStream,
+        pdus: &[rustbgpd_rpki::rtr_codec::RtrPdu],
+    ) {
+        use tokio::io::AsyncWriteExt as _;
+        let mut buf = Vec::new();
+        for pdu in pdus {
+            pdu.encode_with_version(&mut buf, rustbgpd_rpki::rtr_codec::RTR_VERSION_2)
+                .unwrap();
+        }
+        stream.write_all(&buf).await.unwrap();
+    }
+
+    async fn wait_for_rpki_cache_gauges(
+        metrics: &BgpMetrics,
+        cache: &str,
+        connected: f64,
+        ready: f64,
+    ) {
+        let observed = || {
+            (
+                rpki_cache_gauge(metrics, "bgp_rpki_cache_connected", cache),
+                rpki_cache_gauge(metrics, "bgp_rpki_cache_end_of_data_ready", cache),
+            )
+        };
+        let reached = tokio::time::timeout(Duration::from_secs(10), async {
+            while observed() != (Some(connected), Some(ready)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "expected connected={connected} ready={ready}, observed {:?}",
+            observed()
+        );
+    }
+
+    /// The connectivity gauge follows the RTR session, not End-of-Data
+    /// readiness: it rises on connect before any data, falls on an ordinary
+    /// disconnect while the retained contribution stays ready, and stays 0
+    /// through a flush. Wiring it as an alias of readiness makes the
+    /// connected-before-data and disconnected-but-ready waits time out.
+    #[tokio::test]
+    async fn rpki_cache_connectivity_gauge_tracks_the_session_not_readiness() {
+        use rustbgpd_rpki::rtr_codec::RtrPdu;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cache = addr.to_string();
+        let metrics = BgpMetrics::new();
+        let (update_tx, update_rx) = mpsc::channel(16);
+        let (table_tx, _table_rx) = mpsc::channel(16);
+        let (inventory, updates, _queries) = rustbgpd_rpki::CacheInventoryAttachment::new([addr]);
+        let manager = observe_rpki_cache_metrics(
+            rustbgpd_rpki::VrpManager::new(update_rx, table_tx).with_cache_inventory(inventory),
+            &metrics,
+            &[addr],
+        );
+        assert_eq!(
+            rpki_cache_gauge(&metrics, "bgp_rpki_cache_connected", &cache),
+            Some(0.0)
+        );
+        let manager = tokio::spawn(manager.run());
+        let client = rustbgpd_rpki::RtrClient::new(
+            rustbgpd_rpki::RtrClientConfig {
+                server_addr: addr,
+                refresh_interval: 3600,
+                retry_interval: 3600,
+                expire_interval: 7200,
+                max_expire_interval: None,
+            },
+            update_tx,
+        )
+        .with_cache_inventory(updates);
+        let client = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_rtr_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 0.0).await;
+        write_rtr_pdus(
+            &mut stream,
+            &[
+                RtrPdu::CacheResponse { session_id: 7 },
+                RtrPdu::Ipv4Prefix {
+                    flags: 1,
+                    prefix_len: 24,
+                    max_len: 24,
+                    prefix: std::net::Ipv4Addr::new(192, 0, 2, 0),
+                    asn: 64_496,
+                },
+                RtrPdu::EndOfData {
+                    session_id: 7,
+                    serial: 1,
+                    refresh: 3600,
+                    retry: 1,
+                    expire: 7200,
+                },
+            ],
+        )
+        .await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 1.0, 1.0).await;
+
+        // Ordinary disconnect: the retained contribution stays ready.
+        drop(stream);
+        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 1.0).await;
+
+        // The reconnect is told to flush (Cache Shutdown); no further dial
+        // can succeed, so both gauges settle at 0.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        drop(listener);
+        let _query = read_rtr_pdu(&mut stream).await;
+        write_rtr_pdus(
+            &mut stream,
+            &[RtrPdu::ErrorReport {
+                code: 13,
+                pdu: vec![],
+                text: "cache shutdown".to_string(),
+            }],
+        )
+        .await;
+        wait_for_rpki_cache_gauges(&metrics, &cache, 0.0, 0.0).await;
+
+        client.abort();
+        manager.abort();
+    }
 
     #[test]
     fn streamed_plan_authority_is_the_pinned_runtime_descriptor() {

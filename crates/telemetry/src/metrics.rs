@@ -622,6 +622,7 @@ struct BgpMetricsInner {
     rpki_vrp_count: IntGaugeVec,
     rpki_cache_effective_expire_seconds: IntGaugeVec,
     rpki_cache_end_of_data_ready: IntGaugeVec,
+    rpki_cache_connected: IntGaugeVec,
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records: IntGauge,
@@ -2025,6 +2026,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_cache_connected = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_cache_connected",
+                "Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: an ordinary disconnect retains the contribution until the effective expire, while a flush (fatal Error Report, corrupt data) drops it at once",
+            ),
+            &["cache"],
+        )
+        .expect("valid metric definition");
+
         let aspa_records = IntGauge::new(
             "bgp_aspa_records",
             "Number of ASPA customer records in the merged table",
@@ -3008,6 +3018,9 @@ impl BgpMetrics {
             .register(Box::new(rpki_cache_end_of_data_ready.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rpki_cache_connected.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(aspa_records.clone()))
             .expect("metric not already registered");
         registry
@@ -3362,6 +3375,7 @@ impl BgpMetrics {
             rpki_vrp_count,
             rpki_cache_effective_expire_seconds,
             rpki_cache_end_of_data_ready,
+            rpki_cache_connected,
             aspa_records,
             validation_import_refreshes,
             policy_dataset_refresh_errors,
@@ -5228,6 +5242,15 @@ impl BgpMetrics {
             .set(i64::from(ready));
     }
 
+    /// Set whether an RTR session to one configured cache is established.
+    /// This is connectivity, not End-of-Data readiness.
+    pub fn set_rpki_cache_connected(&self, cache: &str, connected: bool) {
+        self.0
+            .rpki_cache_connected
+            .with_label_values(&[cache])
+            .set(i64::from(connected));
+    }
+
     /// Set ASPA record count.
     pub fn set_aspa_records(&self, count: i64) {
         self.0.aspa_records.set(count);
@@ -6989,6 +7012,19 @@ mod tests {
         ));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 0"));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.11:3323\"} 1"));
+    }
+
+    #[test]
+    fn rpki_cache_connectivity_is_registered_and_distinct_from_readiness() {
+        let m = BgpMetrics::new();
+        m.set_rpki_cache_connected("192.0.2.10:3323", false);
+        m.set_rpki_cache_end_of_data_ready("192.0.2.10:3323", true);
+        let text = gather_text(&m);
+        assert!(text.contains(
+            "# HELP bgp_rpki_cache_connected Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: an ordinary disconnect retains the contribution until the effective expire, while a flush (fatal Error Report, corrupt data) drops it at once"
+        ));
+        assert!(text.contains("bgp_rpki_cache_connected{cache=\"192.0.2.10:3323\"} 0"));
+        assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 1"));
     }
 
     #[test]

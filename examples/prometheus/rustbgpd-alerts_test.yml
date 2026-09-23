@@ -891,6 +891,74 @@ tests:
         alertname: RpkiCacheEndOfDataNotReady
         exp_alerts: []
 
+  # ── RpkiCacheDisconnected ─────────────────────────────────────
+  # 192.0.2.10 disconnected but retained (ready 1): only RpkiCacheDisconnected
+  # fires, RpkiCacheEndOfDataNotReady stays silent. 192.0.2.12 was flushed
+  # (ready 0 with the session): both alerts fire for it.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_rpki_cache_connected{cache="192.0.2.10:3323", instance="edge1:9179"}'
+        values: "0x20"
+      - series: 'bgp_rpki_cache_end_of_data_ready{cache="192.0.2.10:3323", instance="edge1:9179"}'
+        values: "1x20"
+      - series: 'bgp_rpki_cache_connected{cache="192.0.2.11:3323", instance="edge1:9179"}'
+        values: "1x20"
+      - series: 'bgp_rpki_cache_end_of_data_ready{cache="192.0.2.11:3323", instance="edge1:9179"}'
+        values: "1x20"
+      - series: 'bgp_rpki_cache_connected{cache="192.0.2.12:3323", instance="edge1:9179"}'
+        values: "0x20"
+      - series: 'bgp_rpki_cache_end_of_data_ready{cache="192.0.2.12:3323", instance="edge1:9179"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: RpkiCacheDisconnected
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: RpkiCacheDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: "192.0.2.10:3323"
+              instance: "edge1:9179"
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.10:3323 RTR session is down"
+              description: >-
+                rustbgpd on edge1:9179 has had no RTR session to cache
+                192.0.2.10:3323 for 15 minutes. While this cache's
+                bgp_rpki_cache_end_of_data_ready is 1, its last accepted
+                contribution is still used for validation until the effective
+                expire (bgp_rpki_cache_effective_expire_seconds) passes; at 0 it
+                was flushed or expired and no longer contributes. Run rbgp rpki
+                caches for its state and age, and check the cache and the path to it.
+          - exp_labels:
+              severity: warning
+              cache: "192.0.2.12:3323"
+              instance: "edge1:9179"
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.12:3323 RTR session is down"
+              description: >-
+                rustbgpd on edge1:9179 has had no RTR session to cache
+                192.0.2.12:3323 for 15 minutes. While this cache's
+                bgp_rpki_cache_end_of_data_ready is 1, its last accepted
+                contribution is still used for validation until the effective
+                expire (bgp_rpki_cache_effective_expire_seconds) passes; at 0 it
+                was flushed or expired and no longer contributes. Run rbgp rpki
+                caches for its state and age, and check the cache and the path to it.
+      - eval_time: 16m
+        alertname: RpkiCacheEndOfDataNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              cache: "192.0.2.12:3323"
+              instance: "edge1:9179"
+            exp_annotations:
+              summary: "RPKI cache 192.0.2.12:3323 has no validated End of Data"
+              description: >-
+                RPKI cache 192.0.2.12:3323 on edge1:9179 has had no usable
+                retained contribution for 15 minutes. Check this cache
+                independently; other configured caches may still be ready and
+                contributing to the merged validation table.
+
   # ── BgpEventOutboxDegraded ────────────────────────────────────
   - interval: 1m
     input_series:
