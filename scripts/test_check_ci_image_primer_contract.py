@@ -133,6 +133,7 @@ class PrimerContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             shutil.copytree(ROOT / ".github", root / ".github")
+            shutil.copy2(ROOT / "Dockerfile", root / "Dockerfile")
             (root / "tests" / "interop").mkdir(parents=True)
             for dockerfile in (ROOT / "tests" / "interop").glob("Dockerfile*"):
                 shutil.copy2(dockerfile, root / "tests" / "interop" / dockerfile.name)
@@ -223,12 +224,56 @@ class PrimerContractTests(unittest.TestCase):
             (INTEROP, "      - name: Run M1 (", streamed + "      - name: Run M1 ("),
         )
 
+    def test_streaming_is_caught_across_continued_lines(self):
+        continued = (
+            "      - name: Fetch a tool\n"
+            "        run: |\n"
+            "          curl -fsSL \\\n"
+            "            https://example.invalid/tool.tgz | \\\n"
+            "            tar -xz\n"
+            "          echo \"$SUM  tool.tgz\" | sha256sum -c -\n\n"
+        )
+        self.assert_red(
+            f"{INTEROP}:228: streams network bytes into tar or a shell",
+            (INTEROP, "      - name: Run M1 (", continued + "      - name: Run M1 ("),
+        )
+
+    def test_unpinned_containerlab_fetch_still_may_not_stream(self):
+        self.assert_red(
+            ".github/actions/install-containerlab/action.yml:34: streams network bytes into tar or a shell",
+            (
+                ".github/actions/install-containerlab/action.yml",
+                "        ok=0\n",
+                '        curl -fsSL "$url" | tar -xz -C /tmp\n        ok=0\n',
+            ),
+        )
+
     def test_installer_scripts_verify_what_they_fetch(self):
         installer = ".github/scripts/install-bird3.sh"
         with self.subTest("checksum verification removed"):
             self.assert_red(
-                f"{installer}: fetches without verifying a SHA-256",
+                f"{installer}: fetch in download_archive_once is not verified by a SHA-256 check",
                 (installer, "sha256sum --check --status", "cat"),
+            )
+        with self.subTest("verified installer gains a second, unverified download"):
+            self.assert_red(
+                f"{installer}: fetch in prepare_archive is not verified by a SHA-256 check",
+                (
+                    installer,
+                    '    mkdir -p "$(dirname "$archive")"\n',
+                    '    mkdir -p "$(dirname "$archive")"\n'
+                    '    curl -fsSLo "$archive.sig" "https://example.invalid/bird.sig"\n',
+                ),
+            )
+        with self.subTest("download helper called without verifying its output"):
+            linters = ".github/scripts/install-developer-linters.sh"
+            self.assert_red(
+                f"{linters}: fetch in download is not verified by a SHA-256 check",
+                (
+                    linters,
+                    'download "$RUFF_URL" "$ruff_archive"\n',
+                    'download "$RUFF_URL" "$ruff_archive"\ndownload "$RUFF_URL" "$extra_archive"\n',
+                ),
             )
         with self.subTest("download piped into tar"):
             self.assert_red(
@@ -263,6 +308,30 @@ class PrimerContractTests(unittest.TestCase):
             self.assertIn(
                 "tests/interop/Dockerfile.bird: fetch is not verified by sha256sum before extraction",
                 errors,
+            )
+        with self.subTest("root Dockerfile built without file: gains a download"):
+            self.assert_red(
+                "Dockerfile: fetch is not verified by sha256sum before extraction",
+                (
+                    "Dockerfile",
+                    "\nFROM debian:bookworm-slim AS runtime\n",
+                    "\nRUN curl -fsSLo /tmp/x.tgz https://example.invalid/x.tgz && tar -xzf /tmp/x.tgz"
+                    "\nFROM debian:bookworm-slim AS runtime\n",
+                ),
+            )
+        with self.subTest("checksum covers a different file than the one extracted"):
+            self.assert_red(
+                "tests/interop/Dockerfile.gobgp-v47: fetch is not verified by sha256sum before extraction",
+                ("tests/interop/Dockerfile.gobgp-v47", 'tar -xzf "${archive}"', 'tar -xzf "/tmp/other.tgz"'),
+            )
+        with self.subTest("only the partial download is checked"):
+            self.assert_red(
+                "tests/interop/Dockerfile.bird-v332: fetch is not verified by sha256sum before extraction",
+                (
+                    "tests/interop/Dockerfile.bird-v332",
+                    'echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict; \\',
+                    "true; \\",
+                ),
             )
 
     def test_lab_jobs_stage_the_archive_they_build(self):

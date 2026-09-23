@@ -63,7 +63,8 @@ DIGEST = re.compile(r"(?<![0-9a-f])(?<!sha256:)(?!0{64})[0-9a-f]{64}(?![0-9a-f])
 FETCH = re.compile(r"(?:^|[;&|(!]|\bthen|\bdo|\bif|\bRUN)\s*(?:sudo\s+)?(?:curl|wget)\s|^ADD\s+https?://", re.M)
 STREAM = re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:tar|sh|bash)\b")
 VERIFY = re.compile(r"sha256sum\s+(?:--check|-c)\b")
-EXTRACT = re.compile(r"\btar\s+(?:-\w*x|--extract)")
+EXTRACT = re.compile(r"\btar\s+(?:-\w*x\w*f|--extract\b.*?--file)\s+\"?([^\s\";]+)")
+CHECKED = re.compile(r"[^;|&]*\|\s*sha256sum\s+(?:--check|-c)\b")
 LAB_CALL = re.compile(
     r"(?ms)^        uses: \./\.github/actions/run-interop-test\n(.*?)(?=^      - |\Z)"
 )
@@ -186,14 +187,57 @@ def _check_dockerfile(path: str, text: str, errors: list[str]) -> None:
     for instruction in text.replace("\\\n", " ").splitlines():
         if not FETCH.search(instruction):
             continue
-        verify = VERIFY.search(instruction)
-        extract = EXTRACT.search(instruction)
-        if not verify or (extract and extract.start() < verify.start()):
+        checked = [(m.end(), m.group(0)) for m in CHECKED.finditer(instruction)]
+        extracts = list(EXTRACT.finditer(instruction))
+        if not checked or any(
+            not any(
+                end < tar.start() and re.search(rf"\s{re.escape(tar.group(1))}(?![\w.])", seg)
+                for end, seg in checked
+            )
+            for tar in extracts
+        ):
             errors.append(f"{path}: fetch is not verified by sha256sum before extraction")
         if "[ ! -f" not in instruction:
             errors.append(f"{path}: fetch is not a fallback behind a staged-archive check")
         if STREAM.search(instruction):
             errors.append(f"{path}: streams network bytes into tar or a shell")
+
+
+def _unverified_fetches(text: str) -> list[str]:
+    """Functions holding installer fetches whose destination never reaches a checksum check.
+
+    A fetch inside a download helper counts as verified when every call of the
+    helper outside the self-test verifies the path it passed as the destination.
+    """
+    text = text.replace("\\\n", " ")
+    functions = {
+        m.group(1): m for m in re.finditer(r"(?ms)^([\w-]+)\(\) [{(]\n(.*?)^[})]$", text)
+    }
+    verifiers: set[str] = set()  # functions that check a SHA-256, directly or not
+    for _ in range(len(functions) + 1):
+        verified = re.compile(rf"{VERIFY.pattern}|\b(?:{'|'.join(verifiers) or '$^'})\b")
+        verifiers = {n for n, m in functions.items() if verified.search(m.group(2))}
+
+    def checked(destination: str, start: int) -> bool:
+        lines = text[start:].splitlines()
+        return any(destination in line and verified.search(line) for line in lines)
+
+    unverified = []
+    for fetch in FETCH.finditer(text):
+        end = text.find("\n", fetch.end())
+        destination = re.search(r"(?:--output|\s-[a-zA-Z]*o)\s+(\S+)", text[fetch.start() : end])
+        if destination and checked(destination.group(1), end):
+            continue
+        owner = next((n for n, m in functions.items() if m.start(2) <= fetch.start() < m.end(2)), "")
+        self_test = functions.get("self_test")
+        calls = [
+            call
+            for call in re.finditer(rf"\b{re.escape(owner)}((?:\s+\"[^\"]*\")+)", text) if owner
+            if not (self_test and self_test.start(2) <= call.start() < self_test.end(2))
+        ]
+        if not (calls and all(checked(c.group(1).split()[-1], c.end()) for c in calls)):
+            unverified.append(owner or "top level")
+    return unverified
 
 
 def _check_permissions(name: str, text: str, errors: list[str]) -> None:
@@ -230,10 +274,18 @@ def check(root: Path) -> list[str]:
         for relative in SCRIPT.findall(text)
         if (root / relative).is_file()
     }
+    # A build-push step without `file:` builds `<context>/Dockerfile`.
+    defaults = [
+        str(Path(context.group(1)) / "Dockerfile")
+        for text in texts.values()
+        for step in re.split(r"(?m)^ *- ", text)
+        if "docker/build-push-action@" in step and "file:" not in step
+        for context in [re.search(r"context: (\S+)", step)]
+        if context
+    ]
     dockerfiles = {
         relative: (root / relative).read_text()
-        for text in list(texts.values())
-        for relative in DOCKERFILE.findall(text)
+        for relative in [*defaults, *(p for t in texts.values() for p in DOCKERFILE.findall(t))]
         if (root / relative).is_file()
     }
 
@@ -254,17 +306,16 @@ def check(root: Path) -> list[str]:
         if digest not in used:
             errors.append(f"{MANIFEST}: {archive} has no copy in the CI surfaces")
     for relative, text in texts.items():
-        if relative in UNPINNED_FETCH:
-            continue
         for line, body in _run_blocks(text):
-            if FETCH.search(body) and not VERIFY.search(body):
+            body = body.replace("\\\n", " ")
+            if FETCH.search(body) and not VERIFY.search(body) and relative not in UNPINNED_FETCH:
                 errors.append(f"{relative}:{line}: fetches without verifying a SHA-256")
             if STREAM.search(body):
                 errors.append(f"{relative}:{line}: streams network bytes into tar or a shell")
     for relative, text in scripts.items():
-        if FETCH.search(text) and not VERIFY.search(text):
-            errors.append(f"{relative}: fetches without verifying a SHA-256")
-        if STREAM.search(text):
+        for owner in _unverified_fetches(text):
+            errors.append(f"{relative}: fetch in {owner} is not verified by a SHA-256 check")
+        if STREAM.search(text.replace("\\\n", " ")):
             errors.append(f"{relative}: streams network bytes into tar or a shell")
     for relative, text in dockerfiles.items():
         _check_dockerfile(relative, text, errors)
