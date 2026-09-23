@@ -1312,10 +1312,11 @@ fn rpki_vrp_table_check(configured_caches: &[String], metrics: Option<&str>) -> 
 }
 
 /// One `rpki.cache.<addr>.session` check per configured cache, from the
-/// daemon's own `ListCaches` inventory. A disconnected cache keeps its
-/// retained contribution until the effective expire, so readiness and the
+/// daemon's own `ListCaches` inventory. An ordinary disconnect retains the
+/// cache's contribution until the effective expire, so readiness and the
 /// merged VRP count stay green through the outage; this is the daemon-side
-/// session signal.
+/// session signal. Retention is reported from the row's `accepted` state,
+/// which a flush or expiry clears, never assumed from the disconnect.
 fn rpki_cache_session_checks(
     configured_caches: &[String],
     inventory: Result<&ListRpkiCachesResponse, &str>,
@@ -1334,6 +1335,14 @@ fn rpki_cache_session_checks(
                 (Err(error), _) => (
                     CheckStatus::Warn,
                     format!("daemon-side RTR session state unavailable: {error}"),
+                ),
+                (Ok(inventory), None) if !inventory.complete => (
+                    CheckStatus::Warn,
+                    format!(
+                        "daemon-side RTR session state unknown: the RPKI cache inventory is \
+                         incomplete ({} omitted) and does not include this cache",
+                        inventory.omitted
+                    ),
                 ),
                 (Ok(_), None) => (
                     CheckStatus::Warn,
@@ -1357,14 +1366,16 @@ fn rpki_cache_session_checks(
                         CheckStatus::Warn,
                         format!(
                             "RTR session down; the contribution accepted {}s ago is retained and \
-                             still used for validation until the effective expire \
-                             (bgp_rpki_cache_effective_expire_seconds) passes; run rbgp rpki caches",
+                             still used for validation until a reconnect replaces or flushes it \
+                             or the effective expire (bgp_rpki_cache_effective_expire_seconds) \
+                             passes; run rbgp rpki caches",
                             accepted.age_seconds
                         ),
                     ),
                     (false, None) => (
                         CheckStatus::Warn,
-                        "RTR session down and no contribution is retained; run rbgp rpki caches"
+                        "RTR session down and no contribution is retained (flushed, expired, or \
+                         never synchronized); run rbgp rpki caches"
                             .to_string(),
                     ),
                 },
@@ -4734,6 +4745,20 @@ paths = ["x"]
         assert!(checks[0].detail.contains("no row"));
         assert_eq!(checks[1].status, CheckStatus::Warn);
         assert!(checks[1].detail.contains("no contribution is retained"));
+        // A truncated listing is not evidence that the cache is missing.
+        let mut truncated = empty.clone();
+        truncated.complete = false;
+        truncated.omitted = 3;
+        let checks = rpki_cache_session_checks(&caches, Ok(&truncated));
+        assert_eq!(checks[0].status, CheckStatus::Warn);
+        assert!(
+            checks[0]
+                .detail
+                .contains("inventory is incomplete (3 omitted)")
+        );
+        // A flushed cache reports no retained contribution: the detail
+        // follows the row's accepted state, not the disconnect.
+        assert!(!checks[1].detail.contains("accepted"));
         let failed = rpki_cache_session_checks(&caches, Err("ListCaches RPC failed: denied"));
         assert!(failed.iter().all(|check| check.status == CheckStatus::Warn
             && check.detail.contains("RPC failed: denied")));

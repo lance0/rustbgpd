@@ -1099,19 +1099,24 @@ validation state `NotFound`. If your policy denies `NotFound` routes, this
 will cause route drops. The recommended policy is to deny `Invalid` and
 prefer `Valid`, leaving `NotFound` as a neutral fallback.
 
-A lost RTR session does not change the validation table until the effective
-expire passes, so readiness and the VRP count stay green through the outage.
-Watch the session itself:
+An ordinary loss of the RTR session (a TCP failure, a closed connection, or a
+non-fatal Error Report) does not change the validation table until the
+effective expire passes, so readiness and the VRP count stay green through the
+outage. A flush is different: a fatal Error Report (for example Cache Shutdown)
+or a corrupt Prefix PDU drops the cache's contribution at once, and readiness
+falls to `0` with the session. A Cache Reset is not a flush; the held data stays
+until the full table that follows replaces it. Watch the session itself:
 
 - `bgp_rpki_cache_connected{cache}` is `1` while the daemon has an RTR session
   to that configured cache and `0` otherwise, including at startup and while
-  the retained contribution is still in use.
+  a retained contribution is still in use.
 - The shipped `RpkiCacheDisconnected` alert fires after 15 minutes at `0`.
 - `rbgp rpki caches` shows each cache as `connected`, `retained` (session
   down, contribution still in use), `syncing`, or `disconnected`, with the
-  age in seconds of the last accepted End of Data. The contribution drops
-  out once that age reaches
-  `bgp_rpki_cache_effective_expire_seconds{cache}`.
+  age in seconds of the last accepted End of Data. A retained contribution
+  drops out once that age reaches
+  `bgp_rpki_cache_effective_expire_seconds{cache}`, unless a reconnect
+  replaces or flushes it first.
 
 `rbgp doctor` reads the same inventory from the daemon (`ListCaches`). The
 daemon-side `rpki.cache.<addr>.session` check is green while the session is
@@ -2280,7 +2285,7 @@ details stay in the structured daemon log and RPC status.
 | `bgp_rpki_vrp_count{af="ipv6"}` | IPv6 VRP entries loaded |
 | `bgp_rpki_cache_effective_expire_seconds{cache}` | Effective RTR expire per cache (`IP:port`): the cache-advertised expire after the RFC 8210 two-day maximum and the configured `max_expire_interval` ceiling. Set at client start and after every End of Data |
 | `bgp_rpki_cache_end_of_data_ready{cache}` | Per-cache retained End-of-Data readiness: `0` at startup and after flush/expiry; `1` after validated End of Data, including an empty table, and through reconnect/resync |
-| `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, including while its retained contribution is still in use |
+| `bgp_rpki_cache_connected{cache}` | Per-cache RTR session state: `1` while a session to that configured cache is established, `0` at startup and whenever it is down, whether or not a contribution is still retained (compare `bgp_rpki_cache_end_of_data_ready`) |
 | `bgp_aspa_records` | ASPA customer records loaded in the merged table. Renamed from `bgp_aspa_records_total` (a gauge must not carry the counter `_total` suffix) |
 | `bgp_validation_import_refreshes_total{dependency, outcome}` | Inbound Route Refresh work triggered by VRP / ASPA cache updates for peers whose import policy matches validation state. `dependency` is `rpki` or `aspa`; `outcome` is `eligible`, `refreshed`, `skipped_not_established`, `skipped_state_unknown`, or `failed`. A state-query timeout increments both `skipped_state_unknown` and `failed` and leaves the peer's refresh intent pending for replay. |
 

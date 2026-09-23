@@ -3291,8 +3291,8 @@ fn observe_rpki_task_exit(
 }
 
 /// Seed and drive the per-cache readiness and connectivity gauges from the
-/// VRP manager. They are distinct signals: a disconnected cache stays ready
-/// while its retained contribution lives until the effective expire.
+/// VRP manager. They are distinct signals: after an ordinary disconnect a
+/// cache stays ready until the effective expire; a flush drops both.
 fn observe_rpki_cache_metrics(
     manager: rustbgpd_rpki::VrpManager,
     metrics: &BgpMetrics,

@@ -314,8 +314,9 @@ impl VrpManager {
 
     /// Observe a configured cache's RTR session going up (`true`) or down
     /// (`false`), from the same transitions that set
-    /// [`CacheState::connected`]. Independent of readiness: a disconnected
-    /// cache keeps its retained contribution until expiry. Fires only for
+    /// [`CacheState::connected`]. Independent of readiness: an ordinary
+    /// disconnect retains the contribution until expiry, while a flush drops
+    /// it at once. Fires only for
     /// caches registered through [`CacheInventoryAttachment`].
     #[must_use]
     pub fn with_connectivity_observer(

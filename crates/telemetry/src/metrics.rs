@@ -2029,7 +2029,7 @@ impl BgpMetrics {
         let rpki_cache_connected = IntGaugeVec::new(
             Opts::new(
                 "bgp_rpki_cache_connected",
-                "Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: a disconnected cache keeps its retained contribution until the effective expire",
+                "Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: an ordinary disconnect retains the contribution until the effective expire, while a flush (fatal Error Report, corrupt data) drops it at once",
             ),
             &["cache"],
         )
@@ -7021,7 +7021,7 @@ mod tests {
         m.set_rpki_cache_end_of_data_ready("192.0.2.10:3323", true);
         let text = gather_text(&m);
         assert!(text.contains(
-            "# HELP bgp_rpki_cache_connected Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: a disconnected cache keeps its retained contribution until the effective expire"
+            "# HELP bgp_rpki_cache_connected Whether an RTR session to this configured cache is currently established (1 connected, 0 not connected); not End-of-Data readiness: an ordinary disconnect retains the contribution until the effective expire, while a flush (fatal Error Report, corrupt data) drops it at once"
         ));
         assert!(text.contains("bgp_rpki_cache_connected{cache=\"192.0.2.10:3323\"} 0"));
         assert!(text.contains("bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.10:3323\"} 1"));
