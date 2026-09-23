@@ -1150,23 +1150,24 @@ carries inactive (absent), unlimited (zero), or finite.
   Extended Next Hop was not negotiated, so a withdrawal sent that way left the
   route in place.
 - A 16- or 32-octet (IPv6) next hop on IPv4-unicast NLRI without negotiated
-  Extended Next Hop breaks the §4 precondition. The UPDATE is
-  treat-as-withdraw with Invalid NEXT_HOP (3/8), the same disposition as other
-  semantically invalid MP next hops: its IPv4 routes are withdrawn from the
-  Adj-RIB-In and the session stays Established. It is counted in
-  `bgp_update_malformed_total{disposition="treat_as_withdraw"}` with cause
-  `type_code="14"`, `reason="invalid_next_hop"`. Earlier releases dropped such
-  an UPDATE with only a log line, leaving any earlier route for the prefix in
-  place.
-- Interpretation: RFC 7606 §7.11 asks for session reset or AFI/SAFI disable
-  when the next-hop length is not the one expected, because the NLRI then
-  cannot be located. rustbgpd implements RFC 8950, so the decoder expects and
-  parses 16/32 octets for IPv4 unicast and the NLRI is located reliably; what
-  is wrong is the next hop's use without the capability, a semantic error.
-  Treat-as-withdraw also avoids a reset loop against speakers that put an
-  IPv6 next hop on IPv4 routes without checking the capability. BIRD makes
-  the same call; ExaBGP and OpenBGPD reset the session; FRR and GoBGP accept
-  the route.
+  Extended Next Hop is a malformed `MP_REACH_NLRI`. RFC 7606 §7.11 judges the
+  next-hop length against the one expected for the AFI/SAFI as modified by
+  the extensions in use, and gives RFC 5549 (now RFC 8950) as the example:
+  only when it is in use may IPv4 unicast carry a 16-octet next hop. A
+  mismatch requires session reset or AFI/SAFI disable. rustbgpd does not
+  implement AFI/SAFI disable, so the session resets with UPDATE Message
+  Error / Optional Attribute Error (3/9) carrying the `MP_REACH_NLRI`
+  attribute as received, the same NOTIFICATION as other malformed
+  `MP_REACH_NLRI` next hops. The reset is counted in
+  `bgp_update_malformed_total{disposition="session_reset"}`. That the
+  decoder could still locate the NLRI does not change the disposition.
+  Earlier releases dropped such an UPDATE with only a log line.
+- Receiving behavior of other implementations for that case, from their
+  source: ExaBGP 5.0.13 and OpenBGPD 9.2 also reset the session, BIRD 3.3.2
+  discards the routes, and FRR 10.7.1 and GoBGP v4.9.0 accept them. GoBGP
+  and ExaBGP send IPv4 routes with an IPv6 next hop without checking the
+  capability, so a peer misconfigured that way against a rustbgpd neighbor
+  that does not advertise Extended Next Hop has its session reset.
 - See ADR-0037 for the IPv4-unicast behavior.
 
 ---

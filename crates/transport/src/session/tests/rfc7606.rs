@@ -2045,9 +2045,10 @@ async fn srv6_service_generic_prefix_sid_failure_still_discards_only_attribute()
 /// IPv4-unicast `MP_REACH_NLRI` next-hop boundary. RFC 4760 permits a
 /// 4-octet IPv4 next hop for AFI 1 / SAFI 1 on any session that negotiated
 /// the family. RFC 8950 §3 adds the 16/32-octet IPv6 forms, which §4 makes
-/// conditional on Extended Next Hop. Without it the NLRI is still located,
-/// so the UPDATE is treat-as-withdraw with Invalid `NEXT_HOP`: the replaced
-/// body route is withdrawn, the session stays up and the cause is counted.
+/// conditional on Extended Next Hop. Without it that length is not the one
+/// expected, so the `MP_REACH_NLRI` is malformed (RFC 7606 §7.11): the
+/// session resets with UPDATE Message Error / Optional Attribute Error
+/// carrying the attribute as received (RFC 4271 §6.3, RFC 4760 §7).
 #[tokio::test]
 async fn ipv4_mp_reach_next_hop_length_boundary() {
     let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -2064,7 +2065,7 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
         for extended_nexthop in [false, true] {
             let case = format!("NH-Len={} ENH={extended_nexthop}", next_hop.len());
             let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-            let (client, _server) = connected_stream_pair().await;
+            let (client, mut server) = connected_stream_pair().await;
             session.test_install_stream(client);
             establish_test_session(&mut session, 65002).await;
             install_test_negotiated_session(
@@ -2072,13 +2073,6 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
                 negotiated_session(65002, extended_nexthop),
             );
             rfc7606_drain(&mut rib_rx);
-            // Accept the prefix through the classic body first, so a rejected
-            // MP replacement must withdraw it rather than merely not add it.
-            session
-                .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
-                .await;
-            rfc7606_drain(&mut rib_rx);
-            assert_eq!(session.known_prefix_count(), 1, "{case}");
 
             let mut mp_reach = vec![0x80, 14, 0, 0, 1, 1];
             mp_reach.push(u8::try_from(next_hop.len()).unwrap());
@@ -2096,17 +2090,10 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
                 })
                 .await;
 
-            let RibUpdate::RoutesReceived {
-                announced,
-                withdrawn,
-                ..
-            } = rib_rx.try_recv().unwrap()
-            else {
-                panic!("{case}: expected RoutesReceived");
-            };
-            assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
             if next_hop.len() == 4 || extended_nexthop {
-                assert!(withdrawn.is_empty(), "{case}");
+                let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+                    panic!("{case}: expected the MP announcement");
+                };
                 assert_eq!(announced.len(), 1, "{case}");
                 assert_eq!(announced[0].prefix, Prefix::V4(prefix), "{case}");
                 assert_eq!(announced[0].next_hop, expected_next_hop, "{case}");
@@ -2115,22 +2102,37 @@ async fn ipv4_mp_reach_next_hop_length_boundary() {
                     (next_hop.len() == 32).then_some(link_local),
                     "{case}"
                 );
-                assert_eq!(session.known_prefix_count(), 1, "{case}");
+                assert_eq!(session.fsm.state(), SessionState::Established, "{case}");
+                assert_eq!(session.notifications_sent, 0, "{case}");
                 assert!(malformed_cause_rows(&session).is_empty(), "{case}");
             } else {
-                assert!(announced.is_empty(), "{case}");
-                assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)], "{case}");
-                assert_eq!(session.known_prefix_count(), 0, "{case}");
-                assert_single_malformed_disposition(&session, "treat_as_withdraw");
+                assert_ne!(
+                    session.fsm.state(),
+                    SessionState::Established,
+                    "{case}: the session must leave Established"
+                );
+                while let Ok(message) = rib_rx.try_recv() {
+                    assert!(
+                        !matches!(message, RibUpdate::RoutesReceived { .. }),
+                        "{case}: no route may reach the RIB"
+                    );
+                }
+                assert_single_malformed_disposition(&session, "session_reset");
+                let notification = read_until_notification(&mut server).await;
                 assert_eq!(
-                    malformed_cause_rows(&session),
-                    vec![(
-                        "14".to_string(),
-                        "invalid_next_hop".to_string(),
-                        "treat_as_withdraw".to_string(),
-                        1.0
-                    )],
+                    notification.code,
+                    rustbgpd_wire::notification::NotificationCode::UpdateMessage,
                     "{case}"
+                );
+                assert_eq!(
+                    notification.subcode,
+                    rustbgpd_wire::notification::update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    "{case}"
+                );
+                assert_eq!(
+                    notification.data.as_ref(),
+                    mp_reach,
+                    "{case}: NOTIFICATION data must be the attribute as received"
                 );
             }
         }

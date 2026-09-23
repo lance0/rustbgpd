@@ -42,6 +42,29 @@ fn malformed_decode_reason(error: &rustbgpd_wire::DecodeError) -> MalformedUpdat
     }
 }
 
+/// The first path attribute of `type_code` exactly as received (flags,
+/// type, length and value), for NOTIFICATION data. `None` if the framing
+/// ends first, which the decoder has already rejected for MP attributes.
+fn raw_path_attribute(mut attrs: &[u8], type_code: u8) -> Option<&[u8]> {
+    while attrs.len() >= 3 {
+        let extended = attrs[0] & rustbgpd_wire::constants::attr_flags::EXTENDED_LENGTH != 0;
+        let (header_len, value_len) = if extended {
+            (
+                4,
+                usize::from(u16::from_be_bytes([attrs[2], *attrs.get(3)?])),
+            )
+        } else {
+            (3, usize::from(attrs[2]))
+        };
+        let attr = attrs.get(..header_len + value_len)?;
+        if attr[1] == type_code {
+            return Some(attr);
+        }
+        attrs = &attrs[attr.len()..];
+    }
+    None
+}
+
 fn malformed_subcode_reason(subcode: u8) -> MalformedUpdateReason {
     use rustbgpd_wire::notification::update_subcode;
     match subcode {
@@ -650,6 +673,7 @@ impl PeerSession {
                 mp.safi == Safi::Unicast
                     && matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
                     && negotiated_families.contains(&family)
+                    && !self.is_unnegotiated_ipv4_mp_ipv6_next_hop(mp)
             })
             .flat_map(|mp| {
                 mp.announced
@@ -671,7 +695,8 @@ impl PeerSession {
     ///
     /// Only forms the import loops below would accept are inspected —
     /// the same gates as [`Self::eligible_unicast_announcements`]
-    /// (negotiated family, no body NLRI on a
+    /// (negotiated family, IPv4-MP IPv6 next hop only with Extended Next
+    /// Hop, no body NLRI on a
     /// scoped link-local session). `body_next_hop` is the value the
     /// body-NLRI import loop evaluates: the decoded wire `NEXT_HOP`
     /// when present, else the session's own address — which is
@@ -704,6 +729,7 @@ impl PeerSession {
                 || mp.safi != Safi::Unicast
                 || !matches!(mp.afi, Afi::Ipv4 | Afi::Ipv6)
                 || !self.negotiated_families().contains(&family)
+                || self.is_unnegotiated_ipv4_mp_ipv6_next_hop(mp)
             {
                 continue;
             }
@@ -896,15 +922,26 @@ impl PeerSession {
                 .is_some_and(|afi| *afi == Afi::Ipv6)
         })
     }
-    /// RFC 8950 §4: an IPv6 (16/32-octet) next hop on IPv4-unicast NLRI is
-    /// usable only with negotiated Extended Next Hop; a 4-octet IPv4 next
-    /// hop is plain RFC 4760 and needs only the family. The NLRI is still
-    /// reliably located (the decoder accepts every RFC 8950 length), so the
-    /// breach is a semantic next-hop error: Invalid `NEXT_HOP`, treat-as-withdraw
-    /// (RFC 7606 §7.3, §2), matching the other semantic MP next-hop checks.
-    fn check_ipv4_mp_next_hop_family(
+    /// An IPv4-unicast `MP_REACH_NLRI` for a negotiated family whose
+    /// 16/32-octet (IPv6) next hop needs RFC 8950 Extended Next Hop, which
+    /// this session did not negotiate. A 4-octet IPv4 next hop is plain
+    /// RFC 4760 and needs only the family (RFC 8950 §4).
+    fn is_unnegotiated_ipv4_mp_ipv6_next_hop(&self, mp: &rustbgpd_wire::MpReachNlri) -> bool {
+        (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
+            && mp.next_hop.is_ipv6()
+            && self.negotiated_families().contains(&(mp.afi, mp.safi))
+            && !self.use_extended_nexthop_ipv4()
+    }
+    /// RFC 7606 §7.11: without negotiated Extended Next Hop, a 16/32-octet
+    /// next hop is not the length expected for IPv4 unicast (RFC 8950 §4), so
+    /// the `MP_REACH_NLRI` is malformed and the session resets (AFI/SAFI
+    /// disable is not implemented). Same NOTIFICATION as the decoder's other
+    /// `MP_REACH_NLRI` next-hop failures: UPDATE Message Error / Optional Attribute
+    /// Error with the attribute as received.
+    fn check_ipv4_mp_next_hop_length(
         &self,
         attrs: &[PathAttribute],
+        raw_attrs: &[u8],
     ) -> Result<
         (),
         (
@@ -913,27 +950,24 @@ impl PeerSession {
             MalformedUpdateReason,
         ),
     > {
-        if self.use_extended_nexthop_ipv4() {
+        if !attrs.iter().any(|attr| {
+            matches!(attr, PathAttribute::MpReachNlri(mp)
+                if self.is_unnegotiated_ipv4_mp_ipv6_next_hop(mp))
+        }) {
             return Ok(());
         }
-        for attr in attrs {
-            if let PathAttribute::MpReachNlri(mp) = attr
-                && (mp.afi, mp.safi) == (Afi::Ipv4, Safi::Unicast)
-                && let IpAddr::V6(next_hop) = mp.next_hop
-                && self.negotiated_families().contains(&(mp.afi, mp.safi))
-            {
-                return Err((
-                    rustbgpd_wire::validate::UpdateError {
-                        subcode: rustbgpd_wire::notification::update_subcode::INVALID_NEXT_HOP,
-                        data: next_hop.octets().to_vec(),
-                        disposition: ErrorDisposition::TreatAsWithdraw,
-                    },
-                    rustbgpd_wire::constants::attr_type::MP_REACH_NLRI,
-                    MalformedUpdateReason::InvalidNextHop,
-                ));
-            }
-        }
-        Ok(())
+        let mp_reach = rustbgpd_wire::constants::attr_type::MP_REACH_NLRI;
+        Err((
+            rustbgpd_wire::validate::UpdateError {
+                subcode: rustbgpd_wire::notification::update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                data: raw_path_attribute(raw_attrs, mp_reach)
+                    .map(<[u8]>::to_vec)
+                    .unwrap_or_default(),
+                disposition: ErrorDisposition::SessionReset,
+            },
+            mp_reach,
+            MalformedUpdateReason::OptionalAttribute,
+        ))
     }
     pub(super) fn is_scoped_link_local_peer(&self) -> bool {
         matches!(self.peer_ip, IpAddr::V6(v6) if is_ipv6_link_local(&v6))
@@ -1507,31 +1541,36 @@ impl PeerSession {
                 && self.use_extended_nexthop_ipv4(),
         };
         let mut validation_payload: Option<(u8, Vec<u8>)> = None;
-        let validation = rustbgpd_wire::validate::validate_update_attributes_with_context(
-            &parsed.attributes,
-            has_nlri,
-            has_body_nlri,
-            is_ebgp,
-            validation_options,
-        )
-        .map_err(|context| {
-            let reason = malformed_subcode_reason(context.error.subcode);
-            (context.error, context.type_code, reason)
-        })
-        .and_then(|()| self.check_ipv4_mp_next_hop_family(&parsed.attributes))
-        .and_then(|()| {
-            rustbgpd_wire::validate::validate_as_path_ceiling(
-                &parsed.attributes,
-                self.config.max_as_path_length,
-            )
-            .map_err(|error| {
-                (
-                    error,
-                    rustbgpd_wire::constants::attr_type::AS_PATH,
-                    MalformedUpdateReason::AsPathLimit,
+        // The session-reset next-hop length check runs first so a weaker
+        // validation error cannot mask it (RFC 7606 §3 (h)).
+        let validation = self
+            .check_ipv4_mp_next_hop_length(&parsed.attributes, &update.path_attributes)
+            .and_then(|()| {
+                rustbgpd_wire::validate::validate_update_attributes_with_context(
+                    &parsed.attributes,
+                    has_nlri,
+                    has_body_nlri,
+                    is_ebgp,
+                    validation_options,
                 )
+                .map_err(|context| {
+                    let reason = malformed_subcode_reason(context.error.subcode);
+                    (context.error, context.type_code, reason)
+                })
             })
-        });
+            .and_then(|()| {
+                rustbgpd_wire::validate::validate_as_path_ceiling(
+                    &parsed.attributes,
+                    self.config.max_as_path_length,
+                )
+                .map_err(|error| {
+                    (
+                        error,
+                        rustbgpd_wire::constants::attr_type::AS_PATH,
+                        MalformedUpdateReason::AsPathLimit,
+                    )
+                })
+            });
         if let Err((update_err, type_code, reason)) = validation {
             // A decoder-removed mandatory attribute already has its primary
             // cause. Do not label the resulting absence as a second independent
