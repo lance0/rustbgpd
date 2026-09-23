@@ -13,8 +13,12 @@ use rustbgpd_wire::bgpls_topo::{
 /// never panic.
 fn topology_accessors(routes: &[BgpLsNlri]) {
     for route in routes {
-        let _ = route.local_node_key();
-        let _ = route.remote_node_key();
+        for key in [route.local_node_key(), route.remote_node_key()]
+            .into_iter()
+            .flatten()
+        {
+            std::hint::black_box(key.as_bytes());
+        }
         let _ = route.link_ipv4_interface_address();
         let _ = route.link_ipv4_neighbor_address();
         let _ = route.link_ipv6_interface_address();
