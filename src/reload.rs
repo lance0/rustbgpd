@@ -1911,6 +1911,20 @@ pub(crate) async fn reload_config(
     .await
 }
 
+/// Whether a SIGHUP candidate's `[global]` differs from the live one in a
+/// field that only the broad restart-required ERROR reports. The implicit
+/// receiver honor knobs and `dynamic_neighbor_limit` are hot-applied, and
+/// `ebgp_requires_policy` belongs to the RFC 8212 posture tuple that
+/// `pin_rfc8212_posture_startup_only` pins and reports on its own terms.
+fn sighup_global_restart_required(current: &config::Global, new: &config::Global) -> bool {
+    let mut new = new.clone();
+    new.honor_graceful_shutdown = current.honor_graceful_shutdown;
+    new.honor_blackhole = current.honor_blackhole;
+    new.dynamic_neighbor_limit = current.dynamic_neighbor_limit;
+    new.ebgp_requires_policy = current.ebgp_requires_policy;
+    new != *current
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -1947,14 +1961,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
         current.global.install_blackhole_discard || new_config.global.install_blackhole_discard;
 
     // Flag sections that require restart at ERROR, the documented level for
-    // a restart-required edit. The implicit receiver honor knobs are
-    // hot-applied below, so ignore them for this broad restart check.
-    let mut restart_new_global = new_config.global.clone();
-    let restart_current_global = current.global.clone();
-    restart_new_global.honor_graceful_shutdown = restart_current_global.honor_graceful_shutdown;
-    restart_new_global.honor_blackhole = restart_current_global.honor_blackhole;
-    restart_new_global.dynamic_neighbor_limit = restart_current_global.dynamic_neighbor_limit;
-    if restart_new_global != restart_current_global {
+    // a restart-required edit.
+    if sighup_global_restart_required(&current.global, &new_config.global) {
         error!("[global] changed — requires full restart to take effect");
     }
     if new_config.flowspec != current.flowspec {
@@ -11862,6 +11870,77 @@ remote_asn = 65002
             disk.rfc8212_posture().policy_source,
             crate::config::Rfc8212PolicySource::ExplicitTrue
         );
+    }
+
+    /// A runtime mutation rewrites the main file canonically, making an
+    /// omitted epoch or boolean explicit. An unedited SIGHUP of that file
+    /// must not report a restart-required posture or `[global]` change: the
+    /// effective posture never moved. A real posture edit on top of it still
+    /// pins and reports. Comparing the raw tuple in the pin makes the first
+    /// assertion red for every cell; comparing the raw boolean in the broad
+    /// `[global]` check makes the omitted-boolean cells red.
+    #[tokio::test]
+    async fn sighup_after_crud_canonical_rewrite_reports_no_posture_pin() {
+        let cells = [
+            // The `--init-config` lab shape: epoch omitted, boolean explicit.
+            baseline_toml().replace(
+                "listen_port = 179",
+                "listen_port = 179\nebgp_requires_policy = true",
+            ),
+            // Legacy omission of both.
+            baseline_toml().to_string(),
+            // ADR-0119 activated cell: epoch 2, boolean omitted.
+            format!("config_epoch = 2\n{}", baseline_toml()),
+        ];
+        for cell in &cells {
+            let (runtime, disk) =
+                reload_then_persist_policy_after_desired_refresh_from(cell, cell).await;
+            let live = runtime.rfc8212_posture();
+            assert_ne!(
+                (disk.config_epoch, disk.global.ebgp_requires_policy),
+                (runtime.config_epoch, runtime.global.ebgp_requires_policy),
+                "the canonical rewrite must change the raw tuple, or this cell proves nothing: {cell}"
+            );
+
+            let mut unedited = disk.clone();
+            assert!(
+                !config::pin_rfc8212_posture_startup_only(&mut unedited, &runtime),
+                "an unedited SIGHUP after a runtime mutation must not report a pin: {cell}"
+            );
+            assert_eq!(unedited.rfc8212_posture(), live, "{cell}");
+            // The broad `[global] changed` ERROR runs before the pin, on the
+            // unpinned candidate, and must not fire on the materialized boolean.
+            assert!(
+                !sighup_global_restart_required(&runtime.global, &disk.global),
+                "an unedited SIGHUP after a runtime mutation must not report [global] changed: {cell}"
+            );
+            let mut other = disk.global.clone();
+            other.listen_port += 1;
+            assert!(
+                sighup_global_restart_required(&runtime.global, &other),
+                "{cell}"
+            );
+
+            let mut flipped = disk.clone();
+            flipped.global.ebgp_requires_policy = Some(!live.policy_effective);
+            assert!(
+                config::pin_rfc8212_posture_startup_only(&mut flipped, &runtime),
+                "a real ebgp_requires_policy change must still pin: {cell}"
+            );
+            assert_eq!(flipped.rfc8212_posture(), live, "{cell}");
+        }
+
+        // Epoch 1 -> 2 with the boolean omitted flips the effective value.
+        let (runtime, disk) =
+            reload_then_persist_policy_after_desired_refresh_from(&cells[1], &cells[1]).await;
+        let mut upgraded = disk;
+        upgraded.config_epoch = Some(crate::config::ConfigEpoch::V2);
+        upgraded.global.ebgp_requires_policy = None;
+        assert!(config::pin_rfc8212_posture_startup_only(
+            &mut upgraded,
+            &runtime
+        ));
+        assert_eq!(upgraded.rfc8212_posture(), runtime.rfc8212_posture());
     }
 
     // SoftResetIn-on-import-policy-change coverage is now PM-side:

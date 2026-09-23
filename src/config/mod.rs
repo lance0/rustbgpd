@@ -4988,14 +4988,26 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
 /// it every time a peer's effective chains are recomputed, so an unpinned
 /// SIGHUP could change behavior or erase source intent. A reload still reports
 /// the on-disk candidate through `ConfigDiff`; the running snapshot keeps the
-/// startup tuple until restart. Returns whether anything was pinned.
+/// startup tuple until restart.
+///
+/// Returns whether the candidate carries a restart-required posture change to
+/// report. A candidate holding exactly the canonical form of the live tuple
+/// (explicit effective epoch and boolean) is what the ADR-0119 canonical
+/// renderer writes on any durable runtime mutation, not an operator posture
+/// edit: epoch 1 with the boolean omitted becomes explicit `false` (the named
+/// legacy-omission materialization), and epoch 2 with the boolean omitted
+/// becomes explicit `true`. The running tuple is still retained, but nothing
+/// is reported.
 pub(crate) fn pin_rfc8212_posture_startup_only(new_config: &mut Config, current: &Config) -> bool {
-    if new_config.rfc8212_posture() == current.rfc8212_posture() {
+    let live = current.rfc8212_posture();
+    let candidate = new_config.rfc8212_posture();
+    if candidate == live {
         return false;
     }
     new_config.config_epoch = current.config_epoch;
     new_config.global.ebgp_requires_policy = current.global.ebgp_requires_policy;
-    true
+    candidate.config_epoch_raw != Some(live.config_epoch_effective)
+        || candidate.policy_raw != Some(live.policy_effective)
 }
 
 fn neighbor_tcp_ao_restart_required_changed(old: &Config, new: &Config) -> bool {
