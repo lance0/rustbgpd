@@ -97,6 +97,32 @@ fn views(peer: &str) -> Vec<Vec<&str>> {
     views
 }
 
+/// gRPC serves before startup installs the configured-peer roster, so an
+/// early view of the configured neighbor would race that install. Wait for
+/// the neighbor itself to be visible before asserting.
+fn wait_until_neighbor_installed(grpc_addr: &str, daemon: &mut Child) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let args = ["neighbor", CONFIGURED];
+        let output = rbgp(grpc_addr, &args);
+        if output.status.success() {
+            return;
+        }
+        if let Some(status) = daemon.try_wait().expect("query daemon status") {
+            panic!(
+                "rustbgpd exited with {status}\n{}",
+                describe(&args, &output)
+            );
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "configured neighbor never became visible\n{}",
+            describe(&args, &output)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn peer_scoped_views_fail_for_unknown_peer_and_stay_empty_for_configured_peer() {
     let temp = support::RetainOnPanic::new(tempfile::tempdir().expect("create temp dir"));
@@ -115,6 +141,7 @@ fn peer_scoped_views_fail_for_unknown_peer_and_stay_empty_for_configured_peer() 
     let sock = temp.path().join("runtime").join("grpc.sock");
     support::wait_until_grpc_socket_accepts(&sock, &mut daemon.0);
     let grpc_addr = format!("unix://{}", sock.display());
+    wait_until_neighbor_installed(&grpc_addr, &mut daemon.0);
 
     for args in views(CONFIGURED) {
         let output = rbgp(&grpc_addr, &args);

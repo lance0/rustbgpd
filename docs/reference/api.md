@@ -1527,12 +1527,20 @@ dynamic peer, or an address whose Adj-RIB-In still retains Graceful Restart or
 LLGR stale routes after its session ended; the first two clauses are the same
 managed-peer answer `GetPolicyStats` uses. A known peer that is down or has sent
 nothing still returns `OK` with an empty result. The daemon checks only when a
-view is empty, so a view with rows never pays for it, and each existence read
-is bounded by the peer-manager read deadline (`DEADLINE_EXCEEDED` if exceeded).
+view is empty, so a view with rows never pays for it. The whole check is bounded
+by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
+
+At startup the gRPC listeners serve before the configured-peer roster is
+installed, so for that brief window a configured neighbor is not yet known and
+these views, like `GetNeighborState` and `GetPolicyStats`, return `NOT_FOUND`
+for it. `/readyz` and systemd `READY=1` are reported only after the roster is
+installed.
 
 A continuation token does not outlive its peer. Removing a peer mutates the
-route table, so the next continuation returns `ABORTED`, and restarting from
-an empty token returns `NOT_FOUND`.
+route table, so the next continuation returns `ABORTED`. Restarting from an
+empty token returns `NOT_FOUND` only once the address is neither managed nor
+retaining stale routes; while its Adj-RIB-In still retains Graceful Restart or
+LLGR stale routes, the restart returns `OK` with those rows.
 
 ### Prefix-SID inspection on VPN and EVPN routes
 
