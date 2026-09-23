@@ -5,6 +5,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PATH = Path(__file__).with_name("check_metric_release_notes.py")
@@ -169,6 +170,13 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             )
 
     def test_fragment_notes_count_and_are_required_alongside_unreleased(self):
+        # Fragments are pending only while the target is [Unreleased]; a
+        # release commit moves the target, so pin it for this fixture.
+        target = mock.patch.object(
+            check, "TARGET_CHANGELOG_SECTION", check.UNRELEASED_SECTION
+        )
+        target.start()
+        self.addCleanup(target.stop)
         changelog = f"""# Changelog
 
 ## [{check.UNRELEASED_SECTION}]
