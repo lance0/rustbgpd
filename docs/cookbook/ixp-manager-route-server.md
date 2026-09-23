@@ -155,7 +155,7 @@ must not be activated:
     "config.toml": "5d7d0eb0…",
     "policy/client-1.rpol": "3cf619c8…",
     "policy/client-4.rpol": "1666481b…",
-    "policy/ixp-hygiene.rpol": "326b2121…"
+    "policy/ixp-hygiene.rpol": "23a80e76…"
   },
   "host": { "router_handle": "b2-rs1-lan1-ipv4",
             "runtime_state_dir": "/var/lib/rustbgpd/b2-rs1-lan1-ipv4" },

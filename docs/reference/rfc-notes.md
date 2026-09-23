@@ -1203,13 +1203,15 @@ carries inactive (absent), unlimited (zero), or finite.
   under the non-transitive rule in "Extended Communities — non-transitive
   eBGP export" below unless `send_non_transitive_extended_communities =
   true`, while route-server-client export preserves it (RFC 7947 §2.2.4
-  transparency). The shipped examples do not signal validation state to
-  members: the route-server example's `hygiene.rpol` adds no `OV_*`
-  community. rpol can still add one, but an operator whose policy tags
-  routes that reach another AS contradicts the draft's §6: "Operators
-  MUST NOT signal RPKI-derived validation states using BGP Path
-  Attributes carried over EBGP sessions across administrative
-  boundaries."
+  transparency). The hand-written route-server example's `hygiene.rpol`
+  adds no `OV_*` community, and neither does `rs-config-render` in IXP
+  Manager mode, which embeds that file. `rs-config-render` in arouteserver
+  mode currently still adds RFC 8097 `OV_*` tags to the routes it accepts
+  when RPKI origin validation is enabled, so its members receive them.
+  That output, like any operator policy that tags routes reaching another
+  AS, contradicts the draft's §6: "Operators MUST NOT signal RPKI-derived
+  validation states using BGP Path Attributes carried over EBGP sessions
+  across administrative boundaries." rpol can still add `OV_*`.
 - See ADR-0034.
 
 ---
