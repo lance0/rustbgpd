@@ -1,0 +1,20 @@
+# Canonical SHA-256 of every pinned archive that CI downloads.
+#
+# Workflows, composite actions, installer scripts and lab Dockerfiles each
+# carry their own copy of these digests, because they verify the bytes
+# themselves at run time. scripts/check_ci_image_primer_contract.py fails
+# when any copy is missing from this file or an entry here has no copy, so a
+# version bump starts here and the checker names every copy still to update.
+21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c  bird-3.3.2.tar.gz
+aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660  bird-2.19.2.tar.gz
+e20b2a155fe14450b9fe37e5c1a1d1bfe101eb479645f5bbea860a8fde30e522  gobgp_3.37.0_linux_amd64.tar.gz
+0aaa2da6e4dcaaf57e3d0e64eae14946292b0a5894d80ef3b7ebde3bf52beb29  gobgp_3.37.0_linux_arm64.tar.gz
+6d4491a85dfbaaab8d18bd6855be6b67a117a5a9670eea3ee9f7dddaf50e869c  gobgp_4.6.0_linux_amd64.tar.gz
+05d98ca0d7bbcb2f50a6b7b6ee51c5e5b5fd64d6a310ee807040ed9d7104d5e0  gobgp_4.7.0_linux_amd64.tar.gz
+43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03  gobgp_4.8.0_linux_amd64.tar.gz
+588c9c429476d9ed66cd3b2ae32283a6da36e0cfbb7e446f5d6a1b68dc770214  grpcurl_1.9.1_linux_x86_64.tar.gz
+a3ded2f355a615df73900f31b9791f41e796e9c5c63b171e1ce041e8139ee00e  gnmic_0.46.0_Linux_x86_64.tar.gz
+bd4829de08d0c50074f9ecd5c351399fae42be06d456b3880a04aa4a7cda1137  rustbgpd-v0.64.0-linux-amd64.tar.gz
+f853e691868d0557425ea290bf7ba6384eef2fa9b04c323afab49a770ba9da80  protoc-25.3-linux-x86_64.zip
+8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz
+98001c995a134d95f9bc83106a7f94b552971b583f1c0ab75fb656a881e13865  ruff-0.16.0-x86_64-unknown-linux-gnu.tar.gz
