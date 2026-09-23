@@ -309,8 +309,8 @@ EOF
 
     # Bypass scan: only this installer may reference the upstream grpcurl
     # path (release URL, go install, or clone). The primer contract checker
-    # bans the release URL on the workflow/action surface it pins; this
-    # sweep is wider and also covers the interop test tree.
+    # only requires workflow/action fetches to verify a checksum; this sweep
+    # bans the grpcurl path outright and also covers the interop test tree.
     if grep -R -F -n 'fullstorydev/grpcurl' \
         "$repo_root/.github/workflows" "$repo_root/.github/actions" \
         "$repo_root/tests/interop"; then
