@@ -2641,7 +2641,9 @@ async fn main() {
 
     if let Err(error) = run(cli, binary_name).await {
         if let Some(diagnostic) = main_error_diagnostic(&error) {
-            eprintln!("{diagnostic}");
+            // Not `eprintln!`: it panics (exit 101) when the terminal has hung up.
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{diagnostic}");
         }
         std::process::exit(1);
     }

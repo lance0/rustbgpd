@@ -3,7 +3,8 @@ mod data;
 mod theme;
 mod ui;
 
-use std::io;
+use std::io::{self, IsTerminal};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
 use crossterm::ExecutableCommand;
@@ -11,6 +12,8 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::signal::unix::{SignalKind, signal};
@@ -31,7 +34,7 @@ const QUIT_KEY: KeyEvent = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTR
 /// turns Ctrl-C into a key event, but a signal from another process never
 /// reaches the event loop, and its default disposition would end the process
 /// inside the alternate screen with the cursor hidden.
-fn spawn_signal_forwarder(tx: mpsc::Sender<KeyEvent>) -> io::Result<()> {
+fn spawn_signal_forwarder(tx: mpsc::Sender<io::Result<KeyEvent>>) -> io::Result<()> {
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut hangup = signal(SignalKind::hangup())?;
@@ -41,9 +44,74 @@ fn spawn_signal_forwarder(tx: mpsc::Sender<KeyEvent>) -> io::Result<()> {
             _ = interrupt.recv() => {}
             _ = hangup.recv() => {}
         }
-        let _ = tx.send(QUIT_KEY).await;
+        let _ = tx.send(Ok(QUIT_KEY)).await;
     });
     Ok(())
+}
+
+/// The terminal crossterm reads keys from: stdin when it is a terminal,
+/// otherwise the controlling terminal.
+fn open_tty() -> Result<OwnedFd, CliError> {
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return Ok(stdin.as_fd().try_clone_to_owned()?);
+    }
+    std::fs::File::open("/dev/tty")
+        .map(OwnedFd::from)
+        .map_err(|_| CliError::Argument("rbgp top needs an interactive terminal".into()))
+}
+
+/// Wait up to `timeout` for input on `tty`; `true` if the terminal has hung
+/// up. crossterm 0.29 must never read a hung-up terminal: its read loop
+/// exits only on data or `WouldBlock`, so the EOF or EIO a hung-up terminal
+/// returns makes it re-read forever on a full core, never returning.
+fn tty_hung_up(tty: BorrowedFd<'_>, timeout: PollTimeout) -> io::Result<bool> {
+    let mut fds = [PollFd::new(tty, PollFlags::POLLIN)];
+    loop {
+        match poll(&mut fds, timeout) {
+            Ok(_) => break,
+            Err(Errno::EINTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+    Ok(revents.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL))
+}
+
+/// Read keys from `tty` until it hangs up (`Ok`) or crossterm fails. Waiting
+/// happens in [`tty_hung_up`], never inside crossterm.
+fn read_keys(tty: BorrowedFd<'_>, tx: &mpsc::Sender<io::Result<KeyEvent>>) -> io::Result<()> {
+    loop {
+        if tty_hung_up(tty, PollTimeout::NONE)? {
+            return Ok(());
+        }
+        // Input is pending. Hand over every event crossterm parses from it
+        // before blocking again. A hangup in the gap between the check and
+        // crossterm's read wedges this thread, but not the event loop: it
+        // still ends on the SIGHUP that comes with it, or on its next draw.
+        loop {
+            if let Event::Key(key) = event::read()?
+                && tx.blocking_send(Ok(key)).is_err()
+            {
+                return Ok(());
+            }
+            if tty_hung_up(tty, PollTimeout::ZERO)? || !event::poll(Duration::ZERO)? {
+                break;
+            }
+        }
+    }
+}
+
+/// Forward terminal keys on a dedicated thread, so the event loop waits on
+/// the channel it shares with the signal forwarder and never blocks inside
+/// crossterm. A hangup arrives as [`QUIT_KEY`]; a read error ends the TUI
+/// with that error. A plain thread, not `spawn_blocking`: runtime shutdown
+/// must not wait for a read that never returns.
+fn spawn_input_reader(tty: OwnedFd, tx: mpsc::Sender<io::Result<KeyEvent>>) {
+    std::thread::spawn(move || {
+        let end = read_keys(tty.as_fd(), &tx).map(|()| QUIT_KEY);
+        let _ = tx.blocking_send(end);
+    });
 }
 
 /// Leave the alternate screen and show the cursor. Ratatui hides the cursor
@@ -61,15 +129,20 @@ impl Drop for TerminalGuard {
 }
 
 pub async fn run(connection: Connection, interval: u64, no_color: bool) -> Result<(), CliError> {
-    let (signal_tx, mut signal_rx) = mpsc::channel(1);
-    spawn_signal_forwarder(signal_tx)?;
+    let tty = open_tty()?;
+    let (key_tx, mut key_rx) = mpsc::channel(16);
+    spawn_signal_forwarder(key_tx.clone())?;
     enable_raw_mode()?;
     let _guard = TerminalGuard;
     io::stdout().execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    // Never dropped: `TerminalGuard` restores the cursor, and ratatui's own
+    // restore `eprintln!`s its failure, which panics once the terminal has
+    // hung up and turns a clean quit into exit status 101.
+    let mut terminal = std::mem::ManuallyDrop::new(Terminal::new(backend)?);
     terminal.clear()?;
+    spawn_input_reader(tty, key_tx);
 
     let theme = if no_color {
         Theme::monochrome()
@@ -95,14 +168,11 @@ pub async fn run(connection: Connection, interval: u64, no_color: bool) -> Resul
     loop {
         terminal.draw(|f| ui::draw(f, &mut app, &theme))?;
 
-        let key = if let Ok(key) = signal_rx.try_recv() {
-            Some(key)
-        } else if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            Some(key)
-        } else {
-            None
+        let key = match tokio::time::timeout(Duration::from_millis(50), key_rx.recv()).await {
+            Ok(Some(key)) => Some(key?),
+            // Both senders send a quit before closing; never spin on a closed channel.
+            Ok(None) => Some(QUIT_KEY),
+            Err(_) => None,
         };
         if let Some(key) = key {
             app.on_key(key);
@@ -190,8 +260,48 @@ mod tests {
         let key = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("signal forwarded within 5s")
-            .expect("forwarder sends before closing");
+            .expect("forwarder sends before closing")
+            .expect("a signal is not an error");
         assert_eq!(key, QUIT_KEY, "a signal must arrive as the Ctrl-C key");
+
+        let mut app = App::new();
+        app.on_key(key);
+        assert!(
+            app.should_quit,
+            "the forwarded key must take the quit branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_hangup_arrives_as_the_ctrl_c_quit_key() {
+        let pty = nix::pty::openpty(None, None).expect("open a pty pair");
+        let tty = pty.slave;
+        assert!(
+            !tty_hung_up(tty.as_fd(), PollTimeout::ZERO).expect("poll idle tty"),
+            "an idle terminal has not hung up"
+        );
+        nix::unistd::write(&pty.master, b"q\n").expect("type into the pty");
+        assert!(
+            !tty_hung_up(tty.as_fd(), PollTimeout::NONE).expect("poll tty with input"),
+            "pending input is not a hangup"
+        );
+
+        // Closing the master is what a dropped SSH session or a killed tmux
+        // server does; reads on the slave now return EOF.
+        drop(pty.master);
+        assert!(
+            tty_hung_up(tty.as_fd(), PollTimeout::NONE).expect("poll hung-up tty"),
+            "a closed master must read as a hangup"
+        );
+
+        let (tx, mut rx) = mpsc::channel(1);
+        spawn_input_reader(tty, tx);
+        let key = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("hangup forwarded within 5s")
+            .expect("reader sends before closing")
+            .expect("a hangup is not an error");
+        assert_eq!(key, QUIT_KEY, "a hangup must arrive as the Ctrl-C key");
 
         let mut app = App::new();
         app.on_key(key);
