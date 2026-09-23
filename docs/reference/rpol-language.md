@@ -1557,14 +1557,19 @@ Changes (up to 2):
     communities + 65001:999
 ```
 
-- `--direction import` evaluates the routes the current import policy
-  accepted: the post-policy Adj-RIB-In (all peers, or one with
-  `--neighbor`), with the attributes the current policy set. Routes the
-  current policy rejects are not stored there, so the dry run shows
-  which accepted routes a candidate would reject or modify, but not
-  which routes it would newly admit. Inspect currently rejected routes
-  with `rbgp rib received PEER --rejected`, which keeps only the most
-  recent rejections per peer (`[policy.reject_retention]`).
+- `--direction import` evaluates the retained post-policy Adj-RIB-In
+  (all peers, or one with `--neighbor`): routes import policy admitted
+  when they were received or last re-evaluated, with the attributes it
+  set. It can still hold routes the installed policy would now reject:
+  after an import-policy change until a Route Refresh replay
+  re-evaluates them (a reload requests one for affected peers;
+  `rbgp neighbor <addr> softreset` requests one on demand), and under an
+  active GR/LLGR window until re-sync/EOR. Rejected routes are not
+  stored there, so the dry run shows which retained routes a candidate
+  would reject or modify, but not which routes it would newly admit.
+  Inspect currently rejected routes with
+  `rbgp rib received PEER --rejected`, which keeps only the most recent
+  rejections per peer (`[policy.reject_retention]`).
 - `--direction export` evaluates Loc-RIB best routes, with `--neighbor`
   setting the peer context guards see (`peer.address`, `peer.asn`,
   `peer.group`).

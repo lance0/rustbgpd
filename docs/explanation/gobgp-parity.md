@@ -114,7 +114,7 @@ releases rather than carried forward from older measurements.
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
 | Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.9.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd enforces RFC 8212 when opted in, by either `[global] ebgp_requires_policy = true` or the ADR-0119 activated secure default — root `config_epoch = 2` with the boolean omitted resolves to effective `true`. Epoch-less and `config_epoch = 1` omission stay effective `false` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
-| Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over a post-policy Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
+| Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over a retained post-policy Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
 
 ## gRPC API
