@@ -153,7 +153,7 @@ session_ready() {
 
 runtime_equal() {
     docker exec "$RUST" bash -c \
-        "sed 's#\"policy/#\"$STATE/current/policy/#g' '$STATE/current/config.toml' >'$STATE/.m96-compare.toml'; chmod 600 '$STATE/.m96-compare.toml'; /usr/local/bin/rbgp --addr '$ADDR' config diff '$STATE/.m96-compare.toml' >/dev/null 2>&1"
+        "sed -e 's#\"policy/#\"$STATE/current/policy/#g' -e 's#\"datasets/#\"$STATE/current/datasets/#g' '$STATE/current/config.toml' >'$STATE/.m96-compare.toml'; chmod 600 '$STATE/.m96-compare.toml'; /usr/local/bin/rbgp --addr '$ADDR' config diff '$STATE/.m96-compare.toml' >/dev/null 2>&1"
 }
 
 private_state() {
