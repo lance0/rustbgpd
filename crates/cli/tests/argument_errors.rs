@@ -91,3 +91,59 @@ fn help_and_man_distinguish_parsing_from_argument_validation() {
         );
     }
 }
+
+#[test]
+fn transport_error_exits_one_when_the_stderr_terminal_has_hung_up() {
+    let directory = tempfile::tempdir().unwrap();
+    let address = format!("unix://{}/absent.sock", directory.path().display());
+    // A pty whose master is closed: writes to the slave fail with EIO, as
+    // they do once an SSH session drops.
+    let pty = nix::pty::openpty(None, None).expect("open a pty pair");
+    drop(pty.master);
+    let status = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+        .args(["--addr", &address, "--no-color", "neighbor"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(pty.slave))
+        .status()
+        .expect("run rbgp with a hung-up stderr");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a lost terminal must not turn the error exit into a panic"
+    );
+}
+
+#[test]
+fn top_needs_a_terminal_on_stdin_and_stdout_before_transport() {
+    use std::process::Stdio;
+
+    let directory = tempfile::tempdir().unwrap();
+    let address = format!("unix://{}/absent.sock", directory.path().display());
+    for (case, stdin_is_tty, stdout_is_tty) in [
+        ("rbgp top > file", true, false),
+        ("rbgp top < /dev/null", false, true),
+    ] {
+        let pty = nix::pty::openpty(None, None).expect("open a pty pair");
+        let tty = || Stdio::from(pty.slave.try_clone().expect("clone pty slave"));
+        let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+            .args(["--addr", &address, "--no-color", "top"])
+            .stdin(if stdin_is_tty { tty() } else { Stdio::null() })
+            .stdout(if stdout_is_tty { tty() } else { Stdio::piped() })
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run rbgp top");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{case}: {error}");
+        assert!(
+            error.contains("rbgp top needs an interactive terminal on stdin and stdout"),
+            "{case}: {error}"
+        );
+        assert!(!error.contains("cannot reach rustbgpd"), "{case}: {error}");
+        assert!(
+            output.stdout.is_empty(),
+            "{case}: no escape codes into a redirected stdout"
+        );
+        drop(pty.master);
+    }
+}

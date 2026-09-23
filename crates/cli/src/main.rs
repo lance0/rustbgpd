@@ -2642,7 +2642,9 @@ async fn main() {
 
     if let Err(error) = run(cli, binary_name).await {
         if let Some(diagnostic) = main_error_diagnostic(&error) {
-            eprintln!("{diagnostic}");
+            // Not `eprintln!`: it panics (exit 101) when the terminal has hung up.
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stderr(), "{diagnostic}");
         }
         std::process::exit(1);
     }
@@ -3546,6 +3548,17 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_rib_age_action(&cli.command)?;
     validate_rib_route_view_action(&cli.command)?;
     validate_local_command(&cli.command)?;
+    // Checked before connecting, outside the pure validator above: a
+    // redirected stdout would receive the TUI's escape codes, and keys are
+    // read from stdin.
+    if matches!(cli.command, Command::Top { .. }) {
+        use std::io::IsTerminal as _;
+        if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+            return Err(CliError::Argument(
+                "rbgp top needs an interactive terminal on stdin and stdout".into(),
+            ));
+        }
+    }
     if let Command::Evpn {
         action: Some(EvpnAction::Explain { .. }),
         route_type,

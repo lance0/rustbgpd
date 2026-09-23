@@ -42,8 +42,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tar = "0.4"
 flate2.workspace = true
 owo-colors.workspace = true
-# `rbgp doctor` first-deploy probes (statvfs/access on the state dir).
-nix = { workspace = true, features = ["fs", "user"] }
+# `rbgp doctor` first-deploy probes (statvfs/access on the state dir);
+# `rbgp top` terminal hangup detection (poll).
+nix = { workspace = true, features = ["fs", "poll", "user"] }
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 rustbgpd-policy.workspace = true
@@ -57,8 +58,9 @@ protoc-bin-vendored = "3"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
-# Raises and delivers real signals in the TUI signal-restore tests.
-nix = { workspace = true, features = ["signal"] }
+# Raises and delivers real signals in the TUI signal-restore tests; opens
+# a pty pair for the TUI terminal-hangup test.
+nix = { workspace = true, features = ["signal", "term"] }
 rustbgpd-api.workspace = true
 rustbgpd-evpn.workspace = true
 # Fixture builder for the from-bmp adapter tests: captures are framed by
