@@ -313,9 +313,15 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   initiated by the speaker with the larger AS number, including a
   four-octet AS number.
 - The comparison applies only while the configured session is in
-  OpenSent or OpenConfirm, with the peer's identifier taken from the
-  inbound connection's OPEN. The configured session's state is read when
-  that OPEN arrives, not when the connection was accepted.
+  OpenConfirm or OpenSent. The configured session's state is read when the
+  inbound connection's OPEN arrives, not when the connection was accepted.
+- The OpenSent case is optional in the RFC: "A BGP speaker MAY also examine
+  connections in an OpenSent state if it knows the BGP Identifier of the
+  peer by means outside of the protocol." rustbgpd deliberately counts the
+  identifier in the inbound connection's OPEN as that knowledge, as FRR's
+  `bgp_collision_detect` does. This is for interoperability: in a
+  simultaneous open, two speakers that follow the same rule cannot both
+  close their connections.
 - A configured session in Idle, Connect or Active has no connection to
   collide with (RFC 4271 §6.8), so the inbound connection replaces it
   without a Cease; its outbound connect attempt and reconnect timer stop.
