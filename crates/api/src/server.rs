@@ -1460,7 +1460,10 @@ pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
     }
 }
 
-pub(crate) const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a runtime config mutation waits for a config-persistence permit
+/// before refusing the mutation. Shared by every persisting mutation path so
+/// they refuse a busy persistence queue at the same deadline.
+pub const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) async fn reserve_config_event_slot(
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
