@@ -1223,3 +1223,105 @@ async fn next_hop_ownership_disabled_by_default_accepts_foreign_next_hop() {
         "default (unset) must preserve transparent behavior"
     );
 }
+
+/// Send one outbound update to an Extended Next Hop session and return the
+/// raw UPDATE as written to the wire.
+async fn send_extended_nexthop_update(
+    route_server_client: bool,
+    scoped: bool,
+    announce: Vec<Route>,
+    withdraw: Vec<(Prefix, u32)>,
+) -> UpdateMessage {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    if scoped {
+        configure_scoped_link_local_peer(&mut session);
+    }
+    session.config.route_server_client = route_server_client;
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, true)));
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.next_hop_override = vec![None; announce.len()].into();
+    update.announce = announce.into();
+    update.withdraw = withdraw;
+    session.send_route_update(update);
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    msg
+}
+
+/// Attribute type codes present in an encoded path-attribute block.
+fn attribute_type_codes(mut attrs: &[u8]) -> Vec<u8> {
+    let mut codes = Vec::new();
+    while let [flags, code, rest @ ..] = attrs {
+        let (len, rest) = if flags & 0x10 == 0 {
+            (usize::from(rest[0]), &rest[1..])
+        } else {
+            (
+                usize::from(u16::from_be_bytes([rest[0], rest[1]])),
+                &rest[2..],
+            )
+        };
+        codes.push(*code);
+        attrs = &rest[len..];
+    }
+    codes
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv4_next_hop_uses_body_nlri() {
+    // Route-server client route passed through with its IPv4 next hop.
+    let msg = send_extended_nexthop_update(true, false, vec![make_route(100)], vec![]).await;
+    assert!(msg.withdrawn_routes.is_empty());
+    assert_eq!(&msg.nlri[..], &[24, 10, 0, 0], "10.0.0.0/24 in body NLRI");
+    let codes = attribute_type_codes(&msg.path_attributes);
+    assert!(!codes.contains(&14), "no MP_REACH_NLRI: {codes:?}");
+    // NEXT_HOP: flags 0x40, type 3, length 4, 10.0.0.2.
+    assert!(
+        msg.path_attributes
+            .windows(7)
+            .any(|w| w == [0x40, 3, 4, 10, 0, 0, 2]),
+        "classic NEXT_HOP 10.0.0.2 expected"
+    );
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv4_withdrawal_uses_body_withdrawn_routes() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let msg = send_extended_nexthop_update(true, false, vec![], vec![(prefix, 0)]).await;
+    assert_eq!(&msg.withdrawn_routes[..], &[24, 10, 0, 0]);
+    assert!(msg.path_attributes.is_empty(), "no MP_UNREACH_NLRI");
+    assert!(msg.nlri.is_empty());
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv6_next_hop_still_uses_mp_reach() {
+    let mut route = make_route(100);
+    route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
+    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    let msg = send_extended_nexthop_update(true, false, vec![route], vec![]).await;
+    assert!(msg.nlri.is_empty(), "IPv4 NLRI must stay in MP_REACH_NLRI");
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("MP_REACH_NLRI");
+    assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+    assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::2".parse().unwrap()));
+}
+
+#[tokio::test]
+async fn scoped_extended_nexthop_ipv4_withdrawal_stays_mp_unreach() {
+    // Unnumbered receivers ignore IPv4 body NLRI, so the MP form stays.
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let msg = send_extended_nexthop_update(false, true, vec![], vec![(prefix, 0)]).await;
+    assert!(msg.withdrawn_routes.is_empty());
+    assert_eq!(attribute_type_codes(&msg.path_attributes), vec![15]);
+}
