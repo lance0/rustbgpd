@@ -969,7 +969,8 @@ each negotiated family via `OutboundRouteUpdate.end_of_rib`.
 - `bgp_gr_active_peers` — gauge, set on GR entry, cleared on completion
   or timer expiry
 - `bgp_gr_stale_routes` — gauge per peer, updated on GR entry, per-family
-  EoR, and completion/expiry
+  EoR, and completion/expiry. It counts every route held for retention,
+  GR-stale or LLGR-stale.
 - `bgp_gr_timer_expired_total` — counter, incremented on timer expiry
 
 ---

@@ -1887,8 +1887,9 @@ capability for a family still in the GR phase, in the LLGR capability for a
 family already LLGR-stale) has its stale routes removed at once instead of at
 End-of-RIB.
 
-`llgr_stale_time` applies to every family the neighbor negotiates GR for;
-there is no per-family LLGR switch (see
+A non-zero `llgr_stale_time` advertises LLGR for every family this speaker
+lists in its own GR capability, and retains every family the peer lists in its
+GR or LLGR capability. There is no per-family LLGR switch (see
 [RFC notes](rfc-notes.md#rfc-9494-5--per-afisafi-configuration)).
 
 The effective LLGR stale time is `min(local llgr_stale_time, peer's per-family minimum)`.

@@ -9,7 +9,9 @@
   its GR or LLGR capability has its stale routes removed at once rather than
   at End-of-RIB or a timer (RFC 4724 §4.2, RFC 9494 §4.2). A GR capability
   that lists a family twice no longer deletes that family's routes at session
-  down. See the [RFC notes](../docs/reference/rfc-notes.md#rfc-9494-42--llgr-families-outside-the-gr-capability).
+  down. `bgp_gr_stale_routes` now counts LLGR-stale routes as well as
+  GR-stale ones at session down, End-of-RIB and Long-Lived Stale Time expiry,
+  so an LLGR-only or partial-GR peer no longer reports zero or too few. See the [RFC notes](../docs/reference/rfc-notes.md#rfc-9494-42--llgr-families-outside-the-gr-capability).
   **Operator-visible:** routes from LLGR-only and partial-GR peers survive a
   session reset as least-preferred `LLGR_STALE` routes for the configured
   Long-Lived Stale Time.

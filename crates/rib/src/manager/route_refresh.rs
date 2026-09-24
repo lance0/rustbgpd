@@ -316,15 +316,10 @@ impl RibManager {
             }
 
             let peer_label = peer.to_string();
-            let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
-                rib.iter().filter(|r| r.is_stale).count()
-                    + rib.iter_flowspec().filter(|r| r.is_stale).count()
-                    + rib.iter_evpn().filter(|r| r.is_stale).count()
-                    + rib.iter_vpn().filter(|r| r.is_stale).count()
-                    + rib.iter_labeled().filter(|r| r.is_stale).count()
-                    + rib.iter_bgpls().filter(|r| r.is_stale).count()
-                    + rib.iter_rtc().filter(|r| r.is_stale).count()
-            });
+            let stale_count = self
+                .ribs
+                .get(&peer)
+                .map_or(0, super::graceful_restart::retained_stale_count);
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
 
@@ -492,15 +487,10 @@ impl RibManager {
             }
 
             let peer_label = peer.to_string();
-            let llgr_stale_count = self.ribs.get(&peer).map_or(0, |rib| {
-                rib.iter().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_vpn().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_labeled().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_bgpls().filter(|r| r.is_llgr_stale).count()
-                    + rib.iter_rtc().filter(|r| r.is_llgr_stale).count()
-            });
+            let llgr_stale_count = self
+                .ribs
+                .get(&peer)
+                .map_or(0, super::graceful_restart::retained_stale_count);
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
 

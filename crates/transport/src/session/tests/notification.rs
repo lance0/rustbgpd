@@ -999,9 +999,9 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     }
 }
 
-/// RFC 9494 §4.2: a peer whose GR capability lists no family but whose
-/// LLGR capability does still gets its routes retained under LLGR, but only
-/// when LLGR is configured locally.
+/// RFC 9494 §4.2: a peer whose GR capability lists no family, but whose LLGR
+/// capability lists one, still gets that family retained under LLGR when LLGR
+/// is configured locally.
 #[tokio::test]
 async fn llgr_only_peer_session_down_enters_retention_when_llgr_configured() {
     for (local_llgr_stale_time, expect_retention) in [(3600, true), (0, false)] {

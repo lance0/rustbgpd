@@ -2627,3 +2627,133 @@ async fn duplicate_gr_family_is_retained_not_deleted() {
     let v4 = adj_route(&manager, source, retention_v4_prefix()).expect("v4 retained");
     assert!(v4.is_stale);
 }
+
+fn gr_gauges(manager: &RibManager, peer: IpAddr) -> (f64, f64) {
+    let label = peer.to_string();
+    let labels = [("peer", label.as_str())];
+    (
+        gauge_metric_value(&manager.metrics, "bgp_gr_active_peers", &labels),
+        gauge_metric_value(&manager.metrics, "bgp_gr_stale_routes", &labels),
+    )
+}
+
+/// `bgp_gr_stale_routes` counts every route held for retention, GR-stale or
+/// LLGR-stale: an LLGR-only peer reports its retained routes from session
+/// down, and the gauges clear at the Long-Lived Stale Time sweep.
+#[tokio::test(start_paused = true)]
+async fn llgr_only_peer_reports_retained_routes_until_llst_sweep() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+
+    manager.handle_update(gr_with_llgr(source, 120, vec![], vec![V4_UNICAST], 30));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+
+    tokio::time::advance(Duration::from_secs(31)).await;
+    manager.sweep_expired_llgr_stale();
+    assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+}
+
+/// Partial GR holds GR-stale v4 and LLGR-stale v6 together; the gauge counts
+/// both, keeps counting v6 after v4's End-of-RIB, and clears when a
+/// reconnect's End-of-RIB or capability check resolves the last family.
+#[tokio::test(start_paused = true)]
+async fn partial_gr_stale_gauge_counts_both_phases_through_reconnect() {
+    for drop_v6_at_peer_up in [false, true] {
+        let (_tx, mut manager) = direct_manager(None);
+        let source = retention_source();
+        let _out_rx = establish_peer(&mut manager, source);
+        announce_dual_stack(&mut manager, source);
+        manager.handle_update(gr_with_llgr(
+            source,
+            10,
+            vec![V4_UNICAST],
+            vec![V4_UNICAST, V6_UNICAST],
+            60,
+        ));
+        assert_eq!(gr_gauges(&manager, source), (1.0, 2.0));
+
+        let llgr_families: &[(Afi, Safi)] = if drop_v6_at_peer_up {
+            &[V4_UNICAST]
+        } else {
+            &[V4_UNICAST, V6_UNICAST]
+        };
+        let _new_rx =
+            reconnect_with_capabilities(&mut manager, source, &[V4_UNICAST], llgr_families);
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: source,
+            session_id: 0,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        });
+        if drop_v6_at_peer_up {
+            assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+            continue;
+        }
+        assert_eq!(
+            gr_gauges(&manager, source),
+            (1.0, 1.0),
+            "v6 is still LLGR-stale after v4's End-of-RIB"
+        );
+        manager.handle_update(RibUpdate::EndOfRib {
+            peer: source,
+            session_id: 0,
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+    }
+}
+
+/// Partial GR: the LLGR-only family's Long-Lived Stale Time can expire while
+/// the GR family is still in its GR phase; the gauge keeps counting the
+/// GR-stale routes.
+#[tokio::test(start_paused = true)]
+async fn partial_gr_llst_sweep_keeps_counting_gr_phase_routes() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(
+        source,
+        120,
+        vec![V4_UNICAST],
+        vec![V4_UNICAST, V6_UNICAST],
+        5,
+    ));
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    manager.sweep_expired_llgr_stale();
+    assert!(adj_route(&manager, source, retention_v6_prefix()).is_none());
+    assert!(adj_route(&manager, source, retention_v4_prefix()).is_some_and(|r| r.is_stale));
+    assert_eq!(gr_gauges(&manager, source), (1.0, 1.0));
+}
+
+/// A full teardown (`PeerDown`, as a reload that rebuilds the session sends)
+/// during LLGR-only retention ends it the same way as for a GR+LLGR peer
+/// already promoted to LLGR: routes, retention state, deadlines and gauges
+/// all go.
+#[tokio::test(start_paused = true)]
+async fn peer_down_during_llgr_only_retention_clears_all_state() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    manager.handle_update(gr_with_llgr(source, 120, vec![], vec![V4_UNICAST], 30));
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer: source,
+        session_id: 0,
+    });
+    assert!(adj_route(&manager, source, retention_v4_prefix()).is_none());
+    assert!(!manager.llgr_peers.contains_key(&source));
+    assert!(!manager.llgr_peer_config.contains_key(&source));
+    assert!(
+        !manager
+            .llgr_stale_deadlines
+            .keys()
+            .any(|&(peer, _, _)| peer == source)
+    );
+    assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
+}

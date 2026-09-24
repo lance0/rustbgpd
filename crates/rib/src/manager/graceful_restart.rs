@@ -131,6 +131,37 @@ impl<'a, K> IntoIterator for &'a DeadlineMap<K> {
     }
 }
 
+/// Routes of one peer still held stale for GR or LLGR retention, across every
+/// family table: the value of `bgp_gr_stale_routes`. A partial-GR peer holds
+/// GR-stale and LLGR-stale routes at the same time, so both flags count.
+pub(super) fn retained_stale_count(rib: &crate::adj_rib_in::AdjRibIn) -> usize {
+    rib.iter().filter(|r| r.is_stale || r.is_llgr_stale).count()
+        + rib
+            .iter_flowspec()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_evpn()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_vpn()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_labeled()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_bgpls()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_rtc()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+}
+
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
@@ -460,15 +491,7 @@ impl RibManager {
 
         let peer_label = peer.to_string();
         self.metrics.set_gr_active(&peer_label, true);
-        let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
-            rib.iter().filter(|r| r.is_stale).count()
-                + rib.iter_flowspec().filter(|r| r.is_stale).count()
-                + rib.iter_evpn().filter(|r| r.is_stale).count()
-                + rib.iter_vpn().filter(|r| r.is_stale).count()
-                + rib.iter_labeled().filter(|r| r.is_stale).count()
-                + rib.iter_bgpls().filter(|r| r.is_stale).count()
-                + rib.iter_rtc().filter(|r| r.is_stale).count()
-        });
+        let stale_count = self.ribs.get(&peer).map_or(0, retained_stale_count);
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
         true
@@ -1040,13 +1063,7 @@ impl RibManager {
                 .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
-            llgr_stale_remaining = rib.iter().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_vpn().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_labeled().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_bgpls().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_rtc().filter(|r| r.is_llgr_stale).count();
+            llgr_stale_remaining = retained_stale_count(rib);
         }
         let had_swept = !swept.is_empty();
         let had_fs_swept = !fs_swept.is_empty();
