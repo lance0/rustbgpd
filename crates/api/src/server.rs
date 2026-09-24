@@ -2904,6 +2904,17 @@ fn report_accept_end<S: Stream>(
 /// socket is unusable, and with it the gRPC fail-stop, until the client
 /// disconnects. Give that drain the coordinated-shutdown grace, then drop the
 /// serve future. Returns `None` when the grace expired.
+///
+/// The grace starts when the accept stream's end is observed, not when the
+/// socket fails. A TLS listener polls accepts only while a handshake slot is
+/// free (`bounded_handshakes`), and the fatal error surfaces only from
+/// `accept(2)`. With all `MAX_CONCURRENT_GRPC_TLS_HANDSHAKES` slots held by
+/// stalled clients, the end is observed when the oldest handshake finishes or
+/// hits `GRPC_TLS_HANDSHAKE_TIMEOUT`: at most 10 s after the failure. So a
+/// listener exits at most 1 s after the failure (plain TCP, UDS, or TLS with a
+/// free slot), or 11 s for a saturated TLS listener. `serve` then gives the
+/// other listeners its own 1 s grace. Observing the end sooner would mean
+/// accepting past the handshake cap or probing the socket out of band.
 async fn serve_with_bounded_accept_end_drain<F: Future>(
     serve: F,
     accept_ended: oneshot::Receiver<()>,
@@ -4086,6 +4097,34 @@ mod tests {
         )
         .await;
         assert!(served.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn saturated_tls_handshakes_delay_the_accept_end_by_at_most_the_handshake_timeout() {
+        // Every handshake slot holds a client that never finishes, as in
+        // `accept_tls`; the accept stream has already ended (a fatal error).
+        let handshakes = (0..MAX_CONCURRENT_GRPC_TLS_HANDSHAKES).map(|_| async {
+            tokio::time::timeout(GRPC_TLS_HANDSHAKE_TIMEOUT, std::future::pending::<()>())
+                .await
+                .ok()
+                .map(Ok::<(), ()>)
+        });
+        let (ended_tx, mut ended_rx) = oneshot::channel();
+        let mut incoming = std::pin::pin!(bounded_handshakes(report_accept_end(
+            tokio_stream::iter(handshakes),
+            ended_tx
+        )));
+        let start = tokio::time::Instant::now();
+        let just_before = GRPC_TLS_HANDSHAKE_TIMEOUT.saturating_sub(Duration::from_millis(1));
+        let served = tokio::time::timeout(just_before, incoming.next()).await;
+        assert!(served.is_err(), "no stalled handshake completes");
+        // Full slots stop the stage polling the accept stream, so its end is
+        // not yet observed.
+        assert!(ended_rx.try_recv().is_err());
+        // The first slot freed by the handshake timeout observes it.
+        assert_eq!(incoming.next().await, None);
+        assert!(ended_rx.try_recv().is_ok());
+        assert_eq!(start.elapsed(), GRPC_TLS_HANDSHAKE_TIMEOUT);
     }
 
     #[tokio::test]
