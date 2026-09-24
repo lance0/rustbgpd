@@ -1447,6 +1447,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     drain_eor(&mut out_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
@@ -1467,6 +1468,7 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv6,

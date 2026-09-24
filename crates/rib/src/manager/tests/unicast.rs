@@ -500,6 +500,7 @@ async fn deferred_registration_rejects_superseded_session_paths_limit() {
 
     for (afi, safi) in dual_stack_sendable() {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer,
             session_id: 8,
             afi,
@@ -1101,6 +1102,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     );
     for (peer, _) in &receivers {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer: *peer,
             session_id: 7,
             afi: Afi::Ipv4,
@@ -1819,6 +1821,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
 
     for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer: target,
             session_id: 7,
             afi,

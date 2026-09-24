@@ -7558,6 +7558,7 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
     // the ungrouped path had delivered.
     for (member, w1, w2) in [(a, b, b), (b, a, c), (c, a, b)] {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer: IpAddr::V4(member),
             session_id: 0,
             afi: Afi::Ipv4,
@@ -9034,6 +9035,7 @@ fn refreshed_grouped_member_manager() -> (
     let (mut manager, peers, mut receivers) = direct_clean_transition_manager(2, 2, None);
     assert!(manager.clean_policy_transition_peer_ready(peers[0]));
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: peers[0],
         session_id: 0,
         afi: Afi::Ipv4,

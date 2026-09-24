@@ -111,6 +111,7 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let _ = out_rx.recv().await.unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,

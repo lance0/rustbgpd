@@ -914,6 +914,7 @@ impl PeerSession {
 
                     self.negotiated = None;
                     self.add_path_receive_families.clear();
+                    self.route_refresh_queued.clear();
                     self.clear_known_routes();
                     // A disconnected session has no live capacity usage.
                     // Remove, rather than zero, so reconnect and GR-retained

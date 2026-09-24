@@ -888,6 +888,7 @@ impl Oracle {
     async fn route_refresh(&mut self, peer: Ipv4Addr, afi: Afi, safi: Safi) {
         self.tx
             .send(RibUpdate::RouteRefreshRequest {
+                queued: Arc::default(),
                 peer: IpAddr::V4(peer),
                 session_id: SESSION,
                 afi,

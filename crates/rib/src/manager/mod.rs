@@ -3332,7 +3332,11 @@ impl RibManager {
                 session_id,
                 afi,
                 safi,
+                queued,
             } => {
+                // Release before the replay reads the Loc-RIB: a refresh the
+                // peer sends from here on needs (and gets) its own replay.
+                queued.store(false, std::sync::atomic::Ordering::Release);
                 if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", Refresh) {
                     self.advance_advertised_pages();
                     self.handle_route_refresh_request(peer, afi, safi);

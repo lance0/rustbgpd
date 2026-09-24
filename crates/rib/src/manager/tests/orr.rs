@@ -968,6 +968,7 @@ async fn route_refresh_replays_vantage_best() {
     let _ = drain_final_unicast(&mut out_b);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: client_b,
         session_id: 0,
         afi: Afi::Ipv4,
@@ -1990,6 +1991,7 @@ async fn vpn_orr_route_refresh_replays_vantage_best() {
     let _ = drain_final_vpn(&mut out_b);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: client_b,
         session_id: 0,
         afi: Afi::Ipv4,

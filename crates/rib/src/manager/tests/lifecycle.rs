@@ -1627,6 +1627,7 @@ async fn stale_route_refresh_request_from_superseded_session_is_discarded() {
     // Stale request: no refresh response may reach the active session's
     // outbound channel.
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 1,
         afi: Afi::Ipv4,
@@ -1645,6 +1646,7 @@ async fn stale_route_refresh_request_from_superseded_session_is_discarded() {
     // The ACTIVE session's request produces the refresh response (EoR +
     // demarcation markers even with an empty table).
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 2,
         afi: Afi::Ipv4,
@@ -1796,6 +1798,7 @@ async fn active_session_messages_flow_after_replacement() {
 
     // A refresh request from the active session gets its response.
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 2,
         afi: Afi::Ipv4,

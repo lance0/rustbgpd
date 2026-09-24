@@ -2716,6 +2716,13 @@ pub enum RibUpdate {
         afi: Afi,
         /// Subsequent address family identifier.
         safi: Safi,
+        /// Coalescing flag shared with the session for this family. The
+        /// session sets it when it queues this request and drops duplicate
+        /// requests while it is set; the RIB clears it when it dequeues the
+        /// request, before the replay reads the Loc-RIB. A duplicate queued
+        /// earlier is therefore answered by this replay, and a request that
+        /// arrives once the replay has started gets exactly one more.
+        queued: Arc<AtomicBool>,
     },
     /// Peer sent Beginning-of-RIB-Refresh (RFC 7313) for this family.
     BeginRouteRefresh {
