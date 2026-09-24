@@ -292,7 +292,7 @@ verified published versions in §7.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.3.1"
+rustbgpd-rpki = "0.3.2"
 rustbgpd-wire = "0.21.2"
 ```
 
@@ -630,7 +630,7 @@ does not mean no newer individual crate exists on the registry.
 |---|---|---|
 | `rustbgpd-wire` | `0.21.2` | `0.21.2` |
 | `rustbgpd-fsm` | `0.8.2` | `0.8.2` |
-| `rustbgpd-rpki` | `0.3.1` | `0.3.2` |
+| `rustbgpd-rpki` | `0.3.2` | `0.3.2` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`

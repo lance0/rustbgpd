@@ -75,7 +75,7 @@ published versions:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = "0.3.1"
+rustbgpd-rpki = "0.3.2"
 rustbgpd-wire = "0.21.2"
 ```
 

@@ -1,6 +1,6 @@
 {
-  "release": "v0.71.0",
-  "source_commit": "4f8b1712274d2d52b07bc014446eced2ed53f2b5",
+  "release": "v0.72.0",
+  "source_commit": "dcbac54420dc92d5b0218916b3568598cd154cd0",
   "families": [
     "bfd_session_flaps_total",
     "bfd_session_up",
@@ -119,6 +119,7 @@
     "bgp_route_event_history_depth",
     "bgp_route_refresh_in_progress",
     "bgp_route_refresh_stale_entries",
+    "bgp_rpki_cache_connected",
     "bgp_rpki_cache_effective_expire_seconds",
     "bgp_rpki_cache_end_of_data_ready",
     "bgp_rpki_vrp_count",
