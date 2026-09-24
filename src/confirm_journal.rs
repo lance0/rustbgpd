@@ -290,7 +290,7 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
     // (which may carry secrets such as TCP-MD5 passwords), and a permissive
     // umask must not make them world-readable. The rename below preserves
     // the temp file's mode — it moves the inode.
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -327,18 +327,33 @@ fn stage_atomic_inner(path: &Path, bytes: &[u8]) -> io::Result<StagedWrite> {
     {
         return Err(io::Error::other("atomic stage pathname identity changed"));
     }
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(StagedWrite {
+    // The locked, identity-checked temp is ours from here: a payload write or
+    // fsync failure (ENOSPC, EIO) returns through the stage's `Drop`, which
+    // removes the partial file instead of leaving it next to the target.
+    let mut stage = StagedWrite {
         tmp,
         target,
         file,
         tmp_dev: metadata.dev(),
         tmp_ino: metadata.ino(),
-    })
+    };
+    stage
+        .file
+        .set_permissions(fs::Permissions::from_mode(0o600))?;
+    stage.file.set_len(0)?;
+    stage.file.write_all(bytes)?;
+    #[cfg(test)]
+    if FAIL_STAGE_PAYLOAD_SYNC.with(std::cell::Cell::get) {
+        return Err(io::Error::other("injected staged payload fsync failure"));
+    }
+    stage.file.sync_all()?;
+    Ok(stage)
 }
+
+// Test-only fault: fail the staged payload fsync on this thread, after the
+// temp file holds a written payload.
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_STAGE_PAYLOAD_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 fn parent_dir(path: &Path) -> io::Result<&Path> {
     path.parent().ok_or_else(|| {
@@ -446,6 +461,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(&format!("failed to write {}", missing.display())));
+    }
+
+    #[test]
+    fn failed_payload_write_removes_the_partial_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("config.toml");
+        fs::write(&target, b"accepted").unwrap();
+        FAIL_STAGE_PAYLOAD_SYNC.with(|fail| fail.set(true));
+        let result = write_atomic(&target, b"candidate");
+        FAIL_STAGE_PAYLOAD_SYNC.with(|fail| fail.set(false));
+        assert!(matches!(result, Err(AtomicPublishError::NotPublished(_))));
+        assert_eq!(fs::read(&target).unwrap(), b"accepted");
+        assert!(!target.with_extension("toml.tmp").exists());
     }
 
     #[test]

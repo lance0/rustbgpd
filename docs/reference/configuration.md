@@ -3676,7 +3676,15 @@ is reported as `foreign_route_exists`, even if its protocol is BGP. Crash
 recovery uses the persisted owned-state file, the unchanged `[[fib_tables]]`
 declaration, and an exact live-kernel value match; if any of those checks
 fail, the row stays foreign. Unsupported or config-stale state files are
-quarantined as `fib-owned.json.stale`. This conservative rule avoids
+quarantined as `fib-owned.json.stale`. Each reconcile pass records the
+routes it is about to install or replace before it sends them to the
+kernel, and every write fsyncs the file and its directory, so a crash at
+any point in a pass leaves the rows it installed recoverable. If that write
+fails, the pass holds its installs and replacements (status
+`owned_state_persist_failed`, metric
+`bgp_fib_owned_state_persist_failures_total`) while removals continue, and
+a runtime table change that cannot be recorded is reverted rather than
+reported as applied. This conservative rule avoids
 replacing or deleting FRR/BIRD routes in the same table and metric.
 If another writer changes a row while rustbgpd owns it, the next reconcile
 reports `owned_route_drifted`, releases ownership, and preserves the live
