@@ -1048,6 +1048,72 @@ async fn vpn_routes_received_reflects_and_withdraws_to_eligible_peer() {
     handle.await.unwrap();
 }
 
+/// RFC 9234 section 5 applies only to IPv4/IPv6 unicast. A VPN route that
+/// carries OTC is still exported toward a peer for which the local role is
+/// Customer, where E2 would block the same route on unicast.
+#[tokio::test]
+async fn vpn_route_with_otc_is_not_suppressed_toward_customer_role_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    tx.send(RibUpdate::SetPeerExportContext {
+        peer: target,
+        session_id: 7,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    })
+    .await
+    .unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 7,
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: vpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let mut route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(64512));
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.otc_blocked.is_empty());
+    assert_eq!(update.vpn_announce.len(), 1);
+    assert_eq!(update.vpn_announce[0].key(), route.key());
+    assert!(
+        update.vpn_announce[0]
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(64512)))
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// RFC 7911 VPN receive: distinct path IDs for the same RD+prefix are
 /// distinct Adj-RIB-In entries, and a withdraw keyed by path ID removes
 /// only that one — the surviving path takes over the Loc-RIB best.

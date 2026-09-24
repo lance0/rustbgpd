@@ -2199,7 +2199,10 @@ report the role as `"rs"` / `"rs-client"`. When `role` is configured, rustbgpd
 advertises the BGP Role capability and applies OTC rules based on the local
 role even if the peer does not advertise a Role. `strict_role = true` changes that compatibility behavior:
 the peer must advertise a compatible Role or the OPEN is rejected with Role
-Mismatch (NOTIFICATION 2/11).
+Mismatch (NOTIFICATION 2/11). A Role capability the peer does send is always
+checked: an incompatible role, an unassigned value (5-255), a wrong length, or
+several Role capabilities with different values are rejected with 2/11
+whether or not `strict_role` is set.
 
 OTC handling is scoped to unicast. FlowSpec and EVPN route attributes are not
 modified by the v1 implementation. Existing OTC attributes are preserved;

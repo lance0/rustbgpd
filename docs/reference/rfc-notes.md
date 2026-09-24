@@ -204,6 +204,30 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 
 ## RFC 9234 — Roles and Only-to-Customer
 
+- OPEN negotiation reads every received capability code 9. The wire decoder
+  keeps an unassigned value (5-255) or a length other than 1 as an unknown
+  code-9 capability with its raw bytes. Negotiation treats that capability as
+  a received Role that matches no Table 2 pair, so a session with a configured
+  local Role is rejected with Role Mismatch (2/11), with or without
+  `strict_role`. Section 4.2's multiple-capability rule compares raw bytes and
+  applies with or without a local Role: `[Customer, 7]` or `[7, 8]` is
+  rejected with 2/11. Without a local Role, a single unassigned or wrong-length
+  Role capability is accepted and no remote role is recorded.
+- The wrong-length case has no RFC 9234 MUST, so its handling is a local
+  decision. FRR (`bgp_capability_role`) and BIRD (`bgp_read_capabilities`)
+  reject a Role length other than 1 as a malformed OPEN (2/0) even without a
+  local Role. rustbgpd keeps one rule for both invalid forms: such a capability
+  carries no Table 2 value, so it fails the Role check (2/11) only when a local
+  Role is configured, and is otherwise ignored like any capability the speaker
+  does not act on (RFC 5492 section 3). Both implementations also compare the
+  raw value against Table 2, so an unassigned value is a Role Mismatch there
+  too when a local Role is configured. BIRD additionally rejects value 255,
+  which it uses internally for "no Role", even without one.
+- `bgp_role_mismatch_total` reports the first assigned Role value in the
+  rejected OPEN as `remote_role`, so `[Customer, 7]` counts as
+  `remote_role="customer"`. When the OPEN carries no assigned Role value, only
+  unassigned or wrong-length ones, the label is `remote_role="none"`, the same
+  label as an absent Role under `strict_role`.
 - The configured local Role is session-stamped into the RIB before `PeerUp`,
   so the first Adj-RIB-Out build and every subsequent export use the same
   RFC 9234 relationship semantics. Update-group identity includes that role;
