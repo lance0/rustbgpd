@@ -459,8 +459,16 @@ pub struct PeerRuntimeConfigUpdate {
 /// Commands sent to a running peer session.
 #[derive(Debug)]
 pub enum PeerCommand {
-    /// Start the BGP session (`ManualStart`).
+    /// Start the BGP session (`ManualStart`). An operator start also clears
+    /// the NOTIFICATION reconnect-backoff streak.
     Start,
+    /// Start a session that replaces this peer's previous one with an accepted
+    /// inbound connection. The previous session's NOTIFICATION streak carries
+    /// over, so a neighbor that keeps reconnecting inbound still escalates.
+    StartInbound {
+        /// The replaced session's consecutive NOTIFICATION teardowns.
+        notification_idle_failures: u32,
+    },
     /// Gracefully tear down the session (`ManualStop`).
     /// Optional reason is included in the Cease NOTIFICATION (RFC 9003).
     Stop {
@@ -603,6 +611,9 @@ pub enum PeerCommand {
     /// Transfer ownership of shared max-prefix capacity gauges to a promoted
     /// inbound collision candidate after the old primary has quiesced.
     ActivateMaxPrefixMetrics {
+        /// The retiring primary's NOTIFICATION streak, carried into the
+        /// promoted session (the larger of the two is kept).
+        notification_idle_failures: u32,
         /// Acknowledges that actor ownership is active and any Established
         /// snapshot has been published.
         reply: oneshot::Sender<()>,
@@ -1026,6 +1037,9 @@ pub struct PeerSessionState {
     /// Seconds until the next automatic reconnect attempt while the session
     /// waits in Idle after an unplanned teardown (0 when none is pending).
     pub reconnect_in_secs: u64,
+    /// Consecutive NOTIFICATION teardowns in the current reconnect-backoff
+    /// streak. Each one doubles the deferred reconnect wait.
+    pub notification_idle_failures: u32,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
     /// Query-time TCP-AO socket inspection. Refreshed by `QueryState` and
@@ -1711,6 +1725,28 @@ impl PeerHandle {
             .await
     }
 
+    /// Start an inbound replacement session with a bounded deadline, keeping
+    /// the replaced session's NOTIFICATION streak.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn start_inbound_timeout(
+        &self,
+        notification_idle_failures: u32,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(
+            PeerCommand::StartInbound {
+                notification_idle_failures,
+            },
+            "start_inbound",
+            deadline,
+        )
+        .await
+    }
+
     /// Send a Stop command for graceful teardown.
     ///
     /// The optional `reason` is included in the Cease NOTIFICATION (RFC 9003).
@@ -1871,13 +1907,17 @@ impl PeerHandle {
     /// within `deadline`.
     pub async fn activate_max_prefix_metrics_timeout(
         &self,
+        notification_idle_failures: u32,
         deadline: Duration,
     ) -> Result<(), PeerCommandError> {
         let commands = self.commands.clone();
         match tokio::time::timeout(deadline, async move {
             let (reply_tx, reply_rx) = oneshot::channel();
             commands
-                .send(PeerCommand::ActivateMaxPrefixMetrics { reply: reply_tx })
+                .send(PeerCommand::ActivateMaxPrefixMetrics {
+                    notification_idle_failures,
+                    reply: reply_tx,
+                })
                 .await
                 .map_err(|_| PeerCommandError::SessionExited)?;
             reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)

@@ -120,7 +120,7 @@ impl PeerManager {
         };
         if let Err(error) = managed
             .handle
-            .activate_max_prefix_metrics_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .activate_max_prefix_metrics_timeout(0, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
         {
             warn!(

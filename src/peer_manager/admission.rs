@@ -38,6 +38,32 @@ fn aggregate(addr: IpAddr, v4_len: u8, v6_len: u8) -> IpAddr {
     }
 }
 
+/// At most one log line per [`LOG_INTERVAL`] for a drop class that a remote
+/// can repeat at will; counts the drops whose lines were suppressed.
+#[derive(Default)]
+pub(super) struct LogThrottle {
+    last_log: Option<Instant>,
+    suppressed_since_last_log: u64,
+}
+
+impl LogThrottle {
+    /// Whether a drop may emit its line now. Returns the number of drops
+    /// suppressed since the last emitted line.
+    pub(super) fn should_log(&mut self) -> Option<u64> {
+        let now = Instant::now();
+        if self
+            .last_log
+            .is_none_or(|last| now.saturating_duration_since(last) >= LOG_INTERVAL)
+        {
+            self.last_log = Some(now);
+            Some(std::mem::take(&mut self.suppressed_since_last_log))
+        } else {
+            self.suppressed_since_last_log += 1;
+            None
+        }
+    }
+}
+
 struct TokenBucket {
     tokens: f64,
     last_refill: Instant,
@@ -49,8 +75,7 @@ pub(super) struct InboundAdmission {
     v4_len: u8,
     v6_len: u8,
     buckets: LruCache<IpAddr, TokenBucket>,
-    last_log: Option<Instant>,
-    suppressed_since_last_log: u64,
+    log: LogThrottle,
 }
 
 impl InboundAdmission {
@@ -68,8 +93,7 @@ impl InboundAdmission {
             buckets: LruCache::new(
                 NonZeroUsize::new(cfg.table_capacity.max(1)).expect("capacity is non-zero"),
             ),
-            last_log: None,
-            suppressed_since_last_log: 0,
+            log: LogThrottle::default(),
         })
     }
 
@@ -108,17 +132,7 @@ impl InboundAdmission {
     /// one line per [`LOG_INTERVAL`]; returns the number of drops
     /// suppressed since the last emitted line.
     pub(super) fn should_log(&mut self) -> Option<u64> {
-        let now = Instant::now();
-        if self
-            .last_log
-            .is_none_or(|last| now.saturating_duration_since(last) >= LOG_INTERVAL)
-        {
-            self.last_log = Some(now);
-            Some(std::mem::take(&mut self.suppressed_since_last_log))
-        } else {
-            self.suppressed_since_last_log += 1;
-            None
-        }
+        self.log.should_log()
     }
 
     /// Tracked source aggregates, for capacity-bound assertions.

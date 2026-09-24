@@ -1479,8 +1479,11 @@ inbound dynamic connection is dropped because all slots are occupied.
 `bgp_inbound_connections_dropped_total` breaks accept-path drops down by a
 bounded `reason` vocabulary (ADR-0120): `unconfigured` (source matched no
 static neighbor and no dynamic range), `rate_limited` (the opt-in
-`[inbound_admission]` per-source token bucket was empty), and
-`dynamic_limit` (slot saturation, counted alongside the legacy counter).
+`[inbound_admission]` per-source token bucket was empty),
+`dynamic_limit` (slot saturation, counted alongside the legacy counter), and
+`notification_backoff` (a configured neighbor dialled in while its session
+waited out an escalated NOTIFICATION reconnect wait; see
+[Debugging a session that won't establish](#debugging-a-session-that-wont-establish)).
 There is deliberately no per-source label — source cardinality is unbounded
 exactly under the floods these drops account for.
 
@@ -1493,7 +1496,7 @@ exactly under the floods these drops account for.
 | `bgp_dynamic_neighbor_slots_limit` | Effective process-global `dynamic_neighbor_limit` |
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
-| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), or `dynamic_limit` |
+| `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), `dynamic_limit`, or `notification_backoff` (a configured neighbor held by its escalated NOTIFICATION reconnect wait) |
 | `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
@@ -2466,6 +2469,15 @@ records for a later outage.
    `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
    `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
    field is absent on older daemons, while JSON omits it when absent or zero.
+   The wait covers both directions. From the second consecutive NOTIFICATION
+   teardown, an inbound connection from the neighbor during the wait is
+   closed without an OPEN and counted as
+   `bgp_inbound_connections_dropped_total{reason="notification_backoff"}`,
+   with a throttled log line naming the streak and the remaining wait; a
+   pending collision candidate is dropped instead of promoted. After the
+   first teardown an inbound connection is still accepted at once, and the
+   session that replaces the waiting one keeps its streak, so a neighbor that
+   always reconnects to us escalates the same way.
    The streak clears after the session stays Established for five minutes, on
    `rbgp neighbor <addr> enable`, or on an administrative reset. TCP misses
    in `Connect` or `Active` keep the fast initial retries followed by the

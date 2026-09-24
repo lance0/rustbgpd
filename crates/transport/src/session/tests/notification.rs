@@ -1384,6 +1384,80 @@ async fn query_state_reports_pending_reconnect_wait() {
     assert_eq!(queried_reconnect_in_secs(&mut session).await, 0);
 }
 
+async fn queried_notification_failures(session: &mut PeerSession) -> u32 {
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    state.await.unwrap().notification_idle_failures
+}
+
+/// A neighbor that reconnects to us after each NOTIFICATION teardown gets a
+/// fresh session every cycle. `StartInbound` carries the replaced session's
+/// streak, so the backoff keeps escalating across those replacements; an
+/// operator `Start` still clears it.
+#[tokio::test(start_paused = true)]
+async fn inbound_replacement_keeps_escalating_the_notification_backoff() {
+    let mut replaced = make_test_session(65001, 65002);
+    notification_cycle(&mut replaced).await;
+    assert_eq!(notification_cycle(&mut replaced).await, 60);
+    let carried = queried_notification_failures(&mut replaced).await;
+    assert_eq!(carried, 2);
+
+    let mut replacement = make_test_session(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    replacement.test_install_stream(client);
+    assert!(matches!(
+        replacement
+            .handle_command(PeerCommand::StartInbound {
+                notification_idle_failures: carried,
+            })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(replacement.fsm.state(), SessionState::OpenSent);
+    replacement.drive_fsm(peer_open(65002)).await;
+    replacement.drive_fsm(Event::KeepaliveReceived).await;
+    replacement.drive_fsm(peer_cease()).await;
+    assert_eq!(
+        pending_reconnect_secs(&replacement),
+        120,
+        "the third consecutive NOTIFICATION must keep doubling the wait"
+    );
+
+    replacement.reconnect_timer = None;
+    assert!(matches!(
+        replacement.handle_command(PeerCommand::Start).await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(queried_notification_failures(&mut replacement).await, 0);
+}
+
+/// Collision promotion hands the retiring primary's streak to the survivor,
+/// keeping whichever streak is longer.
+#[tokio::test]
+async fn promotion_keeps_the_longer_notification_streak() {
+    for (own, carried, expected) in [(0, 2, 2), (3, 1, 3)] {
+        let mut candidate = make_test_session(65001, 65002);
+        candidate.notification_idle_failures = own;
+        let (reply, done) = oneshot::channel();
+        assert!(matches!(
+            candidate
+                .handle_command(PeerCommand::ActivateMaxPrefixMetrics {
+                    notification_idle_failures: carried,
+                    reply,
+                })
+                .await,
+            ControlFlow::Continue(())
+        ));
+        done.await.unwrap();
+        assert_eq!(candidate.notification_idle_failures, expected);
+    }
+}
+
 /// A TCP write failure is logged with the peer and the OS error, like the
 /// connect-failure and OPEN-send warnings, so the operator can tell which
 /// session failed and why without correlating a bare `error_kind`.

@@ -80,6 +80,26 @@ impl PeerManager {
         self.register_session(new_session_id, peer_key);
     }
 
+    /// The primary's state, queried only when a candidate is pending. A
+    /// missed deadline or exited task reads as no state: the candidate is
+    /// then promoted without a carried streak, as before.
+    async fn idle_primary_state_for_pending(
+        &self,
+        peer_key: &PeerKey,
+    ) -> Option<rustbgpd_transport::PeerSessionState> {
+        let managed = self.peers.get(peer_key)?;
+        managed.pending_inbound.as_ref()?;
+        match managed
+            .handle
+            .query_state_outcome(super::PEER_QUERY_TIMEOUT)
+            .await
+        {
+            rustbgpd_transport::StateQueryOutcome::State(state) => Some(state),
+            rustbgpd_transport::StateQueryOutcome::SessionGone
+            | rustbgpd_transport::StateQueryOutcome::TimedOut => None,
+        }
+    }
+
     /// Drain lossless session ownership/latch signals that were already queued
     /// before an inbound-accept command. This closes the cross-channel race in
     /// which a passive reconnect could replace the breached session generation
@@ -258,8 +278,13 @@ impl PeerManager {
                     let withheld = self.bfd_withholding(&peer_addr);
                     if enabled && !withheld {
                         // Existing primary failed — promote the already-running
-                        // inbound candidate if one exists.
-                        if self.promote_pending_inbound(&peer_key).await {
+                        // inbound candidate if one exists, unless the primary
+                        // is waiting out an escalated NOTIFICATION backoff.
+                        let primary = self.idle_primary_state_for_pending(&peer_key).await;
+                        if self
+                            .promote_pending_inbound_unless_backoff(&peer_key, primary.as_ref())
+                            .await
+                        {
                             info!(peer = %peer_addr, "existing session went idle, promoting inbound collision candidate");
                         }
                     } else if let Some(pending) = self
