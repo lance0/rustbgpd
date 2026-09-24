@@ -1066,6 +1066,17 @@ coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
 deliberate: losing the control plane means losing the ability to shut down
 cleanly later. See [ADR-0022](../adr/0022-grpc-server-supervision.md).
 
+A gRPC listener whose socket becomes unusable (`listener socket unusable;
+stopping its accept loop`) gives its open connections the same one-second
+grace as coordinated shutdown, then exits. An open `WatchEvents` stream or an
+idle client connection cannot hold the listener, or the fail-stop, open.
+The other listeners then get one further second to drain before the gRPC
+server exits. So the fail-stop starts within about 2 s of the failure.
+A TLS listener detects the failure only on its next accept, and it stops
+accepting while all 64 concurrent handshake slots are busy. If stalled
+clients hold every slot, detection waits for the first handshake to finish
+or hit its 10 s timeout, which adds up to 10 s.
+
 ### RIB manager or peer manager exits unexpectedly
 
 The daemon likewise treats any RIB manager or peer manager return or panic as
