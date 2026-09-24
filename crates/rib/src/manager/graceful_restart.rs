@@ -131,6 +131,37 @@ impl<'a, K> IntoIterator for &'a DeadlineMap<K> {
     }
 }
 
+/// Routes of one peer still held stale for GR or LLGR retention, across every
+/// family table: the value of `bgp_gr_stale_routes`. A partial-GR peer holds
+/// GR-stale and LLGR-stale routes at the same time, so both flags count.
+pub(super) fn retained_stale_count(rib: &crate::adj_rib_in::AdjRibIn) -> usize {
+    rib.iter().filter(|r| r.is_stale || r.is_llgr_stale).count()
+        + rib
+            .iter_flowspec()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_evpn()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_vpn()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_labeled()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_bgpls()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+        + rib
+            .iter_rtc()
+            .filter(|r| r.is_stale || r.is_llgr_stale)
+            .count()
+}
+
 impl RibManager {
     #[expect(
         clippy::too_many_arguments,
@@ -177,6 +208,32 @@ impl RibManager {
 
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
 
+        // RFC 9494 §4.2: a family in the LLGR capability but not in the GR
+        // capability has a Restart Time of zero. It is retained and enters
+        // the LLGR phase at once instead of being withdrawn.
+        // `retained` is deduplicated: marking a family stale twice would
+        // treat its routes as left over from a previous restart and delete
+        // them (RFC 4724 §4.1), so a peer that lists a family twice must not
+        // lose it.
+        let llgr_active = peer_llgr_capable && llgr_stale_time > 0;
+        // A family with a zero Long-Lived Stale Time has no LLGR period, and
+        // with no GR entry either, nothing retains it (RFC 9494 §4.2).
+        let llgr_listed = peer_llgr_families
+            .iter()
+            .filter(|f| llgr_active && f.stale_time > 0)
+            .map(|f| (f.afi, f.safi));
+        let mut retained: Vec<(Afi, Safi)> = Vec::new();
+        for family in gr_families.iter().copied().chain(llgr_listed) {
+            if !retained.contains(&family) {
+                retained.push(family);
+            }
+        }
+        let llgr_only: Vec<(Afi, Safi)> = retained
+            .iter()
+            .copied()
+            .filter(|family| !gr_families.contains(family))
+            .collect();
+
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
@@ -198,7 +255,7 @@ impl RibManager {
             // no-op for non-matching tuples. EVPN has a single family
             // tuple, so its mark call is hoisted out of the loop and made
             // once when (L2Vpn, Evpn) is among the GR-preserved families.
-            for &family in &gr_families {
+            for &family in &retained {
                 affected.extend(rib.mark_stale(family));
                 fs_affected.extend(rib.mark_stale_flowspec(family));
                 vpn_affected.extend(rib.mark_stale_vpn(family));
@@ -206,10 +263,10 @@ impl RibManager {
                 bgpls_affected.extend(rib.mark_stale_bgpls(family));
                 rtc_affected.extend(rib.mark_stale_rtc(family));
             }
-            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+            if retained.contains(&(Afi::L2Vpn, Safi::Evpn)) {
                 evpn_affected.extend(rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn)));
             }
-            let withdrawn = rib.withdraw_families_except(&gr_families);
+            let withdrawn = rib.withdraw_families_except(&retained);
             if !withdrawn.is_empty() {
                 info!(%peer, count = withdrawn.len(), "withdrew non-GR family routes");
             }
@@ -218,11 +275,11 @@ impl RibManager {
             }
             // RFC 4724-critical negative: only families IN the peer's
             // advertised GR capability are retained. A negotiated typed
-            // family whose tuple is absent from `gr_families` is withdrawn
+            // family whose tuple is absent from `retained` is withdrawn
             // outright — mirroring the EVPN not-in-gr arm below.
             let keys: Vec<_> = rib
                 .iter_flowspec()
-                .filter(|route| !gr_families.contains(&(route.afi, Safi::FlowSpec)))
+                .filter(|route| !retained.contains(&(route.afi, Safi::FlowSpec)))
                 .map(crate::route::FlowSpecRoute::key)
                 .collect();
             for key in keys {
@@ -233,7 +290,7 @@ impl RibManager {
                 });
             }
             for &family in &[(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)] {
-                if !gr_families.contains(&family) {
+                if !retained.contains(&family) {
                     let keys: Vec<crate::route::VpnRibRouteKey> = rib
                         .iter_vpn()
                         .filter(|r| r.afi_safi() == family)
@@ -249,7 +306,7 @@ impl RibManager {
                 (Afi::Ipv4, Safi::LabeledUnicast),
                 (Afi::Ipv6, Safi::LabeledUnicast),
             ] {
-                if !gr_families.contains(&family) {
+                if !retained.contains(&family) {
                     let keys: Vec<crate::route::LabeledRibRouteKey> = rib
                         .iter_labeled()
                         .filter(|r| r.afi_safi() == family)
@@ -262,7 +319,7 @@ impl RibManager {
                 }
             }
             for &family in &[(Afi::BgpLs, Safi::BgpLs), (Afi::BgpLs, Safi::BgpLsVpn)] {
-                if !gr_families.contains(&family)
+                if !retained.contains(&family)
                     && let Some(fam) = BgpLsFamily::from_afi_safi(family.0, family.1)
                 {
                     let keys: Vec<BgpLsRouteKey> = rib
@@ -277,12 +334,12 @@ impl RibManager {
                 }
             }
             // RTC has a single family tuple (AFI 1 / SAFI 132).
-            if !gr_families.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
+            if !retained.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
                 rtc_affected.extend(rib.withdraw_all_rtc());
             }
             // EVPN has a single family tuple; sweep all EVPN routes if
             // the peer didn't advertise GR for (L2Vpn, Evpn).
-            if !gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+            if !retained.contains(&(Afi::L2Vpn, Safi::Evpn)) {
                 let withdrawn_evpn = rib.sweep_stale_evpn();
                 // Also gather any non-stale EVPN routes that must be
                 // dropped entirely; sweep_stale_evpn only removes stale
@@ -313,11 +370,11 @@ impl RibManager {
                 affected.insert(route.prefix);
             }
             for route in rib.iter_flowspec() {
-                if gr_families.contains(&(route.afi, Safi::FlowSpec)) {
+                if retained.contains(&(route.afi, Safi::FlowSpec)) {
                     fs_affected.insert(route.selection_key());
                 }
             }
-            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+            if retained.contains(&(Afi::L2Vpn, Safi::Evpn)) {
                 for route in rib.iter_evpn() {
                     evpn_affected.insert(route.key());
                 }
@@ -329,21 +386,21 @@ impl RibManager {
             // topology feed: `iter_bgpls` includes them, which is what keeps
             // ORR vantages resolved through the restart window.)
             for route in rib.iter_vpn() {
-                if gr_families.contains(&route.afi_safi()) {
+                if retained.contains(&route.afi_safi()) {
                     vpn_affected.insert(route.key());
                 }
             }
             for route in rib.iter_labeled() {
-                if gr_families.contains(&route.afi_safi()) {
+                if retained.contains(&route.afi_safi()) {
                     labeled_affected.insert(route.key());
                 }
             }
             for route in rib.iter_bgpls() {
-                if gr_families.contains(&route.family.to_afi_safi()) {
+                if retained.contains(&route.family.to_afi_safi()) {
                     bgpls_affected.insert(route.key());
                 }
             }
-            if gr_families.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
+            if retained.contains(&crate::route::RtcRibRouteKey::afi_safi()) {
                 for route in rib.iter_rtc() {
                     rtc_affected.insert(route.key());
                 }
@@ -405,36 +462,38 @@ impl RibManager {
         // identity maps survive — the peer is expected back under GR.
         self.clear_outbound_peer_state(peer);
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(restart_time));
-        self.gr_stale_deadlines.insert(peer, deadline);
-        self.gr_stale_routes_time.insert(peer, stale_routes_time);
-        self.gr_peers
-            .insert(peer, gr_families.into_iter().collect());
+        if gr_families.is_empty() {
+            // Every retained family skips the GR phase (LLGR-only peer), so
+            // no GR timer runs. Drop GR state a previous cycle left behind.
+            self.gr_peers.remove(&peer);
+            self.gr_stale_deadlines.remove(&peer);
+            self.gr_stale_routes_time.remove(&peer);
+        } else {
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(u64::from(restart_time));
+            self.gr_stale_deadlines.insert(peer, deadline);
+            self.gr_stale_routes_time.insert(peer, stale_routes_time);
+            self.gr_peers
+                .insert(peer, gr_families.into_iter().collect());
+        }
 
-        if peer_llgr_capable && llgr_stale_time > 0 {
-            self.llgr_peer_config.insert(
-                peer,
-                LlgrPeerConfig {
-                    peer_llgr_capable,
-                    peer_llgr_families,
-                    local_llgr_stale_time: llgr_stale_time,
-                    stale_routes_time,
-                },
-            );
+        if llgr_active {
+            let llgr_config = LlgrPeerConfig {
+                peer_llgr_capable,
+                peer_llgr_families,
+                local_llgr_stale_time: llgr_stale_time,
+                stale_routes_time,
+            };
+            if !llgr_only.is_empty() {
+                info!(%peer, families = ?llgr_only, "families absent from the GR capability enter the LLGR stale phase");
+                self.enter_llgr_phase(peer, &llgr_only, &llgr_config);
+            }
+            self.llgr_peer_config.insert(peer, llgr_config);
         }
 
         let peer_label = peer.to_string();
         self.metrics.set_gr_active(&peer_label, true);
-        let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
-            rib.iter().filter(|r| r.is_stale).count()
-                + rib.iter_flowspec().filter(|r| r.is_stale).count()
-                + rib.iter_evpn().filter(|r| r.is_stale).count()
-                + rib.iter_vpn().filter(|r| r.is_stale).count()
-                + rib.iter_labeled().filter(|r| r.is_stale).count()
-                + rib.iter_bgpls().filter(|r| r.is_stale).count()
-                + rib.iter_rtc().filter(|r| r.is_stale).count()
-        });
+        let stale_count = self.ribs.get(&peer).map_or(0, retained_stale_count);
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
         true
@@ -631,180 +690,7 @@ impl RibManager {
         if let Some(llgr_config) = llgr_config {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
-            // Only promote families that are in BOTH the GR and LLGR capability sets.
-            let llgr_family_set: HashSet<(Afi, Safi)> = llgr_config
-                .peer_llgr_families
-                .iter()
-                .map(|f| (f.afi, f.safi))
-                .collect();
-            let llgr_families: Vec<(Afi, Safi)> = gr_families
-                .iter()
-                .copied()
-                .filter(|f| llgr_family_set.contains(f))
-                .collect();
-            let non_llgr_families: Vec<(Afi, Safi)> = gr_families
-                .iter()
-                .copied()
-                .filter(|f| !llgr_family_set.contains(f))
-                .collect();
-
-            let mut affected = HashSet::new();
-            let mut fs_affected = HashSet::new();
-            let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
-            let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
-            let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
-            let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
-            let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
-            let mut rib_len = 0;
-            let mut evpn_len = 0;
-            if let Some(rib) = self.ribs.get_mut(&peer) {
-                // Promote LLGR-negotiated families to LLGR-stale
-                for &family in &llgr_families {
-                    let promoted = rib.promote_to_llgr_stale(family, &mut self.attr_intern);
-                    for p in promoted {
-                        affected.insert(p);
-                    }
-                    let fs_promoted = rib.promote_to_llgr_stale_flowspec(family);
-                    for r in fs_promoted {
-                        fs_affected.insert(r);
-                    }
-                    let evpn_promoted =
-                        rib.promote_to_llgr_stale_evpn(family, &mut self.attr_intern);
-                    for k in evpn_promoted {
-                        evpn_affected.insert(k);
-                    }
-                }
-                // Sweep families NOT in LLGR — these cannot be preserved
-                for &family in &non_llgr_families {
-                    let swept = rib.sweep_stale_family(family);
-                    for p in swept {
-                        affected.insert(p);
-                    }
-                    let fs_swept = rib.sweep_stale_flowspec_family(family);
-                    for r in fs_swept {
-                        fs_affected.insert(r);
-                    }
-                    let evpn_swept = rib.sweep_stale_family_evpn(family);
-                    for k in evpn_swept {
-                        evpn_affected.insert(k);
-                    }
-                }
-                // Typed families (VPN, BGP-LS, RTC) follow the same split:
-                // LLGR-negotiated tuples promote to LLGR-stale (routes
-                // carrying NO_LLGR are removed instead and their keys join
-                // the affected sets so the recomputes below withdraw them
-                // downstream); tuples outside the LLGR capability purge.
-                // Each helper is a family-scoped no-op for non-matching
-                // tuples.
-                for &family in &llgr_families {
-                    vpn_affected
-                        .extend(rib.promote_to_llgr_stale_vpn(family, &mut self.attr_intern));
-                    labeled_affected
-                        .extend(rib.promote_to_llgr_stale_labeled(family, &mut self.attr_intern));
-                    bgpls_affected
-                        .extend(rib.promote_to_llgr_stale_bgpls(family, &mut self.attr_intern));
-                    rtc_affected
-                        .extend(rib.promote_to_llgr_stale_rtc(family, &mut self.attr_intern));
-                }
-                for &family in &non_llgr_families {
-                    vpn_affected.extend(rib.sweep_stale_family_vpn(family));
-                    labeled_affected.extend(rib.sweep_stale_family_labeled(family));
-                    bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
-                    rtc_affected.extend(rib.sweep_stale_family_rtc(family));
-                }
-                self.metrics.set_rib_prefixes(
-                    &peer_label,
-                    "flowspec",
-                    gauge_val(rib.flowspec_len()),
-                );
-                rib_len = rib.len();
-                evpn_len = rib.evpn_len();
-                // First GC catches interned sets made unreachable by direct
-                // Adj-RIB-In mutation (LLGR COW promotion or non-LLGR family
-                // sweeps). A second GC below runs after Loc-RIB recompute
-                // drops selected-route clones that were still holding old
-                // Arcs alive here.
-                self.attr_intern.gc();
-                self.metrics
-                    .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
-            }
-            if !non_llgr_families.is_empty() {
-                info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
-            }
-            if !affected.is_empty() {
-                info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-            }
-            if !fs_affected.is_empty() {
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
-            if !evpn_affected.is_empty() {
-                self.recompute_and_distribute_evpn(&evpn_affected);
-            }
-            if !bgpls_affected.is_empty() {
-                self.recompute_bgpls_keys(&bgpls_affected);
-            }
-            if !vpn_affected.is_empty() {
-                self.recompute_vpn_keys(&vpn_affected);
-            }
-            if !labeled_affected.is_empty() {
-                self.recompute_labeled_keys(&labeled_affected);
-            }
-            let rtc_changed = !rtc_affected.is_empty();
-            if rtc_changed {
-                self.recompute_rtc_keys(&rtc_affected);
-            }
-            if !affected.is_empty()
-                || !fs_affected.is_empty()
-                || !evpn_affected.is_empty()
-                || !bgpls_affected.is_empty()
-                || !vpn_affected.is_empty()
-                || !labeled_affected.is_empty()
-                || rtc_changed
-            {
-                self.gc_attr_intern();
-            }
-            if rtc_changed {
-                // A non-LLGR purge (or a NO_LLGR removal during promotion)
-                // shrank this peer's RTC Adj-RIB-In; if the peer
-                // re-established (only its End-of-RIB was late), its RT
-                // membership must shrink with it so uncovered VPN routes are
-                // withdrawn from its Adj-RIB-Out. A promotion-only change
-                // leaves the derived membership equal and the rebuild
-                // no-ops.
-                self.rebuild_rtc_membership_and_restage_vpn(peer);
-            }
-            self.metrics
-                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
-            self.metrics
-                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
-
-            // Set the LLGR timer per family (RFC 9494 §4.3: stale time is
-            // negotiated per AFI/SAFI): min(local config, the peer's
-            // advertised stale time for that family). `or_insert` is the
-            // original-LLST rule — a deadline that survived a
-            // reconnect-then-down is re-used, never restarted, so total
-            // retention stays bounded by the FIRST promotion's deadline.
-            let now = tokio::time::Instant::now();
-            for &(afi, safi) in &llgr_families {
-                let peer_family_stale = llgr_config
-                    .peer_llgr_families
-                    .iter()
-                    .filter(|f| (f.afi, f.safi) == (afi, safi))
-                    .map(|f| f.stale_time)
-                    .min()
-                    .unwrap_or(llgr_config.local_llgr_stale_time);
-                let effective = peer_family_stale.min(llgr_config.local_llgr_stale_time);
-                if !self.llgr_stale_deadlines.contains_key(&(peer, afi, safi)) {
-                    self.llgr_stale_deadlines.insert(
-                        (peer, afi, safi),
-                        now + std::time::Duration::from_secs(u64::from(effective)),
-                    );
-                }
-            }
-            self.llgr_peers
-                .insert(peer, llgr_families.into_iter().collect());
+            self.enter_llgr_phase(peer, &gr_families, &llgr_config);
             // GR remains "active" for metrics until LLGR completes
             return;
         }
@@ -919,6 +805,199 @@ impl RibManager {
         self.prune_exact_export_rejections();
     }
 
+    /// Enter the RFC 9494 LLGR stale phase for `families` of `peer`: promote
+    /// the GR-stale routes of every family in the peer's LLGR capability to
+    /// LLGR-stale, purge the stale routes of the others, and stamp each
+    /// promoted family's Long-Lived Stale Time deadline.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "LLGR promotion has unicast + FlowSpec paths"
+    )]
+    fn enter_llgr_phase(
+        &mut self,
+        peer: IpAddr,
+        families: &[(Afi, Safi)],
+        llgr_config: &LlgrPeerConfig,
+    ) {
+        let peer_label = peer.to_string();
+        // Only promote families that are in the LLGR capability with a
+        // non-zero Long-Lived Stale Time; purge the rest. A zero LLST means
+        // no LLGR period for the family (RFC 9494 §4.2), so its routes end
+        // with the GR phase instead of being promoted and swept at once.
+        let llgr_family_set: HashSet<(Afi, Safi)> = llgr_config
+            .peer_llgr_families
+            .iter()
+            .filter(|f| f.stale_time > 0)
+            .map(|f| (f.afi, f.safi))
+            .collect();
+        let llgr_families: Vec<(Afi, Safi)> = families
+            .iter()
+            .copied()
+            .filter(|f| llgr_family_set.contains(f))
+            .collect();
+        let non_llgr_families: Vec<(Afi, Safi)> = families
+            .iter()
+            .copied()
+            .filter(|f| !llgr_family_set.contains(f))
+            .collect();
+
+        let mut affected = HashSet::new();
+        let mut fs_affected = HashSet::new();
+        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
+        let mut bgpls_affected: HashSet<BgpLsRouteKey> = HashSet::new();
+        let mut vpn_affected: HashSet<crate::route::VpnRibRouteKey> = HashSet::new();
+        let mut labeled_affected: HashSet<crate::route::LabeledRibRouteKey> = HashSet::new();
+        let mut rtc_affected: HashSet<crate::route::RtcRibRouteKey> = HashSet::new();
+        let mut rib_len = 0;
+        let mut evpn_len = 0;
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            // Promote LLGR-negotiated families to LLGR-stale
+            for &family in &llgr_families {
+                let promoted = rib.promote_to_llgr_stale(family, &mut self.attr_intern);
+                for p in promoted {
+                    affected.insert(p);
+                }
+                let fs_promoted = rib.promote_to_llgr_stale_flowspec(family);
+                for r in fs_promoted {
+                    fs_affected.insert(r);
+                }
+                let evpn_promoted = rib.promote_to_llgr_stale_evpn(family, &mut self.attr_intern);
+                for k in evpn_promoted {
+                    evpn_affected.insert(k);
+                }
+            }
+            // Sweep families NOT in LLGR — these cannot be preserved
+            for &family in &non_llgr_families {
+                let swept = rib.sweep_stale_family(family);
+                for p in swept {
+                    affected.insert(p);
+                }
+                let fs_swept = rib.sweep_stale_flowspec_family(family);
+                for r in fs_swept {
+                    fs_affected.insert(r);
+                }
+                let evpn_swept = rib.sweep_stale_family_evpn(family);
+                for k in evpn_swept {
+                    evpn_affected.insert(k);
+                }
+            }
+            // Typed families (VPN, BGP-LS, RTC) follow the same split:
+            // LLGR-negotiated tuples promote to LLGR-stale (routes
+            // carrying NO_LLGR are removed instead and their keys join
+            // the affected sets so the recomputes below withdraw them
+            // downstream); tuples outside the LLGR capability purge.
+            // Each helper is a family-scoped no-op for non-matching
+            // tuples.
+            for &family in &llgr_families {
+                vpn_affected.extend(rib.promote_to_llgr_stale_vpn(family, &mut self.attr_intern));
+                labeled_affected
+                    .extend(rib.promote_to_llgr_stale_labeled(family, &mut self.attr_intern));
+                bgpls_affected
+                    .extend(rib.promote_to_llgr_stale_bgpls(family, &mut self.attr_intern));
+                rtc_affected.extend(rib.promote_to_llgr_stale_rtc(family, &mut self.attr_intern));
+            }
+            for &family in &non_llgr_families {
+                vpn_affected.extend(rib.sweep_stale_family_vpn(family));
+                labeled_affected.extend(rib.sweep_stale_family_labeled(family));
+                bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
+                rtc_affected.extend(rib.sweep_stale_family_rtc(family));
+            }
+            self.metrics
+                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
+            rib_len = rib.len();
+            evpn_len = rib.evpn_len();
+            // First GC catches interned sets made unreachable by direct
+            // Adj-RIB-In mutation (LLGR COW promotion or non-LLGR family
+            // sweeps). A second GC below runs after Loc-RIB recompute
+            // drops selected-route clones that were still holding old
+            // Arcs alive here.
+            self.attr_intern.gc();
+            self.metrics
+                .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
+        }
+        if !non_llgr_families.is_empty() {
+            info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
+        }
+        if !affected.is_empty() {
+            info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_affected.is_empty() {
+            self.recompute_and_distribute_evpn(&evpn_affected);
+        }
+        if !bgpls_affected.is_empty() {
+            self.recompute_bgpls_keys(&bgpls_affected);
+        }
+        if !vpn_affected.is_empty() {
+            self.recompute_vpn_keys(&vpn_affected);
+        }
+        if !labeled_affected.is_empty() {
+            self.recompute_labeled_keys(&labeled_affected);
+        }
+        let rtc_changed = !rtc_affected.is_empty();
+        if rtc_changed {
+            self.recompute_rtc_keys(&rtc_affected);
+        }
+        if !affected.is_empty()
+            || !fs_affected.is_empty()
+            || !evpn_affected.is_empty()
+            || !bgpls_affected.is_empty()
+            || !vpn_affected.is_empty()
+            || !labeled_affected.is_empty()
+            || rtc_changed
+        {
+            self.gc_attr_intern();
+        }
+        if rtc_changed {
+            // A non-LLGR purge (or a NO_LLGR removal during promotion)
+            // shrank this peer's RTC Adj-RIB-In; if the peer
+            // re-established (only its End-of-RIB was late), its RT
+            // membership must shrink with it so uncovered VPN routes are
+            // withdrawn from its Adj-RIB-Out. A promotion-only change
+            // leaves the derived membership equal and the rebuild
+            // no-ops.
+            self.rebuild_rtc_membership_and_restage_vpn(peer);
+        }
+        self.metrics
+            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+        self.metrics
+            .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+
+        // Set the LLGR timer per family (RFC 9494 §4.3: stale time is
+        // negotiated per AFI/SAFI): min(local config, the peer's
+        // advertised stale time for that family). `or_insert` is the
+        // original-LLST rule — a deadline that survived a
+        // reconnect-then-down is re-used, never restarted, so total
+        // retention stays bounded by the FIRST promotion's deadline.
+        let now = tokio::time::Instant::now();
+        for &(afi, safi) in &llgr_families {
+            let peer_family_stale = llgr_config
+                .peer_llgr_families
+                .iter()
+                .filter(|f| (f.afi, f.safi) == (afi, safi))
+                .map(|f| f.stale_time)
+                .min()
+                .unwrap_or(llgr_config.local_llgr_stale_time);
+            let effective = peer_family_stale.min(llgr_config.local_llgr_stale_time);
+            if !self.llgr_stale_deadlines.contains_key(&(peer, afi, safi)) {
+                self.llgr_stale_deadlines.insert(
+                    (peer, afi, safi),
+                    now + std::time::Duration::from_secs(u64::from(effective)),
+                );
+            }
+        }
+        // Extend rather than replace: with partial GR, families absent from
+        // the GR capability entered LLGR at session down.
+        self.llgr_peers
+            .entry(peer)
+            .or_default()
+            .extend(llgr_families);
+    }
+
     /// Sweep every (peer, AFI, SAFI) whose LLGR stale deadline has expired,
     /// grouped per peer. Called from the manager run loop's LLGR timer arm.
     pub(super) fn sweep_expired_llgr_stale(&mut self) {
@@ -990,13 +1069,7 @@ impl RibManager {
                 .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
-            llgr_stale_remaining = rib.iter().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_vpn().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_labeled().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_bgpls().filter(|r| r.is_llgr_stale).count()
-                + rib.iter_rtc().filter(|r| r.is_llgr_stale).count();
+            llgr_stale_remaining = retained_stale_count(rib);
         }
         let had_swept = !swept.is_empty();
         let had_fs_swept = !fs_swept.is_empty();
@@ -1076,8 +1149,9 @@ impl RibManager {
         }
         self.llgr_peers.remove(&peer);
         if self.gr_peers.contains_key(&peer) {
-            // Re-established and awaiting End-of-RIB: the GR machinery owns
-            // the remaining lifecycle (and still reads `llgr_peer_config`).
+            // Re-established and awaiting End-of-RIB, or (partial GR) other
+            // families still in the GR phase: the GR machinery owns the
+            // remaining lifecycle (and still reads `llgr_peer_config`).
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_remaining));
             return;

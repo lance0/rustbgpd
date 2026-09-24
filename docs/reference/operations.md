@@ -2240,7 +2240,7 @@ counters, using a 15-minute increase window:
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
-| `bgp_gr_stale_routes` | Routes currently marked stale |
+| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale) |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |

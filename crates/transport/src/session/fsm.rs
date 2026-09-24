@@ -670,6 +670,11 @@ impl PeerSession {
                         .map(|family| (family.afi, family.safi))
                         .collect();
                     let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
+                    let peer_llgr_families = if neg.peer_llgr_capable {
+                        neg.peer_llgr_families.clone()
+                    } else {
+                        Vec::new()
+                    };
                     self.negotiated = Some(negotiated);
                     self.publish_export_profile();
                     self.established_at = Some(tokio::time::Instant::now());
@@ -740,6 +745,8 @@ impl PeerSession {
                             peer_restart_state,
                             peer_gr_families,
                             peer_enhanced_refresh,
+                            peer_llgr_families,
+                            local_llgr_stale_time: self.config.llgr_stale_time,
                         })
                         .await;
 
@@ -883,8 +890,12 @@ impl PeerSession {
                     // session.  All families from the peer's GR capability
                     // are retained (not just forwarding-preserved ones).
                     // RFC 8538: Cease/Hard Reset bypasses GR unconditionally.
+                    // RFC 9494 §4.2: an LLGR family missing from the GR
+                    // capability has a Restart Time of zero and is still
+                    // retained, so an LLGR-only peer enters retention too.
                     let gr_update = self.negotiated.as_ref().and_then(|neg| {
-                        if neg.peer_gr_capable
+                        if (neg.peer_gr_capable
+                            || (neg.peer_llgr_capable && self.config.llgr_stale_time > 0))
                             && self.config.peer.graceful_restart
                             && (!self.notification_teardown || neg.peer_notification_gr)
                             && !self.received_hard_reset

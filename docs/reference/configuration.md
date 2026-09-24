@@ -1878,6 +1878,23 @@ timer expires, routes for LLGR-negotiated families are promoted to LLGR-stale
 (with the `LLGR_STALE` well-known community added) instead of being purged.
 Routes carrying `NO_LLGR` are purged at the GR-to-LLGR transition.
 
+A family that the peer lists in its LLGR capability but not in its GR
+capability skips the GR phase: its routes become LLGR-stale as soon as the
+session goes down (RFC 9494 §4.2 deems its Restart Time zero). This includes a
+peer that sends a GR capability with no families alongside LLGR. When the peer
+re-establishes, a retained family that its new OPEN no longer lists (in the GR
+capability for a family still in the GR phase, in the LLGR capability for a
+family already LLGR-stale) has its stale routes removed at once instead of at
+End-of-RIB.
+
+A non-zero `llgr_stale_time` advertises LLGR for every family this speaker
+lists in its own GR capability. It retains every family the peer lists in its
+GR capability, and enters the LLGR phase only for families the peer lists in
+its LLGR capability with a non-zero Long-Lived Stale Time. A family with a zero
+stale time is purged when its GR phase ends, or at session down if the GR
+capability does not list it. There is no per-family LLGR switch (see
+[RFC notes](rfc-notes.md#rfc-9494-5--per-afisafi-configuration)).
+
 The effective LLGR stale time is `min(local llgr_stale_time, peer's per-family minimum)`.
 
 ```toml
