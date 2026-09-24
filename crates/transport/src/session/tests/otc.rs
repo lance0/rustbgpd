@@ -1098,3 +1098,169 @@ async fn otc_roleless_canonical_and_partial_roundtrip_ingress_rib_egress_bytes()
         );
     }
 }
+
+/// RFC 9234 section 5 I2 boundary: a Peer that sends OTC equal to its own AS
+/// is eligible, and the OTC reaches the RIB unchanged (not replaced or
+/// duplicated by I3).
+#[tokio::test]
+async fn otc_ingress_peer_accepts_tagged_unicast_from_matching_as_unchanged() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.peer.local_role = Some(BgpRole::Peer);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        otc(65002),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("I2 must accept OTC equal to the peer AS");
+    };
+    assert_eq!(announced.len(), 1);
+    let otcs: Vec<u32> = announced[0]
+        .attributes
+        .iter()
+        .filter_map(PathAttribute::only_to_customer)
+        .collect();
+    assert_eq!(otcs, vec![65002]);
+    assert_eq!(
+        otc_routes_blocked_count(&session, "ingress_peer_mismatch"),
+        0
+    );
+}
+
+/// RFC 9234 section 5 E2 negative: with the Provider or RS local role the
+/// neighbor is a Customer or RS-Client, so an OTC-tagged unicast route is
+/// sent, and E1 keeps the existing OTC rather than adding the local AS.
+#[test]
+fn otc_egress_sends_tagged_unicast_to_customer_and_route_server_client() {
+    for role in [BgpRole::Provider, BgpRole::RouteServer] {
+        let mut session = make_test_session(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        let route = replace_route_attrs(
+            &make_route(100),
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65003])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                otc(65003),
+            ],
+        );
+        assert!(
+            !session.otc_egress_blocks_unicast(&route),
+            "role {role:?} must still send an OTC-tagged route"
+        );
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+        let otcs: Vec<u32> = attrs
+            .iter()
+            .filter_map(PathAttribute::only_to_customer)
+            .collect();
+        assert_eq!(otcs, vec![65003], "role {role:?}");
+    }
+}
+
+fn otc_test_vpn_update(with_otc: Option<u32>) -> UpdateMessage {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::MplsVpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![rustbgpd_wire::VpnNlriEntry {
+                path_id: 0,
+                nlri: VpnNlri {
+                    labels: vec![MplsLabelEntry::try_new(4093, 0, true).unwrap()],
+                    route_distinguisher: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+                    prefix: VpnPrefix::v4(Ipv4Addr::new(10, 0, 1, 0), 24).unwrap(),
+                },
+            }],
+            rtc_announced: vec![],
+        }),
+    ];
+    attrs.extend(with_otc.map(otc));
+    UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)
+}
+
+/// RFC 9234 section 5 applies only to IPv4/IPv6 unicast. On `VPNv4`, I1 does
+/// not drop an OTC-tagged route from a Customer, and I3 does not add OTC to an
+/// untagged route from a Provider.
+#[tokio::test]
+async fn otc_ingress_rules_do_not_apply_to_vpn() {
+    for (role, sent_otc) in [
+        (BgpRole::Provider, Some(64512)),
+        (BgpRole::RouteServer, Some(64512)),
+        (BgpRole::Customer, None),
+        (BgpRole::Peer, None),
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+        install_test_negotiated_session(&mut session, negotiated);
+
+        session.process_update(otc_test_vpn_update(sent_otc)).await;
+        let RibUpdate::VpnRoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("role {role:?}: expected VpnRoutesReceived");
+        };
+        assert_eq!(announced.len(), 1, "role {role:?}");
+        let otcs: Vec<u32> = announced[0]
+            .attributes
+            .iter()
+            .filter_map(PathAttribute::only_to_customer)
+            .collect();
+        assert_eq!(
+            otcs,
+            sent_otc.into_iter().collect::<Vec<_>>(),
+            "role {role:?}"
+        );
+    }
+}
+
+/// RFC 9234 section 5 E1 is unicast-only: `VPNv4` export toward a Customer,
+/// Peer or RS-Client does not add OTC, and an existing OTC is kept.
+#[test]
+fn otc_egress_does_not_add_otc_to_vpn() {
+    for role in [BgpRole::Provider, BgpRole::Peer, BgpRole::RouteServer] {
+        let mut session = make_test_session(65001, 65002);
+        session.config.peer.local_role = Some(role);
+        let route = make_vpn_rib_route(100);
+        let attrs = session.prepare_outbound_attributes_vpn(&route, true);
+        assert!(
+            attrs.iter().all(|a| a.only_to_customer().is_none()),
+            "role {role:?} must not add OTC to a VPN route"
+        );
+
+        let mut tagged = make_vpn_rib_route(100);
+        Arc::make_mut(&mut tagged.attributes).push(otc(64512));
+        let attrs = session.prepare_outbound_attributes_vpn(&tagged, true);
+        let otcs: Vec<u32> = attrs
+            .iter()
+            .filter_map(PathAttribute::only_to_customer)
+            .collect();
+        assert_eq!(otcs, vec![64512], "role {role:?}");
+    }
+}
