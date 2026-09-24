@@ -916,6 +916,9 @@ restores or advertises cached routes, and `forwarding_preserved` remains false.
 advertised GR capability (`peer_gr_capable`) AND local config has
 `graceful_restart = true`. The R-bit is NOT checked — it indicates
 restart state in the NEW OPEN after reconnection, not in the dying session.
+A peer whose GR capability lists no usable family also enters retention when
+it advertised LLGR and `llgr_stale_time` is non-zero locally (RFC 9494 §4.2,
+below).
 
 **Family handling:** ALL families from the peer's GR capability are retained
 as stale (not just those with `forwarding_preserved=true`). The
@@ -936,7 +939,13 @@ RFC suggestion (step 7 or later) but matches GoBGP and FRR behavior.
 
 **PeerUp during GR:** Routes are NOT cleared of stale flags. The timer is
 reset. Outbound state is re-registered. Stale flags are cleared only by
-per-family End-of-RIB, not by session re-establishment.
+per-family End-of-RIB, not by session re-establishment. The exception is a
+retained family that the new OPEN does not list: RFC 4724 §4.2 requires its
+stale routes to be removed immediately "if a specific address family is not
+included in the newly received Graceful Restart Capability, or if the Graceful
+Restart Capability is not received in the re-established session at all", and
+rustbgpd removes them at `PeerUp`. The Forwarding State bit in the new
+capability is not checked (see All GR Families Retained below).
 
 **End-of-RIB:** Clears stale flag for the indicated address family.
 Recomputes best paths (previously-demoted routes may now win). If all
@@ -1017,6 +1026,48 @@ the restarting speaker for all the address families that were previously
 received in the Graceful Restart Capability." The `forwarding_preserved`
 flag does NOT gate route retention — it indicates whether the data plane
 was preserved for forwarding decisions.
+
+The same applies on re-establishment. RFC 4724 §4.2 and RFC 9494 §4.2 also
+require removing a family's stale routes when the Forwarding State bit (GR) or
+F bit (LLGR) is clear in the newly received capability. rustbgpd does not
+check either bit and keeps the stale routes until End-of-RIB or the timer.
+rustbgpd itself advertises both bits clear because it does not own the
+forwarding plane, so honoring them would flush every retained route whenever
+two rustbgpd speakers reconnect. Removal on reconnect is limited to families
+the new OPEN does not list at all.
+
+### RFC 9494 §4.2 — LLGR Families Outside the GR Capability
+
+RFC 9494 §4.2: "If the Graceful Restart Capability that was received does not
+list all AFIs/SAFIs supported by the session, then the GR Restart Time shall
+be deemed zero for those AFIs/SAFIs that are not listed." §4.1 names
+"omitting all AFIs/SAFIs from the GR Capability" as the way to skip the GR
+phase, and only an absent GR capability makes LLGR "disregarded" (§4.1, §4.5).
+
+At session down, a family in the peer's LLGR capability but not in its GR
+capability is retained and enters the LLGR phase immediately: its routes
+become LLGR-stale, receive the `LLGR_STALE` community, and are swept at that
+family's Long-Lived Stale Time. Families in both capabilities run the GR phase
+first. A peer that sends a GR capability with an empty family list plus LLGR
+is LLGR-capable, and RFC 8538 Notification GR applies to its retention too.
+An LLGR capability without any GR capability is ignored.
+
+On re-establishment, a family already in the LLGR phase whose tuple the new
+LLGR capability omits, or whose new OPEN has no LLGR capability (or no GR
+capability, which makes LLGR disregarded), has its stale routes removed at
+`PeerUp` (RFC 9494 §4.2: "a specific address family is not included in the
+newly received LLGR Capability, or the LLGR and accompanying GR Capability are
+not received in the re-established session at all"). The F-bit clause is not
+implemented; see All GR Families Retained above.
+
+### RFC 9494 §5 — Per-AFI/SAFI Configuration
+
+RFC 9494 §5: "Implementations MUST NOT enable these procedures by default.
+They MUST require affirmative configuration per AFI/SAFI in order to enable
+them." LLGR is disabled by default (`llgr_stale_time = 0`), but enabling it is
+per neighbor: a non-zero `llgr_stale_time` advertises LLGR for every family
+the neighbor negotiates GR for. This is a deviation from the per-AFI/SAFI
+requirement.
 
 ### gr_stale_routes_time Cap
 

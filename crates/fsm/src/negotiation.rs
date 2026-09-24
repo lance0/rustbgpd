@@ -203,11 +203,16 @@ pub fn validate_open(
             negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
         })
         .collect();
+    // RFC 9494 §4.1/§4.5: LLGR is disregarded only when the GR capability
+    // is absent. A GR capability that lists no usable family still carries
+    // LLGR: §4.1 names "omitting all AFIs/SAFIs from the GR Capability" as
+    // the way to skip the GR phase, and §4.2 deems the Restart Time zero for
+    // every unlisted family.
+    let peer_advertised_gr = peer_gr_capable;
     peer_gr_capable = peer_gr_capable && !peer_gr_families.is_empty();
 
     // Extract Long-Lived Graceful Restart capability (RFC 9494).
-    // LLGR requires GR — if the peer didn't advertise GR, LLGR is ignored.
-    let (peer_llgr_capable, peer_llgr_families) = if peer_gr_capable {
+    let (peer_llgr_capable, peer_llgr_families) = if peer_advertised_gr {
         open.capabilities
             .iter()
             .find_map(|c| match c {
@@ -350,7 +355,11 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
-        peer_notification_gr: peer_gr_capable && peer_notification && config.graceful_restart,
+        // RFC 8538 governs any retention the GR capability enables,
+        // including an LLGR-only session's.
+        peer_notification_gr: (peer_gr_capable || peer_llgr_capable)
+            && peer_notification
+            && config.graceful_restart,
         peer_llgr_capable,
         peer_llgr_families,
         peer_route_refresh,
@@ -1338,6 +1347,55 @@ mod tests {
         assert!(!neg.peer_restart_state);
         assert_eq!(neg.peer_restart_time, 0);
         assert!(neg.peer_gr_families.is_empty());
+    }
+
+    fn llgr_v4(stale_time: u32) -> Capability {
+        Capability::LongLivedGracefulRestart(vec![LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: true,
+            stale_time,
+        }])
+    }
+
+    #[test]
+    fn llgr_only_peer_keeps_llgr_with_empty_gr_family_list() {
+        // RFC 9494 §4.1: omitting every AFI/SAFI from the GR capability
+        // skips the GR phase; LLGR still applies.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 0,
+            families: vec![],
+        });
+        open.capabilities.push(llgr_v4(3600));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable, "no family is GR-retained");
+        assert!(neg.peer_llgr_capable, "LLGR must survive an empty GR list");
+        assert_eq!(neg.peer_llgr_families.len(), 1);
+        assert!(
+            neg.peer_notification_gr,
+            "RFC 8538 N-bit applies to LLGR-only retention"
+        );
+    }
+
+    #[test]
+    fn llgr_without_gr_capability_is_disregarded() {
+        // RFC 9494 §4.5: LLGR received without GR MUST be ignored.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        let mut open = peer_open();
+        open.capabilities.push(llgr_v4(3600));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable);
+        assert!(!neg.peer_llgr_capable);
+        assert!(neg.peer_llgr_families.is_empty());
+        assert!(!neg.peer_notification_gr);
     }
 
     #[test]

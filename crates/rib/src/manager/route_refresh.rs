@@ -128,12 +128,20 @@ impl RibManager {
         }
     }
 
+    pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        info!(%peer, ?afi, ?safi, "received End-of-RIB");
+        self.remove_unrefreshed_stale_family(peer, afi, safi);
+    }
+
+    /// End-of-RIB stale resolution for one family: remove every route still
+    /// GR- or LLGR-stale, clear the stale state of the rest, and complete
+    /// GR/LLGR once no family is awaited. Also used at re-establishment for
+    /// a family the new OPEN no longer lists.
     #[expect(
         clippy::too_many_lines,
         reason = "End-of-RIB handler covers GR and LLGR branches across the per-family stale lifecycles (unicast, FlowSpec, EVPN, VPN, BGP-LS, RTC)"
     )]
-    pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
-        info!(%peer, ?afi, ?safi, "received End-of-RIB");
+    pub(super) fn remove_unrefreshed_stale_family(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let is_gr_peer = self.gr_peers.contains_key(&peer);
         let is_llgr_peer = self.llgr_peers.contains_key(&peer);
         if !is_gr_peer && !is_llgr_peer {
