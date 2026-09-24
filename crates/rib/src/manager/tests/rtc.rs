@@ -963,6 +963,7 @@ async fn route_refresh_rtc_re_advertises_routes() {
     drain_rtc_initial_dump(&mut out_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,

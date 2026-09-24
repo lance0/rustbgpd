@@ -308,6 +308,11 @@ pub(crate) struct PeerSession {
     /// `SessionEstablished` and reused by inbound UPDATE decode instead of
     /// rebuilding from `NegotiatedSession::add_path_families` per UPDATE.
     add_path_receive_families: Vec<(Afi, Safi)>,
+    /// Per-family flags for plain ROUTE-REFRESH requests queued to the RIB
+    /// and not yet started (see `RibUpdate::RouteRefreshRequest::queued`).
+    /// Reset per session epoch so a request left from a torn-down session
+    /// cannot suppress the next session's first refresh.
+    route_refresh_queued: HashMap<(Afi, Safi), Arc<std::sync::atomic::AtomicBool>>,
     /// Families whose End-of-RIB marker has been received on this session.
     /// RFC 7313 requires a GR-capable peer's `BoRR` to be ignored until the
     /// corresponding initial GR replay has completed.
@@ -1875,6 +1880,7 @@ impl PeerSession {
             negotiated: None,
             add_path_receive_families: Vec::new(),
             received_eor_families: HashSet::new(),
+            route_refresh_queued: HashMap::new(),
             stop_requested: false,
             reconnect_timer: None,
             notification_idle_failures: 0,

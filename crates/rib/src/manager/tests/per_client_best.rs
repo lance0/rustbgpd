@@ -534,6 +534,7 @@ async fn route_refresh_replays_filtered_best() {
     drain_eor(&mut client_rx).await;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: client,
         session_id: 0,
         afi: Afi::Ipv4,

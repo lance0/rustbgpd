@@ -303,6 +303,7 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
     assert!(query_best_routes(&tx).await.is_empty());
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 7,
         afi: FAMILY.0,
@@ -960,6 +961,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
     while observer_rx.try_recv().is_ok() {}
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 31,
         afi: FAMILY.0,
@@ -1084,6 +1086,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
     );
     assert!(observer_rx.try_recv().is_err());
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 21,
         afi: FAMILY.0,
@@ -1392,6 +1395,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     observer_rx = observer_retry_rx;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 32,
         afi: FAMILY.0,
@@ -2554,6 +2558,7 @@ fn release_sends_single_eor_to_refresh_deferred_peer() {
     manager.handle_update(peer_up(target, 21, outbound_tx));
     while outbound_rx.try_recv().is_ok() {}
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: target,
         session_id: 21,
         afi: FAMILY.0,

@@ -1283,6 +1283,7 @@ async fn vpn_addpath_send_stages_top_n_and_single_best_unchanged() {
     assert_eq!(rank_2.next_hop, second.next_hop, "rank 2 = runner-up");
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: addpath_target,
         afi: Afi::Ipv4,
@@ -1663,6 +1664,7 @@ async fn route_refresh_vpn_re_advertises_routes() {
     let _eor = out_rx.recv().await.unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
