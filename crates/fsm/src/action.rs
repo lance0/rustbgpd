@@ -191,8 +191,9 @@ pub enum Action {
     RoleMismatchObserved {
         /// Locally configured role (`None` if we didn't advertise Role).
         local_role: Option<BgpRole>,
-        /// Peer's advertised role (`None` if absent; for duplicate-Role
-        /// OPENs the FIRST received Role value is reported).
+        /// Peer's advertised role (`None` if absent or if the peer's Role
+        /// capability carries an unassigned value or a wrong length; for
+        /// duplicate-Role OPENs the first assigned Role value is reported).
         remote_role: Option<BgpRole>,
     },
 }

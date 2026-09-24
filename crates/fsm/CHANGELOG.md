@@ -3,6 +3,20 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- OPEN negotiation now treats a received BGP Role capability with an
+  unassigned value (5-255) or a length other than 1 as a Role that matches no
+  RFC 9234 Table 2 pair. With `PeerConfig::local_role` set, `validate_open`
+  returns a Role Mismatch NOTIFICATION (2/11) whether or not `strict_role` is
+  set; previously such a capability was ignored and the OPEN was accepted as
+  though the peer sent no Role. Its raw bytes also take part in the
+  multiple-Role check, so `[Customer, 7]` is rejected with 2/11 with or
+  without a local Role. Without a local Role, a single unassigned or
+  malformed Role capability is still accepted and `remote_role` is `None`.
+  `Action::RoleMismatchObserved` reports `remote_role: None` for these
+  rejections.
+
 ## 0.8.2 - 2026-09-20
 
 - Documented that the FSM does not validate local timer settings, so the
