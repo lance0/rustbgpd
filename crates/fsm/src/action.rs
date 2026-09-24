@@ -191,9 +191,10 @@ pub enum Action {
     RoleMismatchObserved {
         /// Locally configured role (`None` if we didn't advertise Role).
         local_role: Option<BgpRole>,
-        /// Peer's advertised role (`None` if absent or if the peer's Role
-        /// capability carries an unassigned value or a wrong length; for
-        /// duplicate-Role OPENs the first assigned Role value is reported).
+        /// The first assigned Role value in the peer's OPEN, or `None` when
+        /// the OPEN carries no assigned Role value (no Role capability, or
+        /// only unassigned or wrong-length ones). An OPEN with Customer and
+        /// an unassigned value reports `Some(Customer)`.
         remote_role: Option<BgpRole>,
     },
 }

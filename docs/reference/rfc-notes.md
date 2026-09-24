@@ -223,9 +223,11 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   raw value against Table 2, so an unassigned value is a Role Mismatch there
   too when a local Role is configured. BIRD additionally rejects value 255,
   which it uses internally for "no Role", even without one.
-- `bgp_role_mismatch_total` labels an unassigned or wrong-length remote Role
-  as `remote_role="none"`, the same label as an absent Role under
-  `strict_role`.
+- `bgp_role_mismatch_total` reports the first assigned Role value in the
+  rejected OPEN as `remote_role`, so `[Customer, 7]` counts as
+  `remote_role="customer"`. When the OPEN carries no assigned Role value, only
+  unassigned or wrong-length ones, the label is `remote_role="none"`, the same
+  label as an absent Role under `strict_role`.
 - The configured local Role is session-stamped into the RIB before `PeerUp`,
   so the first Adj-RIB-Out build and every subsequent export use the same
   RFC 9234 relationship semantics. Update-group identity includes that role;

@@ -14,8 +14,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   multiple-Role check, so `[Customer, 7]` is rejected with 2/11 with or
   without a local Role. Without a local Role, a single unassigned or
   malformed Role capability is still accepted and `remote_role` is `None`.
-  `Action::RoleMismatchObserved` reports `remote_role: None` for these
-  rejections.
+  `Action::RoleMismatchObserved` reports the first assigned Role value as
+  `remote_role`, and `None` only when the OPEN carries no assigned Role
+  value.
 
 ## 0.8.2 - 2026-09-20
 
