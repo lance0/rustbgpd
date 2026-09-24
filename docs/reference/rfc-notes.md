@@ -1064,7 +1064,11 @@ capability, which makes LLGR disregarded), has its stale routes removed at
 `PeerUp` (RFC 9494 §4.2: "a specific address family is not included in the
 newly received LLGR Capability, or the LLGR and accompanying GR Capability are
 not received in the re-established session at all"). The F-bit clause is not
-implemented; see All GR Families Retained above.
+implemented; see All GR Families Retained above. If End-of-RIB is still missing
+when the re-armed GR timer expires, promotion to LLGR follows the new OPEN's
+LLGR capability and Long-Lived Stale Times, not the previous session's. A
+family whose Long-Lived Stale Time is zero is purged at the end of its GR
+phase instead of being promoted.
 
 ### RFC 9494 §5 — Per-AFI/SAFI Configuration
 

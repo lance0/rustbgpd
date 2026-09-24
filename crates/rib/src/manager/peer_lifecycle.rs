@@ -968,6 +968,31 @@ impl RibManager {
             info!(%peer, ?afi, ?safi, "re-established session does not list a retained family in its GR/LLGR capability — removing its stale routes");
             self.remove_unrefreshed_stale_family(peer, afi, safi);
         }
+        // The dying session's LLGR parameters must not drive a promotion
+        // after re-establishment: if End-of-RIB is late and the GR timer
+        // expires, `sweep_gr_stale` promotes by what the NEW OPEN and the
+        // new session's local config allow (families, Long-Lived Stale
+        // Times, or no LLGR at all). Without the staged context nothing is
+        // changed, as for the capability check above.
+        if let Some(context) = &gr_context
+            && self.gr_peers.contains_key(&peer)
+        {
+            if context.local_llgr_stale_time > 0 && !context.peer_llgr_families.is_empty() {
+                let stale_routes_time =
+                    self.gr_stale_routes_time.get(&peer).copied().unwrap_or(360);
+                self.llgr_peer_config.insert(
+                    peer,
+                    super::helpers::LlgrPeerConfig {
+                        peer_llgr_capable: true,
+                        peer_llgr_families: context.peer_llgr_families.clone(),
+                        local_llgr_stale_time: context.local_llgr_stale_time,
+                        stale_routes_time,
+                    },
+                );
+            } else {
+                self.llgr_peer_config.remove(&peer);
+            }
+        }
 
         // RFC 4684 decision: lazily self-originate the default (wildcard)
         // RTC NLRI the first time an RTC-capable peer comes up — rustbgpd

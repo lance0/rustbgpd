@@ -21,7 +21,11 @@ pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duratio
 ///
 /// The entry stays alive through the LLGR stale phase — `handle_peer_up`
 /// reads `stale_routes_time` when the peer re-establishes during LLGR, and a
-/// second GR-deadline expiry re-promotes from it. It is removed at every
+/// second GR-deadline expiry re-promotes from it. Re-establishment with a
+/// staged OPEN context re-derives the entry from the new OPEN and the new
+/// session's local `llgr_stale_time` (or removes it when the new session has
+/// no LLGR), so a late-EoR promotion never uses the dying session's
+/// parameters. It is removed at every
 /// terminal point: GR/LLGR completion on End-of-RIB, LLGR expiry sweep,
 /// the no-LLGR purge branch of the GR expiry sweep, and `handle_peer_down`.
 #[derive(Clone)]

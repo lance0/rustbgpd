@@ -670,6 +670,11 @@ impl PeerSession {
                         .map(|family| (family.afi, family.safi))
                         .collect();
                     let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
+                    let peer_llgr_families = if neg.peer_llgr_capable {
+                        neg.peer_llgr_families.clone()
+                    } else {
+                        Vec::new()
+                    };
                     self.negotiated = Some(negotiated);
                     self.publish_export_profile();
                     self.established_at = Some(tokio::time::Instant::now());
@@ -740,6 +745,8 @@ impl PeerSession {
                             peer_restart_state,
                             peer_gr_families,
                             peer_enhanced_refresh,
+                            peer_llgr_families,
+                            local_llgr_stale_time: self.config.llgr_stale_time,
                         })
                         .await;
 

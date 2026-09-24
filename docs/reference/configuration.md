@@ -1888,8 +1888,11 @@ family already LLGR-stale) has its stale routes removed at once instead of at
 End-of-RIB.
 
 A non-zero `llgr_stale_time` advertises LLGR for every family this speaker
-lists in its own GR capability, and retains every family the peer lists in its
-GR or LLGR capability. There is no per-family LLGR switch (see
+lists in its own GR capability. It retains every family the peer lists in its
+GR capability, and enters the LLGR phase only for families the peer lists in
+its LLGR capability with a non-zero Long-Lived Stale Time. A family with a zero
+stale time is purged when its GR phase ends, or at session down if the GR
+capability does not list it. There is no per-family LLGR switch (see
 [RFC notes](rfc-notes.md#rfc-9494-5--per-afisafi-configuration)).
 
 The effective LLGR stale time is `min(local llgr_stale_time, peer's per-family minimum)`.

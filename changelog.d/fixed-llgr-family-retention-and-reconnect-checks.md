@@ -8,7 +8,10 @@
   least one family has a non-zero Long-Lived Stale Time. When the
   peer re-establishes, a retained family that the new OPEN no longer lists in
   its GR or LLGR capability has its stale routes removed at once rather than
-  at End-of-RIB or a timer (RFC 4724 §4.2, RFC 9494 §4.2). A GR capability
+  at End-of-RIB or a timer (RFC 4724 §4.2, RFC 9494 §4.2), and a later
+  promotion to LLGR follows the new OPEN's LLGR capability rather than the
+  previous session's. A family with a zero Long-Lived Stale Time is purged
+  at the end of its GR phase instead of being briefly promoted. A GR capability
   that lists a family twice no longer deletes that family's routes at session
   down. `bgp_gr_stale_routes` now counts LLGR-stale routes as well as
   GR-stale ones at session down, End-of-RIB and Long-Lived Stale Time expiry,

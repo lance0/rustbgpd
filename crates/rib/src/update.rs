@@ -2147,6 +2147,11 @@ pub enum RibUpdate {
         /// collision-failback convergence wait on `BoRR`/`EoRR` is
         /// fulfillable.
         peer_enhanced_refresh: bool,
+        /// Families of the peer's LLGR capability (RFC 9494) with their
+        /// Long-Lived Stale Times; empty when LLGR was not negotiated.
+        peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
+        /// Locally configured `llgr_stale_time` for this session (0 = off).
+        local_llgr_stale_time: u32,
     },
     /// Inject a locally-originated route.
     InjectRoute {

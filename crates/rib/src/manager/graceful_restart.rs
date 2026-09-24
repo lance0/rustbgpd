@@ -820,10 +820,14 @@ impl RibManager {
         llgr_config: &LlgrPeerConfig,
     ) {
         let peer_label = peer.to_string();
-        // Only promote families that are in the LLGR capability; purge the rest.
+        // Only promote families that are in the LLGR capability with a
+        // non-zero Long-Lived Stale Time; purge the rest. A zero LLST means
+        // no LLGR period for the family (RFC 9494 §4.2), so its routes end
+        // with the GR phase instead of being promoted and swept at once.
         let llgr_family_set: HashSet<(Afi, Safi)> = llgr_config
             .peer_llgr_families
             .iter()
+            .filter(|f| f.stale_time > 0)
             .map(|f| (f.afi, f.safi))
             .collect();
         let llgr_families: Vec<(Afi, Safi)> = families

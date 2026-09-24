@@ -2352,12 +2352,34 @@ fn reconnect_with_capabilities(
     gr_families: &[(Afi, Safi)],
     llgr_families: &[(Afi, Safi)],
 ) -> mpsc::Receiver<OutboundRouteUpdate> {
+    reconnect_with_llgr_stale_time(manager, peer, gr_families, llgr_families, 60)
+}
+
+/// `reconnect_with_capabilities` with an explicit Long-Lived Stale Time for
+/// every family of the new LLGR capability (local `llgr_stale_time` 3600).
+fn reconnect_with_llgr_stale_time(
+    manager: &mut RibManager,
+    peer: IpAddr,
+    gr_families: &[(Afi, Safi)],
+    llgr_families: &[(Afi, Safi)],
+    stale_time: u32,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
     manager.handle_update(RibUpdate::SetPeerGracefulRestartContext {
         peer,
         session_id: 0,
         peer_restart_state: false,
         peer_gr_families: gr_families.to_vec(),
         peer_enhanced_refresh: false,
+        peer_llgr_families: llgr_families
+            .iter()
+            .map(|&(afi, safi)| rustbgpd_wire::LlgrFamily {
+                afi,
+                safi,
+                forwarding_preserved: false,
+                stale_time,
+            })
+            .collect(),
+        local_llgr_stale_time: 3600,
     });
     let (out_tx, out_rx) = mpsc::channel(64);
     manager.handle_update(RibUpdate::PeerUp {
@@ -2790,4 +2812,100 @@ async fn llgr_only_family_with_zero_stale_time_is_withdrawn_at_session_down() {
         "zero Restart Time and zero LLST: base BGP withdrawal"
     );
     assert!(!manager.llgr_peers.contains_key(&source));
+}
+
+/// Late End-of-RIB after a reconnect: the GR timer promotes by the NEW OPEN's
+/// LLGR capability, not the dying session's. Covers LLGR dropped, LLGR added,
+/// and a changed Long-Lived Stale Time.
+#[tokio::test(start_paused = true)]
+async fn reconnect_rederives_llgr_promotion_from_the_new_open() {
+    // (old session has LLGR, new OPEN's LLGR families, new LLST, expect promotion)
+    for (old_llgr, new_llgr, new_stale_time, promoted) in [
+        (true, false, 60, false),
+        (false, true, 60, true),
+        (true, true, 0, false),
+        (true, true, 45, true),
+    ] {
+        let (_tx, mut manager) = direct_manager(None);
+        let source = retention_source();
+        let _out_rx = establish_peer(&mut manager, source);
+        announce_dual_stack(&mut manager, source);
+        let old_llgr_families = if old_llgr { vec![V4_UNICAST] } else { vec![] };
+        let mut down = gr_with_llgr(source, 10, vec![V4_UNICAST], old_llgr_families, 600);
+        if !old_llgr
+            && let RibUpdate::PeerGracefulRestart {
+                peer_llgr_capable, ..
+            } = &mut down
+        {
+            *peer_llgr_capable = false;
+        }
+        manager.handle_update(down);
+
+        let new_llgr_families: &[(Afi, Safi)] = if new_llgr { &[V4_UNICAST] } else { &[] };
+        let _new_rx = reconnect_with_llgr_stale_time(
+            &mut manager,
+            source,
+            &[V4_UNICAST],
+            new_llgr_families,
+            new_stale_time,
+        );
+        // End-of-RIB never arrives: the GR timer fires.
+        manager.sweep_gr_stale(source);
+
+        let case = format!("old_llgr={old_llgr} new_llgr={new_llgr} llst={new_stale_time}");
+        let v4 = adj_route(&manager, source, retention_v4_prefix());
+        if promoted {
+            assert_llgr_stale(v4, &case);
+            let deadline = manager
+                .llgr_stale_deadlines
+                .get(&(source, Afi::Ipv4, Safi::Unicast))
+                .copied()
+                .unwrap_or_else(|| panic!("{case}: LLST deadline"));
+            assert_eq!(
+                deadline - tokio::time::Instant::now(),
+                Duration::from_secs(u64::from(new_stale_time)),
+                "{case}: the new OPEN's LLST bounds retention"
+            );
+        } else {
+            assert!(v4.is_none(), "{case}: GR expiry must purge, not promote");
+        }
+    }
+}
+
+/// A family in both capabilities whose Long-Lived Stale Time is zero ends
+/// with the GR phase: purged at GR expiry, not promoted.
+#[tokio::test(start_paused = true)]
+async fn gr_family_with_zero_llst_is_purged_at_gr_expiry() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    let llgr_family = |(afi, safi): (Afi, Safi), stale_time| rustbgpd_wire::LlgrFamily {
+        afi,
+        safi,
+        forwarding_preserved: false,
+        stale_time,
+    };
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 10,
+        stale_routes_time: 360,
+        gr_families: vec![V4_UNICAST, V6_UNICAST],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![llgr_family(V4_UNICAST, 60), llgr_family(V6_UNICAST, 0)],
+        llgr_stale_time: 3600,
+    });
+
+    manager.sweep_gr_stale(source);
+    assert_llgr_stale(adj_route(&manager, source, retention_v4_prefix()), "v4");
+    assert!(
+        adj_route(&manager, source, retention_v6_prefix()).is_none(),
+        "zero LLST: purged at the end of the GR phase"
+    );
+    assert!(
+        !manager
+            .llgr_stale_deadlines
+            .contains_key(&(source, Afi::Ipv6, Safi::Unicast))
+    );
 }

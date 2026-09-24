@@ -124,6 +124,8 @@ async fn stage_gr_context_with(
         peer_restart_state,
         peer_gr_families,
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .await
     .unwrap();
@@ -142,6 +144,8 @@ async fn stage_gr_context_plain_refresh(
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: false,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .await
     .unwrap();
@@ -903,6 +907,8 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     manager.handle_update(peer_up(survivor, 11, survivor_tx));
     let (replacement_tx, _replacement_rx) = mpsc::channel(16);
@@ -912,6 +918,8 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -1637,6 +1645,8 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
             peer_enhanced_refresh: true,
+            peer_llgr_families: Vec::new(),
+            local_llgr_stale_time: 0,
         });
         manager.handle_update(peer_up(survivor, 11, survivor_tx.clone()));
         let (replacement_tx, _replacement_rx) = mpsc::channel(1);
@@ -1646,6 +1656,8 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
             peer_enhanced_refresh: true,
+            peer_llgr_families: Vec::new(),
+            local_llgr_stale_time: 0,
         });
         manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -2229,6 +2241,8 @@ fn peer_teardown_discards_unconsumed_gr_context() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     assert!(manager.pending_peer_gr_context.contains_key(&(a, 9)));
     manager.peer_down_teardown(a);
@@ -2259,6 +2273,8 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .unwrap();
     tx.try_send(peer_up(source, 1, source_tx)).unwrap();

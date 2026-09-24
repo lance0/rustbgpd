@@ -415,6 +415,8 @@ impl RibManager {
                 peer_restart_state: false,
                 peer_gr_families: gate_families.to_vec(),
                 peer_enhanced_refresh: true,
+                peer_llgr_families: Vec::new(),
+                local_llgr_stale_time: 0,
             });
             let (outbound_tx, mut outbound_rx) = mpsc::channel(channel_capacity);
             self.pending_peer_export_encoders
