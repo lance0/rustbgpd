@@ -1066,6 +1066,11 @@ coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
 deliberate: losing the control plane means losing the ability to shut down
 cleanly later. See [ADR-0022](../adr/0022-grpc-server-supervision.md).
 
+A gRPC listener whose socket becomes unusable (`listener socket unusable;
+stopping its accept loop`) gives its open connections the same one-second
+grace as coordinated shutdown, then exits. An open `WatchEvents` stream or an
+idle client connection cannot hold the listener, or the fail-stop, open.
+
 ### RIB manager or peer manager exits unexpectedly
 
 The daemon likewise treats any RIB manager or peer manager return or panic as

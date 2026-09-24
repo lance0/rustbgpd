@@ -78,6 +78,27 @@ const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const GRPC_LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
+/// Test-only fault injection for daemon supervision tests; never set this in
+/// production. A positive integer `N` shuts down each gRPC TCP listening
+/// socket right after it accepts its `N`th connection, so the next accept takes
+/// the unusable-socket exit while earlier connections stay open. Other values
+/// are ignored with a warning.
+const TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER_ENV: &str =
+    "RUSTBGPD_TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER";
+
+fn resolve_test_grpc_tcp_listener_unusable_after() -> Option<usize> {
+    match std::env::var(TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER_ENV) {
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) if value.parse::<usize>().is_ok_and(|n| n > 0) => value.parse().ok(),
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!(
+                "ignoring invalid {TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER_ENV}; expected a positive integer"
+            );
+            None
+        }
+    }
+}
+
 const FULLY_COMPENSATED_STATUS_PREFIX: &str =
     "runtime effects were fully compensated; retry may repeat transient runtime changes:";
 const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
@@ -2021,10 +2042,25 @@ async fn run_tcp_listener(
     let builder = Server::builder();
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
     let handshake_metrics = metrics.clone();
+    let unusable_after = resolve_test_grpc_tcp_listener_unusable_after();
+    let listener_fd = std::os::fd::AsRawFd::as_raw_fd(&tcp_listener);
+    let mut accepted_count = 0_usize;
+    let (accept_ended_tx, accept_ended_rx) = oneshot::channel();
     let accepted = AcceptBackoff::new(
-        TcpListenerStream::new(tcp_listener),
+        FuturesStreamExt::inspect(TcpListenerStream::new(tcp_listener), move |accepted| {
+            if accepted.is_ok() {
+                accepted_count += 1;
+                if Some(accepted_count) == unusable_after {
+                    // The stream owns the listener, so the fd is still open.
+                    let result =
+                        nix::sys::socket::shutdown(listener_fd, nix::sys::socket::Shutdown::Read);
+                    warn!(?result, "injected gRPC TCP listener shutdown");
+                }
+            }
+        }),
         format!("gRPC TCP {bound_addr}"),
     );
+    let accepted = report_accept_end(accepted, accept_ended_tx);
     let incoming = FuturesStreamExt::map(accepted, move |accepted| {
         let generation = credential_store.load();
         let metrics = handshake_metrics.clone();
@@ -2194,13 +2230,17 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ));
     }
-    Box::pin(
+    let serve = Box::pin(
         builder
             .add_routes(routes.routes())
             .serve_with_incoming_shutdown(incoming, await_shutdown(shutdown_rx)),
-    )
-    .await
-    .map_err(|e| format!("TCP listener {bound_addr} failed: {e}"))
+    );
+    match serve_with_bounded_accept_end_drain(serve, accept_ended_rx).await {
+        Some(result) => result.map_err(|e| format!("TCP listener {bound_addr} failed: {e}")),
+        None => Err(accept_end_drain_expired(&format!(
+            "TCP listener {bound_addr}"
+        ))),
+    }
 }
 
 #[expect(
@@ -2455,18 +2495,27 @@ async fn run_uds_listener(
         interceptor,
     ));
 
-    Server::builder()
+    let (accept_ended_tx, accept_ended_rx) = oneshot::channel();
+    let serve = Server::builder()
         .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
         .add_routes(routes.routes())
         .serve_with_incoming_shutdown(
-            AcceptBackoff::new(
-                UnixListenerStream::new(uds_listener),
-                format!("gRPC UDS {}", path.display()),
+            report_accept_end(
+                AcceptBackoff::new(
+                    UnixListenerStream::new(uds_listener),
+                    format!("gRPC UDS {}", path.display()),
+                ),
+                accept_ended_tx,
             ),
             await_shutdown(shutdown_rx),
-        )
-        .await
-        .map_err(|e| format!("UDS listener {} failed: {e}", path.display()))
+        );
+    match serve_with_bounded_accept_end_drain(serve, accept_ended_rx).await {
+        Some(result) => result.map_err(|e| format!("UDS listener {} failed: {e}", path.display())),
+        None => Err(accept_end_drain_expired(&format!(
+            "UDS listener {}",
+            path.display()
+        ))),
+    }
 }
 
 fn bind_uds_listener(path: &Path, mode: u32) -> Result<(UnixListener, UdsSocketCleanup), String> {
@@ -2833,6 +2882,48 @@ impl Drop for UdsSocketCleanup {
             );
         }
     }
+}
+
+/// Reports the end of a listener's accept stream on `ended`, then ends too.
+fn report_accept_end<S: Stream>(
+    incoming: S,
+    ended: oneshot::Sender<()>,
+) -> impl Stream<Item = S::Item> {
+    let end = futures::stream::once(async move {
+        let _ = ended.send(());
+    });
+    FuturesStreamExt::chain(
+        incoming,
+        FuturesStreamExt::filter_map(end, |()| std::future::ready(None)),
+    )
+}
+
+/// Tonic drains open connections with no deadline once its accept stream
+/// ends: `serve_internal` waits on `signal_tx.closed()` in tonic 0.14. An open
+/// watch stream, or an idle connection, would then hold a listener whose
+/// socket is unusable, and with it the gRPC fail-stop, until the client
+/// disconnects. Give that drain the coordinated-shutdown grace, then drop the
+/// serve future. Returns `None` when the grace expired.
+async fn serve_with_bounded_accept_end_drain<F: Future>(
+    serve: F,
+    accept_ended: oneshot::Receiver<()>,
+) -> Option<F::Output> {
+    tokio::select! {
+        result = serve => Some(result),
+        () = async {
+            if accept_ended.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(GRPC_LISTENER_SHUTDOWN_GRACE).await;
+        } => None,
+    }
+}
+
+fn accept_end_drain_expired(listener: &str) -> String {
+    format!(
+        "{listener} stopped accepting and its open connections did not close within {} ms",
+        GRPC_LISTENER_SHUTDOWN_GRACE.as_millis()
+    )
 }
 
 async fn await_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -3966,6 +4057,35 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accept_end_bounds_the_connection_drain_to_the_grace() {
+        let (ended_tx, ended_rx) = oneshot::channel();
+        let mut incoming = std::pin::pin!(report_accept_end(
+            tokio_stream::iter([Ok::<u8, ()>(1)]),
+            ended_tx
+        ));
+        assert_eq!(incoming.next().await, Some(Ok(1)));
+        assert_eq!(incoming.next().await, None);
+
+        // A serve future still draining an open stream never completes.
+        let start = tokio::time::Instant::now();
+        let served =
+            serve_with_bounded_accept_end_drain(std::future::pending::<()>(), ended_rx).await;
+        assert!(served.is_none());
+        assert_eq!(start.elapsed(), GRPC_LISTENER_SHUTDOWN_GRACE);
+
+        // Without an accept end (the sender is dropped with the stream after
+        // shutdown), only the serve future completes the listener.
+        let (ended_tx, ended_rx) = oneshot::channel::<()>();
+        drop(ended_tx);
+        let served = tokio::time::timeout(
+            Duration::from_secs(60),
+            serve_with_bounded_accept_end_drain(std::future::pending::<()>(), ended_rx),
+        )
+        .await;
+        assert!(served.is_err());
     }
 
     #[tokio::test]
