@@ -2547,7 +2547,6 @@ mod tests {
     use std::future::{Future, poll_fn};
     use std::sync::Barrier;
     use std::task::Poll;
-    use std::time::Instant;
 
     fn import_counter_descriptor(generation: u64) -> Arc<InstalledImportPolicy> {
         Arc::new(InstalledImportPolicy::new(
@@ -3029,12 +3028,23 @@ mod tests {
         );
     }
 
+    /// Runs a bounded handle call on the paused clock and returns its result
+    /// with the virtual time it consumed. The outer guard turns a lost bound
+    /// into a test failure instead of a hang.
+    async fn run_bounded<T>(call: impl Future<Output = T>) -> (T, Duration) {
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(10), call)
+            .await
+            .expect("bounded call must return at its deadline, not park on the stalled session");
+        (result, start.elapsed())
+    }
+
     /// Reproduces the `GetHealth` wedge mode where the session-task's
     /// `select!` is parked on TCP write back-pressure: the command does
     /// reach the receiver, but the reply is never sent. The bounded
-    /// variant must surface this as `None` within roughly the deadline,
+    /// variant must surface this as `None` at the deadline,
     /// not hang for as long as the session stays parked.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn query_state_with_bounds_when_reply_is_never_sent() {
         let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
         // Receiver pulls commands off the channel but holds them so the
@@ -3047,14 +3057,12 @@ mod tests {
         });
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = PeerHandle::query_state_with(tx, deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(PeerHandle::query_state_with(tx, deadline)).await;
 
         assert!(result.is_none(), "stalled reply must surface as None");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "query_state_with should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "query_state_with must return exactly at its deadline"
         );
     }
 
@@ -3063,7 +3071,7 @@ mod tests {
     /// stall can fill the channel itself, so `tx.send().await` parks
     /// indefinitely. The bounded variant must surface that as `None` too,
     /// not hang on send.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn query_state_with_bounds_when_command_channel_is_full() {
         let (tx, _rx) = mpsc::channel::<PeerCommand>(1);
         // Pre-fill the single-slot buffer; the receiver is never read, so
@@ -3071,14 +3079,12 @@ mod tests {
         tx.send(PeerCommand::Start).await.unwrap();
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = PeerHandle::query_state_with(tx, deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(PeerHandle::query_state_with(tx, deadline)).await;
 
         assert!(result.is_none(), "blocked send must surface as None");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "query_state_with should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "query_state_with must return exactly at its deadline"
         );
     }
 
@@ -3248,90 +3254,80 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn start_with_bounds_when_command_channel_is_full() {
         let (handle, _rx) = handle_with_full_command_channel();
         fill_command_channel(&handle).await;
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = handle.start_timeout(deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(handle.start_timeout(deadline)).await;
 
         assert_timed_out(&result, "start");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "start_timeout should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "start_timeout must return exactly at its deadline"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stop_with_bounds_when_command_channel_is_full() {
         let (handle, _rx) = handle_with_full_command_channel();
         fill_command_channel(&handle).await;
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = handle.stop_timeout(None, deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(handle.stop_timeout(None, deadline)).await;
 
         assert_timed_out(&result, "stop");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "stop_timeout should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "stop_timeout must return exactly at its deadline"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn collision_dump_with_bounds_when_command_channel_is_full() {
         let (handle, _rx) = handle_with_full_command_channel();
         fill_command_channel(&handle).await;
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = handle.collision_dump_timeout(deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(handle.collision_dump_timeout(deadline)).await;
 
         assert_timed_out(&result, "collision_dump");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "collision_dump_timeout should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "collision_dump_timeout must return exactly at its deadline"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn send_route_refresh_with_bounds_when_command_channel_is_full() {
         let (handle, _rx) = handle_with_full_command_channel();
         fill_command_channel(&handle).await;
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = handle
-            .send_route_refresh_timeout(Afi::Ipv4, Safi::Unicast, deadline)
-            .await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) =
+            run_bounded(handle.send_route_refresh_timeout(Afi::Ipv4, Safi::Unicast, deadline))
+                .await;
 
         assert_timed_out(&result, "send_route_refresh");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "send_route_refresh_timeout should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "send_route_refresh_timeout must return exactly at its deadline"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_with_bounds_aborts_when_command_channel_is_full() {
         let (handle, _rx) = handle_with_full_command_channel();
         fill_command_channel(&handle).await;
 
         let deadline = Duration::from_millis(50);
-        let start = Instant::now();
-        let result = handle.shutdown_timeout(deadline).await;
-        let elapsed = start.elapsed();
+        let (result, elapsed) = run_bounded(handle.shutdown_timeout(deadline)).await;
 
         assert_shutdown_timed_out(&result, "shutdown");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "shutdown_timeout should bound at ~50ms, took {elapsed:?}"
+        assert_eq!(
+            elapsed, deadline,
+            "shutdown_timeout must return exactly at its deadline"
         );
     }
 }
