@@ -2409,7 +2409,8 @@ neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
 listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
-gRPC server, BGP listener task, or BGP accept-forwarding task exited unexpectedly),
+gRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness
+server exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2498,7 +2499,8 @@ fn main() -> ExitCode {
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
                   or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
-                  gRPC server, BGP listener task, or BGP accept-forwarding task exit)\n  \
+                  gRPC server, BGP listener task, BGP accept-forwarding task,\n     \
+                  or metrics/readiness server exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument).\n     \
                   For --diff: also a config that could not be loaded\n  \
                70 Internal error",
@@ -3134,6 +3136,12 @@ const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJ
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 
 /// Test-only fault injection; never set this in production. The only accepted
+/// value is `1`, which shuts down the bound metrics/readiness listening socket
+/// so its accept loop takes the unusable-socket exit; all others are ignored
+/// with a sanitized warning.
+const TEST_METRICS_LISTENER_UNUSABLE_ENV: &str = "RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE";
+
+/// Test-only fault injection; never set this in production. The only accepted
 /// values are `rtr_client_panic` and `vrp_manager_panic`; all others are
 /// ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
@@ -3153,6 +3161,17 @@ fn resolve_test_peer_manager_panic() -> bool {
         Ok(value) if value == "1" => true,
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
             warn!("ignoring invalid {TEST_PEER_MANAGER_PANIC_ENV}; expected 1");
+            false
+        }
+    }
+}
+
+fn resolve_test_metrics_listener_unusable() -> bool {
+    match std::env::var(TEST_METRICS_LISTENER_UNUSABLE_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring invalid {TEST_METRICS_LISTENER_UNUSABLE_ENV}; expected 1");
             false
         }
     }
@@ -3569,6 +3588,7 @@ async fn run<T>(
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
     let test_rpki_task_exit = resolve_test_rpki_task_exit();
+    let test_metrics_listener_unusable = resolve_test_metrics_listener_unusable();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -5801,13 +5821,21 @@ async fn run<T>(
     )
     .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
     .with_rib_readiness(rib_readiness_tx.clone());
-    if let Some(metrics_listener) = metrics_listener.filter(|_| !initial_peer_boot_failed) {
-        let metrics_clone = metrics.clone();
-        let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
-        tokio::spawn(async move {
-            metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;
-        });
-    }
+    // Supervised like the other listeners: `serve_metrics` returns only when
+    // its accept loop ends (an unusable socket), so any exit is a failure.
+    // With no configured listener the task never completes.
+    let metrics_listener = metrics_listener.filter(|_| !initial_peer_boot_failed);
+    let metrics_clone = metrics.clone();
+    let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
+    let mut metrics_handle = tokio::spawn(async move {
+        let Some(metrics_listener) = metrics_listener else {
+            return std::future::pending().await;
+        };
+        if test_metrics_listener_unusable {
+            metrics_listener.shut_down_for_test();
+        }
+        metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;
+    });
 
     // systemd `READY=1` shares the readiness boundary above: every configured
     // gRPC listener is bound, the peer roster is installed, and BGP ingress is
@@ -5856,7 +5884,8 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager).
+    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager,
+    // metrics/readiness).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -5916,6 +5945,12 @@ async fn run<T>(
             result = &mut rib_handle => {
                 error!(?result, "RIB manager exited unexpectedly");
                 info!("initiating shutdown due to RIB manager failure");
+                component_failed = true;
+                break;
+            }
+            result = &mut metrics_handle => {
+                error!(?result, "metrics/readiness server exited unexpectedly");
+                info!("initiating shutdown due to metrics/readiness server failure");
                 component_failed = true;
                 break;
             }

@@ -570,6 +570,10 @@ fn operations_key_log_table_covers_supervised_failures() {
             "BGP accept-forwarding task exited unexpectedly",
         ),
         ("peer_mgr_handle", "peer manager task exited unexpectedly"),
+        (
+            "metrics_handle",
+            "metrics/readiness server exited unexpectedly",
+        ),
     ] {
         let arm_header = format!("            result = &mut {handle} => {{");
         assert_eq!(
@@ -1103,10 +1107,11 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
     assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
-    assert!(help.contains("gRPC server, BGP listener task, or BGP accept-forwarding task exit"));
+    assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
+    assert!(help.contains("or metrics/readiness server exit)"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, or BGP accept-forwarding task exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness\nserver exited unexpectedly"));
 }
 
 #[test]
@@ -1141,6 +1146,35 @@ fn metrics_listener_bind_failure_exits_nonzero() {
         status.code(),
         Some(1),
         "metrics/readiness bind failure must exit 1, got {status}\n{logs}"
+    );
+}
+
+#[test]
+fn metrics_listener_unusable_after_startup_uses_common_shutdown_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path =
+        write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE", "1")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    for message in [
+        "metrics server listening",
+        "listener socket unusable; stopping its accept loop",
+        "metrics/readiness server exited unexpectedly",
+        "initiating shutdown due to metrics/readiness server failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "metrics/readiness server exit must exit 1, got {status}\n{logs}"
     );
 }
 

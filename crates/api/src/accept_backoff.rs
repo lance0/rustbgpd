@@ -86,7 +86,8 @@ where
                     // The listening socket itself is unusable; no later accept
                     // can succeed. End the stream, as the BGP listener drops
                     // such a socket. Tonic's serve returns and the gRPC
-                    // supervisor fail-stops the daemon; the metrics task ends.
+                    // supervisor fail-stops the daemon; the metrics task ends
+                    // and its supervisor does the same.
                     error!(
                         listener = %this.listener,
                         error = %e,
