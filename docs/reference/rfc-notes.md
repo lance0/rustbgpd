@@ -1050,7 +1050,12 @@ capability is retained and enters the LLGR phase immediately: its routes
 become LLGR-stale, receive the `LLGR_STALE` community, and are swept at that
 family's Long-Lived Stale Time. Families in both capabilities run the GR phase
 first. A peer that sends a GR capability with an empty family list plus LLGR
-is LLGR-capable, and RFC 8538 Notification GR applies to its retention too.
+is LLGR-capable when at least one family has a non-zero Long-Lived Stale Time,
+and RFC 8538 Notification GR applies to its retention too. A family with both a
+zero Restart Time and a zero Long-Lived Stale Time gets no retention ("none of
+these procedures would apply"). FRR's default helper-mode OPEN (a GR
+capability with no families and an LLGR capability with a zero stale time)
+therefore stays a non-GR, non-LLGR peer.
 An LLGR capability without any GR capability is ignored.
 
 On re-establishment, a family already in the LLGR phase whose tuple the new

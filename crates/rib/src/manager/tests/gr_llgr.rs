@@ -2757,3 +2757,37 @@ async fn peer_down_during_llgr_only_retention_clears_all_state() {
     );
     assert_eq!(gr_gauges(&manager, source), (0.0, 0.0));
 }
+
+/// A family outside the GR capability whose Long-Lived Stale Time is zero has
+/// neither period (RFC 9494 §4.2): it is withdrawn at session down, not
+/// promoted to LLGR-stale and swept a moment later.
+#[tokio::test(start_paused = true)]
+async fn llgr_only_family_with_zero_stale_time_is_withdrawn_at_session_down() {
+    let (_tx, mut manager) = direct_manager(None);
+    let source = retention_source();
+    let _out_rx = establish_peer(&mut manager, source);
+    announce_dual_stack(&mut manager, source);
+    let llgr_family = |(afi, safi): (Afi, Safi), stale_time| rustbgpd_wire::LlgrFamily {
+        afi,
+        safi,
+        forwarding_preserved: false,
+        stale_time,
+    };
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![V4_UNICAST],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![llgr_family(V4_UNICAST, 60), llgr_family(V6_UNICAST, 0)],
+        llgr_stale_time: 3600,
+    });
+
+    assert!(adj_route(&manager, source, retention_v4_prefix()).is_some_and(|r| r.is_stale));
+    assert!(
+        adj_route(&manager, source, retention_v6_prefix()).is_none(),
+        "zero Restart Time and zero LLST: base BGP withdrawal"
+    );
+    assert!(!manager.llgr_peers.contains_key(&source));
+}

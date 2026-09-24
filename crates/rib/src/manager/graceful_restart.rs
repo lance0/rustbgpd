@@ -216,9 +216,11 @@ impl RibManager {
         // them (RFC 4724 §4.1), so a peer that lists a family twice must not
         // lose it.
         let llgr_active = peer_llgr_capable && llgr_stale_time > 0;
+        // A family with a zero Long-Lived Stale Time has no LLGR period, and
+        // with no GR entry either, nothing retains it (RFC 9494 §4.2).
         let llgr_listed = peer_llgr_families
             .iter()
-            .filter(|_| llgr_active)
+            .filter(|f| llgr_active && f.stale_time > 0)
             .map(|f| (f.afi, f.safi));
         let mut retained: Vec<(Afi, Safi)> = Vec::new();
         for family in gr_families.iter().copied().chain(llgr_listed) {

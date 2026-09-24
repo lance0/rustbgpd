@@ -230,7 +230,14 @@ pub fn validate_open(
             negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
         })
         .collect();
-    let peer_llgr_capable = peer_llgr_capable && !peer_llgr_families.is_empty();
+    // Without a GR-listed family, LLGR matters only if some family has a
+    // non-zero Long-Lived Stale Time. With Restart Time and LLST both zero
+    // "none of these procedures would apply" (RFC 9494 §4.2). A GR capability
+    // with no families plus an all-zero LLGR capability, which FRR sends by
+    // default, stays a non-GR, non-LLGR peer, as before.
+    let peer_llgr_capable = peer_llgr_capable
+        && !peer_llgr_families.is_empty()
+        && (peer_gr_capable || peer_llgr_families.iter().any(|f| f.stale_time > 0));
 
     let peer_route_refresh = open
         .capabilities
@@ -1381,6 +1388,28 @@ mod tests {
             neg.peer_notification_gr,
             "RFC 8538 N-bit applies to LLGR-only retention"
         );
+    }
+
+    #[test]
+    fn empty_gr_list_with_zero_stale_time_llgr_is_not_llgr_capable() {
+        // FRR's default OPEN: helper-mode GR (N bit, no families) plus an
+        // LLGR capability with a zero Long-Lived Stale Time. Restart Time and
+        // LLST are both zero for every family, so no RFC 9494 procedure
+        // applies and RFC 8538 notification handling stays off.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 120,
+            families: vec![],
+        });
+        open.capabilities.push(llgr_v4(0));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable);
+        assert!(!neg.peer_llgr_capable);
+        assert!(!neg.peer_notification_gr);
     }
 
     #[test]
