@@ -379,7 +379,10 @@ mod tests {
         assert_eq!(err.message(), "MRT manager unavailable");
     }
 
-    #[tokio::test]
+    /// Paused clock: the readiness deadline advances only when the runtime is
+    /// idle, so ready responders always answer first, however the host
+    /// schedules this thread.
+    #[tokio::test(start_paused = true)]
     async fn active_peers_counts_only_established() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
@@ -433,7 +436,7 @@ mod tests {
         assert_eq!(resp.total_routes, 42, "total_routes from Loc-RIB");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn get_health_times_out_when_peer_manager_is_wedged() {
         let (peer_tx, _peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
