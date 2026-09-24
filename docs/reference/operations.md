@@ -1075,6 +1075,15 @@ NOTIFICATIONs where the actor that sends them is still alive), and exits 1 for
 `Restart=on-failure`. An intentional shutdown still stops the peer manager as
 part of the ordered teardown and exits 0.
 
+### Metrics/readiness server exits unexpectedly
+
+When `prometheus_addr` is configured, the HTTP server behind `/metrics`,
+`/readyz` and `/livez` is supervised like the gRPC server. Its accept loop ends
+only when the listening socket becomes unusable (`listener socket unusable;
+stopping its accept loop`). The daemon then logs `metrics/readiness server
+exited unexpectedly`, performs the ordinary coordinated shutdown and exits 1
+for `Restart=on-failure`, rather than running on without its health surface.
+
 ### RPKI subsystem task exits unexpectedly
 
 The daemon treats an unexpected return or panic from the VRP manager, either
@@ -2428,9 +2437,10 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `metrics/readiness server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
-| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fails the daemon through gRPC server supervision; the metrics listener stops serving |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). The daemon then fail-stops through gRPC server or metrics/readiness server supervision |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |

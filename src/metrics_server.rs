@@ -39,6 +39,17 @@ impl MetricsListener {
         let addr = listener.local_addr().unwrap_or(addr);
         Ok(Self { addr, listener })
     }
+
+    /// Fault injection for the daemon supervision test: shutting down a
+    /// listening socket makes the next accept fail with EINVAL, the
+    /// unusable-socket path that ends the accept loop.
+    pub fn shut_down_for_test(&self) {
+        if let Err(error) =
+            socket2::SockRef::from(&self.listener).shutdown(std::net::Shutdown::Read)
+        {
+            warn!(error = %error, "injected metrics listener shutdown failed");
+        }
+    }
 }
 
 pub async fn serve_metrics(
