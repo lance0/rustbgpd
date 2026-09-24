@@ -1723,6 +1723,8 @@ impl PeerSession {
                 self.session_telemetry_metric_lease
                     .activate(self.fsm.state());
                 self.sync_max_prefix_capacity_metrics();
+                // Promotion is also the collision verdict for a candidate.
+                self.release_collision_hold().await;
                 let _ = reply.send(());
                 ControlFlow::Continue(())
             }
