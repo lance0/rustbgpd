@@ -62,6 +62,10 @@ tokio = { workspace = true, features = ["test-util"] }
 tikv-jemallocator.workspace = true
 
 [[bench]]
+name = "import_roster"
+harness = false
+
+[[bench]]
 name = "event_history_producer"
 harness = false
 required-features = ["bench-internals"]
