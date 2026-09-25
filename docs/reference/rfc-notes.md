@@ -1264,8 +1264,20 @@ carries inactive (absent), unlimited (zero), or finite.
   VPNv4 IPv6-next-hop receive support (tuple 1/128/2) is advertised whenever
   `l3vpn_ipv4_unicast` is configured, independently of those unicast families.
 - Negotiation: exact 6-byte tuple matching (NLRI AFI, NLRI SAFI, NH AFI).
-- When negotiated, IPv4 unicast uses `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
-  with IPv6 next hop instead of body NLRI.
+- When negotiated, an IPv4-unicast route whose exported next hop is IPv6 is
+  sent in `MP_REACH_NLRI` (16 or 32 octets, §3). A route whose exported next
+  hop is IPv4, and every IPv4-unicast withdrawal, stays in the classic UPDATE
+  body (`NEXT_HOP` plus NLRI, and Withdrawn Routes). §3 keeps that encoding as
+  the existing mode of operation, and it is what OpenBGPD sends. OpenBGPD 9.2
+  resets the session with UPDATE Message Error / Optional Attribute Error
+  (3/9) on an IPv4-unicast `MP_REACH_NLRI` with a 4-octet next hop and on
+  any IPv4-unicast `MP_UNREACH_NLRI`, even with Extended Next Hop negotiated
+  (`rde_get_mp_nexthop`, `rde_update_dispatch`). Earlier rustbgpd releases
+  sent both forms. FRR 10.3.1 source sends every IPv4 withdrawal in
+  `MP_UNREACH_NLRI` once Extended Next Hop is negotiated, which the same
+  OpenBGPD check rejects. A scoped link-local (unnumbered) session keeps the MP
+  form for all IPv4 routes and withdrawals, because receivers there ignore
+  IPv4 body NLRI.
 - IPv4-unicast reflection with an unchanged IPv6 next hop requires the
   recipient's Extended Next Hop receive capability (§5). Without it, export
   is suppressed rather than sending classic IPv4 NLRI without NEXT_HOP.

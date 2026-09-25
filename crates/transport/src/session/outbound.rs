@@ -346,37 +346,72 @@ impl PeerSession {
                 Prefix::V6(_) => v6_routes.push((route, nh_override)),
             }
         }
-        // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI,
-        // depending on Extended Next Hop negotiation.
-        if use_extended_nexthop_ipv4 {
-            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
-            let mut v4_groups: Vec<MpGroup> = Vec::new();
-            for (route, nh_override_ref) in &v4_routes {
-                let nh_override = *nh_override_ref;
+        // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI;
+        // `finish_unicast_candidate` picks the form per route (MP_REACH only
+        // for an Extended Next Hop IPv6 next hop or a scoped link-local peer).
+        if !use_extended_nexthop_ipv4 && export.is_scoped_link_local_peer() {
+            if !v4_routes.is_empty() {
+                warn!(
+                    peer = %self.peer_label,
+                    "not sending IPv4 routes to scoped link-local peer without negotiated Extended Next Hop"
+                );
+            }
+        } else {
+            let mut v4_body_index: HashMap<AttrGroupKey, usize> = HashMap::default();
+            let mut v4_body_groups: Vec<V4BodyGroup> = Vec::new();
+            let mut v4_mp_index: HashMap<AttrGroupKey, usize> = HashMap::default();
+            let mut v4_mp_groups: Vec<MpGroup> = Vec::new();
+            for (route, nh_override) in &v4_routes {
                 let cached_attrs = export
                     .prepared_unicast_attributes_cached(
                         &mut prepared_attr_cache,
                         route,
                         local_ipv4,
-                        nh_override,
+                        *nh_override,
                     )
                     .clone();
-                let prepared = match export.finish_unicast_candidate(
-                    route,
-                    nh_override,
-                    cached_attrs,
-                ) {
+                match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
+                    Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
+                        let key = AttrGroupKey {
+                            attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                            next_hop: None,
+                            link_local_next_hop: None,
+                        };
+                        if let Some(&idx) = v4_body_index.get(&key) {
+                            v4_body_groups[idx].prefixes.push(entry);
+                        } else {
+                            v4_body_index.insert(key, v4_body_groups.len());
+                            v4_body_groups.push(V4BodyGroup {
+                                attrs,
+                                prefixes: vec![entry],
+                            });
+                        }
+                    }
                     Ok(PreparedUnicastCandidate::Mp {
                         next_hop,
                         link_local_next_hop,
                         attrs,
                         entry,
                         ..
-                    }) => (attrs, next_hop, link_local_next_hop, entry),
-                    Ok(PreparedUnicastCandidate::Ipv4Body { .. }) => {
-                        unreachable!("ENHE profile must prepare IPv4 as MP_REACH")
+                    }) => {
+                        let key = AttrGroupKey {
+                            attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                            next_hop: Some(next_hop),
+                            link_local_next_hop,
+                        };
+                        if let Some(&idx) = v4_mp_index.get(&key) {
+                            v4_mp_groups[idx].prefixes.push(entry);
+                        } else {
+                            v4_mp_index.insert(key, v4_mp_groups.len());
+                            v4_mp_groups.push(MpGroup {
+                                attrs,
+                                next_hop,
+                                link_local_next_hop,
+                                prefixes: vec![entry],
+                            });
+                        }
                     }
-                    Err(error) => {
+                    Err(error) if use_extended_nexthop_ipv4 => {
                         // Unreachable while every producer runs the
                         // exact-export preflight on this same snapshot;
                         // if it ever fires, a silent drop would leave
@@ -393,27 +428,21 @@ impl PeerSession {
                         );
                         return;
                     }
-                };
-                let (attrs, next_hop, link_local_next_hop, entry) = prepared;
-                let key = AttrGroupKey {
-                    attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                    next_hop: Some(next_hop),
-                    link_local_next_hop,
-                };
-                if let Some(&idx) = v4_group_index.get(&key) {
-                    v4_groups[idx].prefixes.push(entry);
-                } else {
-                    v4_group_index.insert(key, v4_groups.len());
-                    v4_groups.push(MpGroup {
-                        attrs,
-                        next_hop,
-                        link_local_next_hop,
-                        prefixes: vec![entry],
-                    });
+                    Err(_) => {}
                 }
             }
             let max_len = export.max_message_len();
-            for group in &v4_groups {
+            for group in &v4_body_groups {
+                let attrs = group.attrs.as_ref();
+                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
+                    export
+                        .build_ipv4_body(chunk, &[], attrs)
+                        .expect("IPv4 body announcement construction was previously infallible")
+                }) {
+                    return;
+                }
+            }
+            for group in &v4_mp_groups {
                 let base_attrs = group.attrs.as_ref();
                 let next_hop = group.next_hop;
                 let link_local_next_hop = group.link_local_next_hop;
@@ -429,55 +458,6 @@ impl PeerSession {
                             Ipv4UnicastMode::MpReach,
                         )
                         .expect("IPv4 MP_REACH construction was previously infallible")
-                }) {
-                    return;
-                }
-            }
-        } else if export.is_scoped_link_local_peer() {
-            if !v4_routes.is_empty() {
-                warn!(
-                    peer = %self.peer_label,
-                    "not sending IPv4 routes to scoped link-local peer without negotiated Extended Next Hop"
-                );
-            }
-        } else {
-            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
-            let mut v4_groups: Vec<V4BodyGroup> = Vec::new();
-            for (route, nh_override) in &v4_routes {
-                let cached_attrs = export
-                    .prepared_unicast_attributes_cached(
-                        &mut prepared_attr_cache,
-                        route,
-                        local_ipv4,
-                        *nh_override,
-                    )
-                    .clone();
-                if let Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) =
-                    export.finish_unicast_candidate(route, *nh_override, cached_attrs)
-                {
-                    let key = AttrGroupKey {
-                        attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                        next_hop: None,
-                        link_local_next_hop: None,
-                    };
-                    if let Some(&idx) = v4_group_index.get(&key) {
-                        v4_groups[idx].prefixes.push(entry);
-                    } else {
-                        v4_group_index.insert(key, v4_groups.len());
-                        v4_groups.push(V4BodyGroup {
-                            attrs,
-                            prefixes: vec![entry],
-                        });
-                    }
-                }
-            }
-            let max_len = export.max_message_len();
-            for group in &v4_groups {
-                let attrs = group.attrs.as_ref();
-                if !self.send_v4_chunked(&group.prefixes, max_len, "announce", |chunk| {
-                    export
-                        .build_ipv4_body(chunk, &[], attrs)
-                        .expect("IPv4 body announcement construction was previously infallible")
                 }) {
                     return;
                 }

@@ -558,7 +558,7 @@ async fn ipv4_route_with_ipv6_next_hop_gates_reflection_on_extended_nexthop() {
     Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
 
     for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
-        for extended_nexthop in [false, true] {
+        for extended_nexthop in [true, false] {
             let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
             session.config.route_server_client = route_server_client;
             session.negotiated = Some(Arc::new(negotiated_session(remote_asn, extended_nexthop)));
@@ -1222,4 +1222,245 @@ async fn next_hop_ownership_disabled_by_default_accepts_foreign_next_hop() {
         1,
         "default (unset) must preserve transparent behavior"
     );
+}
+
+/// Send one outbound update to an Extended Next Hop session and return the
+/// raw UPDATE as written to the wire.
+async fn send_extended_nexthop_update(
+    route_server_client: bool,
+    scoped: bool,
+    announce: Vec<Route>,
+    withdraw: Vec<(Prefix, u32)>,
+) -> UpdateMessage {
+    let next_hop_override = vec![None; announce.len()];
+    send_unicast_update(
+        true,
+        route_server_client,
+        scoped,
+        announce,
+        next_hop_override,
+        withdraw,
+    )
+    .await
+}
+
+/// Send one outbound unicast update and return the raw UPDATE as written.
+async fn send_unicast_update(
+    extended_nexthop: bool,
+    route_server_client: bool,
+    scoped: bool,
+    announce: Vec<Route>,
+    next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+    withdraw: Vec<(Prefix, u32)>,
+) -> UpdateMessage {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    if scoped {
+        configure_scoped_link_local_peer(&mut session);
+    }
+    session.config.route_server_client = route_server_client;
+    session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, extended_nexthop)));
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.next_hop_override = next_hop_override.into();
+    update.announce = announce.into();
+    update.withdraw = withdraw;
+    session.send_route_update(update);
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    msg
+}
+
+/// `(type code, value)` for each attribute in an encoded path-attribute block.
+fn attribute_values(mut attrs: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut out = Vec::new();
+    while let [flags, code, rest @ ..] = attrs {
+        let (len, rest) = if flags & 0x10 == 0 {
+            (usize::from(rest[0]), &rest[1..])
+        } else {
+            (
+                usize::from(u16::from_be_bytes([rest[0], rest[1]])),
+                &rest[2..],
+            )
+        };
+        out.push((*code, &rest[..len]));
+        attrs = &rest[len..];
+    }
+    out
+}
+
+/// Attribute type codes present in an encoded path-attribute block.
+fn attribute_type_codes(attrs: &[u8]) -> Vec<u8> {
+    attribute_values(attrs)
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect()
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv4_next_hop_uses_body_nlri() {
+    // Route-server client route passed through with its IPv4 next hop.
+    let msg = send_extended_nexthop_update(true, false, vec![make_route(100)], vec![]).await;
+    assert!(msg.withdrawn_routes.is_empty());
+    assert_eq!(&msg.nlri[..], &[24, 10, 0, 0], "10.0.0.0/24 in body NLRI");
+    let codes = attribute_type_codes(&msg.path_attributes);
+    assert!(!codes.contains(&14), "no MP_REACH_NLRI: {codes:?}");
+    // NEXT_HOP: flags 0x40, type 3, length 4, 10.0.0.2.
+    assert!(
+        msg.path_attributes
+            .windows(7)
+            .any(|w| w == [0x40, 3, 4, 10, 0, 0, 2]),
+        "classic NEXT_HOP 10.0.0.2 expected"
+    );
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv4_withdrawal_uses_body_withdrawn_routes() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let msg = send_extended_nexthop_update(true, false, vec![], vec![(prefix, 0)]).await;
+    assert_eq!(&msg.withdrawn_routes[..], &[24, 10, 0, 0]);
+    assert!(msg.path_attributes.is_empty(), "no MP_UNREACH_NLRI");
+    assert!(msg.nlri.is_empty());
+}
+
+#[tokio::test]
+async fn extended_nexthop_ipv6_next_hop_still_uses_mp_reach() {
+    let mut route = make_route(100);
+    route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
+    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    let msg = send_extended_nexthop_update(true, false, vec![route], vec![]).await;
+    assert!(msg.nlri.is_empty(), "IPv4 NLRI must stay in MP_REACH_NLRI");
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .expect("MP_REACH_NLRI");
+    assert_eq!((mp.afi, mp.safi), (Afi::Ipv4, Safi::Unicast));
+    assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::2".parse().unwrap()));
+}
+
+#[tokio::test]
+async fn scoped_extended_nexthop_ipv4_withdrawal_stays_mp_unreach() {
+    // Unnumbered receivers ignore IPv4 body NLRI, so the MP form stays.
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let msg = send_extended_nexthop_update(false, true, vec![], vec![(prefix, 0)]).await;
+    assert!(msg.withdrawn_routes.is_empty());
+    assert_eq!(attribute_type_codes(&msg.path_attributes), vec![15]);
+}
+
+#[tokio::test]
+async fn specific_ipv4_next_hop_override_is_the_body_next_hop() {
+    // Source route carries NEXT_HOP 10.0.0.2; export policy sets 192.0.2.99.
+    let set = Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+        Ipv4Addr::new(192, 0, 2, 99),
+    )));
+    for extended_nexthop in [true, false] {
+        let msg = send_unicast_update(
+            extended_nexthop,
+            true,
+            false,
+            vec![make_route(100)],
+            vec![set.clone()],
+            vec![],
+        )
+        .await;
+        assert_eq!(&msg.nlri[..], &[24, 10, 0, 0], "ENH={extended_nexthop}");
+        let codes = attribute_type_codes(&msg.path_attributes);
+        assert!(!codes.contains(&14), "ENH={extended_nexthop}: {codes:?}");
+        assert_eq!(
+            codes.iter().position(|&c| c == 3),
+            codes.iter().rposition(|&c| c == 3)
+        );
+        assert!(
+            msg.path_attributes
+                .windows(7)
+                .any(|w| w == [0x40, 3, 4, 192, 0, 2, 99]),
+            "ENH={extended_nexthop}: NEXT_HOP must carry the policy address"
+        );
+    }
+}
+
+#[tokio::test]
+async fn extended_nexthop_mixed_batch_splits_ipv4_body_and_mp_exactly_once() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, true);
+    negotiated.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+
+    let v4_nh = make_route(100); // 10.0.0.0/24 via 10.0.0.2
+    let mut v6_nh = make_route(100); // 10.1.0.0/24 via 2001:db8::2
+    v6_nh.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24));
+    v6_nh.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
+    Arc::make_mut(&mut v6_nh.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    let mut v6_route = v6_nh.clone(); // 2001:db8:5::/48 via 2001:db8::3
+    v6_route.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48));
+    v6_route.next_hop = IpAddr::V6("2001:db8::3".parse().unwrap());
+    let withdrawn = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 24));
+
+    let mut update = empty_outbound_update();
+    update.exact_export_snapshot = Some(session.publish_export_profile());
+    update.next_hop_override = vec![None; 3].into();
+    update.announce = vec![v4_nh, v6_nh, v6_route].into();
+    update.withdraw = vec![(withdrawn, 0)];
+    session.send_route_update(update);
+
+    // Exactly four UPDATEs, in send order: body withdrawal, IPv4 body
+    // announcement, IPv4 MP_REACH (IPv6 next hop), IPv6 MP_REACH.
+    let mut msgs = Vec::new();
+    for _ in 0..4 {
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        msgs.push(msg);
+    }
+    let mut header = [0_u8; 19];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), server.read_exact(&mut header))
+            .await
+            .is_err(),
+        "no fifth message"
+    );
+
+    assert_eq!(&msgs[0].withdrawn_routes[..], &[24, 10, 9, 0]);
+    assert!(msgs[0].path_attributes.is_empty() && msgs[0].nlri.is_empty());
+
+    assert!(msgs[1].withdrawn_routes.is_empty());
+    assert_eq!(&msgs[1].nlri[..], &[24, 10, 0, 0]);
+    let codes = attribute_type_codes(&msgs[1].path_attributes);
+    assert!(!codes.contains(&14) && !codes.contains(&15), "{codes:?}");
+    assert!(
+        msgs[1]
+            .path_attributes
+            .windows(7)
+            .any(|w| w == [0x40, 3, 4, 10, 0, 0, 2])
+    );
+
+    // MP_REACH value: AFI(2) SAFI(1) NH-len(1) NH reserved(1) NLRI.
+    let mp_reach = |msg: &UpdateMessage| -> Vec<u8> {
+        assert!(msg.withdrawn_routes.is_empty() && msg.nlri.is_empty());
+        let attrs = attribute_values(&msg.path_attributes);
+        assert!(!attrs.iter().any(|(code, _)| *code == 15));
+        let mut reach = attrs.iter().filter(|(code, _)| *code == 14);
+        let value = reach.next().expect("MP_REACH_NLRI").1.to_vec();
+        assert!(reach.next().is_none(), "one MP_REACH_NLRI");
+        value
+    };
+    let mut v4_mp = vec![0, 1, 1, 16];
+    v4_mp.extend_from_slice(&"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets());
+    v4_mp.extend_from_slice(&[0, 24, 10, 1, 0]);
+    assert_eq!(mp_reach(&msgs[2]), v4_mp);
+    let mut v6_mp = vec![0, 2, 1, 16];
+    v6_mp.extend_from_slice(&"2001:db8::3".parse::<Ipv6Addr>().unwrap().octets());
+    v6_mp.extend_from_slice(&[0, 48, 0x20, 0x01, 0x0d, 0xb8, 0, 5]);
+    assert_eq!(mp_reach(&msgs[3]), v6_mp);
 }

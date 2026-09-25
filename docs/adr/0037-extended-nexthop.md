@@ -56,3 +56,17 @@ the following rules:
 
 - This ADR only covers the IPv4-unicast-over-IPv6-next-hop case. Other SAFIs
   or AFI combinations remain future work if needed.
+
+## Amendments
+
+### 2026-09-24 — IPv4 next hops and withdrawals stay in the UPDATE body
+
+The Decision bullet that sends all IPv4 unicast updates in `MP_REACH_NLRI` /
+`MP_UNREACH_NLRI` once RFC 8950 is negotiated is narrowed. Only a route whose
+exported next hop is IPv6 uses `MP_REACH_NLRI`. A route with an IPv4 next hop
+and every IPv4 withdrawal use the classic body, which RFC 8950 §3 keeps as the
+existing mode of operation. OpenBGPD 9.2 resets the session on an IPv4 unicast
+`MP_REACH_NLRI` with a 4-octet next hop and on any IPv4 unicast
+`MP_UNREACH_NLRI`. Scoped link-local (unnumbered) sessions keep the MP form for
+everything, because receivers there ignore IPv4 body NLRI. See
+[RFC notes](../reference/rfc-notes.md#rfc-8950--extended-next-hop).

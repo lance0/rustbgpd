@@ -482,7 +482,13 @@ impl SessionExportProfile {
                     }));
                 }
                 PathAttribute::NextHop(_) => {
-                    if policy_set_specific {
+                    // An IPv4 policy rewrite is the effective next hop even if
+                    // the caller did not fold it into the attributes.
+                    if let Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(next_hop))) =
+                        nh_override
+                    {
+                        attrs.push(PathAttribute::NextHop(*next_hop));
+                    } else if policy_set_specific {
                         attrs.push(attr.clone());
                     } else if force_next_hop_self || (is_ebgp && !route_server_client) {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
@@ -936,7 +942,7 @@ impl SessionExportProfile {
     ) -> Result<PreparedUnicastCandidate, ExportProbeError> {
         let local_ipv4 = self.local_ipv4();
         match route.prefix {
-            Prefix::V4(_prefix) if self.use_extended_nexthop_ipv4() => {
+            Prefix::V4(prefix) if self.use_extended_nexthop_ipv4() => {
                 let force_self = matches!(
                     next_hop_override,
                     Some(rustbgpd_policy::NextHopAction::Self_)
@@ -952,6 +958,25 @@ impl SessionExportProfile {
                     }
                     _ => route.next_hop,
                 };
+                // RFC 8950 only adds the IPv6 next-hop form; an IPv4 next hop
+                // keeps the classic body encoding (except on a scoped
+                // link-local session, whose receivers ignore body NLRI).
+                // OpenBGPD resets the session on a 4-octet IPv4 unicast
+                // MP_REACH next hop even with Extended Next Hop negotiated.
+                if !self.scoped_link_local_peer
+                    && next_hop.is_ipv4()
+                    && attrs.with_next_hop.iter().any(|attr| {
+                        matches!(attr, PathAttribute::NextHop(nh) if IpAddr::V4(*nh) == next_hop)
+                    })
+                {
+                    return Ok(PreparedUnicastCandidate::Ipv4Body {
+                        attrs: attrs.with_next_hop,
+                        entry: Ipv4NlriEntry {
+                            path_id: route.path_id,
+                            prefix,
+                        },
+                    });
+                }
                 Ok(PreparedUnicastCandidate::Mp {
                     afi: Afi::Ipv4,
                     next_hop,
@@ -1293,7 +1318,12 @@ impl SessionExportProfile {
     ) -> Result<PreparedWithdrawal, ExportProbeError> {
         Ok(match withdrawal {
             ExportWithdrawal::Unicast { prefix, path_id } => match prefix {
-                Prefix::V4(prefix) if self.use_extended_nexthop_ipv4() => {
+                // A scoped link-local (unnumbered) session carries IPv4 only
+                // in MP attributes; receivers ignore body NLRI there.
+                Prefix::V4(prefix) if self.scoped_link_local_peer => {
+                    if !self.use_extended_nexthop_ipv4() {
+                        return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
+                    }
                     PreparedWithdrawal::Unicast(PreparedMpWithdrawal {
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
@@ -1304,10 +1334,11 @@ impl SessionExportProfile {
                         },
                     })
                 }
+                // Otherwise IPv4 withdrawals use the classic Withdrawn Routes
+                // field, with or without Extended Next Hop: a withdrawal has no
+                // next hop, and OpenBGPD resets the session on an IPv4 unicast
+                // MP_UNREACH.
                 Prefix::V4(prefix) => {
-                    if self.scoped_link_local_peer {
-                        return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
-                    }
                     PreparedWithdrawal::Ipv4Body(Ipv4NlriEntry { path_id, prefix })
                 }
                 Prefix::V6(_) => PreparedWithdrawal::Unicast(PreparedMpWithdrawal::new(
