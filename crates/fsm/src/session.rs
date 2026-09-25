@@ -1078,6 +1078,43 @@ mod tests {
     }
 
     #[test]
+    fn opensent_unassigned_remote_role_is_a_mismatch_reported_as_none() {
+        // Non-strict: an unassigned Role value (7) is still a received Role
+        // that matches no Table 2 pair, so the OPEN is refused with 2/11.
+        let mut cfg = test_config();
+        cfg.local_role = Some(rustbgpd_wire::BgpRole::Customer);
+
+        let mut s = Session::new(cfg);
+        s.handle_event(Event::ManualStart);
+        s.handle_event(Event::TcpConnectionConfirmed);
+
+        let mut open = peer_open();
+        open.capabilities.push(Capability::Unknown {
+            code: 9,
+            data: bytes::Bytes::from_static(&[7]),
+        });
+        let actions = s.handle_event(Event::OpenReceived(open));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(
+            has_action(&actions, |a| matches!(
+                a,
+                Action::RoleMismatchObserved {
+                    local_role: Some(rustbgpd_wire::BgpRole::Customer),
+                    remote_role: None,
+                }
+            )),
+            "unassigned role must report remote_role=None; got {actions:?}"
+        );
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(n)
+                if n.code == NotificationCode::OpenMessage
+                    && n.subcode == open_subcode::ROLE_MISMATCH
+        )));
+    }
+
+    #[test]
     fn opensent_non_role_open_error_does_not_emit_observer_action() {
         // BAD_PEER_AS (subcode 2) must NOT emit RoleMismatchObserved —
         // that's reserved strictly for subcode 11 (Role Mismatch). Confirms

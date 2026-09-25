@@ -453,13 +453,25 @@ mod tests {
 
         let caps = cfg.local_capabilities();
 
-        assert!(matches!(
-            caps.iter()
-                .find(|cap| matches!(cap, Capability::Role { .. })),
-            Some(Capability::Role {
-                role: BgpRole::Provider
+        // RFC 9234 section 4.1: exactly one Role capability.
+        let roles: Vec<_> = caps
+            .iter()
+            .filter(|cap| {
+                matches!(
+                    cap,
+                    Capability::Role { .. } | Capability::Unknown { code: 9, .. }
+                )
             })
-        ));
+            .collect();
+        assert!(
+            matches!(
+                roles.as_slice(),
+                [Capability::Role {
+                    role: BgpRole::Provider
+                }]
+            ),
+            "{roles:?}"
+        );
     }
 
     #[test]

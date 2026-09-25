@@ -1274,10 +1274,6 @@ pub(super) struct LiveSessionRecord {
 }
 
 #[derive(Clone, Debug, Default)]
-#[expect(
-    clippy::struct_field_names,
-    reason = "fields mirror the RibUpdate::SetPeerGracefulRestartContext wire names"
-)]
 struct PeerSelectionDeferralContext {
     peer_restart_state: bool,
     peer_gr_families: Vec<(Afi, Safi)>,
@@ -1285,6 +1281,10 @@ struct PeerSelectionDeferralContext {
     /// failback only arms a `BoRR`/`EoRR` convergence wait when the
     /// survivor can actually produce the pair.
     peer_enhanced_refresh: bool,
+    /// The new OPEN's LLGR families; re-derives the LLGR promotion config of
+    /// a peer that re-establishes during retention.
+    peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
+    local_llgr_stale_time: u32,
 }
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
@@ -3028,6 +3028,8 @@ impl RibManager {
                 peer_restart_state,
                 peer_gr_families,
                 peer_enhanced_refresh,
+                peer_llgr_families,
+                local_llgr_stale_time,
             } => {
                 self.pending_peer_gr_context.insert(
                     (peer, session_id),
@@ -3035,6 +3037,8 @@ impl RibManager {
                         peer_restart_state,
                         peer_gr_families,
                         peer_enhanced_refresh,
+                        peer_llgr_families,
+                        local_llgr_stale_time,
                     },
                 );
             }
@@ -3332,7 +3336,11 @@ impl RibManager {
                 session_id,
                 afi,
                 safi,
+                queued,
             } => {
+                // Release before the replay reads the Loc-RIB: a refresh the
+                // peer sends from here on needs (and gets) its own replay.
+                queued.store(false, std::sync::atomic::Ordering::Release);
                 if !self.stale_session_message(peer, session_id, "RouteRefreshRequest", Refresh) {
                     self.advance_advertised_pages();
                     self.handle_route_refresh_request(peer, afi, safi);

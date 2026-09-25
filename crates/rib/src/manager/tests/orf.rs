@@ -351,6 +351,7 @@ async fn orf_defer_then_plain_refresh_withdraws_now_denied_prefix() {
     // are re-advertised and previously-advertised routes denied by the installed
     // ORF must be explicitly withdrawn.
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
@@ -852,6 +853,7 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
     );
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
@@ -940,6 +942,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
 
     // Lift IPv4 only: the v4 flood + v4 EoR arrive; the v6 EoR must wait.
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv4,
@@ -958,6 +961,7 @@ async fn gr_restarter_deferred_eor_lifts_per_family() {
 
     // Lift IPv6: its flood + EoR follow.
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::Ipv6,
@@ -1138,6 +1142,7 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
     assert!(!manager.clean_policy_transition_peer_ready(peer));
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 7,
         afi: Afi::Ipv4,
@@ -1151,6 +1156,7 @@ fn orf_pending_entry_drops_after_last_route_refresh_lift() {
     assert!(!manager.clean_policy_transition_peer_ready(peer));
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 7,
         afi: Afi::Ipv6,

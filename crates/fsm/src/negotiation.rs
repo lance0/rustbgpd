@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+use rustbgpd_wire::constants::capability_code;
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
 use rustbgpd_wire::{
     AddPathFamily, AddPathMode, Afi, BgpRole, Capability, ExtendedNextHopFamily,
@@ -203,11 +204,16 @@ pub fn validate_open(
             negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
         })
         .collect();
+    // RFC 9494 §4.1/§4.5: LLGR is disregarded only when the GR capability
+    // is absent. A GR capability that lists no usable family still carries
+    // LLGR: §4.1 names "omitting all AFIs/SAFIs from the GR Capability" as
+    // the way to skip the GR phase, and §4.2 deems the Restart Time zero for
+    // every unlisted family.
+    let peer_advertised_gr = peer_gr_capable;
     peer_gr_capable = peer_gr_capable && !peer_gr_families.is_empty();
 
     // Extract Long-Lived Graceful Restart capability (RFC 9494).
-    // LLGR requires GR — if the peer didn't advertise GR, LLGR is ignored.
-    let (peer_llgr_capable, peer_llgr_families) = if peer_gr_capable {
+    let (peer_llgr_capable, peer_llgr_families) = if peer_advertised_gr {
         open.capabilities
             .iter()
             .find_map(|c| match c {
@@ -225,7 +231,14 @@ pub fn validate_open(
             negotiated_families.contains(&key) && graceful_restart_preserves_family(key)
         })
         .collect();
-    let peer_llgr_capable = peer_llgr_capable && !peer_llgr_families.is_empty();
+    // Without a GR-listed family, LLGR matters only if some family has a
+    // non-zero Long-Lived Stale Time. With Restart Time and LLST both zero
+    // "none of these procedures would apply" (RFC 9494 §4.2). A GR capability
+    // with no families plus an all-zero LLGR capability, which FRR sends by
+    // default, stays a non-GR, non-LLGR peer, as before.
+    let peer_llgr_capable = peer_llgr_capable
+        && !peer_llgr_families.is_empty()
+        && (peer_gr_capable || peer_llgr_families.iter().any(|f| f.stale_time > 0));
 
     let peer_route_refresh = open
         .capabilities
@@ -350,7 +363,11 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
-        peer_notification_gr: peer_gr_capable && peer_notification && config.graceful_restart,
+        // RFC 8538 governs any retention the GR capability enables,
+        // including an LLGR-only session's.
+        peer_notification_gr: (peer_gr_capable || peer_llgr_capable)
+            && peer_notification
+            && config.graceful_restart,
         peer_llgr_capable,
         peer_llgr_families,
         peer_route_refresh,
@@ -393,35 +410,45 @@ fn validate_role_capability(
     open: &OpenMessage,
     config: &PeerConfig,
 ) -> Result<Option<BgpRole>, NotificationMessage> {
-    let mut remote_role: Option<BgpRole> = None;
+    // RFC 9234 section 4.2: every received code-9 capability counts. The
+    // wire decoder keeps an unassigned value (5-255) or a length other than 1
+    // as `Unknown { code: 9 }`; its raw bytes take part in the "not all the
+    // same value" check and never match a Table 2 pair.
+    let mut received: Option<Vec<u8>> = None;
     for capability in &open.capabilities {
-        let Capability::Role { role } = capability else {
-            continue;
+        let value = match capability {
+            Capability::Role { role } => vec![role.to_u8()],
+            Capability::Unknown {
+                code: capability_code::BGP_ROLE,
+                data,
+            } => data.to_vec(),
+            _ => continue,
         };
-        if let Some(existing) = remote_role
-            && existing != *role
-        {
+        if received.as_ref().is_some_and(|existing| *existing != value) {
             return Err(role_mismatch_notification());
         }
-        remote_role = Some(*role);
+        received = Some(value);
     }
+    let remote_role = match received.as_deref() {
+        Some(&[value]) => BgpRole::from_u8(value),
+        _ => None,
+    };
 
     let Some(local_role) = config.local_role else {
         return Ok(remote_role);
     };
 
-    let Some(remote_role) = remote_role else {
+    if received.is_none() {
         if config.strict_role {
             return Err(role_mismatch_notification());
         }
         return Ok(None);
-    };
-
-    if !roles_compatible(local_role, remote_role) {
-        return Err(role_mismatch_notification());
     }
 
-    Ok(Some(remote_role))
+    match remote_role {
+        Some(remote_role) if roles_compatible(local_role, remote_role) => Ok(Some(remote_role)),
+        _ => Err(role_mismatch_notification()),
+    }
 }
 
 const fn roles_compatible(local: BgpRole, remote: BgpRole) -> bool {
@@ -868,6 +895,186 @@ mod tests {
 
         assert_eq!(err.code, NotificationCode::OpenMessage);
         assert_eq!(err.subcode, open_subcode::ROLE_MISMATCH);
+    }
+
+    const ALL_ROLES: [BgpRole; 5] = [
+        BgpRole::Provider,
+        BgpRole::RouteServer,
+        BgpRole::RouteServerClient,
+        BgpRole::Customer,
+        BgpRole::Peer,
+    ];
+
+    /// A code-9 capability as the wire decoder yields it for an unassigned
+    /// value or a wrong length.
+    fn raw_role_capability(data: &[u8]) -> Capability {
+        Capability::Unknown {
+            code: 9,
+            data: Bytes::copy_from_slice(data),
+        }
+    }
+
+    fn role_open(capabilities: Vec<Capability>) -> OpenMessage {
+        let mut open = peer_open();
+        open.capabilities.extend(capabilities);
+        open
+    }
+
+    fn assert_role_mismatch(result: Result<NegotiatedSession, NotificationMessage>, case: &str) {
+        let err = result.expect_err(case);
+        assert_eq!(
+            (err.code, err.subcode),
+            (NotificationCode::OpenMessage, open_subcode::ROLE_MISMATCH),
+            "{case}"
+        );
+    }
+
+    #[test]
+    fn role_capability_table2_matrix_accepts_exactly_five_pairs() {
+        // RFC 9234 section 4.2, Table 2, written out rather than reusing
+        // `roles_compatible`.
+        let allowed = [
+            (BgpRole::Provider, BgpRole::Customer),
+            (BgpRole::Customer, BgpRole::Provider),
+            (BgpRole::RouteServer, BgpRole::RouteServerClient),
+            (BgpRole::RouteServerClient, BgpRole::RouteServer),
+            (BgpRole::Peer, BgpRole::Peer),
+        ];
+        let mut accepted = 0;
+        for local in ALL_ROLES {
+            for remote in ALL_ROLES {
+                for strict in [false, true] {
+                    let mut cfg = test_config();
+                    cfg.local_role = Some(local);
+                    cfg.strict_role = strict;
+                    let open = role_open(vec![Capability::Role { role: remote }]);
+                    let result = validate_open(&open, &cfg);
+                    let case = format!("local {local:?}, remote {remote:?}, strict {strict}");
+                    if allowed.contains(&(local, remote)) {
+                        let neg = result.expect(&case);
+                        assert_eq!(neg.remote_role, Some(remote), "{case}");
+                        assert!(neg.role_negotiated, "{case}");
+                        accepted += 1;
+                    } else {
+                        assert_role_mismatch(result, &case);
+                    }
+                }
+            }
+        }
+        assert_eq!(accepted, 10, "five pairs, each with strict off and on");
+    }
+
+    #[test]
+    fn role_capability_unassigned_value_is_a_role_mismatch() {
+        // Mutation-red: ignoring `Unknown { code: 9 }` treats these OPENs as
+        // carrying no Role, so the non-strict cases establish.
+        for local in ALL_ROLES {
+            for value in [5u8, 7, 128, 254, 255] {
+                for strict in [false, true] {
+                    let mut cfg = test_config();
+                    cfg.local_role = Some(local);
+                    cfg.strict_role = strict;
+                    let open = role_open(vec![raw_role_capability(&[value])]);
+                    assert_role_mismatch(
+                        validate_open(&open, &cfg),
+                        &format!("local {local:?}, value {value}, strict {strict}"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn role_capability_value_boundary_four_accepted_five_rejected() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Peer);
+
+        // Decode the wire bytes so the boundary is exercised end to end.
+        let decode = |value: u8| {
+            let mut buf = Bytes::copy_from_slice(&[9, 1, value]);
+            Capability::decode(&mut buf).unwrap()
+        };
+
+        let neg = validate_open(&role_open(vec![decode(4)]), &cfg).unwrap();
+        assert_eq!(neg.remote_role, Some(BgpRole::Peer));
+        assert!(neg.role_negotiated);
+
+        assert_role_mismatch(
+            validate_open(&role_open(vec![decode(5)]), &cfg),
+            "value 5 with local Peer",
+        );
+    }
+
+    #[test]
+    fn role_capability_assigned_and_unassigned_duplicates_rejected() {
+        // RFC 9234 section 4.2: multiple Role capabilities that are not all
+        // the same value are rejected. That rule does not depend on a local
+        // Role, matching the existing handling of two assigned values.
+        for local_role in [Some(BgpRole::Provider), None] {
+            for capabilities in [
+                vec![
+                    Capability::Role {
+                        role: BgpRole::Customer,
+                    },
+                    raw_role_capability(&[7]),
+                ],
+                vec![
+                    raw_role_capability(&[7]),
+                    Capability::Role {
+                        role: BgpRole::Customer,
+                    },
+                ],
+                vec![raw_role_capability(&[7]), raw_role_capability(&[8])],
+            ] {
+                let mut cfg = test_config();
+                cfg.local_role = local_role;
+                let case = format!("local {local_role:?}, {capabilities:?}");
+                assert_role_mismatch(validate_open(&role_open(capabilities), &cfg), &case);
+            }
+        }
+    }
+
+    #[test]
+    fn role_capability_identical_unassigned_duplicates_are_one_mismatch() {
+        let mut cfg = test_config();
+        cfg.local_role = Some(BgpRole::Provider);
+        let open = role_open(vec![raw_role_capability(&[7]), raw_role_capability(&[7])]);
+        assert_role_mismatch(validate_open(&open, &cfg), "two copies of value 7");
+    }
+
+    #[test]
+    fn role_capability_wrong_length_is_a_role_mismatch_when_role_configured() {
+        // Local decision (no RFC 9234 MUST): a code-9 capability whose length
+        // is not 1 carries no Table 2 value, so it cannot correspond.
+        for data in [&[][..], &[3, 3][..], &[0, 0, 3][..]] {
+            let mut cfg = test_config();
+            cfg.local_role = Some(BgpRole::Provider);
+            assert_role_mismatch(
+                validate_open(&role_open(vec![raw_role_capability(data)]), &cfg),
+                &format!("wrong-length payload {data:?}"),
+            );
+
+            cfg.local_role = None;
+            let neg = validate_open(&role_open(vec![raw_role_capability(data)]), &cfg)
+                .expect("without a local Role the capability is not checked");
+            assert_eq!(neg.remote_role, None);
+            assert!(!neg.role_negotiated);
+        }
+    }
+
+    #[test]
+    fn role_capability_unassigned_value_without_local_role_is_accepted() {
+        // Section 4.2 applies Table 2 only "if the BGP Role Capability is
+        // advertised"; without a local Role there is nothing to compare.
+        for strict in [false, true] {
+            let mut cfg = test_config();
+            cfg.local_role = None;
+            cfg.strict_role = strict;
+            let neg = validate_open(&role_open(vec![raw_role_capability(&[7])]), &cfg).unwrap();
+            assert_eq!(neg.local_role, None);
+            assert_eq!(neg.remote_role, None);
+            assert!(!neg.role_negotiated);
+        }
     }
 
     #[test]
@@ -1338,6 +1545,77 @@ mod tests {
         assert!(!neg.peer_restart_state);
         assert_eq!(neg.peer_restart_time, 0);
         assert!(neg.peer_gr_families.is_empty());
+    }
+
+    fn llgr_v4(stale_time: u32) -> Capability {
+        Capability::LongLivedGracefulRestart(vec![LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: true,
+            stale_time,
+        }])
+    }
+
+    #[test]
+    fn llgr_only_peer_keeps_llgr_with_empty_gr_family_list() {
+        // RFC 9494 §4.1: omitting every AFI/SAFI from the GR capability
+        // skips the GR phase; LLGR still applies.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 0,
+            families: vec![],
+        });
+        open.capabilities.push(llgr_v4(3600));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable, "no family is GR-retained");
+        assert!(neg.peer_llgr_capable, "LLGR must survive an empty GR list");
+        assert_eq!(neg.peer_llgr_families.len(), 1);
+        assert!(
+            neg.peer_notification_gr,
+            "RFC 8538 N-bit applies to LLGR-only retention"
+        );
+    }
+
+    #[test]
+    fn empty_gr_list_with_zero_stale_time_llgr_is_not_llgr_capable() {
+        // FRR's default OPEN: helper-mode GR (N bit, no families) plus an
+        // LLGR capability with a zero Long-Lived Stale Time. Restart Time and
+        // LLST are both zero for every family, so no RFC 9494 procedure
+        // applies and RFC 8538 notification handling stays off.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: false,
+            notification: true,
+            restart_time: 120,
+            families: vec![],
+        });
+        open.capabilities.push(llgr_v4(0));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable);
+        assert!(!neg.peer_llgr_capable);
+        assert!(!neg.peer_notification_gr);
+    }
+
+    #[test]
+    fn llgr_without_gr_capability_is_disregarded() {
+        // RFC 9494 §4.5: LLGR received without GR MUST be ignored.
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        cfg.llgr_stale_time = 3600;
+        let mut open = peer_open();
+        open.capabilities.push(llgr_v4(3600));
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable);
+        assert!(!neg.peer_llgr_capable);
+        assert!(neg.peer_llgr_families.is_empty());
+        assert!(!neg.peer_notification_gr);
     }
 
     #[test]

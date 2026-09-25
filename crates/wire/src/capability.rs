@@ -609,8 +609,11 @@ impl Capability {
             }
             capability_code::BGP_ROLE => {
                 // RFC 9234 §4.1: Length = 1, value ∈ {0..=4}. Anything else
-                // is preserved as Unknown so the peer's bytes round-trip and
-                // FSM negotiation can decide whether to reject the session.
+                // is preserved as Unknown with the raw bytes, never dropped.
+                // rustbgpd-fsm treats such a capability as a received Role
+                // that matches no Table 2 pair (NOTIFICATION 2/11 when a
+                // local Role is configured) and compares its bytes in the
+                // multiple-Role check.
                 if length != 1 {
                     let data = buf.copy_to_bytes(usize::from(length));
                     return Ok(Capability::Unknown { code, data });
@@ -1800,8 +1803,9 @@ mod tests {
 
     #[test]
     fn bgp_role_capability_bad_length_stored_as_unknown() {
-        // RFC 9234 §4.1: Role length MUST be 1. Anything else round-trips as
-        // Unknown so the negotiator can decide (the codec stays non-fatal).
+        // RFC 9234 §4.1: Role length is 1. Anything else round-trips as
+        // Unknown with its bytes; the codec stays non-fatal and rustbgpd-fsm
+        // negotiation rejects it with 2/11 when a local Role is configured.
         for (len, payload) in [
             (0u8, &[][..]),
             (2u8, &[0x00, 0x00][..]),
@@ -1820,8 +1824,10 @@ mod tests {
 
     #[test]
     fn bgp_role_capability_invalid_role_byte_stored_as_unknown() {
-        // Role bytes 5..=255 are not defined; preserve the offending byte as
-        // Unknown so the negotiator can NOTIFICATION 2/11 with the raw value.
+        // Role bytes 5..=255 are unassigned; preserve the offending byte as
+        // Unknown. rustbgpd-fsm negotiation compares it against Table 2 (it
+        // never matches) and sends NOTIFICATION 2/11 when a local Role is
+        // configured.
         for invalid in [5u8, 99u8, 200u8, 255u8] {
             let wire = [9u8, 1, invalid];
             let mut buf = Bytes::copy_from_slice(&wire);

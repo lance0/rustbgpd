@@ -43,6 +43,8 @@ async fn selection_deferral_hides_bgpls_topology_until_family_release() {
         peer_restart_state: false,
         peer_gr_families: vec![family],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .await
     .unwrap();
@@ -968,6 +970,7 @@ async fn route_refresh_replays_vantage_best() {
     let _ = drain_final_unicast(&mut out_b);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: client_b,
         session_id: 0,
         afi: Afi::Ipv4,
@@ -1990,6 +1993,7 @@ async fn vpn_orr_route_refresh_replays_vantage_best() {
     let _ = drain_final_vpn(&mut out_b);
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer: client_b,
         session_id: 0,
         afi: Afi::Ipv4,

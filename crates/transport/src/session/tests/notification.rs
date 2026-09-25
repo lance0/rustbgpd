@@ -999,6 +999,47 @@ async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
     }
 }
 
+/// RFC 9494 §4.2: a peer whose GR capability lists no family, but whose LLGR
+/// capability lists one, still gets that family retained under LLGR when LLGR
+/// is configured locally.
+#[tokio::test]
+async fn llgr_only_peer_session_down_enters_retention_when_llgr_configured() {
+    for (local_llgr_stale_time, expect_retention) in [(3600, true), (0, false)] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        neg.peer_gr_capable = false;
+        neg.peer_llgr_capable = true;
+        neg.peer_llgr_families = vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: true,
+            stale_time: 3600,
+        }];
+        session.config.peer.graceful_restart = true;
+        session.config.llgr_stale_time = local_llgr_stale_time;
+        session.negotiated = Some(Arc::new(neg));
+        session.execute_actions(vec![Action::SessionDown]).await;
+        match rib_rx.try_recv().unwrap() {
+            RibUpdate::PeerGracefulRestart {
+                gr_families,
+                peer_llgr_families,
+                ..
+            } => {
+                assert!(
+                    expect_retention,
+                    "LLGR not configured locally: no retention"
+                );
+                assert!(gr_families.is_empty());
+                assert_eq!(peer_llgr_families.len(), 1);
+            }
+            RibUpdate::PeerDown { .. } => {
+                assert!(!expect_retention, "LLGR-only peer must enter retention");
+            }
+            _ => panic!("expected PeerGracefulRestart or PeerDown"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn peer_gr_restart_time_is_capped_before_rib_retention() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);

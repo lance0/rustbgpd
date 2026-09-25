@@ -570,6 +570,10 @@ fn operations_key_log_table_covers_supervised_failures() {
             "BGP accept-forwarding task exited unexpectedly",
         ),
         ("peer_mgr_handle", "peer manager task exited unexpectedly"),
+        (
+            "metrics_handle",
+            "metrics/readiness server exited unexpectedly",
+        ),
     ] {
         let arm_header = format!("            result = &mut {handle} => {{");
         assert_eq!(
@@ -888,6 +892,78 @@ fn shutdown_rpc_with_active_watch_cleans_up_uds() {
 }
 
 #[test]
+fn grpc_listener_accept_end_with_active_watch_fail_stops_within_grace() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    // Connection 1 is the watch; connection 2 makes the listener unusable.
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_GRPC_TCP_LISTENER_UNUSABLE_AFTER", "2")),
+    );
+    let grpc_port = wait_for_bound_grpc_port(&mut daemon);
+    let socket_path = temp.path().join("runtime/grpc.sock");
+    let socket_deadline = Instant::now() + Duration::from_secs(120);
+    while !socket_path.exists() {
+        assert!(
+            matches!(daemon.child.try_wait(), Ok(None)) && Instant::now() < socket_deadline,
+            "gRPC UDS listener never appeared\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let tcp_addr = format!("http://127.0.0.1:{grpc_port}");
+    let watch_stdout = temp.path().join("rbgp-watch.stdout.log");
+    let watch_stderr = temp.path().join("rbgp-watch.stderr.log");
+    let mut watcher = Daemon {
+        child: rbgp_command(&tcp_addr)
+            .arg("--token-file")
+            .arg(temp.path().join("grpc-token"))
+            .arg("watch")
+            .stdout(Stdio::from(
+                std::fs::File::create(&watch_stdout).expect("watcher stdout log"),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(&watch_stderr).expect("watcher stderr log"),
+            ))
+            .spawn()
+            .expect("spawn rbgp watch"),
+        stdout_path: watch_stdout,
+        stderr_path: watch_stderr,
+    };
+    let uds_addr = format!("unix://{}", socket_path.display());
+    wait_for_route_watcher_subscriber(&mut daemon, &mut watcher, &uds_addr);
+
+    assert!(
+        matches!(watcher.child.try_wait(), Ok(None)),
+        "{}",
+        watcher.logs()
+    );
+    let trigger = TcpStream::connect(("127.0.0.1", grpc_port)).expect("second gRPC TCP connection");
+    let triggered = Instant::now();
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let elapsed = triggered.elapsed();
+    drop(trigger);
+    let logs = daemon.logs();
+    for message in [
+        "injected gRPC TCP listener shutdown",
+        "listener socket unusable; stopping its accept loop",
+        "stopped accepting and its open connections did not close within 1000 ms",
+        "gRPC listener exited unexpectedly",
+        "gRPC server exited unexpectedly",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    assert_eq!(status.code(), Some(1), "{logs}");
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "fail-stop took {elapsed:?}\n{logs}"
+    );
+}
+
+#[test]
 fn peer_manager_supervision_is_fail_stop_and_joins_once() {
     let source = include_str!("../src/main.rs");
     let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
@@ -1103,10 +1179,11 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
     assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
-    assert!(help.contains("gRPC server, BGP listener task, or BGP accept-forwarding task exit"));
+    assert!(help.contains("gRPC server, BGP listener task, BGP accept-forwarding task,"));
+    assert!(help.contains("or metrics/readiness server exit)"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, or BGP accept-forwarding task exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, BGP accept-forwarding task, or metrics/readiness\nserver exited unexpectedly"));
 }
 
 #[test]
@@ -1141,6 +1218,35 @@ fn metrics_listener_bind_failure_exits_nonzero() {
         status.code(),
         Some(1),
         "metrics/readiness bind failure must exit 1, got {status}\n{logs}"
+    );
+}
+
+#[test]
+fn metrics_listener_unusable_after_startup_uses_common_shutdown_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path =
+        write_config_with_metrics(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES, Some(0));
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_METRICS_LISTENER_UNUSABLE", "1")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    for message in [
+        "metrics server listening",
+        "listener socket unusable; stopping its accept loop",
+        "metrics/readiness server exited unexpectedly",
+        "initiating shutdown due to metrics/readiness server failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "metrics/readiness server exit must exit 1, got {status}\n{logs}"
     );
 }
 

@@ -163,6 +163,7 @@ async fn route_refresh_bgpls_re_advertises_routes() {
     let _eor = out_rx.recv().await.unwrap();
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         session_id: 0,
         peer: target,
         afi: Afi::BgpLs,
@@ -1275,4 +1276,55 @@ fn peer_down_mid_refresh_zeroes_refresh_gauges() {
         session_id: 2,
     });
     assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 0.0, 0.0);
+}
+
+/// The RIB releases a request's coalescing flag when it dequeues it, before
+/// the replay, so the session queues a fresh request for any refresh that
+/// arrives afterwards. Stale-session requests release it too; otherwise a
+/// flag could stay set with nothing queued to clear it.
+#[test]
+fn route_refresh_request_releases_its_queued_flag_on_dequeue() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+    while outbound_rx.try_recv().is_ok() {}
+
+    for (session_id, replays) in [(0, 1), (1, 0)] {
+        let queued = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        manager.handle_update(RibUpdate::RouteRefreshRequest {
+            peer,
+            session_id,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            queued: Arc::clone(&queued),
+        });
+        assert!(
+            !queued.load(std::sync::atomic::Ordering::Acquire),
+            "session {session_id}: dequeue must release the flag"
+        );
+        let mut eors = 0;
+        while let Ok(update) = outbound_rx.try_recv() {
+            eors += usize::from(update.end_of_rib.contains(&(Afi::Ipv4, Safi::Unicast)));
+        }
+        assert_eq!(eors, replays, "session {session_id}");
+    }
 }

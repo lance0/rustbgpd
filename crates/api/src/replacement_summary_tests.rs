@@ -435,6 +435,8 @@ async fn health_completes_inside_actual_rib_export(selection_release: bool) {
                 peer_restart_state: false,
                 peer_gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
                 peer_enhanced_refresh: true,
+                peer_llgr_families: Vec::new(),
+                local_llgr_stale_time: 0,
             })
             .await
             .unwrap();

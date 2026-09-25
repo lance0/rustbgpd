@@ -59,8 +59,9 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
 # Raises and delivers real signals in the TUI signal-restore tests; opens
-# a pty pair for the TUI terminal-hangup test.
-nix = { workspace = true, features = ["signal", "term"] }
+# a pty pair for the TUI terminal-hangup test; binds a never-listening
+# socket for the connection-refused test.
+nix = { workspace = true, features = ["signal", "socket", "term"] }
 rustbgpd-api.workspace = true
 rustbgpd-evpn.workspace = true
 # Fixture builder for the from-bmp adapter tests: captures are framed by

@@ -839,6 +839,7 @@ impl PeerManager {
                     rule = "identifier_comparison",
                     "collision: remote wins, replacing with inbound"
                 );
+                self.drain_before_candidate_promotion().await;
                 if let Some(promoted) = self.promote_pending_inbound_handle(&peer_key) {
                     self.finish_inbound_promotion(
                         &peer_key,
@@ -1046,11 +1047,21 @@ impl PeerManager {
         Some((old_handle, old_session_id, new_session_id))
     }
 
+    /// A candidate that fell to Idle after reporting its OPEN (collision
+    /// verdict timeout, peer NOTIFICATION, TCP loss) has already queued
+    /// `BackToIdle` behind that report. Consume it before transferring
+    /// ownership, so a dead candidate is dropped rather than installed as
+    /// primary in place of a retired live one.
+    async fn drain_before_candidate_promotion(&mut self) {
+        Box::pin(self.drain_ready_session_notifications()).await;
+    }
+
     pub(super) async fn promote_pending_inbound(
         &mut self,
         peer_key: &PeerKey,
         primary_notification_failures: u32,
     ) -> bool {
+        self.drain_before_candidate_promotion().await;
         let Some(promoted) = self.promote_pending_inbound_handle(peer_key) else {
             return false;
         };

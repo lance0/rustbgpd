@@ -500,6 +500,7 @@ async fn deferred_registration_rejects_superseded_session_paths_limit() {
 
     for (afi, safi) in dual_stack_sendable() {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer,
             session_id: 8,
             afi,
@@ -1101,6 +1102,7 @@ async fn otc_is_rejected_before_grouped_and_private_adj_rib_out_commit() {
     );
     for (peer, _) in &receivers {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer: *peer,
             session_id: 7,
             afi: Afi::Ipv4,
@@ -1819,6 +1821,7 @@ async fn paths_limit_drives_dual_stack_initial_churn_withdraw_and_refresh() {
 
     for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
         tx.send(RibUpdate::RouteRefreshRequest {
+            queued: Arc::default(),
             peer: target,
             session_id: 7,
             afi,
@@ -4102,4 +4105,79 @@ async fn link_local_only_next_hop_change_is_re_advertised() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// RFC 9234 section 5 E2 blocks OTC-tagged routes only toward Providers,
+/// Peers and Route Servers. With the Provider or RS local role the neighbor
+/// is a Customer or RS-Client, and an OTC-tagged unicast route is still
+/// advertised, unchanged, with no OTC denial.
+#[tokio::test]
+async fn otc_tagged_unicast_is_advertised_toward_customer_and_route_server_client() {
+    for role in [
+        rustbgpd_wire::BgpRole::Provider,
+        rustbgpd_wire::BgpRole::RouteServer,
+    ] {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+        let peer: IpAddr = "192.0.2.10".parse().unwrap();
+        tx.send(RibUpdate::SetPeerExportContext {
+            peer,
+            session_id: 7,
+            local_role: Some(role),
+        })
+        .await
+        .unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            session_id: 7,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            per_client_best: false,
+            interpret_rfc1997: true,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let route = with_otc(make_route(prefix, Ipv4Addr::new(198, 51, 100, 1)), 64512);
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let update = out_rx.recv().await.unwrap();
+        assert!(update.otc_blocked.is_empty(), "role {role:?}");
+        assert_eq!(update.announce.len(), 1, "role {role:?}");
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+        assert!(
+            update.announce[0]
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::OnlyToCustomer(64512))),
+            "role {role:?} must carry the OTC unchanged"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
 }

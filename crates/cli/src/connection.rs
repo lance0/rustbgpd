@@ -1040,8 +1040,24 @@ mod tests {
     async fn connect_to_dead_socket_reports_connection_refused() {
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("stale.sock");
-        // Bind then drop the listener: the socket file remains, ECONNREFUSED.
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        // Bind without listen(), then close: the socket file remains and
+        // connect gets ECONNREFUSED. A dropped listener is not enough: a
+        // sibling test's fork holds a copy of every descriptor until its child
+        // execs, so the listener can outlive `drop` and accept the connect.
+        // A socket that never listened refuses regardless of who holds it.
+        let socket = nix::sys::socket::socket(
+            nix::sys::socket::AddressFamily::Unix,
+            nix::sys::socket::SockType::Stream,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .unwrap();
+        nix::sys::socket::bind(
+            std::os::fd::AsRawFd::as_raw_fd(&socket),
+            &nix::sys::socket::UnixAddr::new(&stale).unwrap(),
+        )
+        .unwrap();
+        drop(socket);
         let addr = format!("unix://{}", stale.display());
 
         let err = match connect(&addr, None).await {

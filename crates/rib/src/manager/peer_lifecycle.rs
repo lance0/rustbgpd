@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind;
-use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
@@ -864,6 +864,7 @@ impl RibManager {
         let sendable_families = record.sendable_families.clone();
         let negotiated_orf_recv = record.negotiated_orf_recv.clone();
         let gr_context = record.gr_context.clone();
+        let negotiated_llgr_families = record.negotiated_llgr_families.clone();
         let is_ebgp = record.is_ebgp;
         let route_reflector_client = record.route_reflector_client;
         let local_role = record.local_role;
@@ -902,10 +903,45 @@ impl RibManager {
                 .insert(peer, negotiated_orf_recv.into_iter().collect());
         }
 
+        // RFC 4724 §4.2 / RFC 9494 §4.2: a family whose stale routes are
+        // retained but that the new OPEN no longer lists (a GR-phase family
+        // absent from the new GR capability, an LLGR-phase family absent
+        // from the new LLGR capability, or either capability missing) has
+        // its stale routes removed now, not at End-of-RIB or a timer. The
+        // check needs the staged OPEN context; without it nothing is removed.
+        // The F bit is not consulted (see rfc-notes, "All GR Families
+        // Retained").
+        let unlisted_families: Vec<(Afi, Safi)> = gr_context
+            .as_ref()
+            .map(|context| {
+                let gr_phase = self
+                    .gr_peers
+                    .get(&peer)
+                    .into_iter()
+                    .flatten()
+                    .filter(|family| !context.peer_gr_families.contains(family));
+                let llgr_phase = self
+                    .llgr_peers
+                    .get(&peer)
+                    .into_iter()
+                    .flatten()
+                    .filter(|family| !negotiated_llgr_families.contains(family));
+                gr_phase.chain(llgr_phase).copied().collect()
+            })
+            .unwrap_or_default();
+
         if self.gr_peers.contains_key(&peer) {
             if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
                 self.gr_stale_deadlines.insert(peer, deadline);
+            }
+            // Partial GR: families absent from the GR capability entered
+            // LLGR at session down while the rest were still in GR. All of
+            // them now wait for End-of-RIB together.
+            if let Some(llgr_families) = self.llgr_peers.remove(&peer)
+                && let Some(awaiting) = self.gr_peers.get_mut(&peer)
+            {
+                awaiting.extend(llgr_families);
             }
             info!(%peer, "peer re-established during GR — waiting for End-of-RIB");
         } else if self.llgr_peers.contains_key(&peer)
@@ -927,6 +963,35 @@ impl RibManager {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
             self.gr_stale_deadlines.insert(peer, deadline);
             info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
+        }
+        for (afi, safi) in unlisted_families {
+            info!(%peer, ?afi, ?safi, "re-established session does not list a retained family in its GR/LLGR capability — removing its stale routes");
+            self.remove_unrefreshed_stale_family(peer, afi, safi);
+        }
+        // The dying session's LLGR parameters must not drive a promotion
+        // after re-establishment: if End-of-RIB is late and the GR timer
+        // expires, `sweep_gr_stale` promotes by what the NEW OPEN and the
+        // new session's local config allow (families, Long-Lived Stale
+        // Times, or no LLGR at all). Without the staged context nothing is
+        // changed, as for the capability check above.
+        if let Some(context) = &gr_context
+            && self.gr_peers.contains_key(&peer)
+        {
+            if context.local_llgr_stale_time > 0 && !context.peer_llgr_families.is_empty() {
+                let stale_routes_time =
+                    self.gr_stale_routes_time.get(&peer).copied().unwrap_or(360);
+                self.llgr_peer_config.insert(
+                    peer,
+                    super::helpers::LlgrPeerConfig {
+                        peer_llgr_capable: true,
+                        peer_llgr_families: context.peer_llgr_families.clone(),
+                        local_llgr_stale_time: context.local_llgr_stale_time,
+                        stale_routes_time,
+                    },
+                );
+            } else {
+                self.llgr_peer_config.remove(&peer);
+            }
         }
 
         // RFC 4684 decision: lazily self-originate the default (wildcard)

@@ -628,6 +628,45 @@ impl PeerSession {
         self.bmp_repair_timer = None;
     }
 
+    /// Queue a plain ROUTE-REFRESH replay for one family, coalescing it into
+    /// a request for the same family that the RIB has not started yet. That
+    /// replay reads the Loc-RIB when it starts, so it answers this request
+    /// too (RFC 2918 re-advertisement; with RFC 7313 one BoRR/EoRR bracket).
+    async fn queue_route_refresh_request(
+        &mut self,
+        afi: rustbgpd_wire::Afi,
+        safi: rustbgpd_wire::Safi,
+    ) {
+        let queued =
+            std::sync::Arc::clone(self.route_refresh_queued.entry((afi, safi)).or_default());
+        if queued.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            debug!(
+                peer = %self.peer_label,
+                ?afi, ?safi,
+                "coalesced ROUTE-REFRESH into the replay already queued for this family"
+            );
+            return;
+        }
+        if self
+            .rib_tx
+            .send(RibUpdate::RouteRefreshRequest {
+                peer: self.peer_ip,
+                session_id: self.session_identity.id,
+                afi,
+                safi,
+                queued: std::sync::Arc::clone(&queued),
+            })
+            .await
+            .is_err()
+        {
+            queued.store(false, std::sync::atomic::Ordering::Release);
+            warn!(
+                peer = %self.peer_label,
+                "RIB manager unavailable — route refresh request dropped"
+            );
+        }
+    }
+
     /// Drain complete messages from the read buffer and feed to FSM.
     #[expect(
         clippy::too_many_lines,
@@ -635,6 +674,11 @@ impl PeerSession {
     )]
     pub(super) async fn process_read_buffer(&mut self) {
         loop {
+            // The OPEN just processed may have parked a collision candidate;
+            // input behind it waits for the verdict.
+            if self.collision_verdict_pending() {
+                return;
+            }
             // Reconcile a due refresh window before *each* buffered PDU, not
             // merely once per socket read. One read can contain several UPDATEs
             // and the first may park on RIB backpressure until after the shared
@@ -790,22 +834,8 @@ impl PeerSession {
                                     // the normal re-advertise path.
                                     let handled_orf =
                                         self.process_inbound_orf(afi, safi, &rr).await;
-                                    if !handled_orf
-                                        && self
-                                            .rib_tx
-                                            .send(RibUpdate::RouteRefreshRequest {
-                                                peer: self.peer_ip,
-                                                session_id: self.session_identity.id,
-                                                afi,
-                                                safi,
-                                            })
-                                            .await
-                                            .is_err()
-                                    {
-                                        warn!(
-                                            peer = %self.peer_label,
-                                            "RIB manager unavailable — route refresh request dropped"
-                                        );
+                                    if !handled_orf {
+                                        self.queue_route_refresh_request(afi, safi).await;
                                     }
                                 }
                                 RouteRefreshSubtype::BoRR => {

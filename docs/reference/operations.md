@@ -1066,6 +1066,17 @@ coordinated shutdown (NOTIFICATION to all peers, GR marker write). This is
 deliberate: losing the control plane means losing the ability to shut down
 cleanly later. See [ADR-0022](../adr/0022-grpc-server-supervision.md).
 
+A gRPC listener whose socket becomes unusable (`listener socket unusable;
+stopping its accept loop`) gives its open connections the same one-second
+grace as coordinated shutdown, then exits. An open `WatchEvents` stream or an
+idle client connection cannot hold the listener, or the fail-stop, open.
+The other listeners then get one further second to drain before the gRPC
+server exits. So the fail-stop starts within about 2 s of the failure.
+A TLS listener detects the failure only on its next accept, and it stops
+accepting while all 64 concurrent handshake slots are busy. If stalled
+clients hold every slot, detection waits for the first handshake to finish
+or hit its 10 s timeout, which adds up to 10 s.
+
 ### RIB manager or peer manager exits unexpectedly
 
 The daemon likewise treats any RIB manager or peer manager return or panic as
@@ -1074,6 +1085,15 @@ unexpectedly`, performs the ordinary coordinated shutdown (including peer
 NOTIFICATIONs where the actor that sends them is still alive), and exits 1 for
 `Restart=on-failure`. An intentional shutdown still stops the peer manager as
 part of the ordered teardown and exits 0.
+
+### Metrics/readiness server exits unexpectedly
+
+When `prometheus_addr` is configured, the HTTP server behind `/metrics`,
+`/readyz` and `/livez` is supervised like the gRPC server. Its accept loop ends
+only when the listening socket becomes unusable (`listener socket unusable;
+stopping its accept loop`). The daemon then logs `metrics/readiness server
+exited unexpectedly`, performs the ordinary coordinated shutdown and exits 1
+for `Restart=on-failure`, rather than running on without its health surface.
 
 ### RPKI subsystem task exits unexpectedly
 
@@ -2223,7 +2243,7 @@ counters, using a 15-minute increase window:
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_gr_active_peers` | Peers currently in GR stale-route state |
-| `bgp_gr_stale_routes` | Routes currently marked stale |
+| `bgp_gr_stale_routes` | Routes currently held stale (GR-stale or LLGR-stale) |
 | `bgp_gr_timer_expired_total` | GR timers that expired (routes swept) |
 | `bgp_selection_deferral_active{afi_safi}` | Planned-restart family convergence/release gate (1 = active); it remains active while collision failback waits for EoRR even after route selection is staged |
 | `bgp_selection_deferral_waiters{afi_safi}` | Frozen-roster peers still blocking family convergence/release, including an `awaiting_refresh` survivor after route selection is staged |
@@ -2431,9 +2451,10 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `metrics/readiness server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `listener accept failing; backing off` | ERROR | A gRPC TCP, gRPC UDS or metrics listener hit resource exhaustion (EMFILE, ENFILE, ENOMEM or ENOBUFS). Accepts back off from 100 ms, doubling to a 1 s cap; the line is logged once per episode and then every 60th failure, with `listener`, `failures` and `backoff_ms` |
 | `listener accept recovered` | INFO | The next connection was accepted after a backoff episode; `failures` counts the episode |
-| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). A gRPC listener then fails the daemon through gRPC server supervision; the metrics listener stops serving |
+| `listener socket unusable; stopping its accept loop` | ERROR | A management listener socket itself failed (for example EBADF or EINVAL). The daemon then fail-stops through gRPC server or metrics/readiness server supervision |
 | `config reload complete` | INFO | SIGHUP reload completed; the generation route logs `config reload complete (one runtime generation)` |
 | `SIGHUP reload rejected without runtime effect` | ERROR | The candidate was rejected before any effect, or a generation-route failure restored the prior generation; the candidate file is unchanged |
 | `reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction` | ERROR | A generation-route step failed after effects began and compensation restored the prior generation |

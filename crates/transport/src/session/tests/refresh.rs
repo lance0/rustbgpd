@@ -862,3 +862,108 @@ async fn send_route_update_skips_route_refresh_request_without_capability() {
     assert!(parsed.announced.is_empty());
     assert!(parsed.withdrawn.is_empty());
 }
+
+/// Plain ROUTE-REFRESH requests dequeued from the session's RIB channel,
+/// as `(family, queued flag)` in arrival order.
+fn drain_refresh_requests(
+    rib_rx: &mut mpsc::Receiver<RibUpdate>,
+) -> Vec<((Afi, Safi), Arc<std::sync::atomic::AtomicBool>)> {
+    let mut requests = Vec::new();
+    while let Ok(update) = rib_rx.try_recv() {
+        if let RibUpdate::RouteRefreshRequest {
+            afi, safi, queued, ..
+        } = update
+        {
+            requests.push(((afi, safi), queued));
+        }
+    }
+    requests
+}
+
+fn buffer_plain_refreshes(session: &mut PeerSession, afi: Afi, safi: Safi, count: usize) {
+    for _ in 0..count {
+        buffer_route_refresh(session, afi, safi, RouteRefreshSubtype::Normal);
+    }
+}
+
+fn route_refresh_messages_received(session: &PeerSession) -> f64 {
+    counter_samples(&session.metrics, "bgp_messages_received_total")
+        .into_iter()
+        .filter(|(labels, _)| labels.get("type").map(String::as_str) == Some("route_refresh"))
+        .map(|(_, value)| value)
+        .sum()
+}
+
+/// A burst of duplicate plain ROUTE-REFRESH messages queues one replay per
+/// family until the RIB starts it; different families are never merged, and
+/// every message is still counted as received.
+#[tokio::test]
+async fn duplicate_route_refresh_requests_queue_one_replay_per_family() {
+    let v4 = (Afi::Ipv4, Safi::Unicast);
+    let v6 = (Afi::Ipv6, Safi::Unicast);
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    install_enhanced_refresh_session(&mut session, vec![v4, v6], false);
+
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 8);
+    buffer_plain_refreshes(&mut session, v6.0, v6.1, 1);
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 3);
+    session.process_read_buffer().await;
+
+    let requests = drain_refresh_requests(&mut rib_rx);
+    let families: Vec<_> = requests.iter().map(|(family, _)| *family).collect();
+    assert_eq!(families, vec![v4, v6], "one queued replay per family");
+    assert!(
+        requests
+            .iter()
+            .all(|(_, queued)| queued.load(std::sync::atomic::Ordering::Acquire)),
+        "a queued request stays marked until the RIB starts it"
+    );
+    assert!((route_refresh_messages_received(&session) - 12.0).abs() < f64::EPSILON);
+}
+
+/// Once the RIB has started the queued replay, a later request needs a
+/// replay of its own: the burst that follows yields exactly one more.
+#[tokio::test]
+async fn route_refresh_after_replay_start_queues_exactly_one_more() {
+    let v4 = (Afi::Ipv4, Safi::Unicast);
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    install_enhanced_refresh_session(&mut session, vec![v4], false);
+
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 2);
+    session.process_read_buffer().await;
+    let first = drain_refresh_requests(&mut rib_rx);
+    assert_eq!(first.len(), 1);
+
+    // Still queued: more requests are answered by that replay.
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 2);
+    session.process_read_buffer().await;
+    assert!(drain_refresh_requests(&mut rib_rx).is_empty());
+
+    // The RIB dequeues the request and starts the replay.
+    first[0]
+        .1
+        .store(false, std::sync::atomic::Ordering::Release);
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 5);
+    session.process_read_buffer().await;
+    let follow_up = drain_refresh_requests(&mut rib_rx);
+    assert_eq!(follow_up.len(), 1, "exactly one follow-up replay");
+    assert!(follow_up[0].1.load(std::sync::atomic::Ordering::Acquire));
+}
+
+/// A request still queued when the session went down must not suppress the
+/// next session's first refresh.
+#[tokio::test]
+async fn session_down_forgets_a_queued_route_refresh() {
+    let v4 = (Afi::Ipv4, Safi::Unicast);
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    install_enhanced_refresh_session(&mut session, vec![v4], false);
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 1);
+    session.process_read_buffer().await;
+    assert_eq!(drain_refresh_requests(&mut rib_rx).len(), 1);
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+    install_enhanced_refresh_session(&mut session, vec![v4], false);
+    buffer_plain_refreshes(&mut session, v4.0, v4.1, 1);
+    session.process_read_buffer().await;
+    assert_eq!(drain_refresh_requests(&mut rib_rx).len(), 1);
+}

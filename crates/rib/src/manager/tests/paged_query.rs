@@ -2096,6 +2096,7 @@ fn stale_route_refresh_request_does_not_advance_advertised_page_version() {
     let before = route_page_versions(&manager);
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 1,
         afi: Afi::Ipv4,
@@ -2115,6 +2116,7 @@ fn accepted_route_refresh_request_advances_advertised_page_version_once() {
     let before = route_page_versions(&manager);
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
         peer,
         session_id: 0,
         afi: Afi::Ipv4,

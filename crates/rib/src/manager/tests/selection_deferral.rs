@@ -124,6 +124,8 @@ async fn stage_gr_context_with(
         peer_restart_state,
         peer_gr_families,
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .await
     .unwrap();
@@ -142,6 +144,8 @@ async fn stage_gr_context_plain_refresh(
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: false,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .await
     .unwrap();
@@ -299,6 +303,7 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
     assert!(query_best_routes(&tx).await.is_empty());
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 7,
         afi: FAMILY.0,
@@ -903,6 +908,8 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     manager.handle_update(peer_up(survivor, 11, survivor_tx));
     let (replacement_tx, _replacement_rx) = mpsc::channel(16);
@@ -912,6 +919,8 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -952,6 +961,7 @@ fn dirty_observer_emits_convergence_eor_before_deferred_refresh() {
     while observer_rx.try_recv().is_ok() {}
 
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 31,
         afi: FAMILY.0,
@@ -1076,6 +1086,7 @@ fn no_diff_dirty_resync_keeps_refresh_behind_failed_convergence_eor() {
     );
     assert!(observer_rx.try_recv().is_err());
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 21,
         afi: FAMILY.0,
@@ -1384,6 +1395,7 @@ async fn collision_failback_withholds_eor_until_survivor_refresh_converges() {
     observer_rx = observer_retry_rx;
 
     tx.send(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: observer,
         session_id: 32,
         afi: FAMILY.0,
@@ -1637,6 +1649,8 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
             peer_enhanced_refresh: true,
+            peer_llgr_families: Vec::new(),
+            local_llgr_stale_time: 0,
         });
         manager.handle_update(peer_up(survivor, 11, survivor_tx.clone()));
         let (replacement_tx, _replacement_rx) = mpsc::channel(1);
@@ -1646,6 +1660,8 @@ fn unavailable_survivor_channel_keeps_convergence_timer_bound() {
             peer_restart_state: false,
             peer_gr_families: vec![FAMILY],
             peer_enhanced_refresh: true,
+            peer_llgr_families: Vec::new(),
+            local_llgr_stale_time: 0,
         });
         manager.handle_update(peer_up(survivor, 12, replacement_tx));
 
@@ -2229,6 +2245,8 @@ fn peer_teardown_discards_unconsumed_gr_context() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     });
     assert!(manager.pending_peer_gr_context.contains_key(&(a, 9)));
     manager.peer_down_teardown(a);
@@ -2259,6 +2277,8 @@ async fn queued_route_is_applied_before_simultaneous_eor_and_timer_release() {
         peer_restart_state: false,
         peer_gr_families: vec![FAMILY],
         peer_enhanced_refresh: true,
+        peer_llgr_families: Vec::new(),
+        local_llgr_stale_time: 0,
     })
     .unwrap();
     tx.try_send(peer_up(source, 1, source_tx)).unwrap();
@@ -2538,6 +2558,7 @@ fn release_sends_single_eor_to_refresh_deferred_peer() {
     manager.handle_update(peer_up(target, 21, outbound_tx));
     while outbound_rx.try_recv().is_ok() {}
     manager.handle_update(RibUpdate::RouteRefreshRequest {
+        queued: std::sync::Arc::default(),
         peer: target,
         session_id: 21,
         afi: FAMILY.0,
