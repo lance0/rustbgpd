@@ -2482,7 +2482,11 @@ path — a churny or abusive member inside a permitted range is bounded
 to `burst` immediate accepts and `rate_per_minute` sustained accepts,
 dropped immediately after TCP accept once over rate. Statically
 configured neighbor addresses are exempt: a flapping legitimate peer
-must never lock itself out of re-establishment. Sources matching no
+must never lock itself out of re-establishment. (Separately from this
+limiter, a configured neighbor waiting out an escalated NOTIFICATION
+reconnect wait has its inbound connections held until the wait ends; see
+[operations.md](operations.md#debugging-a-session-that-wont-establish).)
+Sources matching no
 configuration at all are dropped by the existing unconfigured-source
 check before the limiter is consulted.
 
@@ -2510,7 +2514,8 @@ listener; an evicted aggregate re-enters with a fresh burst allowance.
 Drops are counted in
 `bgp_inbound_connections_dropped_total{reason="rate_limited"}`; the
 `unconfigured` and `dynamic_limit` reasons account the pre-existing
-drop sites and are recorded even while the limiter is disabled. See
+drop sites and are recorded even while the limiter is disabled, and
+`notification_backoff` counts the NOTIFICATION reconnect-backoff hold. See
 `docs/reference/operations.md` for the metric reference.
 
 ---
