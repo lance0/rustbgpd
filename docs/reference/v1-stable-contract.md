@@ -187,8 +187,8 @@ These meanings are part of the inventoried RPC contract:
   not that the session command loop is responsive. Peer validation, import
   counters and dataset status are read from the roster the peer manager
   publishes, so success also does not show that the peer manager is
-  responsive; a request fails `UNAVAILABLE` when the peer manager stopped
-  before its capture finished. Numeric samples are not an atomic fleet
+  responsive; a request that sees, after its capture, that the peer manager
+  has stopped fails `UNAVAILABLE`. Numeric samples are not an atomic fleet
   snapshot. Peer validation and export, import and dataset waits share one
   absolute deadline, including admission; errors return no partial response
   and late backend replies do not become successful reads.

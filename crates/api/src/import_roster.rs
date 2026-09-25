@@ -9,8 +9,9 @@
 //! and dataset status the roster designates, without messaging the peer
 //! manager or a session.
 //!
-//! Readers and the publisher never wait on each other: the cell is an
-//! `ArcSwap`, whose loads and stores are lock-free. Dropping the publisher
+//! Readers and the publisher cannot block each other: the cell is an
+//! `ArcSwap`, whose loads and stores are lock-free. The roster reflects the
+//! owner's last completed operation, not its in-progress state. Dropping the publisher
 //! (the peer manager exiting or unwinding) closes the cell; a request checks
 //! that after capture, so a roster loaded before the owner stopped cannot
 //! report its values as success.

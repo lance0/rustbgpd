@@ -1212,8 +1212,8 @@ impl PeerHandle {
 
     /// [`Self::read_import_policy_counters`] over a shared publication,
     /// adding each wait to `yields`: one per Pending wait for the session's
-    /// first publication and one per busy error-mutex retry. A publication
-    /// that is already installed is read without yielding.
+    /// first publication and one per busy error-mutex retry. An installed
+    /// publication whose error mutex is free is read without yielding.
     ///
     /// # Errors
     ///

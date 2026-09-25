@@ -5,9 +5,9 @@
 //! identity. Its fields are private, and so are those two fields of
 //! [`ManagedPeer`]: code outside this module cannot insert, remove or drain a
 //! peer, or swap a peer's session, without going through a method here, and
-//! each such method republishes the import roster before it returns. Mutable
-//! access to the rest of a peer's state ([`ManagedPeerState`]) does not
-//! reach the session fields. Dataset-binding changes use
+//! each such method republishes the import roster before it returns (inside
+//! a batch, when the batch ends). Mutable access to the rest of a peer's
+//! state ([`ManagedPeerState`]) does not reach the session fields. Dataset-binding changes use
 //! [`PeerTable::set_datasets`], which republishes the same way.
 //!
 //! An operation that mutates many peers runs inside a [`RosterBatch`]

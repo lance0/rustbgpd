@@ -36,7 +36,7 @@ resolved.
   manager's published roster ([ADR-0136](../adr/0136-owner-published-counter-reads.md))
   instead of queueing on the peer manager; the export stage still queues on
   the RIB, and an import read can still wait for a Pending session
-  publication, a busy counter lock, or response delivery. Installed import
+  publication, a busy counter or dataset error lock, or response delivery. Installed import
   counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md).
   The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
   records CPU placement, complete call results and remaining stale observations.
