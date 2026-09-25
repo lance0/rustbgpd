@@ -3776,6 +3776,7 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
     let (operator_tx, operator_rx) = mpsc::channel(4);
     harness.mgr = harness.mgr.with_operator_queries(operator_rx);
     let import_roster = harness.mgr.import_roster();
+    let roster_version = import_roster.load().version();
     let (command_tx, command_rx) = mpsc::channel(4);
     harness.mgr.rx = command_rx;
     let (proxy_tx, mut proxy_rx) = mpsc::channel(16);
@@ -3839,12 +3840,17 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
             old_counters.state_queries.load(Ordering::SeqCst),
             old_queries
         );
-        // The published roster already names the replacement's handle.
-        assert!(
+        // The generation is one roster operation (ADR-0136): mid-operation
+        // the roster is still the one published before it, naming the
+        // replaced session, so an import read reports that session gone
+        // rather than a partial result.
+        assert_eq!(import_roster.load().version(), roster_version);
+        assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), roster_import_rows(&import_roster))
                 .await
                 .unwrap()
-                .is_ok()
+                .unwrap_err(),
+            rustbgpd_transport::handle::ImportPolicyStatsError::SessionGone
         );
         assert!(matches!(
             mutation.try_recv(),
@@ -3867,6 +3873,15 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
     assert!(
         matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
         "{outcome:?}"
+    );
+    // The completed operation published once, naming the recreated session.
+    assert_eq!(import_roster.load().version(), roster_version + 1);
+    harness.mgr.assert_import_roster_projection();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), roster_import_rows(&import_roster))
+            .await
+            .unwrap()
+            .is_ok()
     );
     assert_eq!(live.pin().generation, 3);
     assert_eq!(
