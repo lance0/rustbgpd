@@ -918,11 +918,13 @@ impl PeerManager {
                     .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
                 tokio::pin!(queries);
                 while let Some((address, outcome)) = queries.next().await {
-                    if deadline <= tokio::time::Instant::now() {
-                        return Err(ImportPolicyStatsError::TimedOut);
-                    }
+                    // Count a completed read even when the guard below then
+                    // fails the snapshot, so a deadline miss reports it.
                     if outcome.is_ok() {
                         progress.read.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if deadline <= tokio::time::Instant::now() {
+                        return Err(ImportPolicyStatsError::TimedOut);
                     }
                     match outcome {
                         Ok(Some(snapshot)) => {
