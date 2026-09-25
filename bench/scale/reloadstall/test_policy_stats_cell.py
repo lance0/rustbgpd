@@ -7,16 +7,25 @@ import json
 from policy_stats_cell import classify_stats_call, flat_verdict, parse_summary, percentile, run_verdict, validate_reply
 
 SUMMARY = ('stage=export elapsed_ms=597 budget_ms=1999 rpc_elapsed_ms=598 code=Ok; '
-           'stage=import elapsed_ms=1471 budget_ms=1401 rpc_elapsed_ms=2070 code=DeadlineExceeded '
-           'admission_ms=300 collection_ms=1171 publications=812/1000 yields=31')
+           'stage=import elapsed_ms=1402 budget_ms=1401 rpc_elapsed_ms=2000 code=DeadlineExceeded '
+           'publications=812/1000 yields=1')
+LEGACY = ('stage=export elapsed_ms=597 budget_ms=1999 rpc_elapsed_ms=598 code=Ok; '
+          'stage=import elapsed_ms=1471 budget_ms=1401 rpc_elapsed_ms=2070 code=DeadlineExceeded '
+          'admission_ms=300 collection_ms=1171 publications=812/1000 yields=31')
 
 
 class ParseSummary(unittest.TestCase):
-    def test_stages_and_import_substages(self):
+    def test_stages_and_import_capture(self):
         export, imported = parse_summary(SUMMARY)
         self.assertEqual((export['stage'], export['elapsed_ms'], export['code']), ('export', 597, 'Ok'))
-        self.assertNotIn('admission_ms', export)
+        self.assertNotIn('yields', export)
         self.assertEqual(imported['code'], 'DeadlineExceeded')
+        self.assertEqual((imported['publications_read'], imported['publications_selected'], imported['yields']),
+                         (812, 1000, 1))
+        self.assertNotIn('admission_ms', imported)
+
+    def test_legacy_import_substages(self):
+        _, imported = parse_summary(LEGACY)
         self.assertEqual((imported['admission_ms'], imported['collection_ms'], imported['publications_read'],
                           imported['publications_selected'], imported['yields']), (300, 1171, 812, 1000, 31))
 
@@ -35,7 +44,7 @@ class ParseSummary(unittest.TestCase):
 
 COMPLETE = ('stage=export elapsed_ms=75 budget_ms=1999 rpc_elapsed_ms=75 code=Ok; '
             'stage=import elapsed_ms=138 budget_ms=1924 rpc_elapsed_ms=214 code=Ok '
-            'admission_ms=0 collection_ms=138 publications=1000/1000 yields=970; '
+            'publications=1000/1000 yields=0; '
             'stage=datasets elapsed_ms=38 budget_ms=1785 rpc_elapsed_ms=252 code=Ok')
 FLAT = {'pass': True}
 
@@ -62,18 +71,25 @@ class CompleteStageSet(unittest.TestCase):
         self.assertIsNone(total)
         self.assertIn('malformed', reason)
 
-    def test_import_without_substages_is_invalid(self):
-        bare = COMPLETE.replace(' admission_ms=0 collection_ms=138 publications=1000/1000 yields=970', '')
+    def test_import_without_capture_detail_is_invalid(self):
+        bare = COMPLETE.replace(' publications=1000/1000 yields=0', '')
         self.assertEqual(self.verdict(bare)[0], 'INVALID')
+        yields_only = COMPLETE.replace(' publications=1000/1000 yields=0', ' yields=0')
+        self.assertEqual(self.verdict(yields_only)[0], 'INVALID')
+
+    def test_legacy_complete_call_stays_valid(self):
+        legacy = COMPLETE.replace(' publications=1000/1000 yields=0',
+                                  ' admission_ms=0 collection_ms=138 publications=1000/1000 yields=970')
+        self.assertEqual(self.verdict(legacy), ('PASS', 251, None))
 
     def test_deadline_miss_stops_stages_and_stays_valid(self):
         verdict, total, reason = self.verdict(SUMMARY, result='handler_deadline_exceeded')
         self.assertIsNone(reason)
-        self.assertEqual(total, 597 + 1471)
+        self.assertEqual(total, 597 + 1402)
         self.assertEqual(run_verdict(['R1 pair policy_stats failed'], [], FLAT), 'FAIL')
 
     def test_stage_after_failure_is_invalid(self):
-        after = SUMMARY + '; stage=datasets elapsed_ms=0 budget_ms=0 rpc_elapsed_ms=2070 code=Ok'
+        after = SUMMARY + '; stage=datasets elapsed_ms=0 budget_ms=0 rpc_elapsed_ms=2000 code=Ok'
         self.assertEqual(self.verdict(after, result='handler_deadline_exceeded')[0], 'INVALID')
 
 
