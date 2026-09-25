@@ -1676,6 +1676,10 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
     ) -> Self {
+        // ADR-0136: the global fallback's counters exist from install.
+        if let Some(chain) = &export_policy {
+            let _ = chain.hit_counters();
+        }
         let (route_events_tx, _) = broadcast::channel(4096);
         metrics.set_route_event_history_capacity(
             i64::try_from(ROUTE_EVENT_HISTORY_CAPACITY).unwrap_or(i64::MAX),
@@ -2215,6 +2219,22 @@ impl RibManager {
             return *limit;
         }
         send_max
+    }
+
+    /// Create the counter instance of each named peer's installed export
+    /// chain (ADR-0136), compiling it if needed, so a statistics read never
+    /// compiles or creates one inside the actor. Policy replacements call this
+    /// once membership has settled: a grouped member's per-peer chain has then
+    /// been replaced by its group's already-counted handle, so a discarded
+    /// chain is never compiled. Registration needs no call: its initial dump
+    /// takes a counted `share()` of the installed chain, and group handles are
+    /// always shares.
+    fn create_installed_export_counters(&self, peers: impl IntoIterator<Item = IpAddr>) {
+        for peer in peers {
+            if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
+                let _ = chain.hit_counters();
+            }
+        }
     }
 
     /// Resolve the export policy for a peer: per-peer if set, else global.

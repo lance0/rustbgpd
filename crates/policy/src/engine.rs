@@ -1292,6 +1292,8 @@ pub struct PolicyChain {
     /// Live per-term guard-hit counters (ADR-0096 Decision 3.3),
     /// created lazily alongside the compiled IR and bumped by every
     /// [`evaluate_with_attribution`](Self::evaluate_with_attribution).
+    /// Installers create them eagerly (ADR-0133 import, ADR-0136 export) so
+    /// statistics reads use [`installed_hit_counters`](Self::installed_hit_counters).
     /// Derived state like `compiled` (excluded from
     /// `PartialEq`/`Clone`/`Debug`); a cloned or replaced chain starts
     /// from zero — stats read as "since this chain instance was
@@ -1676,25 +1678,20 @@ impl PolicyChain {
             .get_or_init(|| Arc::new(PolicyHitCounters::for_chain(self.compiled())))
     }
 
+    /// The hit counters if this instance already created them, without
+    /// compiling or creating anything. Read paths use this so a statistics
+    /// read never compiles a chain; installers create the counters with
+    /// [`hit_counters`](Self::hit_counters).
+    #[must_use]
+    pub fn installed_hit_counters(&self) -> Option<&Arc<PolicyHitCounters>> {
+        self.hits.get()
+    }
+
     /// Snapshot the per-term hit counters as labeled rows for the
     /// policy-stats surface, in chain walk order.
     #[must_use]
     pub fn term_hit_rows(&self) -> Vec<TermHitRow> {
-        let compiled = self.compiled();
-        let grid = self.hit_counters().snapshot();
-        let mut rows = Vec::new();
-        for (policy_index, (policy, hits)) in compiled.policies.iter().zip(&grid).enumerate() {
-            for (term_index, (term, hits)) in policy.terms.iter().zip(hits).enumerate() {
-                rows.push(TermHitRow {
-                    policy_index,
-                    policy: policy.name.as_ref().map(ToString::to_string),
-                    term_index,
-                    term: term.name.clone(),
-                    hits: *hits,
-                });
-            }
-        }
-        rows
+        self.hit_counters().term_hit_rows()
     }
 }
 
