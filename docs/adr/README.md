@@ -159,6 +159,7 @@ states that the whole decision is Superseded.
 | [0133](0133-installed-import-counter-reads.md) | Installed import-counter reads | Accepted | 2026-09-13 | Active |
 | [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors, RPKI cache endpoints, and MRT dumps | Proposed | 2026-09-15 | Unstated |
 | [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
+| [0136](0136-owner-published-counter-reads.md) | Owner-published counter reads | Accepted (qualification evidence-gated) | 2026-09-25 | Active |
 
 ## Supporting records
 
