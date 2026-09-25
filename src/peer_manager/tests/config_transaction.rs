@@ -4,7 +4,7 @@ use super::*;
 async fn transaction_plan_retains_missing_interface_member() {
     assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
     let mut mgr = test_peer_manager();
-    mgr.current_config = load_test_config(
+    mgr.replace_current_config(load_test_config(
         r#"
 [global]
 asn = 65001
@@ -28,7 +28,7 @@ remote_asn = 65005
 peer_group = "edge"
 import_policy_chain = ["f"]
 "#,
-    );
+    ));
     let initial = toml::to_string_pretty(&mgr.current_config).unwrap();
     let candidate = initial.replace("default_action = \"permit\"", "default_action = \"deny\"");
     let (rib_tx, mut rib_rx) = mpsc::channel(4);
@@ -632,7 +632,7 @@ async fn verified_plan_reattaches_live_external_state() {
     // The live-policy apply path replans the staged snapshot once to return
     // its post-commit token. That no-op must succeed without reusing the
     // consumed one-load identity evidence.
-    mgr.current_config = candidate.clone();
+    mgr.replace_current_config(candidate.clone());
     let post_commit = mgr
         .plan_preloaded_config_transaction(&mut candidate, None)
         .await
@@ -977,7 +977,7 @@ export_policy_chain = ["dataset-export"]
         raw_prior.policy.rpol_files
     );
     assert_eq!(rollback_prior.policy.datasets, raw_prior.policy.datasets);
-    mgr.current_config = raw_prior;
+    mgr.replace_current_config(raw_prior);
 
     // Capture one accepted candidate, then remove both external sources before
     // the real actor consumes the private command. Any planner reparse or

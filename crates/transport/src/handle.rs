@@ -763,6 +763,9 @@ impl InstalledImportPolicy {
         }
     }
 
+    /// Read each counter of the installed instance once. The only
+    /// suspension is a busy error mutex (`try_lock`, yield, retry under the
+    /// caller's deadline); every other step runs without yielding.
     async fn observe(
         &self,
         deadline: tokio::time::Instant,
@@ -796,17 +799,10 @@ impl InstalledImportPolicy {
                 }
             }
         };
-        let mut terms = Vec::new();
-        for (policy_index, (policy, labels)) in counters.labels().iter().enumerate() {
-            consume_budget_counted(yields).await;
-            if deadline <= tokio::time::Instant::now() {
-                return Err(ImportPolicyStatsError::TimedOut);
-            }
+        let labels = counters.labels();
+        let mut terms = Vec::with_capacity(labels.iter().map(|(_, terms)| terms.len()).sum());
+        for (policy_index, (policy, labels)) in labels.iter().enumerate() {
             for (term_index, term) in labels.iter().enumerate() {
-                consume_budget_counted(yields).await;
-                if deadline <= tokio::time::Instant::now() {
-                    return Err(ImportPolicyStatsError::TimedOut);
-                }
                 let hits = counters
                     .term_hits(policy_index, term_index)
                     .ok_or(ImportPolicyStatsError::CountersUnavailable)?;
@@ -827,16 +823,6 @@ impl InstalledImportPolicy {
             terms,
         }))
     }
-}
-
-/// Spend one unit of the task's cooperative budget, counting the checkpoint in
-/// `yields` when the budget is already exhausted and the task therefore yields
-/// to the scheduler. Diagnostic only: the yield itself is unchanged.
-pub async fn consume_budget_counted(yields: &AtomicU64) {
-    if !tokio::task::coop::has_budget_remaining() {
-        yields.fetch_add(1, Ordering::Relaxed);
-    }
-    tokio::task::coop::consume_budget().await;
 }
 
 /// Outcome of a bounded read from a peer-session task.
@@ -1221,48 +1207,52 @@ impl PeerHandle {
         publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
         deadline: tokio::time::Instant,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
-        Self::read_import_policy_counters_counting(publication, deadline, &AtomicU64::new(0)).await
+        Self::read_import_policy_counters_counting(&publication, deadline, &AtomicU64::new(0)).await
     }
 
-    /// [`Self::read_import_policy_counters`], adding each scheduler yield of
-    /// the observation to `yields`.
+    /// [`Self::read_import_policy_counters`] over a shared publication,
+    /// adding each wait to `yields`: one per Pending wait for the session's
+    /// first publication and one per busy error-mutex retry. A publication
+    /// that is already installed is read without yielding.
     ///
     /// # Errors
     ///
     /// Reports deadline expiry, selected task closure, or unavailable counters.
     pub async fn read_import_policy_counters_counting(
-        mut publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+        publication: &watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
         deadline: tokio::time::Instant,
         yields: &AtomicU64,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
         if deadline <= tokio::time::Instant::now() {
             return Err(ImportPolicyStatsError::TimedOut);
         }
-        let observed = tokio::time::timeout_at(deadline, async {
+        let observed = async {
             loop {
                 publication
                     .has_changed()
                     .map_err(|_| ImportPolicyStatsError::SessionGone)?;
                 // Release the watch guard before reading counters or yielding.
-                let installed = publication.borrow_and_update().clone();
+                let installed = publication.borrow().clone();
                 if let Some(installed) = installed {
                     let snapshot = installed.observe(deadline, yields).await?;
                     publication
                         .has_changed()
                         .map_err(|_| ImportPolicyStatsError::SessionGone)?;
-                    if deadline <= tokio::time::Instant::now() {
-                        return Err(ImportPolicyStatsError::TimedOut);
-                    }
                     return Ok(snapshot);
                 }
-                publication
-                    .changed()
-                    .await
-                    .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                // Pending: the session task has not constructed its session
+                // yet. Wait on a private cursor for its first publication.
+                let mut pending = publication.clone();
+                if pending.borrow_and_update().is_none() {
+                    yields.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::timeout_at(deadline, pending.changed())
+                        .await
+                        .map_err(|_| ImportPolicyStatsError::TimedOut)?
+                        .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                }
             }
-        })
-        .await
-        .unwrap_or(Err(ImportPolicyStatsError::TimedOut));
+        }
+        .await;
         if deadline <= tokio::time::Instant::now() {
             Err(ImportPolicyStatsError::TimedOut)
         } else {

@@ -9,7 +9,8 @@ use rustbgpd_transport::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use super::{ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager, TcpAoDesiredInventory};
+use super::ManagedPeerState;
+use super::{PEER_LIFECYCLE_COMMAND_TIMEOUT, PeerManager, TcpAoDesiredInventory};
 
 type SessionApplyPlan = Vec<(
     PeerKey,
@@ -145,7 +146,7 @@ fn key_core_eq(
 
 fn managed_selected_owner(
     peer: &PeerKey,
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
 ) -> rustbgpd_transport::listener::TcpAoSelectedOwner {
     if let Some(range) = managed.accepted_dynamic_range.as_ref() {
         rustbgpd_transport::listener::TcpAoSelectedOwner {
@@ -164,7 +165,7 @@ fn managed_selected_owner(
 
 fn peer_selection_changed(
     peer: &PeerKey,
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
     desired: &TcpAoSessionSelection,
 ) -> Result<bool, String> {
     let desired_owner = desired.accepted_selected_owner.ok_or_else(|| {
@@ -590,7 +591,7 @@ impl PeerManager {
                 .peers
                 .get(&entry.peer)
                 .expect("selection plan peer remains owned");
-            managed.handle.abort_for_transport_safety();
+            managed.handle().abort_for_transport_safety();
             if let Some(pending) = &managed.pending_inbound {
                 pending.handle.abort_for_transport_safety();
             }
@@ -603,7 +604,7 @@ impl PeerManager {
                 .peers
                 .get(&entry.peer)
                 .expect("deletion plan peer remains owned");
-            managed.handle.abort_for_transport_safety();
+            managed.handle().abort_for_transport_safety();
             if let Some(pending) = &managed.pending_inbound {
                 pending.handle.abort_for_transport_safety();
             }
@@ -685,7 +686,7 @@ impl PeerManager {
                     "TCP-AO generation has no covering listener owner for dynamic peer {peer:?}"
                 ));
             }
-            let mut sessions = vec![managed.handle.commands_sender()];
+            let mut sessions = vec![managed.handle().commands_sender()];
             if let Some(pending) = &managed.pending_inbound {
                 sessions.push(pending.handle.commands_sender());
             }
@@ -733,7 +734,7 @@ impl PeerManager {
                     "TCP-AO selection has no covering listener owner for peer {peer:?}"
                 ));
             }
-            let mut sessions = vec![managed.handle.commands_sender()];
+            let mut sessions = vec![managed.handle().commands_sender()];
             if let Some(pending) = &managed.pending_inbound {
                 sessions.push(pending.handle.commands_sender());
             }
@@ -811,7 +812,7 @@ impl PeerManager {
                 current,
                 desired,
             };
-            let mut sessions = vec![managed.handle.commands_sender()];
+            let mut sessions = vec![managed.handle().commands_sender()];
             if let Some(pending) = &managed.pending_inbound {
                 sessions.push(pending.handle.commands_sender());
             }
@@ -1012,7 +1013,7 @@ impl PeerManager {
                         // and pending child stream before any later collision
                         // path can reuse them.
                         if let Some(managed) = self.peers.get(&peer) {
-                            managed.handle.abort_for_transport_safety();
+                            managed.handle().abort_for_transport_safety();
                             if let Some(pending) = &managed.pending_inbound {
                                 pending.handle.abort_for_transport_safety();
                             }
@@ -1023,7 +1024,7 @@ impl PeerManager {
                 self.tcp_ao_rotation.last_error = Some(format!(
                     "global generation stopped after peer {peer:?} failed: {error}"
                 ));
-                for (candidate_peer, candidate) in &mut self.peers {
+                for (candidate_peer, candidate) in self.peers.iter_mut() {
                     if candidate.tcp_ao_rotation.desired != generation {
                         continue;
                     }
@@ -1926,30 +1927,32 @@ mod tests {
         transport.tcp_ao = Some(keyring);
         manager.peers.insert(
             peer.clone(),
-            ManagedPeer {
-                policy_known_down: false,
+            ManagedPeer::new(
                 handle,
                 session_id,
-                remote_asn: 65_002,
-                description: address.to_string(),
-                peer_group: None,
-                enabled: true,
-                hold_time: Some(90),
-                max_prefixes: None,
-                max_prefix_restart_seconds: None,
-                transport_config: transport,
-                import_policy: None,
-                export_policy: None,
-                pending_inbound: None,
-                is_dynamic: false,
-                rfc8212_external: false,
-                tcp_ao_protected: true,
-                tcp_ao_rotation: TcpAoRotationStatus::default(),
-                accepted_dynamic_range: None,
-                pending_refresh: false,
-                pending_export_apply: false,
-                advertise_graceful_shutdown: false,
-            },
+                ManagedPeerState {
+                    policy_known_down: false,
+                    remote_asn: 65_002,
+                    description: address.to_string(),
+                    peer_group: None,
+                    enabled: true,
+                    hold_time: Some(90),
+                    max_prefixes: None,
+                    max_prefix_restart_seconds: None,
+                    transport_config: transport,
+                    import_policy: None,
+                    export_policy: None,
+                    pending_inbound: None,
+                    is_dynamic: false,
+                    rfc8212_external: false,
+                    tcp_ao_protected: true,
+                    tcp_ao_rotation: TcpAoRotationStatus::default(),
+                    accepted_dynamic_range: None,
+                    pending_refresh: false,
+                    pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
+                },
+            ),
         );
         manager.register_session(session_id, &peer);
         peer
@@ -2594,8 +2597,8 @@ mod tests {
         // B dropped its reset acknowledgement. Without the coarse abort
         // backstop, A's successfully mutated stream could remain live and be
         // reused after a terminal observation failure.
-        assert!(manager.peers[&peer_a].handle.is_finished());
-        assert!(manager.peers[&peer_b].handle.is_finished());
+        assert!(manager.peers[&peer_a].handle().is_finished());
+        assert!(manager.peers[&peer_b].handle().is_finished());
     }
 
     #[tokio::test]

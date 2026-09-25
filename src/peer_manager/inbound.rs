@@ -10,6 +10,7 @@ use rustbgpd_transport::{
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
+use super::ManagedPeerState;
 use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
     TcpAoDesiredInventory,
@@ -31,7 +32,7 @@ fn notification_backoff_holds_inbound(state: &PeerSessionState) -> bool {
 }
 
 fn accepted_selected_owner(
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
 ) -> rustbgpd_transport::listener::TcpAoSelectedOwner {
     if let Some(range) = managed.accepted_dynamic_range.as_ref() {
         rustbgpd_transport::listener::TcpAoSelectedOwner {
@@ -292,7 +293,7 @@ impl PeerManager {
                     key.address == ip
                         && self
                             .peers
-                            .get(*key)
+                            .get(key)
                             .and_then(|managed| managed.transport_config.peer_scope_id)
                             == Some(v6.scope_id())
                 })
@@ -544,39 +545,41 @@ impl PeerManager {
                     return;
                 };
 
-                let managed = ManagedPeer {
-                    policy_known_down: false,
+                let managed = ManagedPeer::new(
                     handle,
                     session_id,
-                    remote_asn,
-                    description,
-                    peer_group: Some(peer_group_name),
-                    enabled: true,
-                    hold_time: cfg.hold_time,
-                    max_prefixes: cfg.max_prefixes,
-                    max_prefix_restart_seconds: cfg.max_prefix_restart_seconds,
-                    transport_config: transport,
-                    import_policy,
-                    export_policy,
-                    pending_inbound: None,
-                    is_dynamic: true,
-                    rfc8212_external,
-                    tcp_ao_protected,
-                    tcp_ao_rotation: if tcp_ao_protected {
-                        self.tcp_ao_rotation.clone()
-                    } else {
-                        rustbgpd_transport::TcpAoRotationStatus {
-                            desired: accepted_generation,
-                            applied: accepted_generation,
-                            phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
-                            last_error: None,
-                        }
+                    ManagedPeerState {
+                        policy_known_down: false,
+                        remote_asn,
+                        description,
+                        peer_group: Some(peer_group_name),
+                        enabled: true,
+                        hold_time: cfg.hold_time,
+                        max_prefixes: cfg.max_prefixes,
+                        max_prefix_restart_seconds: cfg.max_prefix_restart_seconds,
+                        transport_config: transport,
+                        import_policy,
+                        export_policy,
+                        pending_inbound: None,
+                        is_dynamic: true,
+                        rfc8212_external,
+                        tcp_ao_protected,
+                        tcp_ao_rotation: if tcp_ao_protected {
+                            self.tcp_ao_rotation.clone()
+                        } else {
+                            rustbgpd_transport::TcpAoRotationStatus {
+                                desired: accepted_generation,
+                                applied: accepted_generation,
+                                phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+                                last_error: None,
+                            }
+                        },
+                        accepted_dynamic_range: Some(accepted_dynamic_range),
+                        pending_refresh: false,
+                        pending_export_apply: false,
+                        advertise_graceful_shutdown,
                     },
-                    accepted_dynamic_range: Some(accepted_dynamic_range),
-                    pending_refresh: false,
-                    pending_export_apply: false,
-                    advertise_graceful_shutdown,
-                };
+                );
                 let peer_key = dynamic_peer_key;
                 self.peers.insert(peer_key.clone(), managed);
                 self.register_session(session_id, &peer_key);
@@ -651,7 +654,7 @@ impl PeerManager {
             return;
         }
 
-        let Some(managed) = self.peers.get_mut(&peer_key) else {
+        let Some(managed) = self.peers.get(&peer_key) else {
             return;
         };
 
@@ -659,7 +662,7 @@ impl PeerManager {
             info!(peer = %peer_addr, "inbound connection for disabled peer, dropping");
             return;
         }
-        let queried_session_id = managed.session_id;
+        let queried_session_id = managed.session_id();
 
         // Bounded so an inbound TCP arriving during a TCP-back-pressure
         // wedge on the existing session can't park the peer-manager actor
@@ -680,7 +683,11 @@ impl PeerManager {
         //   genuine `Idle` arm. Losing one inbound attempt is cheap;
         //   tearing down an Established session on a transient stall is
         //   not.
-        let current_state = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
+        let current_state = match managed
+            .handle()
+            .query_state_outcome(PEER_QUERY_TIMEOUT)
+            .await
+        {
             StateQueryOutcome::State(state) => Some(state),
             StateQueryOutcome::SessionGone => None,
             StateQueryOutcome::TimedOut => {
@@ -705,7 +712,7 @@ impl PeerManager {
                 // generation in the narrow query/notification race.
                 self.drain_ready_session_notifications().await;
                 if !self.peers.get(&peer_key).is_some_and(|managed| {
-                    managed.enabled && managed.session_id == queried_session_id
+                    managed.enabled && managed.session_id() == queried_session_id
                 }) {
                     info!(
                         peer = %peer_addr,
@@ -880,7 +887,11 @@ impl PeerManager {
         let peer_addr = peer_key.address;
         let managed = self.peers.get(peer_key)?;
 
-        let primary = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
+        let primary = match managed
+            .handle()
+            .query_state_outcome(PEER_QUERY_TIMEOUT)
+            .await
+        {
             StateQueryOutcome::State(state) => Some(state),
             // The primary task has exited: it has no connection either.
             StateQueryOutcome::SessionGone => None,
@@ -1035,14 +1046,11 @@ impl PeerManager {
         &mut self,
         peer_key: &PeerKey,
     ) -> Option<(PeerHandle, u64, u64)> {
-        let (old_handle, old_session_id, new_session_id) = {
-            let managed = self.peers.get_mut(peer_key)?;
-            let pending = managed.pending_inbound.take()?;
-            let old_handle = std::mem::replace(&mut managed.handle, pending.handle);
-            let old_session_id = managed.session_id;
-            managed.session_id = pending.session_id;
-            (old_handle, old_session_id, pending.session_id)
-        };
+        let pending = self.peers.get_mut(peer_key)?.pending_inbound.take()?;
+        let new_session_id = pending.session_id;
+        let (old_handle, old_session_id) =
+            self.peers
+                .replace_handle(peer_key, pending.handle, new_session_id)?;
         self.register_session(new_session_id, peer_key);
         Some((old_handle, old_session_id, new_session_id))
     }
@@ -1113,17 +1121,17 @@ impl PeerManager {
         let Some(managed) = self.peers.get(peer_key) else {
             return;
         };
-        if managed.session_id != expected_session_id {
+        if managed.session_id() != expected_session_id {
             warn!(
                 peer = %peer_key.address,
                 expected_session_id,
-                current_session_id = managed.session_id,
+                current_session_id = managed.session_id(),
                 "skipping stale max-prefix metric ownership transfer"
             );
             return;
         }
         if let Err(error) = managed
-            .handle
+            .handle()
             .activate_max_prefix_metrics_timeout(
                 primary_notification_failures,
                 PEER_LIFECYCLE_COMMAND_TIMEOUT,
@@ -1166,8 +1174,8 @@ impl PeerManager {
         } else {
             None
         };
-        let Some((old_handle, old_session_id)) = ({
-            let Some(managed) = self.peers.get_mut(&peer_key) else {
+        let replacement = {
+            let Some(managed) = self.peers.get(&peer_key) else {
                 return;
             };
 
@@ -1182,32 +1190,30 @@ impl PeerManager {
             if let Some(keyring) = projected_keyring {
                 transport_config.tcp_ao = Some(keyring);
             }
-            let old_session_id = managed.session_id;
-            let old_handle = std::mem::replace(
-                &mut managed.handle,
-                PeerHandle::spawn_inbound_at_tcp_ao_generation(
-                    transport_config,
-                    self.metrics.clone(),
-                    self.rib_tx.clone(),
-                    managed.import_policy.clone(),
-                    managed.export_policy.clone(),
-                    stream,
-                    Some(self.session_notify_tx.clone()),
-                    Some(self.session_notification_event_tx.clone()),
-                    Some(self.session_lifecycle_tx.clone()),
-                    self.bmp_tx.clone(),
-                    self.validation_rx.clone(),
-                    advertise_graceful_shutdown,
-                    SessionIdentity::primary(session_id),
-                    self.transport_event_sink.clone(),
-                    tcp_ao_info,
-                    tcp_ao_selected_owner,
-                    tcp_ao_generation,
-                ),
-            );
-            managed.session_id = session_id;
-            Some((old_handle, old_session_id))
-        }) else {
+            PeerHandle::spawn_inbound_at_tcp_ao_generation(
+                transport_config,
+                self.metrics.clone(),
+                self.rib_tx.clone(),
+                managed.import_policy.clone(),
+                managed.export_policy.clone(),
+                stream,
+                Some(self.session_notify_tx.clone()),
+                Some(self.session_notification_event_tx.clone()),
+                Some(self.session_lifecycle_tx.clone()),
+                self.bmp_tx.clone(),
+                self.validation_rx.clone(),
+                advertise_graceful_shutdown,
+                SessionIdentity::primary(session_id),
+                self.transport_event_sink.clone(),
+                tcp_ao_info,
+                tcp_ao_selected_owner,
+                tcp_ao_generation,
+            )
+        };
+        let Some((old_handle, old_session_id)) =
+            self.peers
+                .replace_handle(&peer_key, replacement, session_id)
+        else {
             return;
         };
         self.register_session(session_id, &peer_key);
@@ -1232,7 +1238,7 @@ impl PeerManager {
             return;
         }
         if let Err(e) = managed
-            .handle
+            .handle()
             .start_inbound_timeout(notification_idle_failures, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
         {

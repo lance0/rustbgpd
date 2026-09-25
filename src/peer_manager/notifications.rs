@@ -7,14 +7,17 @@ use rustbgpd_transport::{
 };
 use tracing::{debug, info, warn};
 
-use super::PeerManager;
+use super::{ManagedPeer, PeerManager};
 
 impl PeerManager {
     /// A failed Stop enqueue cannot leave a candidate's sibling primary live:
     /// abort it, fence its old RIB ownership, and install a fresh disabled Idle
     /// actor so the max-prefix latch remains fail-closed but explicit Enable is
     /// still a usable recovery operation.
-    async fn replace_unstoppable_primary(&mut self, peer_key: &rustbgpd_api::peer_types::PeerKey) {
+    pub(super) async fn replace_unstoppable_primary(
+        &mut self,
+        peer_key: &rustbgpd_api::peer_types::PeerKey,
+    ) {
         let Some((
             old_session_id,
             transport,
@@ -24,7 +27,7 @@ impl PeerManager {
             tcp_ao_generation,
         )) = self.peers.get(peer_key).map(|managed| {
             (
-                managed.session_id,
+                managed.session_id(),
                 managed.transport_config.clone(),
                 managed.import_policy.clone(),
                 managed.export_policy.clone(),
@@ -53,11 +56,12 @@ impl PeerManager {
             self.transport_event_sink.clone(),
             tcp_ao_generation,
         );
-        let Some(managed) = self.peers.get_mut(peer_key) else {
+        let Some((aborted, _)) = self
+            .peers
+            .replace_handle(peer_key, replacement, new_session_id)
+        else {
             return;
         };
-        let aborted = std::mem::replace(&mut managed.handle, replacement);
-        managed.session_id = new_session_id;
         // Join cancellation before publishing PeerDown. Without this strict
         // ordering the old actor could complete an in-flight RIB send after the
         // fence and repopulate routes under its now-unregistered generation.
@@ -89,7 +93,7 @@ impl PeerManager {
         managed.pending_inbound.as_ref()?;
         Some(
             managed
-                .handle
+                .handle()
                 .query_state_outcome(super::PEER_QUERY_TIMEOUT)
                 .await,
         )
@@ -124,7 +128,7 @@ impl PeerManager {
                     return;
                 };
                 let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
-                    m.session_id == session_id
+                    m.session_id() == session_id
                         || m.pending_inbound
                             .as_ref()
                             .is_some_and(|p| p.session_id == session_id)
@@ -179,7 +183,7 @@ impl PeerManager {
                 let current_primary = self
                     .peers
                     .get(&peer_key)
-                    .is_some_and(|m| m.session_id == session_id);
+                    .is_some_and(|m| m.session_id() == session_id);
                 if !current_primary {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring stale BackToIdle notification");
                     return;
@@ -200,8 +204,9 @@ impl PeerManager {
                     // when handle_inbound recreates the ManagedPeer.
                     self.dead_letter_pending_for(peer_addr);
                     info!(peer = %peer_addr, "dynamic peer session went idle, removing");
-                    if let Some(mut managed) = self.peers.remove(&peer_key) {
-                        let primary_session_id = managed.session_id;
+                    if let Some(managed) = self.peers.remove(&peer_key) {
+                        let (primary_handle, primary_session_id, mut managed) =
+                            managed.into_parts();
                         self.retiring_sessions
                             .insert(primary_session_id, peer_key.clone());
                         if let Some(pending) = managed.pending_inbound.take() {
@@ -219,7 +224,7 @@ impl PeerManager {
                             .quiesce_retiring_session(
                                 &peer_key,
                                 primary_session_id,
-                                managed.handle,
+                                primary_handle,
                                 "BackToIdle dynamic primary",
                                 false,
                             )
@@ -231,7 +236,7 @@ impl PeerManager {
                             // recovery target instead of auto-removing the peer
                             // and making explicit Enable impossible.
                             let session_id = self.allocate_session_id();
-                            managed.handle = PeerHandle::spawn_at_tcp_ao_generation(
+                            let handle = PeerHandle::spawn_at_tcp_ao_generation(
                                 managed.transport_config.clone(),
                                 self.metrics.clone(),
                                 self.rib_tx.clone(),
@@ -247,9 +252,11 @@ impl PeerManager {
                                 self.transport_event_sink.clone(),
                                 managed.tcp_ao_rotation.applied,
                             );
-                            managed.session_id = session_id;
                             managed.enabled = false;
-                            self.peers.insert(peer_key.clone(), managed);
+                            self.peers.insert(
+                                peer_key.clone(),
+                                ManagedPeer::new(handle, session_id, managed),
+                            );
                             self.register_session(session_id, &peer_key);
                             self.seed_peer_truth_metrics(&peer_key, false);
                             self.publish_peer_info_metric(&peer_key);
@@ -350,7 +357,7 @@ impl PeerManager {
                     return;
                 };
                 let currently_owned = self.peers.get(&peer_key).is_some_and(|managed| {
-                    managed.session_id == session_id
+                    managed.session_id() == session_id
                         || managed
                             .pending_inbound
                             .as_ref()
@@ -391,7 +398,7 @@ impl PeerManager {
                 // InboundCandidate after promotion. Current ownership is
                 // therefore fenced exclusively by the manager's session IDs.
                 let currently_owned = self.peers.get(&peer_key).is_some_and(|managed| {
-                    managed.session_id == session_id
+                    managed.session_id() == session_id
                         || managed
                             .pending_inbound
                             .as_ref()
@@ -442,7 +449,7 @@ impl PeerManager {
                 // manager latch wins the cross-channel race.
                 if let Some(managed) = self.peers.get(&peer_key)
                     && let Err(stop_error) = managed
-                        .handle
+                        .handle()
                         .stop_timeout(None, super::PEER_LIFECYCLE_COMMAND_TIMEOUT)
                         .await
                 {
@@ -524,7 +531,7 @@ impl PeerManager {
             return;
         };
         let matches_current = self.peers.get(&peer_key).is_some_and(|m| {
-            m.session_id == session_id
+            m.session_id() == session_id
                 || m.pending_inbound
                     .as_ref()
                     .is_some_and(|p| p.session_id == session_id)

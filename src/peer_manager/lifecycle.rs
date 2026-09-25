@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::policy_admin::apply_config_event;
 
+use super::ManagedPeerState;
 use super::{
     ManagedPeer, OperatorReadAdmission, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_POLICY_UPDATE_TIMEOUT,
     PeerManager, PeerShutdownOutcome,
@@ -119,7 +120,7 @@ impl PeerManager {
             return;
         };
         if let Err(error) = managed
-            .handle
+            .handle()
             .activate_max_prefix_metrics_timeout(0, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
         {
@@ -241,7 +242,7 @@ impl PeerManager {
         }
     }
 
-    pub(super) fn dynamic_restart_policy_still_current(&self, managed: &ManagedPeer) -> bool {
+    pub(super) fn dynamic_restart_policy_still_current(&self, managed: &ManagedPeerState) -> bool {
         if !managed.is_dynamic {
             return true;
         }
@@ -347,7 +348,7 @@ impl PeerManager {
                 .peers
                 .get(&peer)
                 .expect("validated above")
-                .handle
+                .handle()
                 .commands_sender();
             starts.push((peer, commands));
         }
@@ -465,7 +466,7 @@ impl PeerManager {
 
     pub(super) fn removed_peer_config(
         peer: &PeerKey,
-        managed: &ManagedPeer,
+        managed: &ManagedPeerState,
     ) -> PeerManagerNeighborConfig {
         let tc = &managed.transport_config;
         PeerManagerNeighborConfig {
@@ -589,11 +590,11 @@ impl PeerManager {
             )));
         }
 
-        let previous_config = std::mem::replace(&mut self.current_config, next_config);
+        let previous_config = self.replace_current_config(next_config);
         match self.add_peer(config, false).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.current_config = previous_config;
+                self.replace_current_config(previous_config);
                 if let Some(effect) = &mut failure_effect {
                     **effect = RuntimeCreatePeerFailureEffect::FullyCompensated;
                 }
@@ -756,45 +757,47 @@ impl PeerManager {
         let tcp_ao_protected = transport.tcp_ao.is_some();
         self.peers.insert(
             peer_key.clone(),
-            ManagedPeer {
-                policy_known_down: false,
+            ManagedPeer::new(
                 handle,
                 session_id,
-                remote_asn,
-                description,
-                peer_group,
-                enabled,
-                hold_time,
-                max_prefixes,
-                max_prefix_restart_seconds: config.max_prefix_restart_seconds,
-                transport_config: transport,
-                import_policy,
-                export_policy,
-                pending_inbound: None,
-                is_dynamic: false,
-                // ADR-0112: static neighbors only — this path never accepts a
-                // dynamic range's child, so the configured `remote_asn` is
-                // still the authoritative classification input.
-                rfc8212_external: self.current_config.rfc8212_external_asn(remote_asn),
-                tcp_ao_protected,
-                tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
-                    desired: self.tcp_ao_generation,
-                    applied: self.tcp_ao_generation,
-                    phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
-                    last_error: None,
+                ManagedPeerState {
+                    policy_known_down: false,
+                    remote_asn,
+                    description,
+                    peer_group,
+                    enabled,
+                    hold_time,
+                    max_prefixes,
+                    max_prefix_restart_seconds: config.max_prefix_restart_seconds,
+                    transport_config: transport,
+                    import_policy,
+                    export_policy,
+                    pending_inbound: None,
+                    is_dynamic: false,
+                    // ADR-0112: static neighbors only — this path never accepts a
+                    // dynamic range's child, so the configured `remote_asn` is
+                    // still the authoritative classification input.
+                    rfc8212_external: self.current_config.rfc8212_external_asn(remote_asn),
+                    tcp_ao_protected,
+                    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus {
+                        desired: self.tcp_ao_generation,
+                        applied: self.tcp_ao_generation,
+                        phase: rustbgpd_transport::TcpAoRotationPhase::Idle,
+                        last_error: None,
+                    },
+                    accepted_dynamic_range: None,
+                    pending_refresh: false,
+                    pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
                 },
-                accepted_dynamic_range: None,
-                pending_refresh: false,
-                pending_export_apply: false,
-                advertise_graceful_shutdown: false,
-            },
+            ),
         );
         self.register_session(session_id, &peer_key);
         self.sync_owned_session_metrics(&peer_key).await;
         self.publish_peer_info_metric(&peer_key);
 
         if let Some(next_config) = next_config {
-            self.current_config = next_config;
+            self.replace_current_config(next_config);
         }
         // ADR-0112: the peer is registered with its resolved chains, so the
         // directional gauges have something to read.
@@ -1181,7 +1184,7 @@ impl PeerManager {
                 .get(&peer)
                 .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
             managed
-                .handle
+                .handle()
                 .update_runtime_config_timeout(
                     config.max_prefixes,
                     config.max_prefixes_ipv4,
@@ -1404,8 +1407,8 @@ impl PeerManager {
         // Internal cohort compensation must build from the accepted generation,
         // even while the enclosing reload still owns the candidate snapshot.
         let prior_bfd_lookup = self.set_bfd_rollback_lookup(true);
-        let candidate = rollback_config
-            .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
+        let candidate =
+            rollback_config.map(|prior| Box::new(self.replace_current_config(prior.clone())));
         // Replays the captured prior configs in reverse of the apply order.
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
@@ -1425,7 +1428,7 @@ impl PeerManager {
             }
         }
         if let Some(candidate) = candidate {
-            self.current_config = *candidate;
+            self.replace_current_config(*candidate);
         }
         self.set_bfd_rollback_lookup(prior_bfd_lookup);
         if failures.is_empty() {
@@ -1550,7 +1553,7 @@ impl PeerManager {
                 };
                 match pending {
                     Ok(()) => managed
-                        .handle
+                        .handle()
                         .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
                         .await
                         .map_err(|error| format!("primary session: {error}")),
@@ -1558,7 +1561,7 @@ impl PeerManager {
                 }
             } else {
                 managed
-                    .handle
+                    .handle()
                     .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
                     .await
                     .map_err(|error| error.to_string())
@@ -1595,8 +1598,8 @@ impl PeerManager {
         rollback_config: Option<&crate::config::Config>,
     ) -> Result<(), PeerLifecycleError> {
         let prior_bfd_lookup = self.set_bfd_rollback_lookup(true);
-        let candidate = rollback_config
-            .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
+        let candidate =
+            rollback_config.map(|prior| Box::new(self.replace_current_config(prior.clone())));
         let restored = async {
             if self.peers.contains_key(&peer) {
                 self.delete_peer_checked(
@@ -1615,7 +1618,7 @@ impl PeerManager {
         }
         .await;
         if let Some(candidate) = candidate {
-            self.current_config = *candidate;
+            self.replace_current_config(*candidate);
         }
         self.set_bfd_rollback_lookup(prior_bfd_lookup);
         restored
@@ -1726,7 +1729,7 @@ impl PeerManager {
                 .get(&peer)
                 .map(|managed| {
                     (
-                        managed.session_id,
+                        managed.session_id(),
                         managed
                             .pending_inbound
                             .as_ref()
@@ -1765,7 +1768,7 @@ impl PeerManager {
                 .peers
                 .get(&peer)
                 .expect("primary session remains owned before purge")
-                .handle
+                .handle()
                 .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
                 .await;
             if let Err(error) = primary_result {
@@ -1794,12 +1797,12 @@ impl PeerManager {
             }
         }
 
-        let mut managed = self
+        let (primary_handle, primary_session_id, mut managed) = self
             .peers
             .remove(&peer)
-            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?
+            .into_parts();
         let removed_config = Self::removed_peer_config(&peer, &managed);
-        let primary_session_id = managed.session_id;
         self.retiring_sessions
             .insert(primary_session_id, peer.clone());
         if let Some(pending) = managed.pending_inbound.take() {
@@ -1818,7 +1821,7 @@ impl PeerManager {
             .quiesce_retiring_session(
                 &peer,
                 primary_session_id,
-                managed.handle,
+                primary_handle,
                 "delete primary",
                 false,
             )
@@ -1835,7 +1838,7 @@ impl PeerManager {
 
         let peer_for_reap = peer.clone();
         if let Some(next_config) = next_config {
-            self.current_config = next_config;
+            self.replace_current_config(next_config);
         }
 
         // ADR-0067 step 4: drain the deleted peer's BFD session.
@@ -1894,12 +1897,11 @@ impl PeerManager {
         // (A freshly-restarted BFD session begins Down with no transition, so an
         // unconditional start here would establish BGP with BFD down.)
         let withhold = self.bfd_should_withhold(&address);
-        let Some(managed) = self.peers.get_mut(&peer) else {
+        let Some((handle, managed)) = self.peers.get_mut_with_handle(&peer) else {
             return Err(PeerLifecycleError::NotFound(peer));
         };
         if !withhold {
-            managed
-                .handle
+            handle
                 .start()
                 .await
                 .map_err(|e| PeerLifecycleError::Internal(format!("failed to start peer: {e}")))?;
@@ -1956,10 +1958,10 @@ impl PeerManager {
         }
         let managed = self
             .peers
-            .get_mut(&peer)
+            .get(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed
-            .handle
+            .handle()
             .stop_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
             .map_err(|e| PeerLifecycleError::Internal(format!("failed to stop peer: {e}")))?;
@@ -2011,10 +2013,10 @@ impl PeerManager {
         }
         let managed = self
             .peers
-            .get_mut(&peer)
+            .get(&peer)
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
         managed
-            .handle
+            .handle()
             .administrative_reset_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
             .map_err(|e| PeerLifecycleError::Internal(format!("failed to reset peer: {e}")))?;
@@ -2082,7 +2084,7 @@ impl PeerManager {
             // will pick up the toggle from ManagedPeer at spawn time.
             if let Some(managed) = self.peers.get(peer)
                 && let Err(e) = managed
-                    .handle
+                    .handle()
                     .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
                     .await
             {
@@ -2242,7 +2244,7 @@ impl PeerManager {
             )));
             return;
         }
-        let commands = managed.handle.commands_sender();
+        let commands = managed.handle().commands_sender();
         let deadline = tokio::time::Instant::now() + super::RIB_REPLY_TIMEOUT;
         // Cancellation and expiry belong to the step, not the read-admitting
         // helper: a consumed read retains its own reply and deadline. When it
@@ -2306,7 +2308,7 @@ impl PeerManager {
         let mut refreshed = Vec::with_capacity(target_families.len());
         for (afi, safi) in &target_families {
             match managed
-                .handle
+                .handle()
                 .send_route_refresh_timeout(*afi, *safi, PEER_LIFECYCLE_COMMAND_TIMEOUT)
                 .await
             {

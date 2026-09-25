@@ -350,7 +350,7 @@ impl PeerManager {
 
         // 2. The candidate becomes the snapshot every later session
         //    construction reads (explain settings, registry, groups).
-        applied.prior_config = Some(std::mem::replace(&mut self.current_config, candidate));
+        applied.prior_config = Some(self.replace_current_config(candidate));
         self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
         self.metrics
             .set_dynamic_neighbor_capacity(self.dynamic_peer_count, self.dynamic_neighbor_limit);
@@ -728,7 +728,7 @@ impl PeerManager {
         // Rebuilt peers resolve global transport settings from this snapshot.
         // Restore it before any re-add, including diagnostic retention knobs.
         if let Some(prior_config) = applied.prior_config {
-            self.current_config = prior_config;
+            self.replace_current_config(prior_config);
             self.dynamic_neighbor_limit = self.current_config.effective_dynamic_neighbor_limit();
             self.metrics.set_dynamic_neighbor_capacity(
                 self.dynamic_peer_count,

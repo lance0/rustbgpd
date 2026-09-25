@@ -38,7 +38,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use arc_swap::ArcSwap;
 use sha2::{Digest, Sha256};
@@ -293,6 +293,43 @@ impl DatasetHandle {
                 .clone(),
         }
     }
+
+    /// [`Self::status`] for readers that must never wait on the owner: the
+    /// error lock is taken with `try_lock`, so a busy lock reports
+    /// [`TryLockError::WouldBlock`] instead of blocking the calling thread.
+    /// Generation and record count come from one load of the current
+    /// snapshot.
+    ///
+    /// # Errors
+    ///
+    /// `WouldBlock` while a refresh holds the error lock; `Poisoned` if a
+    /// writer panicked while holding it.
+    pub fn try_status(&self) -> Result<DatasetStatus, TryLockError<()>> {
+        let last_error = match self.last_error.try_lock() {
+            Ok(error) => error.clone(),
+            Err(TryLockError::WouldBlock) => return Err(TryLockError::WouldBlock),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(TryLockError::Poisoned(std::sync::PoisonError::new(())));
+            }
+        };
+        let snapshot = self.current.load();
+        Ok(DatasetStatus {
+            name: self.name.to_string(),
+            kind: self.kind,
+            generation: snapshot.generation,
+            records: snapshot.data.records(),
+            last_error,
+        })
+    }
+
+    /// Hold the refresh-error lock, as a refresh in progress does. Test
+    /// support for readers that must not wait on it.
+    #[doc(hidden)]
+    pub fn hold_error_lock_for_test(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.last_error
+            .lock()
+            .expect("dataset error mutex never poisoned")
+    }
 }
 
 /// Name → handle map a compile resolves `dataset` references through.
@@ -488,6 +525,23 @@ mod tests {
 
     fn asn_data(asns: &[u32]) -> DatasetData {
         DatasetData::Asn(AsnSet::new(asns.iter().copied()))
+    }
+
+    /// A held error lock makes `try_status` report `WouldBlock` rather than
+    /// wait; once released it reports the same status as `status`.
+    #[test]
+    fn try_status_never_waits_on_the_error_lock() {
+        let handle = DatasetHandle::new("customers", DatasetKind::Asn, asn_data(&[64500]));
+        handle.record_error("line 3: bad");
+        {
+            let _held = handle.hold_error_lock_for_test();
+            assert!(matches!(handle.try_status(), Err(TryLockError::WouldBlock)));
+        }
+        assert_eq!(handle.try_status().unwrap(), handle.status());
+        assert_eq!(
+            handle.try_status().unwrap().last_error.as_deref(),
+            Some("line 3: bad")
+        );
     }
 
     #[test]

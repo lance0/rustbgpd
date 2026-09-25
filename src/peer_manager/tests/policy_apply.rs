@@ -1078,7 +1078,7 @@ remote_asn = 65030
         "dynamic policy candidate",
     )
     .expect("test config must parse");
-    mgr.current_config = candidate;
+    mgr.replace_current_config(candidate);
 
     let peer = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 7));
     insert_test_managed_peer_with_asn(

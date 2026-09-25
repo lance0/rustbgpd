@@ -204,7 +204,7 @@ async fn inbound_admission_disabled_by_default_admits_rapid_dynamic_reaccepts() 
             mgr.peers.contains_key(&key(churny)),
             "cycle {cycle}: default config must admit every re-accept"
         );
-        let session_id = mgr.peers.get(&key(churny)).unwrap().session_id;
+        let session_id = mgr.peers.get(&key(churny)).unwrap().session_id();
         mgr.handle_session_notification(SessionNotification::BackToIdle {
             session_id,
             role: rustbgpd_transport::SessionRole::Primary,
@@ -262,7 +262,7 @@ async fn enabled_inbound_admission_rate_limits_dynamic_source_but_exempts_static
         mgr.peers.contains_key(&key(first_source)),
         "the first accept within burst must be admitted"
     );
-    let session_id = mgr.peers.get(&key(first_source)).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(first_source)).unwrap().session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -493,7 +493,7 @@ async fn fresh_dynamic_tcp_ao_inbound_seeds_selected_owner_keyring_for_manager_a
         .clone()
         .expect("ManagedPeer must retain the explicit direct-range keyring");
     assert_eq!(current_keyring.0.len(), 2);
-    let commands = dynamic_peer.handle.commands_sender();
+    let commands = dynamic_peer.handle().commands_sender();
     let mut desired_keyring = current_keyring.clone();
     desired_keyring.0[0].deprecated = true;
     desired_keyring.0[1].preferred = true;
@@ -538,7 +538,9 @@ async fn fresh_dynamic_tcp_ao_inbound_seeds_selected_owner_keyring_for_manager_a
     );
     assert!(!error.contains("lacks its current selected-owner keyring"));
 
-    manager.peers[&peer_key].handle.abort_for_transport_safety();
+    manager.peers[&peer_key]
+        .handle()
+        .abort_for_transport_safety();
     drop(client);
 }
 
@@ -660,7 +662,7 @@ async fn queued_dynamic_selection_accept_reconciles_metadata_and_rotation_status
         "a desired-generation accept must retain the in-progress global rotation truth"
     );
 
-    accepted_peer.handle.abort_for_transport_safety();
+    accepted_peer.handle().abort_for_transport_safety();
     drop(client);
 }
 
@@ -820,7 +822,7 @@ async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establi
 
     // Tear down — peer auto-removes, flags should land in the
     // dead-letter side table rather than evaporating.
-    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -910,7 +912,7 @@ async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish
         .expect("dynamic peer present")
         .advertise_graceful_shutdown = true;
 
-    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -1106,7 +1108,8 @@ async fn escalated_notification_backoff_drops_static_inbound_and_counts_it() {
 
     let managed = &mgr.peers[&key(peer_addr)];
     assert_eq!(
-        managed.session_id, 1,
+        managed.session_id(),
+        1,
         "the waiting session must not be replaced"
     );
     assert!(managed.pending_inbound.is_none());
@@ -1142,10 +1145,11 @@ async fn inbound_outside_escalated_backoff_is_accepted_and_keeps_the_streak() {
         assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
         let managed = &mgr.peers[&key(peer_addr)];
         assert_ne!(
-            managed.session_id, 1,
+            managed.session_id(),
+            1,
             "streak {failures}: inbound must replace the session"
         );
-        let replacement = managed.handle.query_state().await.unwrap();
+        let replacement = managed.handle().query_state().await.unwrap();
         assert_eq!(replacement.notification_idle_failures, failures);
         assert_eq!(
             inbound_drop_metric(&mgr.metrics, "notification_backoff"),
@@ -1194,7 +1198,7 @@ async fn escalated_notification_backoff_drops_pending_candidate() {
         mgr.handle_session_notification(notification).await;
 
         let managed = &mgr.peers[&key(peer_addr)];
-        assert_eq!(managed.session_id, 1, "BackToIdle={via_back_to_idle}");
+        assert_eq!(managed.session_id(), 1, "BackToIdle={via_back_to_idle}");
         assert!(managed.pending_inbound.is_none());
         assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
         assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
@@ -1243,7 +1247,7 @@ async fn promoted_candidate_inherits_the_primary_notification_streak() {
         };
         mgr.handle_session_notification(notification).await;
 
-        assert_eq!(mgr.peers[&key(peer_addr)].session_id, 2);
+        assert_eq!(mgr.peers[&key(peer_addr)].session_id(), 2);
         assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
         assert_eq!(candidate.activate.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1292,7 +1296,8 @@ async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
 
     let managed = &mgr.peers[&key(peer_addr)];
     assert_eq!(
-        managed.session_id, 1,
+        managed.session_id(),
+        1,
         "the unqueried primary keeps ownership"
     );
     assert!(managed.pending_inbound.is_none());

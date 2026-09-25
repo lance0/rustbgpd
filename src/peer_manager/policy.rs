@@ -29,8 +29,9 @@ use crate::policy_admin::{
     peer_group_references, policy_references,
 };
 
+use super::ManagedPeerState;
 use super::{
-    CLEAN_STATE_QUERY_WINDOW, ManagedPeer, OperatorReadAdmission, PEER_POLICY_UPDATE_TIMEOUT,
+    CLEAN_STATE_QUERY_WINDOW, OperatorReadAdmission, PEER_POLICY_UPDATE_TIMEOUT,
     PEER_QUERY_TIMEOUT, PeerManager, RIB_REPLY_TIMEOUT, lifecycle::PeerReshapeSnapshotOutcome,
 };
 
@@ -569,7 +570,7 @@ impl PeerManager {
         let Some(managed) = self.peers.get(peer_key) else {
             return Ok(false);
         };
-        let commands = managed.handle.commands_sender();
+        let commands = managed.handle().commands_sender();
         let state = self
             .await_with_readiness(
                 rustbgpd_transport::PeerHandle::query_state_outcome_with(
@@ -1264,7 +1265,7 @@ impl PeerManager {
                 .peers
                 .get(&peer_key)
                 .expect("locally eligible cohort peer exists")
-                .handle
+                .handle()
                 .commands_sender();
 
             let outcome = self
@@ -1630,7 +1631,7 @@ impl PeerManager {
                     .peers
                     .get(peer_key)
                     .expect("cohort peer existed before import hot-apply")
-                    .handle
+                    .handle()
                     .commands_sender();
                 let import_result = self
                     .hot_apply_session_policy(
@@ -1687,7 +1688,7 @@ impl PeerManager {
                 .peers
                 .get(peer_key)
                 .expect("cohort peer existed before export hot-apply")
-                .handle
+                .handle()
                 .commands_sender();
             let apply_result = self
                 .hot_apply_session_policy(
@@ -1710,7 +1711,7 @@ impl PeerManager {
                     .peers
                     .get(peer_key)
                     .expect("cohort peer existed while restoring failed export hot-apply")
-                    .handle
+                    .handle()
                     .commands_sender();
                 let failing_restore = self
                     .hot_apply_session_policy(
@@ -1733,7 +1734,7 @@ impl PeerManager {
                         .peers
                         .get(peer_key)
                         .expect("cohort peer existed while restoring acked import hot-apply")
-                        .handle
+                        .handle()
                         .commands_sender();
                     match self
                         .hot_apply_session_policy(
@@ -1762,7 +1763,7 @@ impl PeerManager {
                                 .peers
                                 .get(peer_key)
                                 .expect("cohort peer existed after import restore")
-                                .handle
+                                .handle()
                                 .commands_sender();
                             let established = self
                                 .await_with_readiness(
@@ -1955,7 +1956,7 @@ impl PeerManager {
                 .peers
                 .get(peer_key)
                 .expect("cohort peer existed before deferred refresh")
-                .handle
+                .handle()
                 .commands_sender();
             let state = if require_clean_convergence {
                 self.query_clean_session_state(
@@ -2718,7 +2719,7 @@ impl PeerManager {
             let Some(commands) = self
                 .peers
                 .get(peer_key)
-                .map(|managed| managed.handle.commands_sender())
+                .map(|managed| managed.handle().commands_sender())
             else {
                 continue;
             };
@@ -2877,7 +2878,7 @@ impl PeerManager {
             let Some(commands) = self
                 .peers
                 .get(peer_key)
-                .map(|managed| managed.handle.commands_sender())
+                .map(|managed| managed.handle().commands_sender())
             else {
                 continue;
             };
@@ -3062,7 +3063,7 @@ impl PeerManager {
             .peers
             .get(peer)
             .ok_or_else(|| format!("dataset dependent {peer} is no longer managed"))?
-            .handle
+            .handle()
             .commands_sender();
         match self
             .query_clean_session_state(commands, window, operator_reads)
@@ -3397,7 +3398,7 @@ impl PeerManager {
             false
         };
 
-        let Some(managed) = self.peers.get_mut(&peer_key) else {
+        let Some((handle, managed)) = self.peers.get_mut_with_handle(&peer_key) else {
             return Ok(());
         };
 
@@ -3462,8 +3463,7 @@ impl PeerManager {
                 RefreshFailureHandling::BestEffortRestorePrior { .. }
             );
         let import_apply_result = if import_changed || reassert_prior_import {
-            managed
-                .handle
+            handle
                 .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
                 .await
         } else {
@@ -3486,9 +3486,9 @@ impl PeerManager {
         if !import_apply_failed {
             self.drain_operator_queries(operator_reads).await;
         }
-        let managed = self
+        let (handle, managed) = self
             .peers
-            .get_mut(&peer_key)
+            .get_mut_with_handle(&peer_key)
             .expect("the owned policy update retains its managed peer");
 
         // A failed forward export command is not proof that the session kept
@@ -3504,8 +3504,7 @@ impl PeerManager {
                 RefreshFailureHandling::BestEffortRestorePrior { .. }
             );
         let export_apply_result = if export_changed || reassert_prior_export {
-            managed
-                .handle
+            handle
                 .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
                 .await
         } else {
@@ -3525,7 +3524,7 @@ impl PeerManager {
             false
         };
 
-        let commands = managed.handle.commands_sender();
+        let commands = handle.commands_sender();
         let state_reads = if import_apply_failed || export_apply_failed {
             OperatorReadAdmission::Fenced {
                 reason: "a failed session apply must retain its retry intent before reads resume",
@@ -4245,7 +4244,7 @@ impl PeerManager {
             }
         }
         self.metrics.record_policy_generation_loaded();
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         self.reconcile_stale_dynamic_max_prefix_restarts();
         Ok(applied.len())
     }
@@ -4253,7 +4252,7 @@ impl PeerManager {
     pub(super) fn policy_resolution_neighbor(
         config: &Config,
         address: IpAddr,
-        managed: &ManagedPeer,
+        managed: &ManagedPeerState,
     ) -> crate::config::Neighbor {
         config
             .neighbors
@@ -4414,7 +4413,7 @@ impl PeerManager {
         // alternative (shortcircuit on first failure with no rollback)
         // leaves successfully-updated peers running ahead of the
         // snapshot, which is the worse drift.
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         self.reconcile_stale_dynamic_max_prefix_restarts();
 
         if failures.is_empty() {
@@ -4506,7 +4505,7 @@ impl PeerManager {
             }
         }
 
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         self.reconcile_stale_dynamic_max_prefix_restarts();
 
         if failures.is_empty() {
@@ -4728,7 +4727,7 @@ impl PeerManager {
             .await
             .map_err(CatalogMutationError::from)?;
 
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         if let Some(group) = purge_dynamic_group.as_deref() {
             self.purge_dynamic_group_inheritors(group)
                 .await
@@ -4888,7 +4887,7 @@ impl PeerManager {
             }
         };
 
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         if let Some(group) = purge_dynamic_group.as_deref()
             && let Err(error) = self.purge_dynamic_group_inheritors(group).await
         {
@@ -4999,7 +4998,7 @@ impl PeerManager {
             }));
         }
 
-        self.current_config = next_config;
+        self.replace_current_config(next_config);
         self.sync_dynamic_max_prefix_restart_for_group(group);
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, members);

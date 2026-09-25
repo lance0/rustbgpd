@@ -7,7 +7,8 @@ use rustbgpd_transport::{TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, Tc
 
 use crate::config::Config;
 
-use super::{ManagedPeer, PeerManager};
+use super::ManagedPeerState;
+use super::PeerManager;
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
 pub(super) struct DynamicRange {
@@ -398,7 +399,7 @@ impl PeerManager {
 
     pub(super) fn dynamic_peer_still_allowed_by_current_ranges(
         &self,
-        managed: &ManagedPeer,
+        managed: &ManagedPeerState,
     ) -> bool {
         let Some(accepted) = managed.accepted_dynamic_range.as_ref() else {
             return false;
@@ -479,11 +480,12 @@ impl PeerManager {
 
         let mut removed = 0;
         for peer_key in stale {
-            let Some(mut managed) = self.peers.remove(&peer_key) else {
+            let Some(managed) = self.peers.remove(&peer_key) else {
                 continue;
             };
+            let (handle, session_id, mut managed) = managed.into_parts();
             self.remove_max_prefix_latch(&peer_key);
-            self.unregister_session(managed.session_id);
+            self.unregister_session(session_id);
             if let Some(pending) = managed.pending_inbound.take() {
                 self.unregister_session(pending.session_id);
                 let _ = self
@@ -495,11 +497,7 @@ impl PeerManager {
                     .await;
             }
             let _ = self
-                .shutdown_handle_bounded(
-                    peer_key.address,
-                    "dynamic rollback primary",
-                    managed.handle,
-                )
+                .shutdown_handle_bounded(peer_key.address, "dynamic rollback primary", handle)
                 .await;
             self.reap_deleted_peer_metric_series_for_key(&peer_key)
                 .await;

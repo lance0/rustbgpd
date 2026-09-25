@@ -29,6 +29,7 @@ mod global_service;
 pub mod gnmi_dialout;
 mod gnmi_service;
 pub mod health_probe;
+pub mod import_roster;
 mod injection_service;
 pub mod json_format;
 mod neighbor_service;

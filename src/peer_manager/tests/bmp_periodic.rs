@@ -430,7 +430,7 @@ async fn periodic_reports_preserve_order_selection_and_output_drop_counters() {
             }
         }
         for (_, managed) in manager.peers.drain() {
-            managed.handle.shutdown().await.unwrap().unwrap();
+            managed.into_parts().0.shutdown().await.unwrap().unwrap();
         }
         drop(manager);
         rib.await.unwrap();

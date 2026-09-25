@@ -189,21 +189,24 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
                 PeerManagerOperatorQuery::ListPeers { reply } => {
                     let _ = reply.send(vec![crate::test_support::peer_info(peer)]);
                 }
-                PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
-                    let _ = reply.send(address == peer);
-                }
-                PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
-                    let _ = reply.send(Vec::new());
-                }
                 _ => panic!("unexpected operator query"),
             }
         }
     });
+    let (_publication, receiver) = tokio::sync::watch::channel(None);
+    let roster = crate::import_roster::test_support::publisher(
+        vec![crate::import_roster::test_support::peer(
+            &peer.to_string(),
+            receiver,
+        )],
+        Vec::new(),
+    );
     let policy = Arc::new(
         PolicyService::new(AccessMode::ReadOnly, peer_tx.clone(), None, None)
             .with_rib_query(query_tx.clone())
             .with_operator_queries(operator_tx.clone())
-            .with_rib_summary_queries(summary_tx.clone()),
+            .with_rib_summary_queries(summary_tx.clone())
+            .with_import_roster(roster.reader()),
     );
     let neighbor = Arc::new(
         NeighborService::new(65000, AccessMode::ReadOnly, peer_tx, query_tx.clone(), None)

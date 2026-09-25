@@ -4578,6 +4578,9 @@ async fn run<T>(
     } else {
         peer_mgr
     };
+    // GetPolicyStats reads the peer manager's published import roster
+    // (ADR-0136) instead of queueing on its operator lane.
+    let import_roster = peer_mgr.import_roster();
     // Keep the coupling alive with no startup members so SIGHUP can enable BFD.
     let configured = bfd_initial
         .sessions
@@ -5379,6 +5382,7 @@ async fn run<T>(
         start_time,
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
+        import_roster,
         rib_readiness_tx: rib_readiness_tx.clone(),
         rib_summary_tx,
         validation_snapshot: {

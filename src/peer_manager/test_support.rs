@@ -7,7 +7,7 @@ use rustbgpd_transport::handle::MaxPrefixState;
 use rustbgpd_transport::{PeerCommand, PeerHandle, PeerSessionState};
 use tokio::sync::{Notify, mpsc};
 
-use super::{ManagedPeer, PeerManager};
+use super::{ManagedPeer, ManagedPeerState, PeerManager};
 use crate::config::ResolvedNeighbor;
 
 #[derive(Clone, Default)]
@@ -140,30 +140,32 @@ impl PeerManager {
         let tcp_ao_protected = resolved.transport_config.tcp_ao.is_some();
         self.peers.insert(
             key.clone(),
-            ManagedPeer {
-                policy_known_down: false,
+            ManagedPeer::new(
                 handle,
                 session_id,
-                remote_asn,
-                description: resolved.label,
-                peer_group: resolved.peer_group,
-                enabled: true,
-                hold_time: Some(hold_time),
-                max_prefixes,
-                max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
-                transport_config: resolved.transport_config,
-                import_policy: resolved.import_policy,
-                export_policy: resolved.export_policy,
-                pending_inbound: None,
-                is_dynamic: false,
-                rfc8212_external: resolved.rfc8212_external,
-                tcp_ao_protected,
-                tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
-                accepted_dynamic_range: None,
-                pending_refresh: false,
-                pending_export_apply: false,
-                advertise_graceful_shutdown: false,
-            },
+                ManagedPeerState {
+                    policy_known_down: false,
+                    remote_asn,
+                    description: resolved.label,
+                    peer_group: resolved.peer_group,
+                    enabled: true,
+                    hold_time: Some(hold_time),
+                    max_prefixes,
+                    max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
+                    transport_config: resolved.transport_config,
+                    import_policy: resolved.import_policy,
+                    export_policy: resolved.export_policy,
+                    pending_inbound: None,
+                    is_dynamic: false,
+                    rfc8212_external: resolved.rfc8212_external,
+                    tcp_ao_protected,
+                    tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
+                    accepted_dynamic_range: None,
+                    pending_refresh: false,
+                    pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
+                },
+            ),
         );
         self.register_session(session_id, &key);
         acks

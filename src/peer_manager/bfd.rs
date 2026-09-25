@@ -247,7 +247,7 @@ impl PeerManager {
             coupling.retries.insert(
                 peer,
                 BfdCommandRetry {
-                    session_id: managed.session_id,
+                    session_id: managed.session_id(),
                     revision: coupling.configured.get(&peer).map(|params| params.revision),
                     start,
                 },
@@ -288,8 +288,8 @@ impl PeerManager {
             let commands = self
                 .unique_peer_key_for_address(peer)
                 .and_then(|key| self.peers.get(&key))
-                .filter(|managed| managed.enabled && managed.session_id == retry.session_id)
-                .map(|managed| managed.handle.commands_sender());
+                .filter(|managed| managed.enabled && managed.session_id() == retry.session_id)
+                .map(|managed| managed.handle().commands_sender());
             let coupling = self.bfd_coupling.as_mut().expect("BFD retry owns coupling");
             coupling.retry_cursor = Some(peer);
             if events.is_some_and(|events| events.has_pending(peer)) {
@@ -332,7 +332,7 @@ impl PeerManager {
             .unique_peer_key_for_address(peer)
             .and_then(|key| self.peers.get(&key))
             .filter(|managed| managed.enabled)
-            .map(|managed| managed.handle.commands_sender())
+            .map(|managed| managed.handle().commands_sender())
         else {
             return Ok(());
         };
@@ -579,7 +579,7 @@ impl PeerManager {
                 let session_id = self
                     .unique_peer_key_for_address(state.peer)
                     .and_then(|key| self.peers.get(&key))
-                    .map(|managed| managed.session_id);
+                    .map(super::ManagedPeer::session_id);
                 let coupling = self
                     .bfd_coupling
                     .as_mut()
