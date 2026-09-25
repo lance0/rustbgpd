@@ -249,8 +249,11 @@ impl PeerManager {
             Ok(prepared) => prepared,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
         };
+        // One roster publication for the whole generation (ADR-0136).
+        let batch = self.peers.begin_batch();
         let outcome =
             Box::pin(self.apply_reload_generation_inner(candidate, actions, datasets)).await;
+        self.peers.end_batch(batch);
         if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
             if let Err(error) = self.commit_bfd_reload(prepared).await {
                 self.fence_bfd_reload().await;

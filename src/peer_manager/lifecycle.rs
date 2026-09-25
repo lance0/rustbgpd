@@ -1297,7 +1297,26 @@ impl PeerManager {
         }
     }
 
+    /// Reshape every target peer as one operation: one import-roster
+    /// publication for the whole cohort and its compensation.
     pub(super) async fn apply_peer_reshape_snapshot_classified(
+        &mut self,
+        targets: Vec<PeerManagerNeighborConfig>,
+        rollback_config: Option<&crate::config::Config>,
+        dataset_prior: &mut Option<crate::config::DatasetRollback>,
+    ) -> PeerReshapeSnapshotOutcome {
+        let batch = self.peers.begin_batch();
+        let result = Box::pin(self.apply_peer_reshape_snapshot_unbatched(
+            targets,
+            rollback_config,
+            dataset_prior,
+        ))
+        .await;
+        self.peers.end_batch(batch);
+        result
+    }
+
+    async fn apply_peer_reshape_snapshot_unbatched(
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
         rollback_config: Option<&crate::config::Config>,
@@ -1399,7 +1418,21 @@ impl PeerManager {
         PeerReshapeSnapshotOutcome::Success(priors)
     }
 
+    /// Restore reshape priors as one operation: one import-roster
+    /// publication for the whole sweep.
     pub(super) async fn restore_peer_reshape_priors(
+        &mut self,
+        priors: Vec<PeerManagerNeighborConfig>,
+        rollback_config: Option<&crate::config::Config>,
+    ) -> Result<(), PeerLifecycleError> {
+        let batch = self.peers.begin_batch();
+        let result =
+            Box::pin(self.restore_peer_reshape_priors_unbatched(priors, rollback_config)).await;
+        self.peers.end_batch(batch);
+        result
+    }
+
+    async fn restore_peer_reshape_priors_unbatched(
         &mut self,
         priors: Vec<PeerManagerNeighborConfig>,
         rollback_config: Option<&crate::config::Config>,

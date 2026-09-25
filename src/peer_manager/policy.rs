@@ -4597,7 +4597,11 @@ impl PeerManager {
     ) -> Result<(), CatalogMutationError> {
         // The body clones the running configuration onto its own stack frame;
         // boxing it keeps every caller's future under clippy's size ceiling.
-        Box::pin(self.apply_peer_group_change_inner(event, affected_peers)).await
+        // One import-roster publication for the whole group change.
+        let batch = self.peers.begin_batch();
+        let result = Box::pin(self.apply_peer_group_change_inner(event, affected_peers)).await;
+        self.peers.end_batch(batch);
+        result
     }
 
     async fn apply_peer_group_change_inner(
@@ -4751,7 +4755,11 @@ impl PeerManager {
         affected_peers: Vec<IpAddr>,
     ) -> OwnedCatalogMutationOutcome {
         // See `apply_peer_group_change`: boxed for the same stack-size reason.
-        Box::pin(self.apply_peer_group_change_owned_inner(event, affected_peers)).await
+        let batch = self.peers.begin_batch();
+        let result =
+            Box::pin(self.apply_peer_group_change_owned_inner(event, affected_peers)).await;
+        self.peers.end_batch(batch);
+        result
     }
 
     #[expect(

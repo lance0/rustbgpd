@@ -1351,8 +1351,10 @@ impl PeerManager {
         }
 
         loop {
-            // Test builds: between run-loop steps the published import
-            // roster is exactly the peer table and live dataset bindings.
+            // Between run-loop steps no roster batch is open, and in test
+            // builds the published import roster is exactly the peer table
+            // and live dataset bindings.
+            self.peers.settle_abandoned_batches();
             #[cfg(test)]
             self.assert_import_roster_projection();
             let bfd_retry_at = self.bfd_retry_deadline();

@@ -221,6 +221,56 @@ async fn roster_follows_dynamic_accept_and_expiry() {
     assert_released(&accepted_session, "dynamic expiry").await;
 }
 
+/// A bulk peer operation publishes the roster once at its end, however
+/// many peers it adds, removes or replaces (ADR-0136's one publication per
+/// operation), and the result is the exact projection.
+#[tokio::test]
+async fn bulk_reconcile_publishes_the_roster_once() {
+    const ADDED: u8 = 16;
+
+    let mut mgr = test_peer_manager();
+    let roster = mgr.import_roster();
+    let peer = |index: u8| IpAddr::V4(Ipv4Addr::new(192, 0, 2, 100 + index));
+    let before = roster.load().version();
+    let added = (0..ADDED)
+        .map(|index| make_config(peer(index), 65100))
+        .collect();
+    let outcome = mgr.reconcile_peers(added, Vec::new(), Vec::new()).await;
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    mgr.assert_import_roster_projection();
+    assert_eq!(roster.load().peers().len(), usize::from(ADDED));
+    assert_eq!(
+        roster.load().version(),
+        before + 1,
+        "adding {ADDED} peers is one publication"
+    );
+
+    let before = roster.load().version();
+    let removed = (0..ADDED / 2).map(|index| key(peer(index))).collect();
+    let changed = (ADDED / 2..ADDED - 2)
+        .map(|index| {
+            let mut config = make_config(peer(index), 65100);
+            config.hold_time = Some(30);
+            config
+        })
+        .collect();
+    let added = (ADDED..ADDED + 4)
+        .map(|index| make_config(peer(index), 65100))
+        .collect();
+    let outcome = mgr.reconcile_peers(added, removed, changed).await;
+    assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+    mgr.assert_import_roster_projection();
+    assert_eq!(roster.load().peers().len(), usize::from(ADDED / 2 + 4));
+    assert_eq!(
+        roster.load().version(),
+        before + 1,
+        "removing, replacing and adding peers is one publication"
+    );
+    for (_, managed) in mgr.peers.drain() {
+        let _ = managed.into_parts().0.shutdown().await;
+    }
+}
+
 /// Shutdown drains the table, publishing an empty roster, and the exiting
 /// owner closes the cell.
 #[tokio::test]

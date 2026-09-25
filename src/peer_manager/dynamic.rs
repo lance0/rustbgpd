@@ -463,11 +463,20 @@ impl PeerManager {
         }
     }
 
+    /// Reap dynamic peers no range admits any more, as one operation: one
+    /// import-roster publication however many it removes.
+    pub(super) async fn reap_dynamic_peers_not_allowed_by_current_ranges(&mut self) -> usize {
+        let batch = self.peers.begin_batch();
+        let result = Box::pin(self.reap_dynamic_peers_unbatched()).await;
+        self.peers.end_batch(batch);
+        result
+    }
+
     /// Remove dynamic peers whose accepting range is absent from the current
     /// runtime snapshot. Used after config-transaction rollback: the restored
     /// snapshot is authoritative, so peers born from the abandoned candidate
     /// must not survive until a later `BackToIdle`.
-    pub(super) async fn reap_dynamic_peers_not_allowed_by_current_ranges(&mut self) -> usize {
+    async fn reap_dynamic_peers_unbatched(&mut self) -> usize {
         let mut stale: Vec<PeerKey> = self
             .peers
             .iter()

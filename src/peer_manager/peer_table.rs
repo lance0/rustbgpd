@@ -9,6 +9,11 @@
 //! access to the rest of a peer's state ([`ManagedPeerState`]) does not
 //! reach the session fields. Dataset-binding changes use
 //! [`PeerTable::set_datasets`], which republishes the same way.
+//!
+//! An operation that mutates many peers runs inside a [`RosterBatch`]
+//! (ADR-0136's fallback of one publication per operation): mutators inside it
+//! mark the roster stale, and [`PeerTable::end_batch`] publishes once. Readers
+//! meanwhile keep the roster of the owner's last completed operation.
 
 use std::collections::HashMap;
 use std::collections::hash_map;
@@ -64,11 +69,22 @@ impl std::ops::Deref for ManagedPeer {
     }
 }
 
+/// Proof of an open batch, consumed by [`PeerTable::end_batch`]. Only the
+/// table creates one.
+#[must_use = "a roster batch publishes only when passed to `PeerTable::end_batch`"]
+pub(super) struct RosterBatch {
+    _private: (),
+}
+
 /// Every managed peer, keyed by peer identity, plus the published roster.
 pub(super) struct PeerTable {
     peers: HashMap<PeerKey, ManagedPeer>,
     datasets: Arc<[ImportRosterDataset]>,
     publisher: ImportRosterPublisher,
+    /// Open batches; publication is deferred while nonzero.
+    batch_depth: u32,
+    /// A mutation inside the open batches has not been published yet.
+    stale: bool,
 }
 
 impl PeerTable {
@@ -77,6 +93,8 @@ impl PeerTable {
             peers: HashMap::new(),
             datasets: dataset_projection(config),
             publisher: ImportRosterPublisher::new(),
+            batch_depth: 0,
+            stale: false,
         };
         table.publish();
         table
@@ -143,7 +161,7 @@ impl PeerTable {
 
     pub(super) fn insert(&mut self, key: PeerKey, peer: ManagedPeer) -> Option<ManagedPeer> {
         #[cfg(test)]
-        self.assert_published();
+        self.assert_published_if_settled();
         let previous = self.peers.insert(key, peer);
         self.publish();
         previous
@@ -151,7 +169,7 @@ impl PeerTable {
 
     pub(super) fn remove(&mut self, key: &PeerKey) -> Option<ManagedPeer> {
         #[cfg(test)]
-        self.assert_published();
+        self.assert_published_if_settled();
         let removed = self.peers.remove(key);
         self.publish();
         removed
@@ -160,7 +178,7 @@ impl PeerTable {
     /// Remove every peer, publishing the empty roster.
     pub(super) fn drain(&mut self) -> Vec<(PeerKey, ManagedPeer)> {
         #[cfg(test)]
-        self.assert_published();
+        self.assert_published_if_settled();
         let drained = self.peers.drain().collect();
         self.publish();
         drained
@@ -175,7 +193,7 @@ impl PeerTable {
         session_id: u64,
     ) -> Option<(PeerHandle, u64)> {
         #[cfg(test)]
-        self.assert_published();
+        self.assert_published_if_settled();
         let peer = self.peers.get_mut(key)?;
         let previous = (
             std::mem::replace(&mut peer.handle, handle),
@@ -189,13 +207,56 @@ impl PeerTable {
     /// bindings, including wholesale replacement, goes through here.
     pub(super) fn set_datasets(&mut self, config: &Config) {
         #[cfg(test)]
-        self.assert_published();
+        self.assert_published_if_settled();
         self.datasets = dataset_projection(config);
         self.publish();
     }
 
-    /// The single publication point: rebuild the roster from the table.
+    /// Defer publication until the matching [`Self::end_batch`]. Batches
+    /// nest; the outermost end publishes once if anything changed.
+    pub(super) fn begin_batch(&mut self) -> RosterBatch {
+        #[cfg(test)]
+        self.assert_published_if_settled();
+        self.batch_depth += 1;
+        RosterBatch { _private: () }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "taking the token by value ends each opened batch exactly once"
+    )]
+    pub(super) fn end_batch(&mut self, batch: RosterBatch) {
+        let RosterBatch { _private: () } = batch;
+        self.batch_depth = self
+            .batch_depth
+            .checked_sub(1)
+            .expect("end_batch pairs with begin_batch");
+        if self.batch_depth == 0 && self.stale {
+            self.publish();
+        }
+    }
+
+    /// Between owner operations no batch is open. A batch abandoned by a
+    /// dropped operation future is closed here and its changes published.
+    pub(super) fn settle_abandoned_batches(&mut self) {
+        if self.batch_depth > 0 {
+            tracing::error!(
+                depth = self.batch_depth,
+                "import roster batch was not ended; publishing its changes"
+            );
+            self.batch_depth = 0;
+            self.publish();
+        }
+    }
+
+    /// The single publication point: rebuild the roster from the table, or
+    /// mark it stale inside a batch.
     fn publish(&mut self) {
+        if self.batch_depth > 0 {
+            self.stale = true;
+            return;
+        }
+        self.stale = false;
         let peers = self
             .peers
             .iter()
@@ -210,11 +271,24 @@ impl PeerTable {
         self.assert_published();
     }
 
+    #[cfg(test)]
+    fn assert_published_if_settled(&self) {
+        if self.batch_depth == 0 {
+            self.assert_published();
+        }
+    }
+
     /// Test builds: the published roster is exactly the table's projection.
-    /// Every mutator checks it on entry (so a predecessor that skipped its
-    /// republication fails the next mutation) and after publishing.
+    /// Every mutator outside a batch checks it on entry (so a predecessor
+    /// that skipped its republication fails the next mutation) and after
+    /// publishing; a batch is checked when it ends. Checking mid-batch is a
+    /// test error: the roster then deliberately lags the table.
     #[cfg(test)]
     pub(super) fn assert_published(&self) {
+        assert_eq!(
+            self.batch_depth, 0,
+            "the published roster is checked while a batch is open"
+        );
         let published = self.publisher.published();
         let mut expected: Vec<_> = self.peers.iter().collect();
         expected.sort_unstable_by(|a, b| a.0.cmp(b.0));
