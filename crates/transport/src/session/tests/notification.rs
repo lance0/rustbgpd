@@ -1477,6 +1477,41 @@ async fn inbound_replacement_keeps_escalating_the_notification_backoff() {
     assert_eq!(queried_notification_failures(&mut replacement).await, 0);
 }
 
+/// A neighbor that *sends* the NOTIFICATION (the `OpenBGPD` UPDATE-error 3/9
+/// reset loop) feeds the same streak as one we send. After two such teardowns
+/// the queried state is exactly what `PeerManager` holds inbound on: Idle, a
+/// pending reconnect, and a streak of 2.
+#[tokio::test(start_paused = true)]
+async fn received_notification_teardowns_arm_the_inbound_hold_state() {
+    let mut session = make_test_session(65001, 65002);
+    for expected_wait in [30, 60] {
+        session.reconnect_timer = None;
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session
+            .drive_fsm(Event::NotificationReceived(NotificationMessage::new(
+                NotificationCode::UpdateMessage,
+                9,
+                Bytes::new(),
+            )))
+            .await;
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+        assert_eq!(pending_reconnect_secs(&session), expected_wait);
+    }
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    let state = state.await.unwrap();
+    assert_eq!(state.fsm_state, SessionState::Idle);
+    assert_eq!(state.notification_idle_failures, 2);
+    assert_eq!(state.reconnect_in_secs, 60);
+}
+
 /// Collision promotion hands the retiring primary's streak to the survivor,
 /// keeping whichever streak is longer.
 #[tokio::test]
