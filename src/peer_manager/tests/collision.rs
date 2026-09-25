@@ -2022,3 +2022,70 @@ async fn collision_rule_uses_primary_state_at_resolution_not_accept() {
         }
     }
 }
+
+/// A candidate whose collision verdict times out while `PeerManager` is busy
+/// elsewhere falls to Idle and queues `BackToIdle` behind its own, still
+/// unprocessed `OpenReceived`. When the manager resumes, that stale report must
+/// not promote the dead candidate over the primary: the primary would be
+/// retired and a closed session left in its place.
+#[tokio::test]
+async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    // An Active primary has no connection, so a live candidate would be
+    // promoted by the no-primary-connection rule.
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let stale = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    // The manager is blocked: `stale` is held while the candidate's verdict
+    // timer (10 s in the transport) expires on the paused clock.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    // Handshake: the candidate has closed from OpenConfirm. Its Idle
+    // transition, and so its `BackToIdle`, ran in the same batch as this
+    // NOTIFICATION, before the writer task could send it.
+    loop {
+        if let Message::Notification(notification) = read_bgp_message(&mut client, &mut buf).await {
+            assert_eq!(
+                notification.code,
+                rustbgpd_wire::notification::NotificationCode::HoldTimerExpired
+            );
+            break;
+        }
+    }
+
+    mgr.handle_session_notification(stale).await;
+
+    assert_eq!(
+        primary.shutdown.load(Ordering::SeqCst),
+        0,
+        "the primary must not be retired for a dead candidate"
+    );
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(
+        managed.pending_inbound.is_none(),
+        "the dead candidate is dropped"
+    );
+    assert_eq!(managed.session_id, 1, "the primary keeps ownership");
+}
