@@ -558,7 +558,7 @@ async fn ipv4_route_with_ipv6_next_hop_gates_reflection_on_extended_nexthop() {
     Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
 
     for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
-        for extended_nexthop in [false, true] {
+        for extended_nexthop in [true, false] {
             let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
             session.config.route_server_client = route_server_client;
             session.negotiated = Some(Arc::new(negotiated_session(remote_asn, extended_nexthop)));
@@ -1232,6 +1232,27 @@ async fn send_extended_nexthop_update(
     announce: Vec<Route>,
     withdraw: Vec<(Prefix, u32)>,
 ) -> UpdateMessage {
+    let next_hop_override = vec![None; announce.len()];
+    send_unicast_update(
+        true,
+        route_server_client,
+        scoped,
+        announce,
+        next_hop_override,
+        withdraw,
+    )
+    .await
+}
+
+/// Send one outbound unicast update and return the raw UPDATE as written.
+async fn send_unicast_update(
+    extended_nexthop: bool,
+    route_server_client: bool,
+    scoped: bool,
+    announce: Vec<Route>,
+    next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+    withdraw: Vec<(Prefix, u32)>,
+) -> UpdateMessage {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     if scoped {
         configure_scoped_link_local_peer(&mut session);
@@ -1240,10 +1261,10 @@ async fn send_extended_nexthop_update(
     session.config.local_ipv6_nexthop = Some("2001:db8::1".parse().unwrap());
     let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
-    session.negotiated = Some(Arc::new(negotiated_session(65002, true)));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, extended_nexthop)));
     let mut update = empty_outbound_update();
     update.exact_export_snapshot = Some(session.publish_export_profile());
-    update.next_hop_override = vec![None; announce.len()].into();
+    update.next_hop_override = next_hop_override.into();
     update.announce = announce.into();
     update.withdraw = withdraw;
     session.send_route_update(update);
@@ -1324,4 +1345,36 @@ async fn scoped_extended_nexthop_ipv4_withdrawal_stays_mp_unreach() {
     let msg = send_extended_nexthop_update(false, true, vec![], vec![(prefix, 0)]).await;
     assert!(msg.withdrawn_routes.is_empty());
     assert_eq!(attribute_type_codes(&msg.path_attributes), vec![15]);
+}
+
+#[tokio::test]
+async fn specific_ipv4_next_hop_override_is_the_body_next_hop() {
+    // Source route carries NEXT_HOP 10.0.0.2; export policy sets 192.0.2.99.
+    let set = Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(
+        Ipv4Addr::new(192, 0, 2, 99),
+    )));
+    for extended_nexthop in [true, false] {
+        let msg = send_unicast_update(
+            extended_nexthop,
+            true,
+            false,
+            vec![make_route(100)],
+            vec![set.clone()],
+            vec![],
+        )
+        .await;
+        assert_eq!(&msg.nlri[..], &[24, 10, 0, 0], "ENH={extended_nexthop}");
+        let codes = attribute_type_codes(&msg.path_attributes);
+        assert!(!codes.contains(&14), "ENH={extended_nexthop}: {codes:?}");
+        assert_eq!(
+            codes.iter().position(|&c| c == 3),
+            codes.iter().rposition(|&c| c == 3)
+        );
+        assert!(
+            msg.path_attributes
+                .windows(7)
+                .any(|w| w == [0x40, 3, 4, 192, 0, 2, 99]),
+            "ENH={extended_nexthop}: NEXT_HOP must carry the policy address"
+        );
+    }
 }

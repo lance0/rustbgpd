@@ -482,7 +482,13 @@ impl SessionExportProfile {
                     }));
                 }
                 PathAttribute::NextHop(_) => {
-                    if policy_set_specific {
+                    // An IPv4 policy rewrite is the effective next hop even if
+                    // the caller did not fold it into the attributes.
+                    if let Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(next_hop))) =
+                        nh_override
+                    {
+                        attrs.push(PathAttribute::NextHop(*next_hop));
+                    } else if policy_set_specific {
                         attrs.push(attr.clone());
                     } else if force_next_hop_self || (is_ebgp && !route_server_client) {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
