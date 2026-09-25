@@ -277,7 +277,7 @@ impl FibRouteTarget {
 }
 
 /// Daemon-owned route state. Updated only after successful apply ops.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct FibOwnedState {
     /// Routes rustbgpd believes it owns.
     pub routes: BTreeMap<FibRouteKey, FibRoute>,
@@ -286,6 +286,12 @@ pub(crate) struct FibOwnedState {
     /// record and the post-apply persist leaves entries here; the next kernel
     /// dump settles each one through [`resolve_in_flight`].
     pub in_flight: BTreeMap<FibRouteKey, FibRoute>,
+    /// The other `[[fib_tables]]` generation of the latest runtime table
+    /// change. The config file is published only after the actor applies the
+    /// change, so a restart may boot either generation; persisting both keeps
+    /// the booted generation's rows adoptable and lets rows in tables it no
+    /// longer declares be withdrawn instead of stranded.
+    pub transition_tables: Vec<FibTableConfig>,
 }
 
 /// Settle write-ahead alternates against the live kernel: adopt the

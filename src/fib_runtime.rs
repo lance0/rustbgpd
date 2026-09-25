@@ -360,7 +360,12 @@ async fn run_loop<F>(
                         // valid owned state. `Applied` therefore never depends on
                         // a write after the kernel changed, and a failed write
                         // leaves the kernel untouched.
+                        // Both generations are recorded until the next change: the
+                        // caller publishes the config file only after this
+                        // reply, so a crash before that boots the previous set.
                         let previous = std::mem::replace(&mut config.tables, tables);
+                        let prior_transition =
+                            std::mem::replace(&mut owned.transition_tables, previous.clone());
                         let signature_write = persist_owned_state(&config, &owned, &metrics);
                         let reached_apply = signature_write.is_ok()
                             && reconcile_once_with_events(
@@ -405,11 +410,21 @@ async fn run_loop<F>(
                             // so re-persisting also keeps still-owned routes
                             // adoptable on restart and retried by the periodic
                             // reconcile.
-                            config.tables = previous;
-                            let restored = matches!(
+                            let candidate = std::mem::replace(&mut config.tables, previous);
+                            let restored = if matches!(
                                 signature_write,
                                 Err(AtomicPublishError::NotPublished(_))
-                            ) || persist_owned_state(&config, &owned, &metrics).is_ok();
+                            ) {
+                                owned.transition_tables = prior_transition;
+                                true
+                            } else {
+                                // Keep the candidate as the other generation: a
+                                // row the reconcile installed into a candidate-only
+                                // table is then withdrawn after a restart instead
+                                // of stranded.
+                                owned.transition_tables = candidate;
+                                persist_owned_state(&config, &owned, &metrics).is_ok()
+                            };
                             let reason = if let Err(error) = &signature_write {
                                 format!(
                                     "FIB table change could not persist owned-state \
@@ -1699,6 +1714,11 @@ struct PersistedFibOwnedState {
     /// build ignores the field and loads `routes` exactly as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     in_flight: Vec<PersistedFibRoute>,
+    /// The other `[[fib_tables]]` generation of the latest runtime table
+    /// change (see `FibOwnedState::transition_tables`). Optional and
+    /// additive like `in_flight`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transition_tables: Vec<PersistedFibTableSignature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1824,6 +1844,34 @@ impl From<&FibRoute> for PersistedFibRoute {
             peer: route.peer,
             origin_type: route.origin_type.into(),
             path_id: route.path_id,
+        }
+    }
+}
+
+impl PersistedFibTableSignature {
+    fn key(&self) -> FibTableKey {
+        FibTableKey {
+            table_id: self.table_id,
+            metric: self.metric,
+        }
+    }
+}
+
+/// The signature carries every `[[fib_tables]]` field, so a recorded
+/// generation converts back into the table config it was taken from.
+impl From<PersistedFibTableSignature> for FibTableConfig {
+    fn from(signature: PersistedFibTableSignature) -> Self {
+        Self {
+            name: signature.name,
+            table_id: signature.table_id,
+            metric: signature.metric,
+            families: signature.families,
+            allowed_peer_groups: signature.allowed_peer_groups,
+            allowed_neighbors: signature.allowed_neighbors,
+            max_routes: signature.max_routes,
+            maximum_paths: signature.maximum_paths,
+            maximum_paths_ebgp: signature.maximum_paths_ebgp,
+            maximum_paths_ibgp: signature.maximum_paths_ibgp,
         }
     }
 }
@@ -2094,19 +2142,37 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             )
         })
         .collect();
+    // A file written during a runtime table change records both
+    // generations, because the config file is published only after the
+    // actor applies the change and a restart may boot either one. A table
+    // matching either generation keeps its rows, and a table recorded in
+    // either generation but absent from the booted config keeps its rows as
+    // withdraw candidates: the first reconcile removes them.
+    let generations = || persisted.tables.iter().chain(&persisted.transition_tables);
+    let changing = !persisted.transition_tables.is_empty();
     let mut valid_tables: BTreeSet<FibTableKey> = BTreeSet::new();
-    let mut dropped_tables: Vec<&str> = Vec::new();
-    for signature in &persisted.tables {
-        let key = FibTableKey {
-            table_id: signature.table_id,
-            metric: signature.metric,
-        };
-        if current_by_key.get(&key) == Some(signature) {
-            valid_tables.insert(key);
-        } else {
-            dropped_tables.push(signature.name.as_str());
+    let mut withdraw_tables: BTreeMap<FibTableKey, &PersistedFibTableSignature> = BTreeMap::new();
+    for signature in generations() {
+        let key = signature.key();
+        match current_by_key.get(&key) {
+            Some(current) if current == signature => {
+                valid_tables.insert(key);
+            }
+            None if changing => {
+                withdraw_tables.entry(key).or_insert(signature);
+            }
+            _ => {}
         }
     }
+    let mut dropped_tables: Vec<&str> = generations()
+        .filter(|signature| {
+            let key = signature.key();
+            !valid_tables.contains(&key) && !withdraw_tables.contains_key(&key)
+        })
+        .map(|signature| signature.name.as_str())
+        .collect();
+    dropped_tables.sort_unstable();
+    dropped_tables.dedup();
     if !dropped_tables.is_empty() {
         warn!(
             path = %path.display(),
@@ -2122,7 +2188,13 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
         preserve_stale_owned_state_copy(config, "config_mismatch");
     }
 
-    let mut owned = FibOwnedState::default();
+    let mut owned = FibOwnedState {
+        transition_tables: withdraw_tables
+            .values()
+            .map(|signature| FibTableConfig::from((*signature).clone()))
+            .collect(),
+        ..FibOwnedState::default()
+    };
     let routes = persisted.routes.into_iter().map(|route| (route, false));
     let in_flight = persisted.in_flight.into_iter().map(|route| (route, true));
     for (route, is_in_flight) in routes.chain(in_flight) {
@@ -2133,7 +2205,8 @@ fn load_owned_state(config: &FibRuntimeConfig) -> FibOwnedState {
             );
             continue;
         };
-        if !valid_tables.contains(&route.key.table_key()) {
+        let table = route.key.table_key();
+        if !valid_tables.contains(&table) && !withdraw_tables.contains_key(&table) {
             warn!(
                 path = %path.display(),
                 table_id = route.key.table_id,
@@ -2249,6 +2322,7 @@ fn write_owned_state(
             .values()
             .map(PersistedFibRoute::from)
             .collect(),
+        transition_tables: table_signatures(&owned.transition_tables),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|e| not_published(format!("serialize owned-state: {e}")))?;
@@ -4597,6 +4671,7 @@ mod tests {
                 .collect(),
             routes: vec![route],
             in_flight: Vec::new(),
+            transition_tables: Vec::new(),
         };
         let bytes = serde_json::to_vec_pretty(&persisted).unwrap();
         std::fs::write(&path, &bytes).unwrap();
@@ -4877,6 +4952,7 @@ mod tests {
                 path_id: 0,
             }],
             in_flight: Vec::new(),
+            transition_tables: Vec::new(),
         };
         std::fs::write(&path, serde_json::to_vec_pretty(&persisted).unwrap()).unwrap();
 
@@ -5445,6 +5521,139 @@ mod tests {
 
         assert_eq!(loaded, FibOwnedState::default());
         assert!(stale_owned_state_path(&path).exists());
+    }
+
+    /// Spawn the actor on `tables` with one RIB route, wait for its first
+    /// install, apply `candidate` through `OwnedReplaceTables`, and return
+    /// the reply plus every kernel Add the actor sent. The actor keeps
+    /// running, as it would between the reply and the caller publishing
+    /// the candidate config.
+    async fn apply_table_change(
+        config: FibRuntimeConfig,
+        candidate: Vec<FibTableConfig>,
+    ) -> (
+        FibRuntimeHandle,
+        OwnedFibReplaceOutcome,
+        Arc<std::sync::Mutex<Vec<FibRoute>>>,
+    ) {
+        let installed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = installed.clone();
+        let fib = FakeFib {
+            on_apply: Some(Box::new(move |op: &FibOp| {
+                if let FibOp::Add(route) = op {
+                    sink.lock().unwrap().push(route.clone());
+                }
+            })),
+            ..FakeFib::default()
+        };
+        let (rib_tx, _count, _events, _candidates) =
+            rib_with_events(vec![route(v4(24), ip("198.51.100.1"))]);
+        let (status_tx, mut status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let handle = spawn_with_fib(
+            config,
+            rib_tx.clone(),
+            rib_tx,
+            fib,
+            metrics(),
+            status_tx,
+            event_tx,
+            CancellationToken::new(),
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while status_rx.borrow().is_empty() {
+                status_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let (reply, outcome) = oneshot::channel();
+        handle
+            .command_sender()
+            .send(FibRuntimeCommand::OwnedReplaceTables {
+                tables: candidate,
+                reply,
+            })
+            .await
+            .unwrap();
+        let outcome = outcome.await.unwrap();
+        (handle, outcome, installed)
+    }
+
+    #[tokio::test]
+    async fn crash_before_config_publish_keeps_edited_table_rows_owned() {
+        // The caller publishes the candidate config only after `Applied`; a
+        // crash before that boots the previous `[[fib_tables]]`, which must
+        // still match the owned-state file for the edited table.
+        let dir = tempfile::tempdir().unwrap();
+        let previous = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let mut edited = previous[0].clone();
+        edited.max_routes = Some(10);
+        let mut config = config_with(previous);
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+
+        let (handle, outcome, installed) = apply_table_change(config.clone(), vec![edited]).await;
+
+        assert_eq!(outcome, OwnedFibReplaceOutcome::Applied);
+        let installed = installed.lock().unwrap().clone();
+        assert_eq!(installed.len(), 1);
+        let restarted = load_owned_state(&config);
+        assert_eq!(restarted.routes.get(&installed[0].key), Some(&installed[0]));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn crash_before_config_publish_withdraws_rows_in_candidate_only_tables() {
+        // A table change adds a table and installs into it; the daemon then
+        // crashes before the candidate config is published and boots the
+        // previous set. The new table's row must be withdrawn, not left in
+        // a table the booted daemon never looks at.
+        let dir = tempfile::tempdir().unwrap();
+        let previous = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let mut candidate = previous.clone();
+        candidate.push(table("edge2", 1001, 200, &["ipv4_unicast"]));
+        let mut config = config_with(previous);
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+
+        let (handle, outcome, installed) = apply_table_change(config.clone(), candidate).await;
+
+        assert_eq!(outcome, OwnedFibReplaceOutcome::Applied);
+        let installed = installed.lock().unwrap().clone();
+        let added = installed
+            .iter()
+            .find(|route| route.key.table_id == 1001)
+            .unwrap()
+            .clone();
+        let mut restarted = load_owned_state(&config);
+        assert!(restarted.routes.contains_key(&added.key));
+        let mut fib = FakeFib::default();
+        for route in &installed {
+            fib.kernel.routes.insert(
+                route.key,
+                FibKernelRoute {
+                    target: route.target.clone(),
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            );
+        }
+        let statuses = reconcile_config_for_test(
+            config.clone(),
+            rib_with_routes(vec![route(v4(24), ip("198.51.100.1"))]),
+            &mut fib,
+            &mut restarted,
+        )
+        .await;
+
+        assert!(
+            matches!(fib.applied.as_slice(), [FibOp::Remove(route)] if route.key == added.key),
+            "{:?}",
+            fib.applied
+        );
+        assert!(!fib.kernel.routes.contains_key(&added.key));
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert!(!load_owned_state(&config).routes.contains_key(&added.key));
+        handle.shutdown().await;
     }
 
     #[tokio::test]

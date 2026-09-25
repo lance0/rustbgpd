@@ -3684,7 +3684,11 @@ fails, the pass holds its installs and replacements (status
 `owned_state_persist_failed`, metric
 `bgp_fib_owned_state_persist_failures_total`) while removals continue, and
 a runtime table change that cannot be recorded is reverted rather than
-reported as applied. This conservative rule avoids
+reported as applied. A runtime table change records both the previous and
+the new table set, because the config file is saved only after the change
+is applied: a restart under either set keeps that set's rows, and rows in a
+table the restarted config no longer declares are withdrawn instead of left
+unmanaged. This conservative rule avoids
 replacing or deleting FRR/BIRD routes in the same table and metric.
 If another writer changes a row while rustbgpd owns it, the next reconcile
 reports `owned_route_drifted`, releases ownership, and preserves the live

@@ -14,5 +14,9 @@
   later pass writes the file; removals continue. A runtime FIB table change
   now records its table signatures before touching the kernel; if that write
   fails, the change is rejected with no kernel effect instead of reported as
-  applied. The file keeps its format version; an older build ignores the new
-  optional `in_flight` field.
+  applied. The change also records both the previous and the new table set
+  until the next change, so a crash before the new config is saved keeps
+  the previous tables' rows owned and withdraws rows already installed into
+  a table the restarted config does not declare. The file keeps its format
+  version; an older build ignores the new optional `in_flight` and
+  `transition_tables` fields.
