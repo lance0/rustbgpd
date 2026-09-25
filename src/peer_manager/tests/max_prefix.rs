@@ -98,7 +98,7 @@ async fn post_restart_second_breach_gets_one_fresh_hold_down() {
         .unwrap()
         .max_prefix_restart_seconds = Some(30);
 
-    mgr.peers[&key(addr)].handle.start().await.unwrap();
+    mgr.peers[&key(addr)].handle().start().await.unwrap();
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
@@ -862,7 +862,7 @@ async fn reconcile_preserves_max_prefix_emitted_during_old_actor_shutdown() {
     );
     assert_eq!(counters.shutdown.load(Ordering::SeqCst), 1);
     let managed = mgr.peers.get(&key(addr)).expect("replacement peer");
-    assert_ne!(managed.session_id, 1);
+    assert_ne!(managed.session_id(), 1);
     assert!(!managed.enabled);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
     assert!(mgr.retiring_sessions.is_empty());
@@ -915,7 +915,7 @@ async fn local_wins_collision_preserves_candidate_terminal_breach() {
     let managed = mgr.peers.get(&key(addr)).unwrap();
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
-    assert_eq!(managed.session_id, 1);
+    assert_eq!(managed.session_id(), 1);
     assert_eq!(candidate.collision_dump.load(Ordering::SeqCst), 1);
     assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
@@ -973,7 +973,7 @@ async fn remote_wins_collision_preserves_old_primary_terminal_breach() {
     let managed = mgr.peers.get(&key(addr)).unwrap();
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
-    assert_eq!(managed.session_id, 2);
+    assert_eq!(managed.session_id(), 2);
     assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 1);
     assert_eq!(candidate.stop.load(Ordering::SeqCst), 1);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
@@ -1026,7 +1026,7 @@ async fn inbound_replace_preserves_old_primary_terminal_breach() {
 
     assert_eq!(old.shutdown.load(Ordering::SeqCst), 1);
     let managed = mgr.peers.get(&key(addr)).unwrap();
-    assert_eq!(managed.session_id, 2);
+    assert_eq!(managed.session_id(), 2);
     assert!(!managed.enabled);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
     assert!(mgr.retiring_sessions.is_empty());
@@ -1035,7 +1035,7 @@ async fn inbound_replace_preserves_old_primary_terminal_breach() {
 
     drop(client);
     let managed = mgr.peers.remove(&key(addr)).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 /// Load-bearing dynamic-retirement proof: the actor emits max-prefix only from
@@ -1079,7 +1079,7 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
 
     assert_eq!(old.shutdown.load(Ordering::SeqCst), 1);
     let managed = mgr.peers.get(&key(addr)).expect("disabled recovery target");
-    assert_eq!(managed.session_id, 2);
+    assert_eq!(managed.session_id(), 2);
     assert!(managed.is_dynamic);
     assert!(!managed.enabled);
     assert_eq!(mgr.dynamic_peer_count, 1);
@@ -1093,7 +1093,7 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
     assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
     assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
     let managed = mgr.peers.remove(&key(addr)).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 /// Load-bearing fail-closed recovery proof: a wedged, full primary command
@@ -1171,7 +1171,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
     assert_eq!(peer, addr);
     assert_eq!(session_id, 1);
     let managed = mgr.peers.get(&key(addr)).unwrap();
-    assert_eq!(managed.session_id, 3);
+    assert_eq!(managed.session_id(), 3);
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
     assert!(mgr.peer_key_for_session(1).is_none());

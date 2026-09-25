@@ -815,14 +815,14 @@ async fn peer_info_follows_install_hot_update_and_delete() {
         peer_info_series(&metrics_view, "10.0.0.2"),
         vec![peer_info_labels("65002", "Example Member", "")]
     );
-    let session_id = mgr.peers[&key(peer_addr)].session_id;
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
 
     // A hot-applied description edit replaces the old identity row without
     // rebuilding the session.
     let mut renamed = make_config(peer_addr, 65002);
     renamed.description = "Renamed Member".to_string();
     mgr.hot_update_peer(renamed).await.unwrap();
-    assert_eq!(mgr.peers[&key(peer_addr)].session_id, session_id);
+    assert_eq!(mgr.peers[&key(peer_addr)].session_id(), session_id);
     assert_eq!(
         peer_info_series(&metrics_view, "10.0.0.2"),
         vec![peer_info_labels("65002", "Renamed Member", "")]

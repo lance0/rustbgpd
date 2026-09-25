@@ -15,9 +15,10 @@ use tracing::warn;
 
 use crate::config::{RFC8212_MISSING_EXPORT_POLICY, RFC8212_MISSING_IMPORT_POLICY};
 
-use super::{ManagedPeer, PEER_QUERY_TIMEOUT, PeerManager};
+use super::ManagedPeerState;
+use super::{PEER_QUERY_TIMEOUT, PeerManager, PeerTable};
 
-fn accepted_dynamic_range_snapshot(managed: &ManagedPeer) -> Option<DynamicRangeTarget> {
+fn accepted_dynamic_range_snapshot(managed: &ManagedPeerState) -> Option<DynamicRangeTarget> {
     managed
         .accepted_dynamic_range
         .as_ref()
@@ -29,7 +30,7 @@ fn accepted_dynamic_range_snapshot(managed: &ManagedPeer) -> Option<DynamicRange
 }
 
 fn authentication_snapshot(
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
     session_state: Option<&PeerSessionState>,
 ) -> &'static str {
     if session_state.map_or(managed.tcp_ao_protected, |state| state.tcp_ao_protected) {
@@ -149,7 +150,7 @@ fn inbound_prefix_limit_rows(
 
 pub(super) fn build_peer_info(
     peer: &PeerKey,
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
     session_state: Option<&PeerSessionState>,
     ebgp_requires_policy: bool,
 ) -> PeerInfo {
@@ -259,7 +260,7 @@ pub(super) fn build_peer_info(
 /// per-peer gauges all go through here, so none of them can report a verdict
 /// the others do not.
 pub(super) fn rfc8212_statuses(
-    managed: &ManagedPeer,
+    managed: &ManagedPeerState,
     ebgp_requires_policy: bool,
 ) -> (Rfc8212PolicyStatus, Rfc8212PolicyStatus) {
     let enforced = ebgp_requires_policy && managed.rfc8212_external;
@@ -311,7 +312,10 @@ pub(super) fn rfc8212_status(
     }
 }
 
-fn effective_remote_asn(managed: &ManagedPeer, session_state: Option<&PeerSessionState>) -> u32 {
+fn effective_remote_asn(
+    managed: &ManagedPeerState,
+    session_state: Option<&PeerSessionState>,
+) -> u32 {
     session_state
         .and_then(|s| s.peer_asn)
         .filter(|asn| *asn != 0)
@@ -326,13 +330,11 @@ fn effective_remote_asn(managed: &ManagedPeer, session_state: Option<&PeerSessio
 /// [`StateQueryOutcome::SessionGone`]. A peer whose query task fails to join
 /// is absent from the map. Every non-state outcome is treated as `stale =
 /// true` by [`build_peer_info`].
-async fn collect_session_states(
-    peers: &HashMap<PeerKey, ManagedPeer>,
-) -> HashMap<PeerKey, StateQueryOutcome> {
+async fn collect_session_states(peers: &PeerTable) -> HashMap<PeerKey, StateQueryOutcome> {
     let mut tasks = Vec::with_capacity(peers.len());
     for (peer, managed) in peers {
         let peer = peer.clone();
-        let commands = managed.handle.commands_sender();
+        let commands = managed.handle().commands_sender();
         tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
             let outcome = PeerHandle::query_state_outcome_with(commands, PEER_QUERY_TIMEOUT).await;
             (peer, outcome)
@@ -463,8 +465,8 @@ impl PeerManager {
                 None => b"rustbgpd/policy-chain/warm-checkpoint/v1/implicit-permit\n".to_vec(),
             };
             let peer = peer.clone();
-            let session_id = managed.session_id;
-            let commands = managed.handle.commands_sender();
+            let session_id = managed.session_id();
+            let commands = managed.handle().commands_sender();
             tasks.push(AbortOnDropHandle::new(tokio::spawn(async move {
                 let state =
                     PeerHandle::query_warm_checkpoint_state_with(commands, PEER_QUERY_TIMEOUT)
@@ -521,7 +523,10 @@ impl PeerManager {
 
     pub(super) async fn get_peer_info(&self, peer: &PeerKey) -> Option<PeerInfo> {
         let managed = self.peers.get(peer)?;
-        let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+        let session_state = managed
+            .handle()
+            .query_state_timeout(PEER_QUERY_TIMEOUT)
+            .await;
         let mut info = build_peer_info(
             peer,
             managed,

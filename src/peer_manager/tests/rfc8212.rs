@@ -33,7 +33,7 @@ async fn rfc8212_pinned_dynamic_child_keeps_deny_across_chain_reresolution() {
     );
     let mut config = make_dynamic_manager_config();
     config.global.ebgp_requires_policy = Some(true);
-    mgr.current_config = config;
+    mgr.replace_current_config(config);
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
     let counters = Arc::new(FakePeerCounters::default());

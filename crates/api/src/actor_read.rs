@@ -68,7 +68,7 @@ impl KnownPeerQueries {
     /// Fail with `NOT_FOUND` naming `address` unless it names a known peer.
     ///
     /// Known means a managed peer — a configured neighbor or an accepted
-    /// dynamic peer, the same `HasPeerAddress` answer `GetPolicyStats` uses —
+    /// dynamic peer, the `HasPeerAddress` answer —
     /// or a peer whose Adj-RIB-In still retains GR/LLGR-stale routes after its
     /// session (and, for a dynamic peer, its managed entry) went away. The
     /// synthetic peer that owns locally injected routes is always known, even

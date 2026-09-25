@@ -9,8 +9,8 @@ use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{
-    ImportExplainReply, ImportPolicyTermHits, NegotiatedSessionState, RejectedRoutesReply,
-    RemovePrivateAs, SessionQueryOutcome, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
+    ImportExplainReply, NegotiatedSessionState, RejectedRoutesReply, RemovePrivateAs,
+    SessionQueryOutcome, TcpAoInfoSnapshot, TcpAoKeyring, TransportAuthSecret,
 };
 use rustbgpd_wire::{Afi, BgpRole, Prefix, Safi};
 use tokio::net::TcpStream;
@@ -1178,13 +1178,6 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// LAN-305: operator-facing status of every bound external
-    /// dataset (name, kind, generation, records, path, last refresh
-    /// error), sorted by name. Read-only; backs `rbgp policy stats`.
-    QueryPolicyDatasets {
-        /// Reply channel returning one row per bound dataset.
-        reply: oneshot::Sender<Vec<PolicyDatasetStatusRow>>,
-    },
     /// List all named policy definitions.
     ListPolicies {
         /// Reply channel returning all named policies.
@@ -1221,28 +1214,6 @@ pub enum PeerManagerCommand {
         address: IpAddr,
         /// Reply channel carrying the bounded session-query outcome.
         reply: oneshot::Sender<SessionQueryOutcome<RejectedRoutesReply>>,
-    },
-    /// Snapshot the live import-chain per-term hit counters of peer
-    /// sessions (ADR-0096 Decision 3.3, import direction). Read-only —
-    /// no counter moves. Peers without an installed import chain are
-    /// omitted from a successful reply; deadline, task exit and unavailable
-    /// counter state remain explicit.
-    QueryImportPolicyTermHits {
-        /// Optional peer filter; `None` = every session.
-        peer: Option<IpAddr>,
-        /// Original absolute RPC deadline, shared by publication acquisition
-        /// and counter observation across the selected session roster.
-        deadline: tokio::time::Instant,
-        /// Collection progress shared with the requesting handler; it
-        /// survives a deadline miss or a dropped reply.
-        progress: Arc<ImportPolicyStatsProgress>,
-        /// Reply channel: successful rows are sorted by peer address.
-        reply: oneshot::Sender<
-            Result<
-                Vec<(IpAddr, ImportPolicyTermHits)>,
-                rustbgpd_transport::handle::ImportPolicyStatsError,
-            >,
-        >,
     },
     /// Query a single named policy definition.
     GetPolicy {
@@ -1605,40 +1576,6 @@ pub enum PeerManagerOperatorQuery {
         address: IpAddr,
         reply: oneshot::Sender<bool>,
     },
-    /// Query session import counters with the RPC's aggregate deadline.
-    QueryImportPolicyTermHits {
-        peer: Option<IpAddr>,
-        deadline: tokio::time::Instant,
-        progress: Arc<ImportPolicyStatsProgress>,
-        reply: oneshot::Sender<
-            Result<
-                Vec<(IpAddr, ImportPolicyTermHits)>,
-                rustbgpd_transport::handle::ImportPolicyStatsError,
-            >,
-        >,
-    },
-    /// Return the currently published policy dataset status.
-    QueryPolicyDatasets {
-        reply: oneshot::Sender<Vec<PolicyDatasetStatusRow>>,
-    },
-}
-
-/// Sub-stage progress of one `GetPolicyStats` import collection, recorded by
-/// the peer manager and read by the requesting handler for its audit record.
-/// Measurement only: nothing here gates, cancels or bounds the collection.
-#[derive(Debug, Default)]
-pub struct ImportPolicyStatsProgress {
-    /// When the peer manager dispatched the query (end of admission wait).
-    pub admitted: std::sync::OnceLock<tokio::time::Instant>,
-    /// When the collector produced its result, successful or not.
-    pub collected: std::sync::OnceLock<tokio::time::Instant>,
-    /// Session publications selected for collection.
-    pub targets: std::sync::atomic::AtomicUsize,
-    /// Session publications whose counters were read.
-    pub read: std::sync::atomic::AtomicUsize,
-    /// Cooperative-budget checkpoints in the collection that yielded to the
-    /// scheduler.
-    pub yields: std::sync::atomic::AtomicU64,
 }
 
 /// One operator query stamped with its send instant, so the peer manager can
@@ -1668,20 +1605,6 @@ impl From<PeerManagerOperatorQuery> for PeerManagerCommand {
             }
             PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
                 Self::HasPeerAddress { address, reply }
-            }
-            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer,
-                deadline,
-                progress,
-                reply,
-            } => Self::QueryImportPolicyTermHits {
-                peer,
-                deadline,
-                progress,
-                reply,
-            },
-            PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
-                Self::QueryPolicyDatasets { reply }
             }
         }
     }
@@ -2716,16 +2639,6 @@ pub enum Rfc8212PolicyStatus {
     Present,
     /// Enforcement applies and the reserved internal deny is installed.
     Missing,
-}
-
-/// One `QueryPolicyDatasets` reply row (LAN-305): the policy crate's
-/// dataset status plus the config-bound snapshot path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyDatasetStatusRow {
-    /// Name / kind / generation / records / last-error snapshot.
-    pub status: rustbgpd_policy::datasets::DatasetStatus,
-    /// Bound snapshot file path (`[policy.datasets.<name>].path`).
-    pub path: String,
 }
 
 #[cfg(test)]

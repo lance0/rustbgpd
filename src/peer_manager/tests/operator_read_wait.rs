@@ -439,7 +439,7 @@ async fn read_admitted_during_the_cohort_transition_is_labelled_forward_transiti
     let (mut manager, result) = reload.await.unwrap();
     result.expect("the cohort commits once released");
     for (_, managed) in manager.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
     drop(manager);
     rib.await.unwrap();
@@ -637,7 +637,7 @@ async fn read_admitted_during_prestage_is_labelled_prestage() {
     let (mut manager, result) = reload.await.unwrap();
     result.expect("the cohort commits once the prestage reply is released");
     for (_, managed) in manager.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
     drop(manager);
     rib.await.unwrap();

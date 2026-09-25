@@ -45,7 +45,7 @@ async fn reset_peer_sends_administrative_reset_and_keeps_peer_enabled() {
     let managed = &mgr.peers[&key(addr)];
     assert!(managed.enabled);
     assert!(managed.pending_inbound.is_none());
-    assert_eq!(managed.session_id, 1);
+    assert_eq!(managed.session_id(), 1);
     assert_eq!(mgr.peer_key_for_session(1), Some(key(addr)));
     assert!(mgr.peer_key_for_session(2).is_none());
 

@@ -296,7 +296,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("promoted peer");
     for _ in 0..20 {
-        let state = managed.handle.query_state().await.expect("query state");
+        let state = managed.handle().query_state().await.expect("query state");
         if state.fsm_state == SessionState::Established {
             return;
         }
@@ -340,7 +340,7 @@ async fn queued_max_prefix_latch_fences_inbound_before_collision_handling() {
         .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).unwrap();
-    assert_eq!(managed.session_id, 1);
+    assert_eq!(managed.session_id(), 1);
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
     assert_eq!(
@@ -444,7 +444,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
         .await;
 
     let managed = mgr.peers.get(&key(peer_addr)).unwrap();
-    assert_eq!(managed.session_id, 1);
+    assert_eq!(managed.session_id(), 1);
     assert!(!managed.enabled);
     assert!(managed.pending_inbound.is_none());
     assert!(mgr.max_prefix_latches.contains_key(&key(peer_addr)));
@@ -539,7 +539,8 @@ async fn inbound_state_query_timeout_keeps_existing_session() {
          because a state query timed out"
     );
     assert_eq!(
-        managed.session_id, 1,
+        managed.session_id(),
+        1,
         "the existing session must NOT be replaced on a state-query timeout"
     );
     assert!(
@@ -608,7 +609,8 @@ async fn inbound_after_session_task_exit_takes_accept_path() {
 
     let managed = mgr.peers.get(&key(peer_addr)).expect("peer still managed");
     assert_ne!(
-        managed.session_id, 1,
+        managed.session_id(),
+        1,
         "a dead session task must be replaced by the inbound connection"
     );
     assert!(managed.pending_inbound.is_none());
@@ -682,7 +684,7 @@ async fn collision_local_wins_drops_inbound_candidate() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "local-wins collision must keep the primary session"
     );
 }
@@ -746,7 +748,7 @@ async fn collision_equal_router_ids_larger_remote_as_promotes_dynamic_inbound() 
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 2),
         "the larger remote four-octet AS must preserve its inbound connection; \
          using ManagedPeer.remote_asn would read the dynamic wildcard 0 and fail"
     );
@@ -811,7 +813,7 @@ async fn collision_equal_router_ids_larger_local_four_octet_as_drops_inbound() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "the larger local four-octet AS must preserve its outbound connection"
     );
 }
@@ -875,7 +877,7 @@ async fn collision_equal_router_id_and_as_drops_inbound_defensively() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "equal AS and router ID is invalid iBGP identity and must not promote inbound"
     );
 }
@@ -934,7 +936,7 @@ async fn primary_back_to_idle_promotes_pending_inbound_candidate() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 2),
         "pending inbound candidate should be promoted when the primary idles"
     );
 }
@@ -1070,7 +1072,7 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|managed| managed.session_id == 2 && managed.pending_inbound.is_none())
+            .is_some_and(|managed| managed.session_id() == 2 && managed.pending_inbound.is_none())
     );
 }
 
@@ -1136,7 +1138,7 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_some() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_some() && m.session_id() == 1),
         "stale notifications must not drop or promote live sessions"
     );
 }
@@ -1450,7 +1452,7 @@ async fn peer_presence_dynamic_inbound_added_then_back_to_idle_removed_fifo() {
         SessionState::Connect,
     );
 
-    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id;
+    let session_id = mgr.peers.get(&key(peer_addr)).unwrap().session_id();
     mgr.handle_session_notification(SessionNotification::BackToIdle {
         session_id,
         role: rustbgpd_transport::SessionRole::Primary,
@@ -1614,7 +1616,7 @@ async fn assert_candidate_promoted_over_connectionless_primary(primary_state: Se
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 2),
         "{primary_state:?} primary: the candidate must become the primary"
     );
     assert_eq!(
@@ -1645,7 +1647,7 @@ async fn assert_candidate_promoted_over_connectionless_primary(primary_state: Se
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 2),
         "stale signals from the retired primary must not touch the promoted session"
     );
 }
@@ -1725,7 +1727,7 @@ async fn collision_primary_established_keeps_primary_even_when_remote_id_higher(
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "an Established primary must survive a late candidate OPEN"
     );
 }
@@ -1846,9 +1848,9 @@ async fn inbound_candidate_held_while_primary_active_is_promoted() {
     .expect("promotion must release the held KEEPALIVE");
     assert!(matches!(msg, Message::Keepalive));
     let managed = &mgr.peers[&key(peer_addr)];
-    assert!(managed.pending_inbound.is_none() && managed.session_id != 1);
+    assert!(managed.pending_inbound.is_none() && managed.session_id() != 1);
     assert_eq!(
-        managed.handle.query_state().await.unwrap().fsm_state,
+        managed.handle().query_state().await.unwrap().fsm_state,
         SessionState::Established,
         "the promoted inbound session consumes the buffered KEEPALIVE"
     );
@@ -1884,15 +1886,20 @@ async fn collision_loser_is_closed_from_open_confirm_without_keepalive() {
     );
     let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
     // The primary's own connection reaches OpenConfirm before the verdict.
-    let accept_handle = std::mem::replace(
-        &mut mgr.peers.get_mut(&key(peer_addr)).unwrap().handle,
-        fake_peer_handle(
-            peer_addr,
-            SessionState::OpenConfirm,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            primary.clone(),
-        ),
-    );
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    let (accept_handle, _) = mgr
+        .peers
+        .replace_handle(
+            &key(peer_addr),
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                primary.clone(),
+            ),
+            session_id,
+        )
+        .unwrap();
     let _ = accept_handle.shutdown().await;
 
     let mut buf = BytesMut::with_capacity(4096);
@@ -1908,7 +1915,7 @@ async fn collision_loser_is_closed_from_open_confirm_without_keepalive() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "the OpenConfirm primary with the higher local identifier must win"
     );
     let msg = tokio::time::timeout(
@@ -1970,15 +1977,20 @@ async fn collision_rule_uses_primary_state_at_resolution_not_accept() {
     // The primary's own outbound connection completes its OPEN exchange
     // before the candidate's OPEN arrives.
     let resolution_time = Arc::new(FakePeerCounters::default());
-    let accept_handle = std::mem::replace(
-        &mut mgr.peers.get_mut(&key(peer_addr)).unwrap().handle,
-        fake_peer_handle(
-            peer_addr,
-            SessionState::OpenConfirm,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            resolution_time.clone(),
-        ),
-    );
+    let session_id = mgr.peers[&key(peer_addr)].session_id();
+    let (accept_handle, _) = mgr
+        .peers
+        .replace_handle(
+            &key(peer_addr),
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                resolution_time.clone(),
+            ),
+            session_id,
+        )
+        .unwrap();
     let _ = accept_handle.shutdown().await;
 
     let mut buf = BytesMut::with_capacity(4096);
@@ -2001,7 +2013,7 @@ async fn collision_rule_uses_primary_state_at_resolution_not_accept() {
     assert!(
         mgr.peers
             .get(&key(peer_addr))
-            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id() == 1),
         "an OpenConfirm primary with the higher local identifier must win"
     );
     loop {
@@ -2089,5 +2101,5 @@ async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() 
         managed.pending_inbound.is_none(),
         "the dead candidate is dropped"
     );
-    assert_eq!(managed.session_id, 1, "the primary keeps ownership");
+    assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
 }

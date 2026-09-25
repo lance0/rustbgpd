@@ -808,7 +808,7 @@ async fn dynamic_peer_open_received_updates_remote_asn_and_metric_without_state_
 
     assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("0"));
 
-    let session_id = mgr.peers[&peer].session_id;
+    let session_id = mgr.peers[&peer].session_id();
 
     // Session transitions to OpenConfirm, triggering OpenReceived on the lossless notify_tx.
     // Notice we deliberately DO NOT invoke handle_session_lifecycle_notification with

@@ -1144,6 +1144,8 @@ pub struct ServeConfig {
     pub peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     /// Operator queries admitted before session policy application.
     pub peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
+    /// The peer manager's published import roster (`GetPolicyStats`).
+    pub import_roster: crate::import_roster::ImportRosterReader,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Bounded RIB summary lane served during synchronous policy replacement.
@@ -1744,6 +1746,7 @@ async fn run_listener(
     let start_time = config.start_time;
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
     let peer_mgr_operator_tx = config.peer_mgr_operator_tx;
+    let import_roster = config.import_roster;
     let rib_readiness_tx = config.rib_readiness_tx;
     let rib_summary_tx = config.rib_summary_tx;
     let validation_snapshot = config.validation_snapshot;
@@ -1814,6 +1817,7 @@ async fn run_listener(
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 peer_mgr_operator_tx,
+                import_roster.clone(),
                 asn,
                 router_id,
                 listen_port,
@@ -1882,6 +1886,7 @@ async fn run_listener(
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 peer_mgr_operator_tx,
+                import_roster.clone(),
                 asn,
                 router_id,
                 listen_port,
@@ -1957,6 +1962,7 @@ async fn run_tcp_listener(
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
+    import_roster: crate::import_roster::ImportRosterReader,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2158,7 +2164,8 @@ async fn run_tcp_listener(
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_summary_queries(rib_summary_tx.clone())
-        .with_rib_query(rib_query_tx.clone()),
+        .with_rib_query(rib_query_tx.clone())
+        .with_import_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(
@@ -2266,6 +2273,7 @@ async fn run_uds_listener(
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     peer_mgr_operator_tx: mpsc::Sender<EnqueuedOperatorQuery>,
+    import_roster: crate::import_roster::ImportRosterReader,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2424,7 +2432,8 @@ async fn run_uds_listener(
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_summary_queries(rib_summary_tx.clone())
-        .with_rib_query(rib_query_tx.clone()),
+        .with_rib_query(rib_query_tx.clone())
+        .with_import_roster(import_roster.clone()),
         interceptor.clone(),
     ));
     routes.add_service(GlobalServiceServer::with_interceptor(

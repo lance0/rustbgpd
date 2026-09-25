@@ -465,7 +465,7 @@ async fn strict_bfd_drops_inbound_until_up() {
         "strict + BFD down → withhold"
     );
 
-    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id;
+    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id();
 
     // A real inbound socket; the address we drive `handle_inbound` with is the
     // configured strict peer's, not the loopback the socket actually came from.
@@ -482,7 +482,8 @@ async fn strict_bfd_drops_inbound_until_up() {
     // given a pending collision candidate, so no BGP session started.
     let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(
-        managed.session_id, session_id_before,
+        managed.session_id(),
+        session_id_before,
         "strict peer's session must not be replaced by an inbound while BFD is down"
     );
     assert!(
@@ -509,7 +510,7 @@ async fn nonstrict_bfd_down_drops_inbound_while_held() {
         "non-strict peer is held while BFD is down"
     );
 
-    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id;
+    let session_id_before = mgr.peers.get(&key(peer)).unwrap().session_id();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
@@ -521,7 +522,8 @@ async fn nonstrict_bfd_down_drops_inbound_while_held() {
 
     let managed = mgr.peers.get(&key(peer)).unwrap();
     assert_eq!(
-        managed.session_id, session_id_before,
+        managed.session_id(),
+        session_id_before,
         "inbound must be dropped while a non-strict peer is BFD-held"
     );
     assert!(managed.pending_inbound.is_none());
@@ -1308,7 +1310,12 @@ async fn bfd_retry_cancels_on_opposite_state_admin_and_replacement() {
         match cancellation {
             "down" => mgr.handle_bfd_state_change(down(peer)).await,
             "disable" => mgr.set_bfd_peer_disabled(peer, true),
-            "replacement" => mgr.peers.get_mut(&key(peer)).unwrap().session_id += 1,
+            "replacement" => {
+                let (handle, session_id, state) =
+                    mgr.peers.remove(&key(peer)).unwrap().into_parts();
+                mgr.peers
+                    .insert(key(peer), ManagedPeer::new(handle, session_id + 1, state));
+            }
             _ => {
                 mgr.bfd_coupling
                     .as_mut()

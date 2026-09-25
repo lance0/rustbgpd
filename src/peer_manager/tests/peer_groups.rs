@@ -144,7 +144,7 @@ async fn peer_group_bfd_membership_edits_reject_before_effects() {
                 fake_peer_handle(address, SessionState::Established, None, counters.clone()),
                 false,
             );
-            let before = mgr.peers[&key(address)].session_id;
+            let before = mgr.peers[&key(address)].session_id();
             let event = if attach {
                 ConfigEvent::SetNeighborPeerGroup {
                     address,
@@ -170,12 +170,13 @@ async fn peer_group_bfd_membership_edits_reject_before_effects() {
             assert!(error.to_string().contains("BFD membership"), "{error}");
             assert!(error.to_string().contains("SIGHUP"), "{error}");
             assert_eq!(mgr.current_config, prior);
-            assert_eq!(mgr.peers[&key(address)].session_id, before);
+            assert_eq!(mgr.peers[&key(address)].session_id(), before);
             assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
             mgr.peers
                 .remove(&key(address))
                 .unwrap()
-                .handle
+                .into_parts()
+                .0
                 .shutdown()
                 .await
                 .unwrap()
@@ -235,7 +236,10 @@ async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
         .map(|addr| {
             (
                 *addr,
-                mgr.peers.get(&key(*addr)).expect("managed peer").session_id,
+                mgr.peers
+                    .get(&key(*addr))
+                    .expect("managed peer")
+                    .session_id(),
             )
         })
         .collect();
@@ -248,7 +252,8 @@ async fn peer_group_reshape_noop_update_does_not_bounce_or_publish() {
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("managed peer");
         assert_eq!(
-            managed.session_id, session_id,
+            managed.session_id(),
+            session_id,
             "no-op peer-group set must not rebuild {addr}"
         );
         assert_eq!(managed.hold_time, Some(90));
@@ -295,7 +300,10 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
         .map(|addr| {
             (
                 addr,
-                mgr.peers.get(&key(addr)).expect("managed peer").session_id,
+                mgr.peers
+                    .get(&key(addr))
+                    .expect("managed peer")
+                    .session_id(),
             )
         })
         .collect();
@@ -308,7 +316,8 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
         let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
         assert_eq!(managed.hold_time, Some(45));
         assert_ne!(
-            managed.session_id, session_id,
+            managed.session_id(),
+            session_id,
             "real peer-group reshape must rebuild {addr}"
         );
     }
@@ -689,7 +698,7 @@ tcp_ao = { key = "secret", send_id = 7, recv_id = 9, algorithm = "hmac(sha256)" 
     );
     let managed = mgr.peers.get(&key(addr)).expect("untouched peer");
     assert_eq!(managed.hold_time, Some(90));
-    assert_eq!(managed.session_id, 1, "peer generation unchanged");
+    assert_eq!(managed.session_id(), 1, "peer generation unchanged");
     assert_eq!(
         mgr.current_config
             .peer_groups
@@ -893,7 +902,7 @@ async fn peer_group_hot_field_edit_applies_in_place_without_session_reset() {
         .map(|addr| {
             let managed = mgr.peers.get(&key(*addr)).expect("managed peer");
             assert_eq!(managed.transport_config.max_prefixes, None);
-            (*addr, managed.session_id)
+            (*addr, managed.session_id())
         })
         .collect();
 
@@ -904,7 +913,8 @@ async fn peer_group_hot_field_edit_applies_in_place_without_session_reset() {
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("hot-applied member");
         assert_eq!(
-            managed.session_id, session_id,
+            managed.session_id(),
+            session_id,
             "a pure-hot peer-group edit must not tear down {addr}'s session"
         );
         // Skipping the reshape is only correct if the member's *effective*
@@ -939,7 +949,12 @@ async fn peer_group_mixed_impact_edit_still_reshapes_members() {
     ];
     let before: Vec<_> = addresses
         .iter()
-        .map(|addr| (*addr, mgr.peers.get(&key(*addr)).expect("peer").session_id))
+        .map(|addr| {
+            (
+                *addr,
+                mgr.peers.get(&key(*addr)).expect("peer").session_id(),
+            )
+        })
         .collect();
 
     // `hold_time` is OPEN-negotiated (session reset) and `max_prefixes` is
@@ -951,7 +966,8 @@ async fn peer_group_mixed_impact_edit_still_reshapes_members() {
     for (addr, session_id) in before {
         let managed = mgr.peers.get(&key(addr)).expect("reshaped member");
         assert_ne!(
-            managed.session_id, session_id,
+            managed.session_id(),
+            session_id,
             "a mixed-impact peer-group edit must still reshape {addr}"
         );
         assert_eq!(managed.hold_time, Some(45));
@@ -972,7 +988,7 @@ async fn peer_group_hot_apply_mid_cohort_failure_restores_prior_members() {
     mgr.inject_hot_update_failures.insert(key(a2), 0);
     let sessions: Vec<_> = [a1, a2, a3]
         .into_iter()
-        .map(|addr| (addr, mgr.peers.get(&key(addr)).expect("peer").session_id))
+        .map(|addr| (addr, mgr.peers.get(&key(addr)).expect("peer").session_id()))
         .collect();
 
     let Err(error) = mgr
@@ -997,7 +1013,8 @@ async fn peer_group_hot_apply_mid_cohort_failure_restores_prior_members() {
         );
         assert_eq!(managed.transport_config.max_prefixes, None);
         assert_eq!(
-            managed.session_id, session_id,
+            managed.session_id(),
+            session_id,
             "rollback of an in-place apply must not bounce {addr} either"
         );
     }
@@ -1031,7 +1048,7 @@ async fn peer_group_hot_field_edit_reaches_live_dynamic_members() {
         8,
         "ix-members",
     );
-    let session_id = mgr.peers[&key(addr)].session_id;
+    let session_id = mgr.peers[&key(addr)].session_id();
     let cap_before = mgr.peers[&key(addr)]
         .transport_config
         .gr_peer_restart_time_max;
@@ -1060,7 +1077,8 @@ async fn peer_group_hot_field_edit_reaches_live_dynamic_members() {
     let managed = &mgr.peers[&key(addr)];
     assert_eq!(managed.transport_config.gr_peer_restart_time_max, 1_800);
     assert_eq!(
-        managed.session_id, session_id,
+        managed.session_id(),
+        session_id,
         "a hot peer-group edit must not bounce the dynamic member"
     );
     assert!(managed.is_dynamic);

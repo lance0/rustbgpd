@@ -56,9 +56,14 @@ def distribution(values):
 
 
 STAGE = re.compile(r'stage=(\w+) elapsed_ms=(\d+) budget_ms=(\d+) rpc_elapsed_ms=(\d+) code=(\w+)'
-                   r'(?: (admission=pending|admission_ms=\d+ collection_ms=\d+ publications=\d+/\d+ yields=\d+))?')
+                   r'(?: (admission=pending|admission_ms=\d+ collection_ms=\d+ publications=\d+/\d+ yields=\d+'
+                   r'|publications=\d+/\d+ yields=\d+))?')
 STAGE_ORDER = ('export', 'import', 'datasets')  # a fleet `--direction both` request
-IMPORT_DETAIL = ('admission_ms', 'collection_ms', 'publications_read', 'publications_selected', 'yields')
+# The import stage reads the peer manager's published roster (ADR-0136) and
+# records only its capture: publications read/selected and waits taken.
+IMPORT_DETAIL = ('publications_read', 'publications_selected', 'yields')
+# Runs before the roster (slice 0) also recorded the peer-manager wait.
+LEGACY_IMPORT_DETAIL = ('admission_ms', 'collection_ms') + IMPORT_DETAIL
 
 
 def parse_summary(summary):
@@ -79,7 +84,8 @@ def parse_summary(summary):
         if detail == 'admission=pending':
             stage['admission'] = 'pending'
         elif detail:
-            stage.update(zip(IMPORT_DETAIL, map(int, re.findall(r'\d+', detail))))
+            fields = LEGACY_IMPORT_DETAIL if detail.startswith('admission_ms=') else IMPORT_DETAIL
+            stage.update(zip(fields, map(int, re.findall(r'\d+', detail))))
         stages.append(stage)
     return stages
 
@@ -89,7 +95,8 @@ def stage_set_problem(stages, result):
 
     Stages run in STAGE_ORDER and stop at the first failure, so a record must
     be a prefix of it ending at any non-Ok stage; a successful handler must
-    carry all three. The import stage must carry its sub-stages (or pending).
+    carry all three. The import stage must carry its capture detail (or, in a
+    run from before the published roster, its pending admission).
     """
     names = [s['stage'] for s in stages]
     if names != list(STAGE_ORDER[:len(names)]) or not names:
@@ -101,7 +108,7 @@ def stage_set_problem(stages, result):
         return f'handler_ok with incomplete or failed stages {names}'
     for s in stages:
         if s['stage'] == 'import' and s.get('admission') != 'pending' and not all(k in s for k in IMPORT_DETAIL):
-            return 'import stage without admission/collection/publications/yields'
+            return 'import stage without publications/yields'
         if s['stage'] != 'import' and ('admission' in s or 'yields' in s):
             return f"{s['stage']} stage carries import sub-stages"
     return None

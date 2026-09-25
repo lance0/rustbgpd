@@ -743,7 +743,20 @@ pub struct InstalledImportPolicy {
     counters: Option<Arc<rustbgpd_policy::PolicyHitCounters>>,
     #[cfg(test)]
     test_error_busy: std::sync::atomic::AtomicBool,
+    /// Test clock: the deadline counts as passed once this many term rows
+    /// have been read.
+    #[cfg(test)]
+    test_deadline_after_rows: std::sync::atomic::AtomicUsize,
 }
+
+/// Term rows read between deadline checks in one installed publication. A
+/// row costs about 30 ns with short labels and 250 ns with 256-byte labels
+/// (release, one core: 500,000 terms in 14.2 ms; 32,000 rows with 256-byte
+/// labels in 7.7 ms), so one clock read per stride is well under 1% of the
+/// pass, and the pass stops within about 30 to 250 us of its deadline. A
+/// chain can hold about 500,000 terms (`MAX_CHAIN_NODES` at two IR nodes per
+/// term).
+const DEADLINE_CHECK_ROWS: usize = 1024;
 
 impl InstalledImportPolicy {
     /// Capture the installed identity and counter ownership, creating the
@@ -760,9 +773,15 @@ impl InstalledImportPolicy {
             counters: chain.map(|chain| Arc::clone(chain.hit_counters())),
             #[cfg(test)]
             test_error_busy: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            test_deadline_after_rows: std::sync::atomic::AtomicUsize::new(usize::MAX),
         }
     }
 
+    /// Read each counter of the installed instance once. The only
+    /// suspension is a busy error mutex (`try_lock`, yield, retry under the
+    /// caller's deadline); every other step runs without yielding, checking
+    /// the deadline every [`DEADLINE_CHECK_ROWS`] term rows.
     async fn observe(
         &self,
         deadline: tokio::time::Instant,
@@ -796,16 +815,20 @@ impl InstalledImportPolicy {
                 }
             }
         };
-        let mut terms = Vec::new();
-        for (policy_index, (policy, labels)) in counters.labels().iter().enumerate() {
-            consume_budget_counted(yields).await;
-            if deadline <= tokio::time::Instant::now() {
-                return Err(ImportPolicyStatsError::TimedOut);
-            }
+        let labels = counters.labels();
+        let mut terms = Vec::with_capacity(labels.iter().map(|(_, terms)| terms.len()).sum());
+        for (policy_index, (policy, labels)) in labels.iter().enumerate() {
             for (term_index, term) in labels.iter().enumerate() {
-                consume_budget_counted(yields).await;
-                if deadline <= tokio::time::Instant::now() {
-                    return Err(ImportPolicyStatsError::TimedOut);
+                // No await in this pass, so the caller's `timeout_at` cannot
+                // interrupt it: bound a large chain here, without yielding.
+                if terms.len() % DEADLINE_CHECK_ROWS == DEADLINE_CHECK_ROWS - 1 {
+                    let expired = deadline <= tokio::time::Instant::now();
+                    #[cfg(test)]
+                    let expired = expired
+                        || terms.len() >= self.test_deadline_after_rows.load(Ordering::Relaxed);
+                    if expired {
+                        return Err(ImportPolicyStatsError::TimedOut);
+                    }
                 }
                 let hits = counters
                     .term_hits(policy_index, term_index)
@@ -827,16 +850,6 @@ impl InstalledImportPolicy {
             terms,
         }))
     }
-}
-
-/// Spend one unit of the task's cooperative budget, counting the checkpoint in
-/// `yields` when the budget is already exhausted and the task therefore yields
-/// to the scheduler. Diagnostic only: the yield itself is unchanged.
-pub async fn consume_budget_counted(yields: &AtomicU64) {
-    if !tokio::task::coop::has_budget_remaining() {
-        yields.fetch_add(1, Ordering::Relaxed);
-    }
-    tokio::task::coop::consume_budget().await;
 }
 
 /// Outcome of a bounded read from a peer-session task.
@@ -1221,48 +1234,52 @@ impl PeerHandle {
         publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
         deadline: tokio::time::Instant,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
-        Self::read_import_policy_counters_counting(publication, deadline, &AtomicU64::new(0)).await
+        Self::read_import_policy_counters_counting(&publication, deadline, &AtomicU64::new(0)).await
     }
 
-    /// [`Self::read_import_policy_counters`], adding each scheduler yield of
-    /// the observation to `yields`.
+    /// [`Self::read_import_policy_counters`] over a shared publication,
+    /// adding each wait to `yields`: one per Pending wait for the session's
+    /// first publication and one per busy error-mutex retry. An installed
+    /// publication whose error mutex is free is read without yielding.
     ///
     /// # Errors
     ///
     /// Reports deadline expiry, selected task closure, or unavailable counters.
     pub async fn read_import_policy_counters_counting(
-        mut publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+        publication: &watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
         deadline: tokio::time::Instant,
         yields: &AtomicU64,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
         if deadline <= tokio::time::Instant::now() {
             return Err(ImportPolicyStatsError::TimedOut);
         }
-        let observed = tokio::time::timeout_at(deadline, async {
+        let observed = async {
             loop {
                 publication
                     .has_changed()
                     .map_err(|_| ImportPolicyStatsError::SessionGone)?;
                 // Release the watch guard before reading counters or yielding.
-                let installed = publication.borrow_and_update().clone();
+                let installed = publication.borrow().clone();
                 if let Some(installed) = installed {
                     let snapshot = installed.observe(deadline, yields).await?;
                     publication
                         .has_changed()
                         .map_err(|_| ImportPolicyStatsError::SessionGone)?;
-                    if deadline <= tokio::time::Instant::now() {
-                        return Err(ImportPolicyStatsError::TimedOut);
-                    }
                     return Ok(snapshot);
                 }
-                publication
-                    .changed()
-                    .await
-                    .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                // Pending: the session task has not constructed its session
+                // yet. Wait on a private cursor for its first publication.
+                let mut pending = publication.clone();
+                if pending.borrow_and_update().is_none() {
+                    yields.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::timeout_at(deadline, pending.changed())
+                        .await
+                        .map_err(|_| ImportPolicyStatsError::TimedOut)?
+                        .map_err(|_| ImportPolicyStatsError::SessionGone)?;
+                }
             }
-        })
-        .await
-        .unwrap_or(Err(ImportPolicyStatsError::TimedOut));
+        }
+        .await;
         if deadline <= tokio::time::Instant::now() {
             Err(ImportPolicyStatsError::TimedOut)
         } else {
@@ -2611,6 +2628,73 @@ mod tests {
             generation,
             Some(&PolicyChain::new(vec![])),
         ))
+    }
+
+    /// A chain with this many terms is read in one synchronous pass.
+    fn many_term_descriptor(terms: usize) -> Arc<InstalledImportPolicy> {
+        use rustbgpd_policy::rpol::compile_rpol;
+        use rustbgpd_policy::sets::SetStore;
+        use rustbgpd_policy::{NamedPolicy, PolicyChain};
+
+        use std::fmt::Write as _;
+
+        let mut body = String::new();
+        for index in 0..terms {
+            writeln!(body, " term t{index} {{ accept }}").expect("writing to a String");
+        }
+        let compiled = compile_rpol(&format!("policy wide {{\n{body}}}"), &mut SetStore::new())
+            .expect("valid wide policy");
+        let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "wide".to_string(),
+            Arc::new(compiled),
+        )]);
+        Arc::new(InstalledImportPolicy::new(
+            SessionIdentity::default(),
+            0,
+            Some(&chain),
+        ))
+    }
+
+    /// The term pass has no await, so the caller's `timeout_at` cannot stop
+    /// it: a deadline that passes mid-pass must end it at the next stride
+    /// check instead of reading every remaining term. The test clock passes
+    /// the deadline after 2,000 rows of 5,000; without the stride check the
+    /// pass returns all 5,000 rows.
+    #[tokio::test]
+    async fn installed_counter_pass_stops_at_a_deadline_passed_mid_pass() {
+        let installed = many_term_descriptor(5_000);
+        let far = tokio::time::Instant::now() + Duration::from_secs(60);
+        let rows = installed
+            .observe(far, &AtomicU64::new(0))
+            .await
+            .unwrap()
+            .expect("installed chain");
+        assert_eq!(
+            rows.terms.len(),
+            5_000,
+            "an unexpired pass reads every term"
+        );
+
+        installed
+            .test_deadline_after_rows
+            .store(2_000, Ordering::Relaxed);
+        let yields = AtomicU64::new(0);
+        let outcome = poll_fn(|cx| {
+            let observe = installed.observe(far, &yields);
+            tokio::pin!(observe);
+            Poll::Ready(observe.poll(cx))
+        })
+        .await;
+        assert!(
+            matches!(outcome, Poll::Ready(Err(ImportPolicyStatsError::TimedOut))),
+            "the pass ran past its deadline: {:?}",
+            outcome.map(|result| result.map(|rows| rows.map(|rows| rows.terms.len())))
+        );
+        assert_eq!(
+            yields.load(Ordering::Relaxed),
+            0,
+            "the check does not yield"
+        );
     }
 
     #[tokio::test(start_paused = true)]

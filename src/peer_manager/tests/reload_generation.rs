@@ -206,30 +206,32 @@ impl GenerationHarness {
             let tcp_ao_protected = resolved.transport_config.tcp_ao.is_some();
             mgr.peers.insert(
                 peer_key.clone(),
-                ManagedPeer {
-                    policy_known_down: false,
+                ManagedPeer::new(
                     handle,
                     session_id,
-                    remote_asn: resolved.transport_config.peer.remote_asn,
-                    description: resolved.label,
-                    peer_group: resolved.peer_group,
-                    enabled: true,
-                    hold_time: Some(resolved.transport_config.peer.hold_time),
-                    max_prefixes: resolved.transport_config.max_prefixes,
-                    max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
-                    transport_config: resolved.transport_config,
-                    import_policy: resolved.import_policy,
-                    export_policy: resolved.export_policy,
-                    pending_inbound: None,
-                    is_dynamic: false,
-                    rfc8212_external: resolved.rfc8212_external,
-                    tcp_ao_protected,
-                    tcp_ao_rotation: TcpAoRotationStatus::default(),
-                    accepted_dynamic_range: None,
-                    pending_refresh: false,
-                    pending_export_apply: false,
-                    advertise_graceful_shutdown: false,
-                },
+                    ManagedPeerState {
+                        policy_known_down: false,
+                        remote_asn: resolved.transport_config.peer.remote_asn,
+                        description: resolved.label,
+                        peer_group: resolved.peer_group,
+                        enabled: true,
+                        hold_time: Some(resolved.transport_config.peer.hold_time),
+                        max_prefixes: resolved.transport_config.max_prefixes,
+                        max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
+                        transport_config: resolved.transport_config,
+                        import_policy: resolved.import_policy,
+                        export_policy: resolved.export_policy,
+                        pending_inbound: None,
+                        is_dynamic: false,
+                        rfc8212_external: resolved.rfc8212_external,
+                        tcp_ao_protected,
+                        tcp_ao_rotation: TcpAoRotationStatus::default(),
+                        accepted_dynamic_range: None,
+                        pending_refresh: false,
+                        pending_export_apply: false,
+                        advertise_graceful_shutdown: false,
+                    },
+                ),
             );
             mgr.register_session(session_id, &peer_key);
             mgr.next_session_id = session_id + 1;
@@ -277,7 +279,7 @@ impl GenerationHarness {
     }
 
     fn session_id(&self, address: &str) -> u64 {
-        self.mgr.peers[&key(address.parse().unwrap())].session_id
+        self.mgr.peers[&key(address.parse().unwrap())].session_id()
     }
 
     fn export_installs(&self, address: &str) -> u32 {
@@ -312,7 +314,7 @@ impl GenerationHarness {
 
     async fn shutdown(mut self) {
         for (_, managed) in self.mgr.peers.drain() {
-            let _ = managed.handle.shutdown().await;
+            let _ = managed.into_parts().0.shutdown().await;
         }
     }
 }
@@ -1083,6 +1085,7 @@ async fn assert_generation_operator_read_boundaries(
     harness.mgr.internal_rx = Some(internal_rx);
     let (operator_tx, operator_rx) = mpsc::channel(16);
     harness.mgr = harness.mgr.with_operator_queries(operator_rx);
+    let import_roster = harness.mgr.import_roster();
     let (readiness_tx, readiness_rx) = mpsc::channel(4);
     harness.mgr = harness.mgr.with_readiness_queries(readiness_rx);
     let rib_tx = harness.mgr.rib_tx.clone();
@@ -1178,12 +1181,8 @@ async fn assert_generation_operator_read_boundaries(
                 .await
                 .unwrap();
             assert!(response.await.unwrap());
-            let (reply, response) = oneshot::channel();
-            operator_tx
-                .send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply }.into())
-                .await
-                .unwrap();
-            assert!(response.await.unwrap().is_empty());
+            // Dataset status reads the published roster, not a lane.
+            assert!(import_roster.load().datasets().is_empty());
             assert!(matches!(
                 mutation_response.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
@@ -1309,7 +1308,7 @@ async fn assert_generation_operator_read_boundaries(
             "manager metadata still names candidate knobs although the session acknowledged its prior knobs"
         );
         let state = managed
-            .handle
+            .handle()
             .query_state_timeout(PEER_QUERY_TIMEOUT)
             .await
             .unwrap();
@@ -1331,7 +1330,7 @@ async fn assert_generation_operator_read_boundaries(
         drop(operator_response);
         drop(mutation_response);
         for (_, managed) in harness.mgr.peers.drain() {
-            let _ = managed.handle.shutdown().await;
+            let _ = managed.into_parts().0.shutdown().await;
         }
         drop(harness.mgr);
         drop(internal_tx);
@@ -1453,17 +1452,21 @@ async fn generation_dynamic_hot_group_updates_transport_and_preserves_identity()
     let untouched = harness.add_dynamic("10.9.0.4", "untouched", true);
     // Preserve a concrete accepted interface, even though resolving a synthetic
     // dynamic neighbor produces no interface of its own.
-    let mut managed = harness.mgr.peers.remove(&dynamic).unwrap();
+    let (handle, session_id, mut managed) =
+        harness.mgr.peers.remove(&dynamic).unwrap().into_parts();
     managed.transport_config.peer_interface = Some("accepted0".into());
     let dynamic = PeerKey::new(dynamic.address, Some("accepted0".into()));
-    harness.mgr.register_session(managed.session_id, &dynamic);
-    harness.mgr.peers.insert(dynamic.clone(), managed);
+    harness.mgr.register_session(session_id, &dynamic);
+    harness.mgr.peers.insert(
+        dynamic.clone(),
+        ManagedPeer::new(handle, session_id, managed),
+    );
     let identity: Vec<_> = [&dynamic, &disabled, &untouched]
         .into_iter()
         .map(|peer| {
             let managed = &harness.mgr.peers[peer];
             (
-                managed.session_id,
+                managed.session_id(),
                 managed.accepted_dynamic_range.clone(),
                 managed.enabled,
             )
@@ -1519,7 +1522,7 @@ async fn generation_dynamic_hot_group_updates_transport_and_preserves_identity()
         let managed = &harness.mgr.peers[peer];
         assert_eq!(
             (
-                managed.session_id,
+                managed.session_id(),
                 managed.accepted_dynamic_range.clone(),
                 managed.enabled
             ),
@@ -1541,7 +1544,7 @@ async fn generation_dynamic_hot_group_keeps_mixed_reshape_deferred() {
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
     let peer = harness.add_dynamic("10.9.0.2", "members", true);
-    let session = harness.mgr.peers[&peer].session_id;
+    let session = harness.mgr.peers[&peer].session_id();
     let cap = harness.mgr.peers[&peer]
         .transport_config
         .gr_peer_restart_time_max;
@@ -1555,7 +1558,7 @@ async fn generation_dynamic_hot_group_keeps_mixed_reshape_deferred() {
         "{outcome:?}"
     );
     assert_eq!(harness.runtime_config_updates("10.9.0.2"), 0);
-    assert_eq!(harness.mgr.peers[&peer].session_id, session);
+    assert_eq!(harness.mgr.peers[&peer].session_id(), session);
     assert_eq!(
         harness.mgr.peers[&peer]
             .transport_config
@@ -1572,7 +1575,7 @@ async fn generation_dynamic_hot_group_restores_transport_after_late_failure() {
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
     let peer = harness.add_dynamic("10.9.0.2", "members", true);
-    let session = harness.mgr.peers[&peer].session_id;
+    let session = harness.mgr.peers[&peer].session_id();
     let cap = harness.mgr.peers[&peer]
         .transport_config
         .gr_peer_restart_time_max;
@@ -1618,7 +1621,7 @@ async fn generation_dynamic_hot_group_restores_transport_after_late_failure() {
         cap
     );
     assert_eq!(harness.export_med("10.9.0.2"), Some(10));
-    assert_eq!(harness.mgr.peers[&peer].session_id, session);
+    assert_eq!(harness.mgr.peers[&peer].session_id(), session);
     assert_eq!(harness.mgr.current_config, prior);
     harness.shutdown().await;
 }
@@ -1934,7 +1937,7 @@ async fn failed_bfd_generation_inner_reshape_restores_prior_nonstrict_start() {
         "candidate BFD must not publish"
     );
     let state = harness.mgr.peers[&key(peer)]
-        .handle
+        .handle()
         .query_state_timeout(PEER_QUERY_TIMEOUT)
         .await
         .unwrap();
@@ -2149,11 +2152,16 @@ async fn reject_policy_transition(state: SessionState) {
         }
         Ok(())
     });
-    let managed = harness.mgr.peers.get_mut(&key(addr)).unwrap();
-    let previous = std::mem::replace(
-        &mut managed.handle,
-        PeerHandle::from_parts(session_tx, task),
-    );
+    let session_id = harness.mgr.peers[&key(addr)].session_id();
+    let (previous, _) = harness
+        .mgr
+        .peers
+        .replace_handle(
+            &key(addr),
+            PeerHandle::from_parts(session_tx, task),
+            session_id,
+        )
+        .unwrap();
     previous.shutdown().await.unwrap().unwrap();
     let (rib_tx, rib_rx) = mpsc::channel(256);
     harness.mgr.rib_tx = rib_tx;
@@ -3762,11 +3770,13 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
         .insert(key("2001:db8::3".parse().unwrap()), 0);
     let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
     let old_commands = harness.mgr.peers[&key("10.0.0.2".parse().unwrap())]
-        .handle
+        .handle()
         .commands_sender();
     let old_counters = harness.counters[&"10.0.0.2".parse::<IpAddr>().unwrap()].clone();
     let (operator_tx, operator_rx) = mpsc::channel(4);
     harness.mgr = harness.mgr.with_operator_queries(operator_rx);
+    let import_roster = harness.mgr.import_roster();
+    let roster_version = import_roster.load().version();
     let (command_tx, command_rx) = mpsc::channel(4);
     harness.mgr.rx = command_rx;
     let (proxy_tx, mut proxy_rx) = mpsc::channel(16);
@@ -3830,25 +3840,17 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
             old_counters.state_queries.load(Ordering::SeqCst),
             old_queries
         );
-        let (reply, response) = oneshot::channel();
-        operator_tx
-            .send(
-                PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                    peer: None,
-                    deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-                    progress: Arc::default(),
-                    reply,
-                }
-                .into(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), response)
+        // The generation is one roster operation (ADR-0136): mid-operation
+        // the roster is still the one published before it, naming the
+        // replaced session, so an import read reports that session gone
+        // rather than a partial result.
+        assert_eq!(import_roster.load().version(), roster_version);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), roster_import_rows(&import_roster))
                 .await
                 .unwrap()
-                .unwrap()
-                .is_ok()
+                .unwrap_err(),
+            rustbgpd_transport::handle::ImportPolicyStatsError::SessionGone
         );
         assert!(matches!(
             mutation.try_recv(),
@@ -3871,6 +3873,15 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
     assert!(
         matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
         "{outcome:?}"
+    );
+    // The completed operation published once, naming the recreated session.
+    assert_eq!(import_roster.load().version(), roster_version + 1);
+    harness.mgr.assert_import_roster_projection();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), roster_import_rows(&import_roster))
+            .await
+            .unwrap()
+            .is_ok()
     );
     assert_eq!(live.pin().generation, 3);
     assert_eq!(
@@ -4053,7 +4064,7 @@ async fn dataset_generation_single_replacement_failure_restores_data_before_cons
     harness.mgr.disable_peer(peer.clone(), None).await.unwrap();
     let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
     let mut dataset_prior = Some(prepared.publish());
-    harness.mgr.current_config = candidate;
+    harness.mgr.replace_current_config(candidate);
     harness.mgr.dataset_generations_at_peer_construction = Some(Vec::new());
     let mut replacement = make_config(addr, 65002);
     replacement.interface = Some(interface.to_string());
@@ -4088,6 +4099,10 @@ async fn dataset_generation_single_replacement_failure_restores_data_before_cons
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fixture re-keys a scoped peer through the peer table and then drives the hot update"
+)]
 async fn generation_hot_update_retains_missing_interface_scope_and_session() {
     let config: Config = toml::from_str(
         r#"
@@ -4109,8 +4124,8 @@ peer_group = "edge"
     .unwrap();
     let addr: IpAddr = "fe80::5".parse().unwrap();
     let mut harness = GenerationHarness::new(&config);
-    let mut managed = harness.mgr.peers.remove(&key(addr)).unwrap();
-    let session_id = managed.session_id;
+    let (handle, session_id, mut managed) =
+        harness.mgr.peers.remove(&key(addr)).unwrap().into_parts();
     let peer = scoped_key(addr, "rbgp-missing");
     // Preserve a synthetic accepted index after the interface disappears.
     assert!(nix::net::if_::if_nametoindex("rbgp-missing").is_err());
@@ -4118,7 +4133,10 @@ peer_group = "edge"
     managed.transport_config.peer_scope_id = Some(42);
     managed.transport_config.remote_addr = "[fe80::5%42]:179".parse().unwrap();
     harness.mgr.register_session(session_id, &peer);
-    harness.mgr.peers.insert(peer.clone(), managed);
+    harness
+        .mgr
+        .peers
+        .insert(peer.clone(), ManagedPeer::new(handle, session_id, managed));
     harness.mgr.current_config.neighbors[0].interface = peer.interface.clone();
     let mut candidate = harness.mgr.current_config.clone();
     candidate.neighbors[0].description = Some("updated description".into());
@@ -4148,7 +4166,8 @@ peer_group = "edge"
     );
     let retained = &harness.mgr.peers[&peer];
     assert_eq!(
-        retained.session_id, session_id,
+        retained.session_id(),
+        session_id,
         "hot update cannot replace the session"
     );
     assert_eq!(retained.transport_config.peer_scope_id, Some(42));
@@ -4168,7 +4187,7 @@ peer_group = "edge"
         harness.mgr.hot_update_peer_owned(hot).await,
         rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome::Success,
     ));
-    assert_eq!(harness.mgr.peers[&peer].session_id, session_id);
+    assert_eq!(harness.mgr.peers[&peer].session_id(), session_id);
     assert_eq!(
         harness.mgr.peers[&peer].transport_config.peer_scope_id,
         Some(42)
@@ -4186,7 +4205,7 @@ peer_group = "edge"
         .await
         .expect("inherited hot edit retains accepted scope");
     let retained = &harness.mgr.peers[&peer];
-    assert_eq!(retained.session_id, session_id);
+    assert_eq!(retained.session_id(), session_id);
     assert_eq!(retained.transport_config.peer_scope_id, Some(42));
     assert_eq!(retained.transport_config.max_prefixes, Some(5000));
     harness.shutdown().await;

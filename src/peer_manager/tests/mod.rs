@@ -465,32 +465,51 @@ fn insert_test_managed_peer_for_key(
     let session_id = u64::try_from(mgr.peers.len()).unwrap_or(u64::MAX - 1) + 1;
     mgr.peers.insert(
         peer_key.clone(),
-        ManagedPeer {
-            policy_known_down: false,
+        ManagedPeer::new(
             handle,
             session_id,
-            remote_asn,
-            description: "test".to_string(),
-            peer_group: None,
-            enabled: true,
-            hold_time: Some(hold),
-            max_prefixes: None,
-            max_prefix_restart_seconds: None,
-            transport_config: transport,
-            import_policy: None,
-            export_policy: None,
-            pending_inbound: None,
-            is_dynamic: false,
-            rfc8212_external: false,
-            tcp_ao_protected: false,
-            accepted_dynamic_range: None,
-            pending_refresh,
-            pending_export_apply: false,
-            tcp_ao_rotation: TcpAoRotationStatus::default(),
-            advertise_graceful_shutdown: false,
-        },
+            ManagedPeerState {
+                policy_known_down: false,
+                remote_asn,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                rfc8212_external: false,
+                tcp_ao_protected: false,
+                accepted_dynamic_range: None,
+                pending_refresh,
+                pending_export_apply: false,
+                tcp_ao_rotation: TcpAoRotationStatus::default(),
+                advertise_graceful_shutdown: false,
+            },
+        ),
     );
     mgr.register_session(session_id, peer_key);
+}
+
+/// Capture every managed peer's import counters from the published roster
+/// under a fresh two-second deadline, as `GetPolicyStats` does.
+pub(super) async fn roster_import_rows(
+    roster: &rustbgpd_api::import_roster::ImportRosterReader,
+) -> Result<
+    Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>,
+    rustbgpd_transport::handle::ImportPolicyStatsError,
+> {
+    let roster = roster.load();
+    rustbgpd_api::import_roster::capture_import(
+        roster.peers(),
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        &mut rustbgpd_api::import_roster::ImportCaptureProgress::default(),
+    )
+    .await
 }
 
 pub(super) fn installed_policy(
@@ -809,30 +828,32 @@ fn insert_test_scoped_managed_peer(
     let peer_key = scoped_key(addr, interface);
     mgr.peers.insert(
         peer_key.clone(),
-        ManagedPeer {
-            policy_known_down: false,
+        ManagedPeer::new(
             handle,
             session_id,
-            remote_asn: 65002,
-            description: interface.to_string(),
-            peer_group: None,
-            enabled: true,
-            hold_time: Some(hold),
-            max_prefixes: None,
-            max_prefix_restart_seconds: None,
-            transport_config: transport,
-            import_policy: None,
-            export_policy: None,
-            pending_inbound: None,
-            is_dynamic: false,
-            rfc8212_external: false,
-            tcp_ao_protected: false,
-            accepted_dynamic_range: None,
-            pending_refresh: false,
-            pending_export_apply: false,
-            tcp_ao_rotation: TcpAoRotationStatus::default(),
-            advertise_graceful_shutdown: false,
-        },
+            ManagedPeerState {
+                policy_known_down: false,
+                remote_asn: 65002,
+                description: interface.to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                rfc8212_external: false,
+                tcp_ao_protected: false,
+                accepted_dynamic_range: None,
+                pending_refresh: false,
+                pending_export_apply: false,
+                tcp_ao_rotation: TcpAoRotationStatus::default(),
+                advertise_graceful_shutdown: false,
+            },
+        ),
     );
     mgr.register_session(session_id, &peer_key);
 }
@@ -1258,34 +1279,36 @@ fn insert_test_dynamic_managed_peer(
     let peer_key = key(addr);
     mgr.peers.insert(
         peer_key.clone(),
-        ManagedPeer {
-            policy_known_down: false,
+        ManagedPeer::new(
             handle,
             session_id,
-            remote_asn: 65030,
-            description: format!("dynamic:{range_peer_group}"),
-            peer_group: Some(range_peer_group.to_string()),
-            enabled,
-            hold_time: Some(hold),
-            max_prefixes: None,
-            max_prefix_restart_seconds: None,
-            transport_config: transport,
-            import_policy: None,
-            export_policy: None,
-            pending_inbound: None,
-            is_dynamic: true,
-            rfc8212_external: false,
-            tcp_ao_protected: false,
-            accepted_dynamic_range: Some(AcceptedDynamicRange {
-                addr: range_addr,
-                prefix_len: range_prefix_len,
-                peer_group: range_peer_group.to_string(),
-            }),
-            pending_refresh: false,
-            pending_export_apply: false,
-            tcp_ao_rotation: TcpAoRotationStatus::default(),
-            advertise_graceful_shutdown: false,
-        },
+            ManagedPeerState {
+                policy_known_down: false,
+                remote_asn: 65030,
+                description: format!("dynamic:{range_peer_group}"),
+                peer_group: Some(range_peer_group.to_string()),
+                enabled,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: true,
+                rfc8212_external: false,
+                tcp_ao_protected: false,
+                accepted_dynamic_range: Some(AcceptedDynamicRange {
+                    addr: range_addr,
+                    prefix_len: range_prefix_len,
+                    peer_group: range_peer_group.to_string(),
+                }),
+                pending_refresh: false,
+                pending_export_apply: false,
+                tcp_ao_rotation: TcpAoRotationStatus::default(),
+                advertise_graceful_shutdown: false,
+            },
+        ),
     );
     mgr.register_session(session_id, &peer_key);
     mgr.dynamic_peer_count += 1;
@@ -1650,7 +1673,7 @@ fn rfc8212_status_manager() -> (PeerManager, mpsc::Receiver<RibUpdate>) {
     // chain. Nothing in the status derivation may consult it.
     config.policy.import_chain = vec!["operator-import".to_string()];
     config.policy.export_chain = vec!["operator-export".to_string()];
-    mgr.current_config = config;
+    mgr.replace_current_config(config);
     (mgr, rib_rx)
 }
 
@@ -1685,6 +1708,7 @@ mod config_transaction;
 mod dynamic_ranges;
 mod events;
 mod export_cohorts;
+mod import_roster;
 mod inbound_admission;
 mod lifecycle;
 mod max_prefix;

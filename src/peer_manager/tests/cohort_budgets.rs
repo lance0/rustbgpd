@@ -151,6 +151,7 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
         None,
     )
     .with_operator_queries(operator_rx);
+    let import_roster = manager.import_roster();
     let installs = Arc::new(AtomicUsize::new(0));
     for peer in peers {
         insert_test_managed_peer(
@@ -239,23 +240,11 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
         .expect("the API entry admits the peer snapshot")
         .unwrap();
     assert_eq!(infos.len(), 2);
-    let (reply, response) = oneshot::channel();
-    operator_tx
-        .send(
-            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer: None,
-                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-                progress: Arc::default(),
-                reply,
-            }
-            .into(),
-        )
+    // Import statistics read the published roster; the held owner is
+    // never asked.
+    let stats = tokio::time::timeout(Duration::from_secs(1), roster_import_rows(&import_roster))
         .await
-        .unwrap();
-    let stats = tokio::time::timeout(Duration::from_secs(1), response)
-        .await
-        .expect("the API entry admits complete import statistics")
-        .unwrap();
+        .expect("the API entry admits complete import statistics");
     assert!(matches!(stats, Ok(rows) if rows.len() == 2));
     assert!(!applied.is_finished(), "the cohort is still held");
     assert!(matches!(
@@ -1040,6 +1029,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
         None,
     )
     .with_operator_queries(operator_rx);
+    let import_roster = manager.import_roster();
     let installs = Arc::new(AtomicUsize::new(0));
     for peer in [first, second] {
         insert_test_managed_peer(
@@ -1150,23 +1140,11 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
             )))
             .collect::<Vec<_>>()
     );
-    let (reply, response) = oneshot::channel();
-    operator_tx
-        .send(
-            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer: None,
-                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-                progress: Arc::default(),
-                reply,
-            }
-            .into(),
-        )
+    // Import statistics read the published roster; the held owner is
+    // never asked.
+    let rows = tokio::time::timeout(Duration::from_secs(1), roster_import_rows(&import_roster))
         .await
-        .unwrap();
-    let rows = tokio::time::timeout(Duration::from_secs(1), response)
-        .await
-        .expect("the import-stats collection is answered while the cohort RIB reply is awaited")
-        .unwrap();
+        .expect("the import-stats collection is answered while the cohort RIB reply is awaited");
     assert!(matches!(rows, Ok(ref rows) if rows.len() == 2), "{rows:?}");
     assert!(
         !reload.is_finished(),
@@ -1279,6 +1257,7 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
         None,
     )
     .with_operator_queries(operator_rx);
+    let import_roster = manager.import_roster();
     let installs = Arc::new(AtomicUsize::new(0));
     for peer in [first, second] {
         insert_test_managed_peer(
@@ -1348,23 +1327,11 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
             ""
         }
     );
-    let (reply, response) = oneshot::channel();
-    operator_tx
-        .send(
-            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
-                peer: None,
-                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
-                progress: Arc::default(),
-                reply,
-            }
-            .into(),
-        )
+    // Import statistics read the published roster; the held owner is
+    // never asked.
+    let rows = tokio::time::timeout(Duration::from_secs(1), roster_import_rows(&import_roster))
         .await
-        .unwrap();
-    let rows = tokio::time::timeout(Duration::from_secs(1), response)
-        .await
-        .expect("the import-stats collection is answered while the rollback RIB reply is awaited")
-        .unwrap();
+        .expect("the import-stats collection is answered while the rollback RIB reply is awaited");
     assert!(matches!(rows, Ok(ref rows) if rows.len() == 2), "{rows:?}");
     assert!(
         !reload.is_finished(),
@@ -1400,7 +1367,7 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
         );
     }
     for (_, managed) in manager.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
     drop(manager);
     rib.await.unwrap();

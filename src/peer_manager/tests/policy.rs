@@ -911,7 +911,7 @@ async fn apply_policy_change_reaches_live_dynamic_peers() {
     if let Some(group) = config.peer_groups.get_mut("ix-members") {
         group.import_policy_chain = vec!["ix-import".to_string()];
     }
-    mgr.current_config = config;
+    mgr.replace_current_config(config);
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
     let counters = Arc::new(FakePeerCounters::default());
@@ -996,7 +996,7 @@ async fn set_peer_group_policy_only_change_reaches_live_dynamic_peers() {
         config.peer_groups.get("ix-members").unwrap(),
     );
     next_group.import_policy_chain = vec!["deny-import".to_string()];
-    mgr.current_config = config;
+    mgr.replace_current_config(config);
 
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
     let counters = Arc::new(FakePeerCounters::default());
@@ -1055,7 +1055,7 @@ async fn set_peer_group_rejects_an_unparseable_orr_vantage_on_apply() {
         rib_tx,
         None,
     );
-    mgr.current_config = make_dynamic_manager_config();
+    mgr.replace_current_config(make_dynamic_manager_config());
     let mut definition = crate::policy_admin::config_peer_group_to_api(
         mgr.current_config.peer_groups.get("ix-members").unwrap(),
     );
@@ -1873,30 +1873,32 @@ async fn pending_refresh_re_arms_when_peer_still_not_established() {
     let hold = transport.peer.hold_time;
     mgr.peers.insert(
         key(addr),
-        ManagedPeer {
-            policy_known_down: false,
+        ManagedPeer::new(
             handle,
-            session_id: 1,
-            remote_asn: 65002,
-            description: "test".to_string(),
-            peer_group: None,
-            enabled: true,
-            hold_time: Some(hold),
-            max_prefixes: None,
-            max_prefix_restart_seconds: None,
-            transport_config: transport,
-            import_policy: None,
-            export_policy: None,
-            pending_inbound: None,
-            is_dynamic: false,
-            rfc8212_external: false,
-            tcp_ao_protected: false,
-            accepted_dynamic_range: None,
-            pending_refresh: true,
-            pending_export_apply: false,
-            tcp_ao_rotation: TcpAoRotationStatus::default(),
-            advertise_graceful_shutdown: false,
-        },
+            1,
+            ManagedPeerState {
+                policy_known_down: false,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                max_prefix_restart_seconds: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                rfc8212_external: false,
+                tcp_ao_protected: false,
+                accepted_dynamic_range: None,
+                pending_refresh: true,
+                pending_export_apply: false,
+                tcp_ao_rotation: TcpAoRotationStatus::default(),
+                advertise_graceful_shutdown: false,
+            },
+        ),
     );
 
     // Same (None) policies — `import_changed = false` here. The
@@ -2193,7 +2195,7 @@ async fn chain_node_budget_rejects_api_and_reload_without_effect() {
         rib_tx,
         None,
     );
-    mgr.current_config = make_dynamic_manager_config();
+    mgr.replace_current_config(make_dynamic_manager_config());
     mgr.current_config.global.honor_graceful_shutdown = true;
     mgr.current_config.policy.rpol =
         chain_budget_registry(&format!("policy small {{}} policy bulk {{ {body} }}"));
@@ -2292,7 +2294,7 @@ async fn chain_node_budget_dynamic_reload_intermediate_rejects_without_adoption(
         rib_tx,
         None,
     );
-    mgr.current_config = make_dynamic_manager_config();
+    mgr.replace_current_config(make_dynamic_manager_config());
     mgr.current_config.global.honor_graceful_shutdown = true;
     mgr.current_config.policy.rpol = chain_budget_registry("policy p {}");
     mgr.current_config

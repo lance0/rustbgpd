@@ -344,7 +344,7 @@ async fn clean_state_non_established_carries_pending_intent_and_commits() {
     );
     assert_eq!(queries.load(Ordering::SeqCst), 1);
     let live = manager.peers.remove(&key(peer)).unwrap();
-    live.handle.shutdown().await.unwrap().unwrap();
+    live.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 #[tokio::test(start_paused = true)]

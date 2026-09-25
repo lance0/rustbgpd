@@ -76,7 +76,7 @@ async fn retained_reject_counts_remain_scoped_to_each_peer_key() {
     );
 
     for (_, managed) in mgr.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
 }
 
@@ -282,7 +282,7 @@ async fn unavailable_session_authentication_uses_durable_managed_protection() {
     }
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 /// Load-bearing: sourcing this from unavailable session state, or omitting the
@@ -307,7 +307,7 @@ async fn unavailable_session_preserves_graceful_shutdown_advertise_intent() {
     assert!(info.stale);
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 fn effective_posture(
@@ -395,7 +395,7 @@ async fn effective_posture_snapshot_reports_resolved_static_values() {
     }
 
     for (_, managed) in mgr.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
 }
 
@@ -451,7 +451,7 @@ async fn effective_posture_snapshot_keeps_dynamic_inheritance_at_static_parity()
 
     drop(client_stream);
     for (_, managed) in mgr.peers.drain() {
-        managed.handle.shutdown().await.unwrap().unwrap();
+        managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }
 }
 
@@ -517,7 +517,7 @@ async fn max_prefix_snapshot_uses_live_accounting_and_withholds_stale_headroom()
     );
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 /// Load-bearing proof: copying configured families or the `OpenConfirm` identity
@@ -571,5 +571,5 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
     assert!(fresh_down.negotiated_session.is_none());
 
     let managed = mgr.peers.remove(&peer_key).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }

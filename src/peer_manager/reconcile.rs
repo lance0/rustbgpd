@@ -14,11 +14,25 @@ use crate::policy_admin::fib_table_snapshot_to_config;
 use super::PeerManager;
 
 impl PeerManager {
+    /// Reconcile the peer set as one operation: one import-roster
+    /// publication however many peers it adds, removes or replaces.
+    pub(super) async fn reconcile_peers(
+        &mut self,
+        added: Vec<PeerManagerNeighborConfig>,
+        removed: Vec<PeerKey>,
+        changed: Vec<PeerManagerNeighborConfig>,
+    ) -> PeerReconcileOutcome {
+        let batch = self.peers.begin_batch();
+        let result = Box::pin(self.reconcile_peers_unbatched(added, removed, changed)).await;
+        self.peers.end_batch(batch);
+        result
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "peer reconciliation keeps remove, purge-aware replacement, runtime-state replay, add, and typed outcome accounting in one ordered pass"
     )]
-    pub(super) async fn reconcile_peers(
+    async fn reconcile_peers_unbatched(
         &mut self,
         added: Vec<PeerManagerNeighborConfig>,
         removed: Vec<PeerKey>,

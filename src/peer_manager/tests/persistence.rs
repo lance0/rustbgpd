@@ -206,7 +206,7 @@ hold_time = 90
             rib_tx.clone(),
             None,
         );
-        mgr.current_config = actor_config;
+        mgr.replace_current_config(actor_config);
         let peer_addr: IpAddr = Self::PEER.parse().unwrap();
         insert_test_managed_peer_with_asn(
             &mut mgr,
@@ -970,7 +970,7 @@ async fn soft_reset_in_skips_configured_families_the_peer_never_negotiated() {
         .expect_err("an explicitly named un-negotiated family still errors");
 
     let managed = mgr.peers.remove(&key(addr)).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
 }
 
 /// A forward apply that fails *at the Route Refresh step* may already have
@@ -1077,7 +1077,7 @@ async fn rollback_arms_retry_when_a_partially_delivered_refresh_cannot_be_undone
     );
 
     let managed = mgr.peers.remove(&key(addr)).unwrap();
-    managed.handle.shutdown().await.unwrap().unwrap();
+    managed.into_parts().0.shutdown().await.unwrap().unwrap();
     drop(mgr);
     rib.await.unwrap();
 }

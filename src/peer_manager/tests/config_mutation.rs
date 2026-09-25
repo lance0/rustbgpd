@@ -266,7 +266,7 @@ async fn hot_update_peer_applies_in_place_without_session_rebuild() {
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
-    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id();
 
     let mut updated = make_config(addr, 65002);
     updated.description = "hot-updated".to_string();
@@ -278,7 +278,7 @@ async fn hot_update_peer_applies_in_place_without_session_rebuild() {
     // The load-bearing pin: the session task was NOT delete/re-added.
     // Every rebuild path (`reconfigure_peer`, `reconcile_peers` changed)
     // allocates a fresh session id; hot update must keep the same one.
-    assert_eq!(managed.session_id, session_id_before);
+    assert_eq!(managed.session_id(), session_id_before);
     assert_eq!(managed.description, "hot-updated");
     assert_eq!(managed.max_prefixes, Some(500));
     assert_eq!(managed.transport_config.max_prefixes, Some(500));
@@ -302,7 +302,7 @@ async fn hot_update_peer_forwards_and_records_gr_peer_restart_cap() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 82));
     let (handle, mut seen_rx) = recording_runtime_config_handle();
     insert_test_managed_peer(&mut mgr, addr, handle, false);
-    let session_id = mgr.peers[&key(addr)].session_id;
+    let session_id = mgr.peers[&key(addr)].session_id();
 
     let mut updated = make_config(addr, 65002);
     updated.gr_peer_restart_time_max = 300;
@@ -315,7 +315,7 @@ async fn hot_update_peer_forwards_and_records_gr_peer_restart_cap() {
     assert_eq!(seen_rx.try_recv().unwrap(), 300);
     assert!(seen_rx.try_recv().is_err(), "cap-only edit sent twice");
     let managed = &mgr.peers[&key(addr)];
-    assert_eq!(managed.session_id, session_id);
+    assert_eq!(managed.session_id(), session_id);
     assert_eq!(managed.transport_config.gr_peer_restart_time_max, 300);
 }
 
@@ -699,7 +699,7 @@ async fn hot_update_peer_applies_policy_chains_in_place() {
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
-    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id();
 
     let mut updated = make_config(addr, 65002);
     let chain = deny_policy_chain();
@@ -707,7 +707,7 @@ async fn hot_update_peer_applies_policy_chains_in_place() {
     mgr.hot_update_peer(updated).await.unwrap();
 
     let managed = mgr.peers.get(&key(addr)).expect("hot-updated peer");
-    assert_eq!(managed.session_id, session_id_before);
+    assert_eq!(managed.session_id(), session_id_before);
     assert_eq!(managed.import_policy, Some(chain));
 }
 
@@ -755,7 +755,7 @@ async fn reconcile_changed_peer_still_rebuilds_session_task() {
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
-    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id;
+    let session_id_before = mgr.peers.get(&key(addr)).expect("peer").session_id();
 
     let mut changed = make_config(addr, 65002);
     changed.hold_time = Some(30);
@@ -775,7 +775,7 @@ async fn reconcile_changed_peer_still_rebuilds_session_task() {
     );
 
     let managed = mgr.peers.get(&key(addr)).expect("rebuilt peer");
-    assert_ne!(managed.session_id, session_id_before);
+    assert_ne!(managed.session_id(), session_id_before);
     assert_eq!(managed.hold_time, Some(30));
 }
 
@@ -811,7 +811,7 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
     let mut candidate = prior_config.clone();
     candidate.policy.explain.enabled = !prior_config.policy.explain.enabled;
     candidate.policy.reject_retention.capacity += 1;
-    mgr.current_config = candidate.clone();
+    mgr.replace_current_config(candidate.clone());
     let outcome = mgr
         .apply_peer_reshape_snapshot_classified(vec![replacement], Some(&prior_config), &mut None)
         .await;
@@ -1422,7 +1422,7 @@ async fn dynamic_purge_pending_admission_failure_leaves_primary_untouched() {
     assert!(outcome.failures[0].contains("pending session"));
     assert_eq!(primary.purge_reset.load(Ordering::SeqCst), 0);
     let managed = mgr.peers.get(&key(addr)).expect("primary remains owned");
-    assert_eq!(managed.session_id, 11);
+    assert_eq!(managed.session_id(), 11);
     assert_eq!(managed.pending_inbound.as_ref().unwrap().session_id, 12);
 }
 
@@ -1475,7 +1475,7 @@ async fn dynamic_purge_primary_admission_failure_retires_purged_pending_generati
         .peers
         .get(&key(addr))
         .expect("old primary remains owned");
-    assert_eq!(managed.session_id, 11);
+    assert_eq!(managed.session_id(), 11);
     assert!(
         managed.pending_inbound.is_none(),
         "purged candidate BackToIdle must settle instead of being promoted"
