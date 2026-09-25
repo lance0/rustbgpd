@@ -2237,19 +2237,6 @@ impl RibManager {
         }
     }
 
-    /// Test-build check behind every export statistics read: each installed
-    /// export chain already owns its counter instance.
-    fn debug_assert_installed_export_counters(&self) {
-        debug_assert!(
-            self.peer_export_policies
-                .values()
-                .flatten()
-                .chain(&self.export_policy)
-                .all(|chain| chain.installed_hit_counters().is_some()),
-            "an export chain was installed without its counter instance"
-        );
-    }
-
     /// Resolve the export policy for a peer: per-peer if set, else global.
     fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
         match self.peer_export_policies.get(&peer) {

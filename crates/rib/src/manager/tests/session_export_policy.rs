@@ -221,7 +221,7 @@ async fn export_counters_are_created_at_every_install_path() {
     let restored = installed_counter_id(&manager, target).expect("rollback creates counters");
     assert!(restored > batched);
 
-    let rows = manager.export_policy_term_hits(None);
+    let rows = manager.export_policy_term_hits(None).unwrap();
     assert_eq!(rows.len(), 2, "per-peer row plus the global fallback");
     assert_eq!(rows[0].peer, Some(target));
     assert_eq!(installed_counter_id(&manager, target), Some(restored));
@@ -234,7 +234,7 @@ async fn export_counters_are_created_at_every_install_path() {
 #[test]
 fn export_stats_read_does_not_create_or_compile_counters() {
     let uninstalled = chain(PolicyAction::Deny);
-    assert!(super::super::queries::snapshot_export_chain(Some(peer()), &uninstalled).is_none());
+    assert!(super::super::queries::snapshot_export_chain(Some(peer()), &uninstalled).is_err());
     assert!(
         uninstalled.installed_hit_counters().is_none(),
         "the read left no counter instance behind"
@@ -246,4 +246,78 @@ fn export_stats_read_does_not_create_or_compile_counters() {
         .expect("installed chain reports a row");
     assert_eq!(row.terms, installed.hit_counters().term_hit_rows());
     assert_eq!(installed.hit_counters().id(), id);
+}
+
+/// ADR-0136 failure semantics: an installed export chain without its counter
+/// instance fails the statistics read closed, on the live path and on the
+/// frozen replacement projection. The reply is dropped (the API reports
+/// `UNAVAILABLE`) instead of succeeding with that peer's row missing, while a
+/// peer with no export policy still legitimately reports no row.
+/// Break-to-red: omitting the uncounted chain's row (the previous `None`
+/// drop) turns both reads into short successes.
+#[tokio::test]
+async fn export_stats_read_fails_closed_on_installed_chain_without_counters() {
+    let uncounted: IpAddr = Ipv4Addr::new(10, 0, 0, 7).into();
+    let disabled: IpAddr = Ipv4Addr::new(10, 0, 0, 8).into();
+    let (_tx, rx) = mpsc::channel(16);
+    let (summary_tx, summary_rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(chain(PolicyAction::Permit)),
+        None,
+        BgpMetrics::new(),
+    )
+    .with_summary_queries(summary_rx);
+    // Bypass every install path: the chain never gets its instance.
+    manager
+        .peer_export_policies
+        .insert(uncounted, Some(chain(PolicyAction::Deny)));
+    manager.peer_export_policies.insert(disabled, None);
+
+    let live = |manager: &mut RibManager, peer| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_query_export_policy_term_hits(peer, reply);
+        response.try_recv()
+    };
+    assert!(
+        matches!(
+            live(&mut manager, None),
+            Err(oneshot::error::TryRecvError::Closed)
+        ),
+        "a fleet read must not succeed without the uncounted chain's row"
+    );
+    assert!(matches!(
+        live(&mut manager, Some(uncounted)),
+        Err(oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(
+        live(&mut manager, Some(disabled)).unwrap().is_empty(),
+        "no export policy installed is still an empty success"
+    );
+    assert_eq!(
+        live(&mut manager, Some(peer())).unwrap().len(),
+        1,
+        "an unaffected peer reads the counted global fallback"
+    );
+
+    let (reply, mut frozen) = oneshot::channel();
+    manager.with_replacement_summary_reads("apply", |manager| {
+        summary_tx
+            .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+            .unwrap();
+        manager.replacement_checkpoint(true);
+    });
+    assert!(
+        matches!(frozen.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
+        "the frozen projection fails closed too"
+    );
+    assert!(
+        manager.peer_export_policies[&uncounted]
+            .as_ref()
+            .unwrap()
+            .installed_hit_counters()
+            .is_none(),
+        "failing the read never creates the missing instance"
+    );
 }

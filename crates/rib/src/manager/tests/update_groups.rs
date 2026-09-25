@@ -10259,7 +10259,8 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
             let expected_comparison = fleet
                 .manager
                 .update_group_comparison(fleet.members[0], fleet.members[1]);
-            let expected_terms = format!("{:?}", fleet.manager.export_policy_term_hits(None));
+            let expected_terms =
+                format!("{:?}", fleet.manager.export_policy_term_hits(None).unwrap());
             let (summary_tx, summary_rx) = mpsc::channel(8);
             fleet.manager.summary_rx = Some(summary_rx);
             let (query_tx, query_rx) = mpsc::channel(1);

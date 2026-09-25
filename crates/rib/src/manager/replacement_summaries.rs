@@ -1,6 +1,7 @@
 //! Temporary operator projections held only while synchronous replacement owns
 //! canonical RIB state. These contain values, never routes or shared counters.
 
+use super::queries::MissingExportCounters;
 use super::update_groups::{GroupKey, GroupMembership, compare_update_groups};
 use super::{QUERY_BUDGET_PER_CHUNK, RibManager};
 use crate::update::{
@@ -21,8 +22,8 @@ struct SummaryProjection {
     neighbors: HashMap<IpAddr, NeighborRibSnapshot>,
     unknown_outbound: PeerOutboundState,
     // An explicit None disables the global fallback for that peer.
-    policies: BTreeMap<IpAddr, Option<ExportPolicyTermHits>>,
-    global_policy: Option<ExportPolicyTermHits>,
+    policies: BTreeMap<IpAddr, Option<Result<ExportPolicyTermHits, MissingExportCounters>>>,
+    global_policy: Option<Result<ExportPolicyTermHits, MissingExportCounters>>,
     memberships: HashMap<IpAddr, GroupMembership>,
     group_keys: HashMap<usize, GroupKey>,
 }
@@ -39,30 +40,33 @@ impl ReplacementSummaries {
                     if reply.is_closed() {
                         continue;
                     }
-                    let mut rows = Vec::new();
-                    if let Some(peer) = peer {
-                        if let Some(mut row) = self
-                            .view
-                            .policies
-                            .get(&peer)
-                            .unwrap_or(&self.view.global_policy)
-                            .clone()
-                        {
-                            row.peer = Some(peer);
-                            rows.push(row);
-                        }
-                    } else {
-                        for row in self.view.policies.values().flatten() {
-                            if reply.is_closed() {
-                                break;
+                    let rows = (|| {
+                        let mut rows = Vec::new();
+                        if let Some(peer) = peer {
+                            if let Some(row) = self
+                                .view
+                                .policies
+                                .get(&peer)
+                                .unwrap_or(&self.view.global_policy)
+                            {
+                                let mut row = row.clone()?;
+                                row.peer = Some(peer);
+                                rows.push(row);
                             }
-                            rows.push(row.clone());
+                        } else {
+                            for row in self.view.policies.values().flatten() {
+                                if reply.is_closed() {
+                                    break;
+                                }
+                                rows.push(row.clone()?);
+                            }
+                            if let Some(row) = &self.view.global_policy {
+                                rows.push(row.clone()?);
+                            }
                         }
-                        if let Some(row) = &self.view.global_policy {
-                            rows.push(row.clone());
-                        }
-                    }
-                    let _ = reply.send(rows);
+                        Ok(rows)
+                    })();
+                    super::queries::reply_export_policy_term_hits(reply, rows);
                 }
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
@@ -162,7 +166,7 @@ impl RibManager {
             #[cfg(feature = "bench-internals")]
             tracing::info!(target: "replacement_summary", operation, phase = "captured", capture_us,
                 peer_count, policy_count = view.policies.len(), group_count = view.group_keys.len(),
-                term_count = view.policies.values().flatten().chain(view.global_policy.iter()).map(|row| row.terms.len()).sum::<usize>(),
+                term_count = view.policies.values().flatten().chain(view.global_policy.iter()).filter_map(|row| row.as_ref().ok()).map(|row| row.terms.len()).sum::<usize>(),
                 "replacement summary scope");
             let context = manager
                 .replacement_readiness
@@ -220,7 +224,6 @@ impl RibManager {
     }
 
     fn capture_replacement_summaries(&self) -> SummaryProjection {
-        self.debug_assert_installed_export_counters();
         let mut peers = HashSet::new();
         // Outbound registration covers mode/limit inputs. Other maps may outlive
         // it, and startup selection waiters may precede registration entirely.
@@ -260,14 +263,14 @@ impl RibManager {
                 peer,
                 chain
                     .as_ref()
-                    .and_then(|chain| super::queries::snapshot_export_chain(Some(peer), chain)),
+                    .map(|chain| super::queries::snapshot_export_chain(Some(peer), chain)),
             );
             self.replacement_checkpoint(false);
         }
         let global_policy = self
             .export_policy
             .as_ref()
-            .and_then(|chain| super::queries::snapshot_export_chain(None, chain));
+            .map(|chain| super::queries::snapshot_export_chain(None, chain));
         let mut memberships = HashMap::with_capacity(self.update_groups.members.len());
         let mut group_keys = HashMap::new();
         for (&peer, membership) in &self.update_groups.members {
@@ -299,12 +302,12 @@ impl SummaryProjection {
             checkpoint();
         }
         while let Some((_, row)) = self.policies.pop_first() {
-            if let Some(mut row) = row {
+            if let Some(Ok(mut row)) = row {
                 super::retire_vec(&mut row.terms, checkpoint);
             }
             checkpoint();
         }
-        if let Some(mut row) = self.global_policy.take() {
+        if let Some(Ok(mut row)) = self.global_policy.take() {
             super::retire_vec(&mut row.terms, checkpoint);
         }
         for (_, key) in self.group_keys.drain() {
@@ -438,8 +441,11 @@ mod tests {
         manager.peer_export_policies.insert(disabled, None);
         let expected_neighbors =
             [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
-        let expected_all = format!("{:?}", manager.export_policy_term_hits(None));
-        let expected_unknown = format!("{:?}", manager.export_policy_term_hits(Some(unknown)));
+        let expected_all = format!("{:?}", manager.export_policy_term_hits(None).unwrap());
+        let expected_unknown = format!(
+            "{:?}",
+            manager.export_policy_term_hits(Some(unknown)).unwrap()
+        );
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
             manager.peer_export_policies.clear();
