@@ -1,6 +1,6 @@
 # ADR-0136: Owner-Published Counter Reads
 
-**Status:** Proposed
+**Status:** Accepted (qualification evidence-gated)
 **Date:** 2026-09-25
 
 This record makes the owners of policy hit counters publish which counter
@@ -174,16 +174,30 @@ chains (ADR-0105).
 | Policy reload or rollback | See generation semantics. |
 | Daemon shutdown | `drain` republishes an empty roster, and dropping the owner closes the cell. |
 
-Each cell carries a `closed` flag. A guard in each owner sets it with
-`Release` ordering when the owner is dropped, whether it exits normally or
-unwinds. A handler checks the flag with `Acquire` ordering after its capture
-pass, not only before it, and returns `UNAVAILABLE` if it is set. A request
-that loaded a roster before its owner stopped therefore fails once the closure
-is visible to that check, instead of returning frozen values as success.
-Success means the handler observed the cell open after capture; there is no
-stronger ordering with an owner stopping concurrently. The check costs one atomic load per roster. The daemon
-already shuts down when the RIB task exits; the flag covers the interval
-before that and embedders.
+Every published source a read depends on has a closure signal:
+
+- **Export roster cell:** a `closed` flag, set by a guard in the RIB manager.
+- **Import roster cell:** a `closed` flag, set by a guard in the peer manager.
+- **Per-session import publication:** its existing `watch` channel closes when
+  the session task drops its sender. The read already checks `has_changed()`
+  after observing counters (ADR-0133) and reports `SessionGone`, so it needs
+  no new flag.
+- **`DatasetHandle` status:** no flag of its own. The peer manager owns the
+  bindings and drives every refresh, and a request reaches a handle only
+  through the import roster, so that roster's flag covers it. A handle
+  removed from the bindings stays readable only by requests holding an older
+  roster, which is the bounded lag described above.
+
+A guard sets its flag with `Release` ordering when the owner is dropped,
+whether it exits normally or unwinds. A handler checks each roster flag with
+`Acquire` ordering after its capture pass, not only before it, and returns
+`UNAVAILABLE` if it is set. A request that loaded a roster before its owner
+stopped therefore fails once the closure is visible to that check, instead of
+returning frozen values as success. Success means the handler observed the
+cell open after capture; there is no stronger ordering with an owner stopping
+concurrently. The check costs one atomic load per roster. The daemon already
+shuts down when the RIB task exits; the flags cover the interval before that
+and embedders.
 
 Each in-flight request retains at most one roster per owner and releases it on
 completion, failure or cancellation, so retired rosters are bounded by
@@ -324,7 +338,13 @@ Each slice ships independently with its own proof.
    `ExportPolicyTermHits` from the summary lane and its part of the temporary
    projection, which keeps neighbor snapshots. Delete
    `QueryExportPolicyTermHits` if unused. This slice updates the
-   `policy_generation` comment in `proto/rustbgpd.proto`, and extends the v1
+   `policy_generation` comment in `proto/rustbgpd.proto`. It replaces the
+   hard-coded export `policy_generation: 0` and its comment in
+   `crates/api/src/policy_service.rs` (about line 1505), and that file's test
+   assertion that export generations are 0, removing the tracker reference
+   both carry. The import-direction assertion in
+   `src/peer_manager/tests/policy_stats.rs` stays valid, since a session's
+   initial publication is generation 0. The slice also extends the v1
    contract and `api.md` wording to the RIB. It also adds a `### Changed`
    changelog fragment and a `### Upgrade notes` fragment. The upgrade note
    explains that export generations become nonzero and change whenever the
@@ -332,7 +352,8 @@ Each slice ships independently with its own proof.
    peer.
 4. **Qualification.** Run the isolated cell and the next flagship soak with
    the management gate unchanged, update the known-issue entry to its
-   qualified scope, and move this record to Accepted with evidence links.
+   qualified scope, record the qualification evidence here, and drop the
+   gate from the status.
 
 ## Proof plan
 
