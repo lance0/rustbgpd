@@ -131,20 +131,23 @@ pub(super) fn send_mrt_snapshot(
     }
 }
 
+/// Snapshot an installed export chain's counter instance (ADR-0136).
+///
+/// Reads only the instance the install created: it never compiles a chain or
+/// creates counters inside the actor. `None` means the chain has no instance,
+/// which install paths rule out ([`RibManager::create_installed_export_counters`]).
 pub(super) fn snapshot_export_chain(
     owner: Option<IpAddr>,
     chain: &rustbgpd_policy::PolicyChain,
-) -> crate::update::ExportPolicyTermHits {
-    crate::update::ExportPolicyTermHits {
+) -> Option<crate::update::ExportPolicyTermHits> {
+    let counters = chain.installed_hit_counters()?;
+    Some(crate::update::ExportPolicyTermHits {
         peer: owner,
-        evals: chain.hit_counters().evals(),
-        eval_errors: chain.hit_counters().eval_errors(),
-        last_error: chain
-            .hit_counters()
-            .last_error()
-            .map(|error| error.to_string()),
-        terms: chain.term_hit_rows(),
-    }
+        evals: counters.evals(),
+        eval_errors: counters.eval_errors(),
+        last_error: counters.last_error().map(|error| error.to_string()),
+        terms: counters.term_hit_rows(),
+    })
 }
 
 fn materialize_neighbor_rib_snapshot(
@@ -2732,10 +2735,11 @@ impl RibManager {
         &self,
         peer: Option<IpAddr>,
     ) -> Vec<crate::update::ExportPolicyTermHits> {
+        self.debug_assert_installed_export_counters();
         let mut out = Vec::new();
         if let Some(peer) = peer {
             if let Some(chain) = self.export_policy_for(peer) {
-                out.push(snapshot_export_chain(Some(peer), chain));
+                out.extend(snapshot_export_chain(Some(peer), chain));
             }
         } else {
             let mut peers: Vec<IpAddr> = self
@@ -2746,11 +2750,11 @@ impl RibManager {
             peers.sort_unstable();
             for peer in peers {
                 if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
-                    out.push(snapshot_export_chain(Some(peer), chain));
+                    out.extend(snapshot_export_chain(Some(peer), chain));
                 }
             }
             if let Some(chain) = self.export_policy.as_ref() {
-                out.push(snapshot_export_chain(None, chain));
+                out.extend(snapshot_export_chain(None, chain));
             }
         }
         out

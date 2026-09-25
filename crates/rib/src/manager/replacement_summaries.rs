@@ -220,6 +220,7 @@ impl RibManager {
     }
 
     fn capture_replacement_summaries(&self) -> SummaryProjection {
+        self.debug_assert_installed_export_counters();
         let mut peers = HashSet::new();
         // Outbound registration covers mode/limit inputs. Other maps may outlive
         // it, and startup selection waiters may precede registration entirely.
@@ -259,14 +260,14 @@ impl RibManager {
                 peer,
                 chain
                     .as_ref()
-                    .map(|chain| super::queries::snapshot_export_chain(Some(peer), chain)),
+                    .and_then(|chain| super::queries::snapshot_export_chain(Some(peer), chain)),
             );
             self.replacement_checkpoint(false);
         }
         let global_policy = self
             .export_policy
             .as_ref()
-            .map(|chain| super::queries::snapshot_export_chain(None, chain));
+            .and_then(|chain| super::queries::snapshot_export_chain(None, chain));
         let mut memberships = HashMap::with_capacity(self.update_groups.members.len());
         let mut group_keys = HashMap::new();
         for (&peer, membership) in &self.update_groups.members {
@@ -431,6 +432,8 @@ mod tests {
                         families: vec![(Afi::Ipv4, Safi::Unicast)],
                     }],
                 });
+        // Installed chains own their counters (ADR-0136).
+        let _ = chain.hit_counters();
         manager.peer_export_policies.insert(known, Some(chain));
         manager.peer_export_policies.insert(disabled, None);
         let expected_neighbors =

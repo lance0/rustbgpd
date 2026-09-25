@@ -376,8 +376,15 @@ fn warn_eval_error(policy: Option<&str>, term: Option<&str>, kind: EvalErrorKind
 /// [`CompiledChain`] it was built from. It lives on the owning
 /// `PolicyChain` instance, so replacing a chain resets the counts by
 /// construction ("since chain install" semantics).
+///
+/// The instance describes itself (ADR-0136): it carries the chain's
+/// immutable policy and term labels, and a process-wide [`id`](Self::id)
+/// drawn at creation. The same id means the same monotonic counters; a new
+/// id means the counts restarted.
 #[derive(Debug)]
 pub struct PolicyHitCounters {
+    id: u64,
+    labels: Vec<PolicyTermLabels>,
     policies: Vec<Vec<AtomicU64>>,
     evals: AtomicU64,
     eval_errors: AtomicU64,
@@ -388,11 +395,32 @@ pub struct PolicyHitCounters {
     last_error: std::sync::Mutex<Option<EvalError>>,
 }
 
+/// One policy's immutable labels, carried by its [`PolicyHitCounters`]:
+/// the chain-member name (`None` = inline / anonymous) and each term's name
+/// (`None` for TOML statements), in chain walk order.
+pub type PolicyTermLabels = (Option<Arc<str>>, Vec<Option<String>>);
+
+/// The one process-wide counter-instance id sequence (ADR-0136). Starts at
+/// 1 so 0 never names an instance.
+static NEXT_COUNTER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
 impl PolicyHitCounters {
-    /// Zeroed counters shaped like `chain` (one per term).
+    /// Zeroed counters shaped like `chain` (one per term), labeled from it,
+    /// with a fresh instance id.
     #[must_use]
     pub fn for_chain(chain: &CompiledChain) -> Self {
         Self {
+            id: NEXT_COUNTER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
+            labels: chain
+                .policies
+                .iter()
+                .map(|policy| {
+                    (
+                        policy.name.clone(),
+                        policy.terms.iter().map(|term| term.name.clone()).collect(),
+                    )
+                })
+                .collect(),
             policies: chain
                 .policies
                 .iter()
@@ -402,6 +430,41 @@ impl PolicyHitCounters {
             eval_errors: AtomicU64::new(0),
             last_error: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Process-wide identity of this counter instance, unique and increasing
+    /// in creation order. Equal ids name the same monotonic counters.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The immutable policy and term labels, shaped like the counters.
+    #[must_use]
+    pub fn labels(&self) -> &[PolicyTermLabels] {
+        &self.labels
+    }
+
+    /// Snapshot the per-term hit counters as labeled rows for the
+    /// policy-stats surface, in chain walk order. Uses only this instance:
+    /// it never compiles or touches a chain.
+    #[must_use]
+    pub fn term_hit_rows(&self) -> Vec<crate::engine::TermHitRow> {
+        let mut rows = Vec::new();
+        for (policy_index, ((policy, terms), hits)) in
+            self.labels.iter().zip(&self.policies).enumerate()
+        {
+            for (term_index, (term, hits)) in terms.iter().zip(hits).enumerate() {
+                rows.push(crate::engine::TermHitRow {
+                    policy_index,
+                    policy: policy.as_ref().map(ToString::to_string),
+                    term_index,
+                    term: term.clone(),
+                    hits: hits.load(Ordering::Relaxed),
+                });
+            }
+        }
+        rows
     }
 
     /// Routes evaluated through the chain since these counters were

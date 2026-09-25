@@ -158,3 +158,82 @@ fn concurrent_evaluation_and_reads_agree_on_totals() {
     assert_eq!(rows[2].hits, total, "wide-open matched every route");
     assert_eq!(rows[0].hits, 0, "rpki-guard never matched");
 }
+
+/// ADR-0136: every counter instance draws a process-wide id from one
+/// monotonic sequence starting at 1. Ids are unique across concurrent
+/// creators and increase in each creator's creation order.
+/// Break-to-red: drawing the id with a plain `load` instead of `fetch_add`
+/// makes every instance share an id.
+#[test]
+fn counter_instance_ids_are_unique_and_monotonic_across_threads() {
+    let compiled = rpol_chain().compiled().clone();
+    let per_thread: Vec<Vec<u64>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let compiled = &compiled;
+                scope.spawn(move || {
+                    (0..500)
+                        .map(|_| PolicyHitCounters::for_chain(compiled).id())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+    for ids in &per_thread {
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ids.iter().all(|&id| id >= 1), "0 never names an instance");
+    }
+    let mut all: Vec<u64> = per_thread.into_iter().flatten().collect();
+    let created = all.len();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), created, "no two instances share an id");
+}
+
+/// The instance carries its labels and id: `share()` hands out the same
+/// instance, a clone (a reinstall) gets a new one with equal labels, and
+/// rows come from the instance alone.
+/// Break-to-red: building the instance with no labels empties the rows.
+#[test]
+fn labels_and_id_travel_with_the_counter_instance() {
+    let chain = rpol_chain();
+    let instance = Arc::clone(chain.hit_counters());
+    let expected = [(
+        Some(Arc::<str>::from("tagger")),
+        vec![
+            Some("rpki-guard".to_string()),
+            Some("tag".to_string()),
+            Some("wide-open".to_string()),
+        ],
+    )];
+    assert_eq!(instance.labels(), expected);
+    assert_eq!(chain.share().hit_counters().id(), instance.id());
+
+    let reinstalled = chain.clone();
+    assert!(reinstalled.installed_hit_counters().is_none());
+    assert!(reinstalled.hit_counters().id() > instance.id());
+    assert_eq!(reinstalled.hit_counters().labels(), expected);
+
+    let _ = chain.evaluate_with_attribution(&route(
+        v4_prefix([10, 0, 0, 0], 24),
+        RpkiValidation::NotFound,
+    ));
+    let rows = instance.term_hit_rows();
+    assert_eq!(rows, chain.term_hit_rows());
+    let labels: Vec<_> = rows
+        .iter()
+        .map(|row| (row.policy.as_deref(), row.term.as_deref(), row.hits))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            (Some("tagger"), Some("rpki-guard"), 0),
+            (Some("tagger"), Some("tag"), 1),
+            (Some("tagger"), Some("wide-open"), 1),
+        ]
+    );
+}

@@ -732,21 +732,22 @@ impl std::error::Error for ImportPolicyStatsError {}
 
 /// Identity and live counters of one actually installed import policy.
 ///
-/// This retains counter allocations and immutable names, never a policy or
-/// compiled IR. Numeric fields are observed during collection, not cached.
+/// This retains the counter instance, which carries its own immutable labels,
+/// never a policy or compiled IR. Numeric fields are observed during
+/// collection, not cached.
 #[derive(Debug)]
 pub struct InstalledImportPolicy {
     /// Identity of the session task that installed this policy.
     pub session_identity: SessionIdentity,
     generation: u64,
     counters: Option<Arc<rustbgpd_policy::PolicyHitCounters>>,
-    labels: Vec<(Option<String>, Vec<Option<String>>)>,
     #[cfg(test)]
     test_error_busy: std::sync::atomic::AtomicBool,
 }
 
 impl InstalledImportPolicy {
-    /// Capture the installed identity, counter ownership and immutable names.
+    /// Capture the installed identity and counter ownership, creating the
+    /// chain's counter instance if it does not exist yet.
     #[must_use]
     pub fn new(
         session_identity: SessionIdentity,
@@ -757,19 +758,6 @@ impl InstalledImportPolicy {
             session_identity,
             generation,
             counters: chain.map(|chain| Arc::clone(chain.hit_counters())),
-            labels: chain.map_or_else(Vec::new, |chain| {
-                chain
-                    .compiled()
-                    .policies
-                    .iter()
-                    .map(|policy| {
-                        (
-                            policy.name.as_ref().map(ToString::to_string),
-                            policy.terms.iter().map(|term| term.name.clone()).collect(),
-                        )
-                    })
-                    .collect()
-            }),
             #[cfg(test)]
             test_error_busy: std::sync::atomic::AtomicBool::new(false),
         }
@@ -809,7 +797,7 @@ impl InstalledImportPolicy {
             }
         };
         let mut terms = Vec::new();
-        for (policy_index, (policy, labels)) in self.labels.iter().enumerate() {
+        for (policy_index, (policy, labels)) in counters.labels().iter().enumerate() {
             consume_budget_counted(yields).await;
             if deadline <= tokio::time::Instant::now() {
                 return Err(ImportPolicyStatsError::TimedOut);
@@ -824,7 +812,7 @@ impl InstalledImportPolicy {
                     .ok_or(ImportPolicyStatsError::CountersUnavailable)?;
                 terms.push(rustbgpd_policy::TermHitRow {
                     policy_index,
-                    policy: policy.clone(),
+                    policy: policy.as_ref().map(ToString::to_string),
                     term_index,
                     term: term.clone(),
                     hits,
@@ -2755,25 +2743,52 @@ mod tests {
         );
     }
 
+    /// The descriptor keeps no label copy: its rows are labeled by the
+    /// installed chain's own counter instance (ADR-0136 slice 1).
+    /// Break-to-red: giving the descriptor a fresh counter instance instead of
+    /// the chain's changes the instance id and splits the counts.
     #[tokio::test]
-    async fn published_import_counter_out_of_range_metadata_index_is_unavailable() {
-        let mut installed = InstalledImportPolicy::new(
-            SessionIdentity::default(),
-            1,
-            Some(&PolicyChain::new(vec![])),
-        );
-        installed
-            .labels
-            .push((Some("missing".to_string()), vec![None]));
-        let (_publication, receiver) = watch::channel(Some(Arc::new(installed)));
-        assert!(matches!(
-            PeerHandle::read_import_policy_counters(
-                receiver,
-                tokio::time::Instant::now() + Duration::from_secs(1),
+    async fn published_import_counters_are_labeled_by_the_installed_instance() {
+        let file = rustbgpd_policy::rpol::RpolFile::parse(
+            "policy member-import { term tag { set med 5; } term deny-all { reject } }",
+        )
+        .expect("clean rpol");
+        let compiled = file
+            .compile_policy(
+                "member-import",
+                &[],
+                &mut rustbgpd_policy::sets::SetStore::new(),
             )
-            .await,
-            Err(ImportPolicyStatsError::CountersUnavailable)
-        ));
+            .expect("policy exists");
+        let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+            "member-import".to_string(),
+            Arc::new(compiled),
+        )]);
+        let installed = InstalledImportPolicy::new(SessionIdentity::default(), 3, Some(&chain));
+        let instance = Arc::clone(chain.hit_counters());
+        assert_eq!(
+            installed.counters.as_ref().map(|counters| counters.id()),
+            Some(instance.id()),
+            "the descriptor holds the chain's own counter instance"
+        );
+        assert_eq!(
+            instance.labels(),
+            [(
+                Some(Arc::from("member-import")),
+                vec![Some("tag".to_string()), Some("deny-all".to_string())],
+            )]
+        );
+        let (_publication, receiver) = watch::channel(Some(Arc::new(installed)));
+        let snapshot = PeerHandle::read_import_policy_counters(
+            receiver,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.generation, 3);
+        assert_eq!(snapshot.terms, instance.term_hit_rows());
+        assert_eq!(snapshot.terms.len(), 2);
     }
 
     #[tokio::test]

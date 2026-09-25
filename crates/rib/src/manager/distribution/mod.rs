@@ -3559,6 +3559,7 @@ impl RibManager {
             // takes the dirty resync exactly as before.
             let before = manager.grouped_member_of(peer);
             manager.recompute_update_group(peer);
+            manager.create_installed_export_counters([peer]);
             let key_stable = before.is_some() && before == manager.grouped_member_of(peer);
             if !key_stable {
                 manager.mark_outbound_dirty(peer);
@@ -4108,6 +4109,12 @@ impl RibManager {
         }
         receipt.fallback_regroup_us =
             u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.create_installed_export_counters(
+            present
+                .iter()
+                .inspect(|_| checkpoint())
+                .map(|replacement| replacement.peer),
+        );
 
         // Group tables and memberships moved above without a staging
         // pass; advertised-query continuations must not survive that.
