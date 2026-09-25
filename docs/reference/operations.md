@@ -909,7 +909,7 @@ chain, etc.).
 | Dynamic-neighbor add/delete via gRPC | Config file (atomic write) | Serialized with SIGHUP reload; the RPC waits for persistence acknowledgement and rolls the matcher back if the write is rejected |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
 | Optional shutdown warm checkpoint | `<runtime_state_dir>/warm-bundle-v1/` | On coordinated shutdown when `warm_cache_checkpoint_on_shutdown = true`; owner-private post-import-policy Adj-RIB-In snapshot and manifest, never restored on boot |
-| General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
+| General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | Before a reconcile pass sends route installs or replacements to the kernel, and after each ADR-0061 FIB apply/drain; written with file and directory fsync |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
 
@@ -2180,6 +2180,7 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="install"}` | Kernel rejected an add operation for a reason other than a classified unresolved next hop |
 | `bgp_fib_kernel_failures_total{action="replace"}` | Kernel rejected a replace operation for a reason other than a classified unresolved next hop |
 | `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
+| `bgp_fib_owned_state_persist_failures_total` | A write of `<runtime_state_dir>/fib-owned.json` failed (for example a full or read-only filesystem). While the write fails, route installs and replacements are held with status `failed` / `owned_state_persist_failed:*`; removals continue, and the next reconcile retries the write |
 | `bgp_dataplane_reconcile_planning_failures_total{actor="general_fib",reason}` | Pre-kernel planning aborts; the last successful status snapshot and all kernel/ownership state remain unchanged |
 | `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
 | `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
@@ -3492,6 +3493,11 @@ for sampled `route_limit_exceeded` rows.
 - `failed` / `dump_failed:*`, `install_failed:*`, `replace_failed:*`, or
   `remove_failed:*`: the runtime hit a RIB or kernel boundary error. Check
   `bgp_fib_kernel_failures_total` and daemon logs for the matching action.
+- `failed` / `owned_state_persist_failed:*`: rustbgpd could not record the
+  route in `<runtime_state_dir>/fib-owned.json` before installing it, so it
+  held the install. Check `bgp_fib_owned_state_persist_failures_total` and
+  free space or the mount state of the runtime state directory; the next
+  reconcile retries once the write succeeds.
 
 For direct kernel inspection, use the configured table and metric:
 

@@ -277,10 +277,40 @@ impl FibRouteTarget {
 }
 
 /// Daemon-owned route state. Updated only after successful apply ops.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct FibOwnedState {
     /// Routes rustbgpd believes it owns.
     pub routes: BTreeMap<FibRouteKey, FibRoute>,
+    /// Write-ahead alternates for owned keys whose Add/Replace to a different
+    /// target was recorded before the kernel apply. Only a crash between that
+    /// record and the post-apply persist leaves entries here; the next kernel
+    /// dump settles each one through [`resolve_in_flight`].
+    pub in_flight: BTreeMap<FibRouteKey, FibRoute>,
+    /// The other `[[fib_tables]]` generation of the latest runtime table
+    /// change. The config file is published only after the actor applies the
+    /// change, so a restart may boot either generation; persisting both keeps
+    /// the booted generation's rows adoptable and lets rows in tables it no
+    /// longer declares be withdrawn instead of stranded.
+    pub transition_tables: Vec<FibTableConfig>,
+}
+
+/// Settle write-ahead alternates against the live kernel: adopt the
+/// alternate when the kernel row is exactly it, otherwise keep the previously
+/// owned value (which the normal diff then keeps, repairs, or reports as
+/// drifted). Returns whether any alternate was consumed, so the caller
+/// rewrites the owned-state file without it.
+pub(crate) fn resolve_in_flight(owned: &mut FibOwnedState, kernel: &FibKernelSnapshot) -> bool {
+    if owned.in_flight.is_empty() {
+        return false;
+    }
+    for (key, alternate) in std::mem::take(&mut owned.in_flight) {
+        if kernel.routes.get(&key).is_some_and(|row| {
+            row.protocol == FibKernelProtocol::Bgp && row.target == alternate.target
+        }) {
+            owned.routes.insert(key, alternate);
+        }
+    }
+    true
 }
 
 /// Observed kernel route snapshot for the Linux FIB actor.
@@ -1504,6 +1534,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(existing.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
@@ -1532,6 +1563,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(withdrawn.key, withdrawn.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(
@@ -1566,6 +1598,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(existing.key, kernel("203.0.113.8", FibKernelProtocol::Bgp))]),
@@ -1595,6 +1628,7 @@ mod tests {
         let intent = project_fib_intent(&[table], &candidates(routes));
         let owned = FibOwnedState {
             routes: BTreeMap::from([(existing.key, existing.clone())]),
+            ..Default::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &FibKernelSnapshot::default());
@@ -1645,6 +1679,7 @@ mod tests {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(route.key, route.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(route.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
@@ -1671,6 +1706,7 @@ mod tests {
         desired.path_id = 7;
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, owned_route)]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
@@ -1693,6 +1729,7 @@ mod tests {
         let desired = one_route(previous.key, "203.0.113.2");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(previous.key, previous.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(previous.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
@@ -1720,6 +1757,7 @@ mod tests {
         let desired = one_route(key, "203.0.113.2");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, previous.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(key, kernel("203.0.113.9", FibKernelProtocol::Bgp))]),
@@ -1750,6 +1788,7 @@ mod tests {
         let desired = one_route(key, "203.0.113.2");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, previous.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(key, kernel("203.0.113.2", FibKernelProtocol::Bgp))]),
@@ -1774,6 +1813,7 @@ mod tests {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(route.key, route.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(route.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
@@ -1790,6 +1830,7 @@ mod tests {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(route.key, route.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(route.key, kernel("203.0.113.9", FibKernelProtocol::Bgp))]),
@@ -1806,6 +1847,7 @@ mod tests {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(route.key, route.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(route.key, kernel("203.0.113.1", FibKernelProtocol::Other))]),
@@ -1905,6 +1947,7 @@ mod tests {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let owned = FibOwnedState {
             routes: BTreeMap::from([(route.key, route.clone())]),
+            ..Default::default()
         };
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route.clone())]),
@@ -2401,6 +2444,7 @@ mod tests {
         desired.target = target_from_addrs(["203.0.113.2", "203.0.113.1"]);
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, owned_route)]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(
@@ -2435,6 +2479,7 @@ mod tests {
         desired.target = target_from_addrs(["203.0.113.1", "203.0.113.2"]);
         let owned = FibOwnedState {
             routes: BTreeMap::from([(key, previous.clone())]),
+            ..Default::default()
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),

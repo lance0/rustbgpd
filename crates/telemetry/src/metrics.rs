@@ -588,6 +588,7 @@ struct BgpMetricsInner {
     fib_routes_rejected: IntCounterVec,
     fib_routes_unresolved: IntGauge,
     fib_kernel_failures: IntCounterVec,
+    fib_owned_state_persist_failures: IntCounter,
     dataplane_reconcile_planning_failures: IntCounterVec,
     kernel_route_notify_dropped: IntCounterVec,
     kernel_route_notify_subscription_failures: IntCounterVec,
@@ -1761,6 +1762,13 @@ impl BgpMetrics {
                 "Kernel failures while applying general unicast FIB routes by action.",
             ),
             &["action"],
+        )
+        .expect("valid metric definition");
+
+        let fib_owned_state_persist_failures = IntCounter::new(
+            "bgp_fib_owned_state_persist_failures_total",
+            "Failed writes of the general unicast FIB crash-recovery owned-state \
+             file. While writes fail, route installs and replacements are held.",
         )
         .expect("valid metric definition");
 
@@ -2940,6 +2948,9 @@ impl BgpMetrics {
             .register(Box::new(fib_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(fib_owned_state_persist_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(dataplane_reconcile_planning_failures.clone()))
             .expect("metric not already registered");
         registry
@@ -3349,6 +3360,7 @@ impl BgpMetrics {
             fib_routes_rejected,
             fib_routes_unresolved,
             fib_kernel_failures,
+            fib_owned_state_persist_failures,
             dataplane_reconcile_planning_failures,
             kernel_route_notify_dropped,
             kernel_route_notify_subscription_failures,
@@ -4880,6 +4892,11 @@ impl BgpMetrics {
             .fib_kernel_failures
             .with_label_values(&[action])
             .inc();
+    }
+
+    /// Record a failed write of the general unicast FIB owned-state file.
+    pub fn record_fib_owned_state_persist_failure(&self) {
+        self.0.fib_owned_state_persist_failures.inc();
     }
 
     /// Record one pre-kernel dataplane reconcile planning failure.
