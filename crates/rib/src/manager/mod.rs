@@ -2221,8 +2221,8 @@ impl RibManager {
     }
 
     /// Create the counter instance of each named peer's installed export
-    /// chain (ADR-0136), compiling it if needed, so a statistics read never
-    /// compiles or creates one inside the actor. Policy replacements call this
+    /// chain (ADR-0136), compiling it if needed, at install rather than at
+    /// the roster's publication or first evaluation. Policy replacements call this
     /// once membership has settled: a grouped member's per-peer chain has then
     /// been replaced by its group's already-counted handle, so a discarded
     /// chain is never compiled. Registration needs no call: its initial dump
