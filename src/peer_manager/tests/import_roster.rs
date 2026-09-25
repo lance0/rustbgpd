@@ -271,10 +271,11 @@ async fn bulk_reconcile_publishes_the_roster_once() {
     }
 }
 
-/// Shutdown drains the table, publishing an empty roster, and the exiting
-/// owner closes the cell.
+/// Shutdown drains the table and its dataset bindings, publishing an empty
+/// roster, and the exiting owner closes the cell.
 #[tokio::test]
 async fn shutdown_drains_the_roster_and_closes_the_cell() {
+    let dir = tempfile::tempdir().unwrap();
     let (tx, rx) = mpsc::channel(4);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -287,16 +288,20 @@ async fn shutdown_drains_the_roster_and_closes_the_cell() {
         rib_tx,
         None,
     );
+    mgr.replace_current_config(super::wait_sites::dataset_generation_config(dir.path()));
     let roster = mgr.import_roster();
+    assert_eq!(roster.load().datasets().len(), 1);
     let peer: IpAddr = "192.0.2.20".parse().unwrap();
     insert_test_managed_peer(&mut mgr, peer, published_handle(None, 0), false);
     let running = designated(&roster, peer);
     let actor = tokio::spawn(mgr.run());
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     actor.await.unwrap();
+    let drained = roster.load();
+    assert!(drained.peers().is_empty(), "drain published no peers");
     assert!(
-        roster.load().peers().is_empty(),
-        "drain published an empty roster"
+        drained.datasets().is_empty(),
+        "a shutting-down daemon publishes no dataset rows"
     );
     assert!(roster.is_closed(), "the stopped owner closed the cell");
     assert_released(&running, "shutdown").await;

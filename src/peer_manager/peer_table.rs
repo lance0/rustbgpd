@@ -175,11 +175,13 @@ impl PeerTable {
         removed
     }
 
-    /// Remove every peer, publishing the empty roster.
+    /// Remove every peer and dataset binding, publishing the empty roster:
+    /// the daemon is shutting down.
     pub(super) fn drain(&mut self) -> Vec<(PeerKey, ManagedPeer)> {
         #[cfg(test)]
         self.assert_published_if_settled();
         let drained = self.peers.drain().collect();
+        self.datasets = Arc::new([]);
         self.publish();
         drained
     }
