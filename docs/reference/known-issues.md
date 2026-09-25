@@ -32,10 +32,12 @@ resolved.
   plus read service between queued RIB work units. Final phase coverage
   remains outstanding. General RIB queries retain their
   consistency fences, incomplete restoration can fence live peer-manager
-  reads, and remaining import-read latency can still arise in peer-manager
-  selection, publication collection, or response delivery. Installed import
-  counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md);
-  it does not remove those caller and scheduling waits.
+  reads. Peer validation, import counters and dataset status read the peer
+  manager's published roster ([ADR-0136](../adr/0136-owner-published-counter-reads.md))
+  instead of queueing on the peer manager; the export stage still queues on
+  the RIB, and an import read can still wait for a Pending session
+  publication, a busy counter lock, or response delivery. Installed import
+  counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md).
   The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
   records CPU placement, complete call results and remaining stale observations.
   The paired native rollback cell passes on both baseline and candidate; it

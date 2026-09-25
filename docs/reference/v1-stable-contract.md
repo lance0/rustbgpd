@@ -184,10 +184,14 @@ These meanings are part of the inventoried RPC contract:
   non-stale `Established` observations, so an unavailable peer is excluded
   without asserting it is down. Core snapshot failure returns an RPC error.
 - `GetPolicyStats`: success means the installed counters were available,
-  not that the session command loop is responsive. Numeric samples are not
-  an atomic fleet snapshot. Peer validation and export, import and dataset
-  waits share one absolute deadline, including admission; errors return no
-  partial response and late backend replies do not become successful reads.
+  not that the session command loop is responsive. Peer validation, import
+  counters and dataset status are read from the roster the peer manager
+  publishes, so success also does not show that the peer manager is
+  responsive; a request fails `UNAVAILABLE` when the peer manager stopped
+  before its capture finished. Numeric samples are not an atomic fleet
+  snapshot. Peer validation and export, import and dataset waits share one
+  absolute deadline, including admission; errors return no partial response
+  and late backend replies do not become successful reads.
 
 The [API deadline table](api.md#operator-read-deadlines) distinguishes bounded
 operator, summary and statistics waits from general RIB listing/explain reads
