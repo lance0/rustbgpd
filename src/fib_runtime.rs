@@ -1132,10 +1132,11 @@ where
         );
         return false;
     }
+    let dump_tables = tables_to_dump(config, owned);
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return false,
-        result = fib.dump(&config.tables) => match result {
+        result = fib.dump(&dump_tables) => match result {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 metrics.record_fib_kernel_failure("dump");
@@ -1394,7 +1395,15 @@ where
         }
         let result = tokio::select! {
             biased;
-            () = shutdown.cancelled() => break,
+            () = shutdown.cancelled() => {
+                // The request may already have reached the kernel even though
+                // its reply was never seen. Keep the write-ahead target in
+                // owned state so the post-apply persist does not drop it; the
+                // shutdown drain (or the first dump after a restart) settles
+                // it against the kernel.
+                outcome.owned_changed |= record_write_ahead(owned, op_route(op));
+                break;
+            }
             result = fib.apply(op) => result,
         };
         match result {
@@ -1516,20 +1525,44 @@ fn write_ahead_owned_state<'a>(
     let mut record: Option<FibOwnedState> = None;
     for op in attempted {
         let desired = op_route(op);
-        match owned.routes.get(&desired.key) {
-            Some(current) if current.target == desired.target => {}
-            current => {
-                let record = record.get_or_insert_with(|| owned.clone());
-                let slot = if current.is_some() {
-                    &mut record.in_flight
-                } else {
-                    &mut record.routes
-                };
-                slot.insert(desired.key, desired.clone());
-            }
+        if owned
+            .routes
+            .get(&desired.key)
+            .is_none_or(|current| current.target != desired.target)
+        {
+            record_write_ahead(record.get_or_insert_with(|| owned.clone()), desired);
         }
     }
     record
+}
+
+/// Record `desired` as a possible kernel value: as owned when the key is
+/// new, or as the in-flight alternate of a key owned at another target.
+/// Returns whether the owned state changed.
+fn record_write_ahead(owned: &mut FibOwnedState, desired: &FibRoute) -> bool {
+    let slot = match owned.routes.get(&desired.key) {
+        Some(current) if current.target == desired.target => return false,
+        Some(_) => &mut owned.in_flight,
+        None => &mut owned.routes,
+    };
+    slot.insert(desired.key, desired.clone()).as_ref() != Some(desired)
+}
+
+/// The tables a kernel dump must cover: the configured set plus any
+/// transition-generation table the config no longer declares, so owned rows
+/// an unpublished table change left there are checked against the kernel
+/// before they are withdrawn or released.
+fn tables_to_dump(config: &FibRuntimeConfig, owned: &FibOwnedState) -> Vec<FibTableConfig> {
+    let mut tables = config.tables.clone();
+    for table in &owned.transition_tables {
+        if !tables
+            .iter()
+            .any(|known| known.table_id == table.table_id && known.metric == table.metric)
+        {
+            tables.push(table.clone());
+        }
+    }
+    tables
 }
 
 fn refresh_unresolved_holds(
@@ -1591,7 +1624,7 @@ async fn drain_owned_with_events<F>(
 ) where
     F: UnicastFib,
 {
-    let snapshot = match fib.dump(&config.tables).await {
+    let snapshot = match fib.dump(&tables_to_dump(config, owned)).await {
         Ok(snapshot) => snapshot,
         Err(e) => {
             metrics.record_fib_kernel_failure("dump");
@@ -3248,20 +3281,28 @@ mod tests {
         kernel_events: Option<mpsc::Receiver<KernelRouteEvent>>,
         /// Runs as each op reaches the fake kernel, before it takes effect.
         on_apply: Option<ApplyHook>,
+        /// The next Add takes effect in the kernel but never replies.
+        hang_next_apply: bool,
     }
 
     impl UnicastFib for FakeFib {
         fn dump<'a>(
             &'a mut self,
-            _tables: &'a [FibTableConfig],
+            tables: &'a [FibTableConfig],
         ) -> Pin<Box<dyn Future<Output = Result<FibKernelSnapshot, String>> + Send + 'a>> {
             self.dump_calls += 1;
             Box::pin(async move {
                 if let Some(error) = &self.fail_dump {
-                    Err(error.clone())
-                } else {
-                    Ok(self.kernel.clone())
+                    return Err(error.clone());
                 }
+                // Like the Linux dump, report only the requested tables.
+                let mut snapshot = self.kernel.clone();
+                snapshot.routes.retain(|key, _| {
+                    tables
+                        .iter()
+                        .any(|table| table.table_id == key.table_id && table.metric == key.metric)
+                });
+                Ok(snapshot)
             })
         }
 
@@ -3272,6 +3313,20 @@ mod tests {
             self.applied.push(op.clone());
             if let Some(hook) = &mut self.on_apply {
                 hook(op);
+            }
+            if std::mem::take(&mut self.hang_next_apply) {
+                // The request takes effect in the kernel; its reply never
+                // arrives.
+                if let FibOp::Add(route) = op {
+                    self.kernel.routes.insert(
+                        route.key,
+                        FibKernelRoute {
+                            target: route.target.clone(),
+                            protocol: FibKernelProtocol::Bgp,
+                        },
+                    );
+                }
+                return Box::pin(std::future::pending());
             }
             Box::pin(async move {
                 if self
@@ -5654,6 +5709,85 @@ mod tests {
         assert_eq!(statuses[0].state, FibRuntimeState::Installed);
         assert!(!load_owned_state(&config).routes.contains_key(&added.key));
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_an_unanswered_apply_keeps_its_write_ahead_record() {
+        // Shutdown wins the race against a kernel Add whose request has
+        // already taken effect but whose reply never arrived. The persisted
+        // state must still name the row, and the drain must remove it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+        let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
+        let mut fib = FakeFib {
+            hang_next_apply: true,
+            on_apply: Some(Box::new(move |_: &FibOp| cancel.cancel())),
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        reconcile_once(
+            &config,
+            &rib_with_routes(vec![route(v4(24), ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics(),
+            &status_tx,
+            &mut owned,
+            &shutdown,
+        )
+        .await;
+        let installed = fib_route(v4(24), ip("192.0.2.1"));
+        assert!(fib.kernel.routes.contains_key(&installed.key));
+
+        // A crash here restarts from the file.
+        let restarted = load_owned_state(&config);
+        assert!(
+            restarted.routes.contains_key(&installed.key),
+            "{restarted:?}"
+        );
+
+        fib.on_apply = None;
+        drain_owned(&config, &mut fib, &metrics(), &status_tx, &mut owned).await;
+        assert!(fib.kernel.routes.is_empty(), "{:?}", fib.kernel);
+        assert!(load_owned_state(&config).routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_withdraws_rows_in_transition_only_tables() {
+        // After a restart on the previous config, an owned row can sit in a
+        // table only the unpublished table change declared. The drain must
+        // check it against the kernel and remove it, not just forget it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with(vec![table("edge", 1000, 200, &["ipv4_unicast"])]);
+        config.owned_state_path = Some(dir.path().join("fib-owned.json"));
+        let candidate_only = table("edge2", 1001, 200, &["ipv4_unicast"]);
+        let row = fib_route_in("edge2", 1001, 200, v4(24), ip("192.0.2.1"));
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(row.key, row.clone())]),
+            transition_tables: vec![candidate_only],
+            ..FibOwnedState::default()
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            row.key,
+            FibKernelRoute {
+                target: row.target.clone(),
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+
+        drain_owned(&config, &mut fib, &metrics(), &status_tx, &mut owned).await;
+
+        assert!(
+            matches!(fib.applied.as_slice(), [FibOp::Remove(route)] if route.key == row.key),
+            "{:?}",
+            fib.applied
+        );
+        assert!(fib.kernel.routes.is_empty());
+        assert!(owned.routes.is_empty());
     }
 
     #[tokio::test]
