@@ -58,7 +58,90 @@ pub(super) const MAX_NOTIFICATION_IDLE_BACKOFF_SECS: u32 = 300;
 /// peer that only ever survives until hold-timer expiry still backs off.
 pub(super) const HEALTHY_ESTABLISHED: Duration = Duration::from_secs(300);
 
+/// How long an unpromoted inbound collision candidate waits in `OpenConfirm`
+/// for `PeerManager`'s verdict. The manager normally answers within one
+/// bounded state query; this only reclaims a candidate whose verdict was lost,
+/// which would otherwise block every later inbound connection from the peer.
+pub(super) const COLLISION_VERDICT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// RFC 4271 §6.8 decides a collision when the OPEN arrives, before the
+/// KEEPALIVE that leads to Established. An inbound candidate runs as its own
+/// task and asks `PeerManager` for that decision, so it holds its KEEPALIVE
+/// (and any peer input) until promotion, as FRR resolves inline before its
+/// KEEPALIVE. A loser is then closed from `OpenConfirm` and never reports
+/// Established, registers with the RIB, or flaps toward the peer.
+pub(super) enum CollisionHold {
+    /// A primary, or a promoted candidate: the FSM runs unmodified.
+    Released,
+    /// An unpromoted candidate that has not yet received the peer's OPEN.
+    Armed,
+    /// An unpromoted candidate in `OpenConfirm` waiting for the verdict. Holds
+    /// the deferred KEEPALIVE and keepalive-timer actions.
+    Waiting(Vec<Action>),
+}
+
 impl PeerSession {
+    pub(super) fn collision_verdict_pending(&self) -> bool {
+        matches!(self.collision_hold, CollisionHold::Waiting(_))
+    }
+
+    /// Withhold the KEEPALIVE from an unpromoted candidate's transition to
+    /// `OpenConfirm`. The transition itself still runs, so `PeerManager`
+    /// receives `OpenReceived` and can decide.
+    fn hold_keepalive_for_collision_verdict(&mut self, actions: Vec<Action>) -> Vec<Action> {
+        let enters_open_confirm = actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::StateChanged {
+                    new: SessionState::OpenConfirm,
+                    ..
+                }
+            )
+        });
+        if !matches!(self.collision_hold, CollisionHold::Armed) || !enters_open_confirm {
+            return actions;
+        }
+        let (deferred, now) = actions.into_iter().partition(|action| {
+            matches!(
+                action,
+                Action::SendKeepalive | Action::StartTimer(rustbgpd_fsm::TimerType::Keepalive, _)
+            )
+        });
+        debug!(peer = %self.peer_label, "inbound collision candidate holding KEEPALIVE for verdict");
+        self.collision_hold = CollisionHold::Waiting(deferred);
+        self.collision_verdict_timer =
+            Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
+        now
+    }
+
+    /// Promotion: send the held KEEPALIVE and resume the peer's input, which
+    /// may already hold the KEEPALIVE that completes the handshake.
+    pub(super) async fn release_collision_hold(&mut self) {
+        let held = std::mem::replace(&mut self.collision_hold, CollisionHold::Released);
+        let CollisionHold::Waiting(deferred) = held else {
+            return;
+        };
+        self.collision_verdict_timer = None;
+        for event in self.execute_actions(deferred).await {
+            self.drive_fsm(event).await;
+        }
+        if self.read_half.is_some() {
+            self.process_read_buffer().await;
+        }
+    }
+
+    /// No verdict arrived: end the `OpenConfirm` wait as its hold timer would.
+    /// The candidate falls to Idle and `PeerManager` drops it on `BackToIdle`.
+    pub(super) async fn expire_collision_verdict_wait(&mut self) {
+        self.collision_verdict_timer = None;
+        warn!(
+            peer = %self.peer_label,
+            timeout_secs = COLLISION_VERDICT_TIMEOUT.as_secs(),
+            "inbound collision candidate received no verdict; closing it"
+        );
+        self.drive_fsm(Event::HoldTimerExpires).await;
+    }
+
     /// Deferred reconnect wait for the fall to Idle being executed.
     ///
     /// A NOTIFICATION teardown doubles `connect_retry_secs` for each
@@ -266,7 +349,8 @@ impl PeerSession {
                         .as_deref()
                         .or(self.fsm.negotiated())
                         .is_some_and(|negotiated| negotiated.peer_notification_gr);
-            let mut actions = self.fsm.handle_event(event.clone());
+            let actions = self.fsm.handle_event(event.clone());
+            let mut actions = self.hold_keepalive_for_collision_verdict(actions);
             if bfd_notification_gr {
                 for action in &mut actions {
                     if let Action::SendNotification(notification) = action
@@ -476,6 +560,10 @@ impl PeerSession {
                 }
                 Action::StateChanged { old, new } => {
                     self.session_telemetry_metric_lease.set_state(new);
+                    if new != SessionState::OpenConfirm && self.collision_verdict_pending() {
+                        self.collision_hold = CollisionHold::Armed;
+                        self.collision_verdict_timer = None;
+                    }
                     info!(
                         peer = %self.peer_label,
                         from = old.as_str(),

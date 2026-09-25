@@ -1765,12 +1765,41 @@ async fn next_candidate_open_received(mgr: &mut PeerManager) -> SessionNotificat
     notification
 }
 
+/// Send the peer's OPEN and its KEEPALIVE together, as a peer that already
+/// has our OPEN does, and wait until the candidate has reported the OPEN.
+async fn candidate_open_exchange(
+    mgr: &mut PeerManager,
+    client: &mut TcpStream,
+    buf: &mut BytesMut,
+) -> SessionNotification {
+    let msg = tokio::time::timeout(Duration::from_secs(2), read_bgp_message(client, buf))
+        .await
+        .expect("candidate must send OPEN");
+    assert!(matches!(msg, Message::Open(_)));
+    let mut bytes = encode_message(&Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2)))).unwrap();
+    bytes.extend(encode_message(&Message::Keepalive).unwrap());
+    client.write_all(&bytes).await.unwrap();
+    next_candidate_open_received(mgr).await
+}
+
+async fn pending_candidate_state(mgr: &PeerManager, peer_addr: IpAddr) -> SessionState {
+    mgr.peers[&key(peer_addr)]
+        .pending_inbound
+        .as_ref()
+        .expect("candidate still pending")
+        .handle
+        .query_state()
+        .await
+        .unwrap()
+        .fsm_state
+}
+
 /// The M81 interleaving end to end: the primary sits in Active with no
-/// connection, the peer connects in, and the candidate reaches Established
-/// before the manager resolves its OPEN. With a higher local identifier the
-/// candidate must still be kept.
+/// connection and the peer connects in. The candidate holds in `OpenConfirm`
+/// until the manager resolves its OPEN, then promotion completes the
+/// handshake. With a higher local identifier the candidate must still be kept.
 #[tokio::test]
-async fn inbound_candidate_established_while_primary_active_is_promoted() {
+async fn inbound_candidate_held_while_primary_active_is_promoted() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let mut mgr = PeerManager::new(
@@ -1797,51 +1826,112 @@ async fn inbound_candidate_established_while_primary_active_is_promoted() {
 
     let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
     let mut buf = BytesMut::with_capacity(4096);
-    let msg = tokio::time::timeout(
-        Duration::from_secs(2),
-        read_bgp_message(&mut client, &mut buf),
-    )
-    .await
-    .expect("candidate must send OPEN");
-    assert!(matches!(msg, Message::Open(_)));
-    send_bgp_message(
-        &mut client,
-        &Message::Open(mock_open(Ipv4Addr::new(10, 0, 0, 2))),
-    )
-    .await;
-    let msg = tokio::time::timeout(
-        Duration::from_secs(2),
-        read_bgp_message(&mut client, &mut buf),
-    )
-    .await
-    .expect("candidate should send KEEPALIVE after OPEN");
-    assert!(matches!(msg, Message::Keepalive));
-    send_bgp_message(&mut client, &Message::Keepalive).await;
-
-    // Hold the OpenReceived notification until the candidate is Established,
-    // which is the order the M81 daemon log recorded.
-    let notification = next_candidate_open_received(&mut mgr).await;
-    let mut established = false;
-    for _ in 0..40 {
-        let pending = mgr.peers[&key(peer_addr)].pending_inbound.as_ref().unwrap();
-        if pending.handle.query_state().await.unwrap().fsm_state == SessionState::Established {
-            established = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert!(established, "candidate did not reach Established");
+    let notification = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+    assert_eq!(
+        pending_candidate_state(&mgr, peer_addr).await,
+        SessionState::OpenConfirm,
+        "the candidate must wait for the verdict despite the peer KEEPALIVE"
+    );
 
     mgr.handle_session_notification(notification).await;
 
     assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("promotion must release the held KEEPALIVE");
+    assert!(matches!(msg, Message::Keepalive));
     let managed = &mgr.peers[&key(peer_addr)];
     assert!(managed.pending_inbound.is_none() && managed.session_id != 1);
     assert_eq!(
         managed.handle.query_state().await.unwrap().fsm_state,
         SessionState::Established,
-        "the promoted inbound session must stay up"
+        "the promoted inbound session consumes the buffered KEEPALIVE"
     );
+}
+
+/// A true simultaneous open that the local identifier wins: the candidate has
+/// the peer's OPEN and KEEPALIVE, the primary is in `OpenConfirm`. The
+/// candidate is never Established, never registers with the RIB, and is
+/// closed with Cease 6/7 before it ever sends a KEEPALIVE.
+#[tokio::test]
+async fn collision_loser_is_closed_from_open_confirm_without_keepalive() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::OpenSent, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    // The primary's own connection reaches OpenConfirm before the verdict.
+    let accept_handle = std::mem::replace(
+        &mut mgr.peers.get_mut(&key(peer_addr)).unwrap().handle,
+        fake_peer_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            primary.clone(),
+        ),
+    );
+    let _ = accept_handle.shutdown().await;
+
+    let mut buf = BytesMut::with_capacity(4096);
+    let notification = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+    assert_eq!(
+        pending_candidate_state(&mgr, peer_addr).await,
+        SessionState::OpenConfirm
+    );
+
+    mgr.handle_session_notification(notification).await;
+
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert!(
+        mgr.peers
+            .get(&key(peer_addr))
+            .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+        "the OpenConfirm primary with the higher local identifier must win"
+    );
+    let msg = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_bgp_message(&mut client, &mut buf),
+    )
+    .await
+    .expect("the loser must be closed");
+    let Message::Notification(notification) = msg else {
+        panic!("the loser sent {msg:?} before its Cease; the peer saw a KEEPALIVE");
+    };
+    assert_eq!(
+        notification.code,
+        rustbgpd_wire::notification::NotificationCode::Cease
+    );
+    assert_eq!(
+        notification.subcode,
+        rustbgpd_wire::notification::cease_subcode::CONNECTION_COLLISION_RESOLUTION
+    );
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(
+            !matches!(update, rustbgpd_rib::RibUpdate::PeerUp { .. }),
+            "the collision loser must never register with the RIB"
+        );
+    }
 }
 
 /// The resolution rule reads the primary's state when the OPEN arrives, not
@@ -1931,4 +2021,71 @@ async fn collision_rule_uses_primary_state_at_resolution_not_accept() {
             break;
         }
     }
+}
+
+/// A candidate whose collision verdict times out while `PeerManager` is busy
+/// elsewhere falls to Idle and queues `BackToIdle` behind its own, still
+/// unprocessed `OpenReceived`. When the manager resumes, that stale report must
+/// not promote the dead candidate over the primary: the primary would be
+/// retired and a closed session left in its place.
+#[tokio::test]
+async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 255, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    // An Active primary has no connection, so a live candidate would be
+    // promoted by the no-primary-connection rule.
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::Active, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let stale = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    // The manager is blocked: `stale` is held while the candidate's verdict
+    // timer (10 s in the transport) expires on the paused clock.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    // Handshake: the candidate has closed from OpenConfirm. Its Idle
+    // transition, and so its `BackToIdle`, ran in the same batch as this
+    // NOTIFICATION, before the writer task could send it.
+    loop {
+        if let Message::Notification(notification) = read_bgp_message(&mut client, &mut buf).await {
+            assert_eq!(
+                notification.code,
+                rustbgpd_wire::notification::NotificationCode::HoldTimerExpired
+            );
+            break;
+        }
+    }
+
+    mgr.handle_session_notification(stale).await;
+
+    assert_eq!(
+        primary.shutdown.load(Ordering::SeqCst),
+        0,
+        "the primary must not be retired for a dead candidate"
+    );
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(
+        managed.pending_inbound.is_none(),
+        "the dead candidate is dropped"
+    );
+    assert_eq!(managed.session_id, 1, "the primary keeps ownership");
 }

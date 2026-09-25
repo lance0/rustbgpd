@@ -333,6 +333,12 @@ pub(crate) struct PeerSession {
     /// The FSM batch being executed tore the session down with a
     /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
     batch_notification_teardown: bool,
+    /// RFC 4271 §6.8 gate for an unpromoted inbound collision candidate: its
+    /// KEEPALIVE and further input wait in `OpenConfirm` for `PeerManager`'s
+    /// verdict, so a collision loser never reaches Established.
+    collision_hold: fsm::CollisionHold,
+    /// Bounds the `OpenConfirm` wait for a collision verdict that never comes.
+    collision_verdict_timer: Option<Pin<Box<Sleep>>>,
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
     /// so control commands remain responsive during connection establishment.
     connect_task: Option<ConnectTask>,
@@ -1885,6 +1891,12 @@ impl PeerSession {
             reconnect_timer: None,
             notification_idle_failures: 0,
             batch_notification_teardown: false,
+            collision_hold: if session_identity.role == SessionRole::InboundCandidate {
+                fsm::CollisionHold::Armed
+            } else {
+                fsm::CollisionHold::Released
+            },
+            collision_verdict_timer: None,
             connect_task: None,
             connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,
@@ -2420,7 +2432,12 @@ impl PeerSession {
             // same arm immediately drives `TcpConnectionConfirmed`, so the FSM
             // is past `Idle` before the next read), so this never gates a live
             // outbound read.
-            let read_active = self.read_half.is_some() && self.fsm.state() != SessionState::Idle;
+            //
+            // A candidate waiting for its collision verdict leaves the peer's
+            // KEEPALIVE unread: processing it would reach Established.
+            let read_active = self.read_half.is_some()
+                && self.fsm.state() != SessionState::Idle
+                && !self.collision_verdict_pending();
 
             let replay_waiting = self
                 .pending_replay
@@ -2433,6 +2450,7 @@ impl PeerSession {
                 timers,
                 commands,
                 reconnect_timer,
+                collision_verdict_timer,
                 connect_task,
                 outbound_rx,
                 writer_join,
@@ -2485,6 +2503,10 @@ impl PeerSession {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
+                }
+
+                () = poll_timer(collision_verdict_timer) => {
+                    self.expire_collision_verdict_wait().await;
                 }
 
                 // Deferred BMP peer-state reset after a dropped

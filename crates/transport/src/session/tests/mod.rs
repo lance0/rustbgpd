@@ -2060,6 +2060,7 @@ async fn direct_action_fallback_rebuilds_fresh_arc_and_add_path_projection() {
 
 mod authenticated_dial;
 mod bmp;
+mod collision_hold;
 mod denied_replacements;
 mod exact_export;
 mod export_policy;

@@ -674,6 +674,11 @@ impl PeerSession {
     )]
     pub(super) async fn process_read_buffer(&mut self) {
         loop {
+            // The OPEN just processed may have parked a collision candidate;
+            // input behind it waits for the verdict.
+            if self.collision_verdict_pending() {
+                return;
+            }
             // Reconcile a due refresh window before *each* buffered PDU, not
             // merely once per socket read. One read can contain several UPDATEs
             // and the first may park on RIB backpressure until after the shared
