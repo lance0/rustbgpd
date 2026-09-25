@@ -142,7 +142,7 @@ def validate_reply(op, body, peers):
         assert len(data) == len(addresses) == peers, 'neighbor cardinality'
         stale = sum(bool(r.get('stale')) or r.get('state') == 'Stale' for r in data)
         return {'rows': len(data), 'stale_rows': stale}
-    assert isinstance(data, dict) and not data.get('datasets'), 'stats shape/datasets'
+    assert isinstance(data, dict) and isinstance(data.get('datasets', []), list), 'stats shape/datasets'
     result = {}
     for direction in ('import', 'export'):
         rows = [r for r in data['chains'] if r['direction'] == direction]

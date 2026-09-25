@@ -2,7 +2,9 @@
 """Focused checks for the policy-stats cell's audit parser and flat verdict."""
 import unittest
 
-from policy_stats_cell import classify_stats_call, flat_verdict, parse_summary, percentile, run_verdict
+import json
+
+from policy_stats_cell import classify_stats_call, flat_verdict, parse_summary, percentile, run_verdict, validate_reply
 
 SUMMARY = ('stage=export elapsed_ms=597 budget_ms=1999 rpc_elapsed_ms=598 code=Ok; '
            'stage=import elapsed_ms=1471 budget_ms=1401 rpc_elapsed_ms=2070 code=DeadlineExceeded '
@@ -88,6 +90,27 @@ class FlatVerdict(unittest.TestCase):
         self.assertEqual(percentile(list(range(1, 21)), 95), 19)
         self.assertEqual(percentile([5], 50), 5)
         self.assertIsNone(percentile([], 50))
+
+
+
+def stats_reply(peers=2, **extra):
+    chains = [{'peer_address': f'127.1.0.{i}', 'direction': d, 'eval_errors': 0, 'policy_generation': 0,
+               'terms': [{'term': 'default', 'hits': 1}]} for d in ('import', 'export') for i in range(peers)]
+    return json.dumps({'chains': chains, **extra}).encode()
+
+
+class ValidateReply(unittest.TestCase):
+    def test_reply_with_dataset_row_validates(self):
+        row = {'name': 'client-0-prefixes', 'generation': 3, 'records': 400, 'last_error': None}
+        shape = validate_reply('policy_stats', stats_reply(datasets=[row]), 2)
+        self.assertEqual((shape['import_rows'], shape['export_rows']), (2, 2))
+
+    def test_omitted_datasets_validates(self):
+        self.assertEqual(validate_reply('policy_stats', stats_reply(), 2)['export_rows'], 2)
+
+    def test_non_list_datasets_fails(self):
+        with self.assertRaises(AssertionError):
+            validate_reply('policy_stats', stats_reply(datasets={'name': 'x'}), 2)
 
 
 if __name__ == '__main__':
