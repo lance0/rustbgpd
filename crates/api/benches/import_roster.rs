@@ -6,6 +6,8 @@
 //! roster. `capture` times one `GetPolicyStats` import capture over installed
 //! publications, reading every counter once. Targets at 1,000 peers:
 //! publication <= 100 us, capture <= 1 ms with two terms per peer.
+//! `bulk_insert` compares a bulk operation publishing after every peer with
+//! one publication per operation.
 
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -162,5 +164,63 @@ fn bench_capture(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_publish, bench_capture);
+/// A bulk operation inserting `peers` peers into an empty table: publishing
+/// after every insert (O(peers^2) roster rows built) against one publication
+/// when the operation ends.
+fn bench_bulk_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("import_roster_bulk_insert");
+    group.sample_size(10);
+    let template = chain(2, 0);
+    for peers in [1_000, 10_000] {
+        let fleet = installed_fleet(peers, &template);
+        let datasets: Arc<[_]> = Vec::new().into();
+        let row = |index: usize| {
+            let (key, _, receiver) = &fleet[index];
+            (key.clone(), (index as u64 + 1, receiver.clone()))
+        };
+        let publish = |publisher: &mut ImportRosterPublisher,
+                       table: &HashMap<PeerKey, (u64, Receiver)>| {
+            let rows = table
+                .iter()
+                .map(|(key, (session_id, publication))| ImportRosterPeer {
+                    key: key.clone(),
+                    session_id: *session_id,
+                    publication: publication.clone(),
+                })
+                .collect();
+            publisher.publish(rows, Arc::clone(&datasets));
+        };
+        group.bench_function(format!("{peers}_peers_per_peer"), |b| {
+            b.iter_batched(
+                || (ImportRosterPublisher::new(), HashMap::with_capacity(peers)),
+                |(mut publisher, mut table)| {
+                    for index in 0..peers {
+                        let (key, value) = row(index);
+                        table.insert(key, value);
+                        publish(&mut publisher, &table);
+                    }
+                    publisher
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        group.bench_function(format!("{peers}_peers_batched"), |b| {
+            b.iter_batched(
+                || (ImportRosterPublisher::new(), HashMap::with_capacity(peers)),
+                |(mut publisher, mut table)| {
+                    for index in 0..peers {
+                        let (key, value) = row(index);
+                        table.insert(key, value);
+                    }
+                    publish(&mut publisher, &table);
+                    publisher
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_publish, bench_capture, bench_bulk_insert);
 criterion_main!(benches);
