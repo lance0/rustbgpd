@@ -1253,3 +1253,49 @@ async fn promoted_candidate_inherits_the_primary_notification_streak() {
         );
     }
 }
+
+/// When the Idle primary's state query times out after its `BackToIdle`, its
+/// NOTIFICATION streak and reconnect wait are unknown. The pending candidate
+/// is dropped rather than promoted with streak 0, which could bypass an
+/// escalated wait.
+#[tokio::test(start_paused = true)]
+async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let mut mgr = test_peer_manager();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        stalled_policy_query_handle(),
+        false,
+    );
+    let candidate = Arc::new(BackoffSessionCounters::default());
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        backoff_session_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            0,
+            0,
+            candidate.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert_eq!(
+        managed.session_id, 1,
+        "the unqueried primary keeps ownership"
+    );
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+}

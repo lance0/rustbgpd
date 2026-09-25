@@ -80,24 +80,19 @@ impl PeerManager {
         self.register_session(new_session_id, peer_key);
     }
 
-    /// The primary's state, queried only when a candidate is pending. A
-    /// missed deadline or exited task reads as no state: the candidate is
-    /// then promoted without a carried streak, as before.
+    /// The Idle primary's state, queried only when a candidate is pending.
     async fn idle_primary_state_for_pending(
         &self,
         peer_key: &PeerKey,
-    ) -> Option<rustbgpd_transport::PeerSessionState> {
+    ) -> Option<rustbgpd_transport::StateQueryOutcome> {
         let managed = self.peers.get(peer_key)?;
         managed.pending_inbound.as_ref()?;
-        match managed
-            .handle
-            .query_state_outcome(super::PEER_QUERY_TIMEOUT)
-            .await
-        {
-            rustbgpd_transport::StateQueryOutcome::State(state) => Some(state),
-            rustbgpd_transport::StateQueryOutcome::SessionGone
-            | rustbgpd_transport::StateQueryOutcome::TimedOut => None,
-        }
+        Some(
+            managed
+                .handle
+                .query_state_outcome(super::PEER_QUERY_TIMEOUT)
+                .await,
+        )
     }
 
     /// Drain lossless session ownership/latch signals that were already queued
@@ -280,11 +275,43 @@ impl PeerManager {
                         // Existing primary failed — promote the already-running
                         // inbound candidate if one exists, unless the primary
                         // is waiting out an escalated NOTIFICATION backoff.
-                        let primary = self.idle_primary_state_for_pending(&peer_key).await;
-                        if self
-                            .promote_pending_inbound_unless_backoff(&peer_key, primary.as_ref())
-                            .await
-                        {
+                        let promoted = match self.idle_primary_state_for_pending(&peer_key).await {
+                            None => false,
+                            // An exited primary has no reconnect wait to honour.
+                            Some(rustbgpd_transport::StateQueryOutcome::SessionGone) => {
+                                self.promote_pending_inbound_unless_backoff(&peer_key, None)
+                                    .await
+                            }
+                            Some(rustbgpd_transport::StateQueryOutcome::State(state)) => {
+                                self.promote_pending_inbound_unless_backoff(&peer_key, Some(&state))
+                                    .await
+                            }
+                            // A live primary whose backoff streak is unknown:
+                            // promoting could bypass its wait and reset the
+                            // streak. Drop the candidate, as a timed-out query
+                            // does on accept and at OPEN resolution; the
+                            // neighbor retries.
+                            Some(rustbgpd_transport::StateQueryOutcome::TimedOut) => {
+                                if let Some(pending) = self
+                                    .peers
+                                    .get_mut(&peer_key)
+                                    .and_then(|m| m.pending_inbound.take())
+                                {
+                                    info!(peer = %peer_addr, "primary state query timed out after BackToIdle; dropping inbound collision candidate");
+                                    let _ = self
+                                        .quiesce_retiring_session(
+                                            &peer_key,
+                                            pending.session_id,
+                                            pending.handle,
+                                            "BackToIdle unknown-primary pending inbound",
+                                            false,
+                                        )
+                                        .await;
+                                }
+                                false
+                            }
+                        };
+                        if promoted {
                             info!(peer = %peer_addr, "existing session went idle, promoting inbound collision candidate");
                         }
                     } else if let Some(pending) = self
