@@ -10,8 +10,7 @@
   so a fleet read during a reload that replaces or removes peers can return
   `UNAVAILABLE` for a session that has already exited. Success no longer
   shows that the peer manager is responsive, and a read that sees, after its
-  capture, that the peer manager has stopped returns `UNAVAILABLE`. The
-  export stage is unchanged.
+  capture, that the peer manager has stopped returns `UNAVAILABLE`.
   **Operator-visible:** the import entry of the `grpc_authz`
   `request_summary` audit record drops `admission_ms`, `collection_ms` and
   `admission=pending` along with the wait they measured; it keeps

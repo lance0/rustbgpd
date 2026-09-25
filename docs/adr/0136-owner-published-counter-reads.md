@@ -342,7 +342,9 @@ Each slice ships independently with its own proof.
    hard-coded export `policy_generation: 0` and its comment in
    `crates/api/src/policy_service.rs` (about line 1505), and that file's test
    assertion that export generations are 0, removing the tracker reference
-   both carry. The import-direction assertion in
+   both carry, and makes `rbgp policy stats` print export generations,
+   which its JSON rendered as `null` and its text omitted. The
+   import-direction assertion in
    `src/peer_manager/tests/policy_stats.rs` stays valid, since a session's
    initial publication is generation 0. The slice also extends the v1
    contract and `api.md` wording to the RIB. It also adds a `### Changed`

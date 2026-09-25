@@ -186,12 +186,15 @@ These meanings are part of the inventoried RPC contract:
 - `GetPolicyStats`: success means the installed counters were available,
   not that the session command loop is responsive. Peer validation, import
   counters and dataset status are read from the roster the peer manager
-  publishes, so success also does not show that the peer manager is
-  responsive; a request that sees, after its capture, that the peer manager
-  has stopped fails `UNAVAILABLE`. Numeric samples are not an atomic fleet
+  publishes, and export counters from the roster the RIB manager publishes,
+  so success also does not show that the peer manager or the RIB manager is
+  making progress; readiness and health test that. A request that sees,
+  after its capture, that either owner has stopped fails `UNAVAILABLE`.
+  Export rows' `policy_generation` is the counter-instance id: nonzero, and
+  new whenever the counters restart. Numeric samples are not an atomic fleet
   snapshot. Peer validation and export, import and dataset waits share one
-  absolute deadline, including admission; errors return no partial response
-  and late backend replies do not become successful reads.
+  absolute deadline; errors return no partial response and late capture
+  results do not become successful reads.
 
 The [API deadline table](api.md#operator-read-deadlines) distinguishes bounded
 operator, summary and statistics waits from general RIB listing/explain reads
