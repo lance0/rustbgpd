@@ -391,3 +391,46 @@ python3 -m unittest discover -s bench/scale/reloadstall -p test_membership_churn
 ```
 
 The [September 2026 membership receipt](../../../docs/perf/ixp-membership-churn-2026-09.md) retains a passing 20+2 preparation, a 702-member cell that failed readiness, and the v0.70.0 rejection control.
+
+## Policy-stats reload cell
+
+`policy_stats_cell.sh` measures `GetPolicyStats` through changed-policy
+reloads on the isolated-generator placement: the daemon on CPUs 2–3 (two
+runtime workers), this harness on CPUs 4–5 and the probes and CPU sampler on
+CPUs 8–15. It runs 1,000 peers with 400 IPv4 prefixes each and 12 reloads in
+alternating directions. Each reload gets one concurrent `neighbor` and
+`policy stats --direction both` pair, fired 0.50 s after the cohort hot-apply
+completes so that it starts in the −220 to 0 ms band before the RIB commit. A
+quiescent `policy stats --direction both` probe follows 20 s after the reload
+completes, inside the 40 s inter-reload quiesce. Nothing is retried.
+
+Build release `rustbgpd` and `rbgp` from the source under test, and
+`reloadstall` from `bench/scale`. On an otherwise quiet host, from the repo
+root:
+
+```bash
+cargo build --locked --release -p rustbgpd -p rustbgpctl --bin rustbgpd --bin rbgp
+(cd bench/scale && cargo build --locked --release -p reloadstall)
+bash bench/scale/reloadstall/policy_stats_cell.sh target/release \
+    bench/scale/target/release/reloadstall "$(mktemp -d)/run"
+```
+
+The run directory keeps the daemon log, every probe row and reply body, the
+engine log, metric snapshots, a 1 s CPU sample of the pinned cores and their
+SMT siblings, and `environment.json` (source, binary hashes, placement). The
+analyzer matches each statistics call to its audit record and writes
+`summary.json`: per-stage and import sub-stage timing (admission, collection,
+publications, yields) for in-band, all pair and quiescent calls, deadline
+misses, reload durations, per-row `policy_generation` values, and the flat
+verdict. It exits 0 only if every call returns complete rows within 2 s, at
+least six complete pairs start in the band, and the in-band maximum of the
+summed stage `elapsed_ms` stays within twice the quiescent median plus 50 ms.
+Re-run the analyzer alone with
+`python3 bench/scale/reloadstall/policy_stats_cell.py analyze RUN_DIR`.
+Neighbor stale rows are counted, not gated. The CPU sample reports load from
+other processes on the daemon's cores; a run with material foreign load is not
+comparable. Run the focused checks with:
+
+```bash
+python3 -m unittest discover -s bench/scale/reloadstall -p test_policy_stats_cell.py
+```
