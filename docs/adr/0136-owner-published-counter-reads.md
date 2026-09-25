@@ -125,17 +125,29 @@ descriptors keep their `watch` channel, which carries their pending and closed
 states; readers hold that borrow only to clone one `Arc`.
 
 A handler takes one `load_full()` per roster. This returns an owned `Arc`,
-safe across an await, rather than a `Guard`. The handler captures every row in
-one synchronous pass of `Relaxed` loads, awaits only import publications that
-are still Pending, and then renders. Capture does not yield, so the sampling
-window is as short as the loop and involves no trips through the run queue.
+safe across an await, rather than a `Guard`. It captures rows in one pass and
+then renders. The pass reads each counter once and yields only at three waits,
+each bounded by the request deadline:
+
+- an import publication that is still Pending, awaited until the session
+  publishes or closes;
+- a busy import error mutex (`try_lock`, yield, retry), as in ADR-0133;
+- a busy dataset `last_error` lock, which moves from a blocking `lock()` to the
+  same `try_lock` shape.
+
+Otherwise capture does not yield, so a fleet read makes no forced trips
+through the run queue.
 
 ### Lifecycle and ownership
 
 A roster is never edited in place. It is rebuilt from the owner's
 authoritative state at one publication point, and Rust privacy prevents
-bypassing that point. A projection cannot hold an entry its source lacks, so
-the published roster can lag its source but cannot diverge from it.
+bypassing that point. Two properties follow and must not be confused. A
+published roster that is mutated independently of, or diverges from, its
+owner's state is structurally impossible: nothing edits a roster, and a
+projection cannot hold an entry its source lacks. A reader that loaded an
+older roster keeps using it until its request ends; that snapshot lag is
+intended and bounded by the request.
 
 In the peer manager, the peer table becomes a small type in its own module
 with private fields, including the current-session handle inside each managed
@@ -162,25 +174,34 @@ chains (ADR-0105).
 | Policy reload or rollback | See generation semantics. |
 | Daemon shutdown | `drain` republishes an empty roster, and dropping the owner closes the cell. |
 
-A guard in each owner closes its cell when the owner is dropped, whether it
-exits normally or unwinds. A read of a closed cell returns `UNAVAILABLE`, so a
-stopped publisher never appears as success with frozen numbers. The daemon
-already shuts down when the RIB task exits; the guard covers the interval
+Each cell carries a `closed` flag. A guard in each owner sets it with
+`Release` ordering when the owner is dropped, whether it exits normally or
+unwinds. A handler checks the flag with `Acquire` ordering after its capture
+pass, not only before it, and returns `UNAVAILABLE` if it is set. A request
+that loaded a roster before its owner stopped therefore fails once the closure
+is visible to that check, instead of returning frozen values as success.
+Success means the handler observed the cell open after capture; there is no
+stronger ordering with an owner stopping concurrently. The check costs one atomic load per roster. The daemon
+already shuts down when the RIB task exits; the flag covers the interval
 before that and embedders.
 
-Readers retain at most one roster per owner per in-flight request and release
-it on completion, failure or cancellation. Retired rosters are therefore
-bounded by in-flight statistics requests. Releasing a 1,000-peer roster costs
-about a thousand `Arc` decrements, and releasing the last reference to an
-instance costs the same as today's chain replacement.
+Each in-flight request retains at most one roster per owner and releases it on
+completion, failure or cancellation, so retired rosters are bounded by
+in-flight statistics requests. Releasing a 1,000-peer roster costs about a
+thousand `Arc` decrements.
 
 ### What a successful read means
 
-Every numeric value is a `Relaxed` load made during the request, from the
-instance the owner's roster designated when the request loaded it. Each atomic
-has one modification order, and sequential requests are ordered by the reply,
-so an instance's counters never go backwards across reads. Instance selection
-reflects the owner's last completed operation. During a long synchronous RIB
+Every counter value is a `Relaxed` load made during the request, from the
+instance the owner's roster designated when the request loaded it. Each
+counter only increases in its modification order, and one request reads each
+counter once in one pass. No ordering across requests is promised: `Relaxed`
+loads in separate handlers have no happens-before relation. Metadata is not
+sampled this way. Instance ids, term labels, install generations and dataset
+bindings are immutable in the roster a request loaded. A dataset's generation
+and record count come from one load of that handle's immutable snapshot.
+Evaluation-error counts and last-error detail are read together under their
+mutex. Instance selection reflects the owner's last completed operation. During a long synchronous RIB
 operation a read reports live counters of the instances installed before it,
 which is fresher than the frozen projection served in that interval today.
 
@@ -225,12 +246,10 @@ The shared absolute deadline, the audit summary's stage names, all-or-error
 responses, deterministic ordering and cancellation are unchanged. After
 migration a request can still time out when the handler is scheduled late,
 because polling, rendering, encoding and writing compete for runtime workers;
-removing that wait would require read priority. It also waits, under the
-deadline, for an import publication that is still Pending or a cold error lock
-that is busy. The dataset handle's `last_error` moves from a blocking `lock()`
-to the same `try_lock` shape. It returns `UNAVAILABLE` when a selected session
-publication closed, counters are poisoned or mismatched, or a roster cell is
-closed; opt-in partial results under churn stay deferred on their existing
+removing that wait would require read priority. The three capture waits above
+can also exhaust the deadline. It returns `UNAVAILABLE` when a selected session
+publication closed, counters are poisoned or mismatched, or a roster cell was
+closed by the time capture finished; opt-in partial results under churn stay deferred on their existing
 triggers. An unmanaged peer returns `NOT_FOUND` from the import roster, and a
 listener built without a roster returns `FAILED_PRECONDITION`.
 
@@ -333,12 +352,13 @@ be retained.
   retired instance's `Weak` no longer upgrades once readers drop. Test builds
   check "published equals projection" after every RIB unit and peer-table
   method. The red proof removes one version advance or republication.
-- **Semantics.** An increment with no intervening owner operation is visible
-  to the next read, and sequential reads never decrease. Reads between
-  `CommitMembers` batches see only pre-commit instances; publishing per batch
-  must fail this. Dropping the RIB makes export return `UNAVAILABLE`; removing
-  the closing guard must fail this. A reader holding a loaded roster across an
-  await does not delay republication.
+- **Semantics.** An increment that happens before a request, with no owner
+  operation between, is visible to that request, so nothing is cached. Reads
+  between `CommitMembers` batches see only pre-commit instances; publishing per
+  batch must fail this. A request that loads the export roster, is held before
+  its closure check while the RIB is dropped, and then resumes returns
+  `UNAVAILABLE`; checking only before capture must fail this. A reader holding
+  a loaded roster across an await does not delay republication.
 - **Latency flat through reloads.** Use the isolated release cell: 1,000 peers
   with 400 IPv4 prefixes each, and the generator on separate cores. Run 12
   reloads in both directions, with probes in the −220 to 0 ms commit band and
@@ -379,8 +399,7 @@ no lane-wait sample).
 
 ## Prior art
 
-None of these sources is a latency measurement, and thread placement alone
-does not settle read latency.
+None of these sources is a latency measurement.
 
 | Source | Counter storage and read path |
 |---|---|
@@ -399,5 +418,4 @@ does not settle read latency.
 | [Rust Atomics and Locks](https://marabos.nl/atomics/memory-ordering.html) | Each atomic has a total modification order; separately updated `Relaxed` counters can be mutually inconsistent. |
 
 Every surveyed daemon reads counters on the owner thread, through its queue or
-under its lock, even when the counters are atomics. Reading published atomics
-directly applies the Prometheus-client and Envoy model to a gRPC surface.
+under its lock, even when they are atomics.
