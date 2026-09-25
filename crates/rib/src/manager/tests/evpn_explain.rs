@@ -176,13 +176,11 @@ fn exact_evpn_explain_runs_each_export_stop_in_live_order() {
                 manager.peer_is_ebgp.insert(TARGET, false);
             }
             "policy_denied" => {
-                manager
-                    .peer_export_policies
-                    .insert(TARGET, Some(policy("reject")));
+                manager.export_chains.insert(TARGET, Some(policy("reject")));
             }
             "no_advertise_policy_suppressed" => {
                 manager
-                    .peer_export_policies
+                    .export_chains
                     .insert(TARGET, Some(policy("add community 65535:65282; accept")));
             }
             _ => unreachable!(),
@@ -219,9 +217,7 @@ fn exact_evpn_explain_runs_each_export_stop_in_live_order() {
 fn exact_evpn_explain_preserves_policy_counters_events_and_committed_state() {
     let (mut manager, mut out, route) = fixture();
     let chain = policy("add community 65000:7; accept");
-    manager
-        .peer_export_policies
-        .insert(TARGET, Some(chain.share()));
+    manager.export_chains.insert(TARGET, Some(chain.share()));
     let before_stats = manager.export_policy_stats.clone();
     let metrics_snapshot = |manager: &RibManager| {
         manager

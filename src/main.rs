@@ -4263,6 +4263,9 @@ async fn run<T>(
     let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
         .with_readiness_queries(rib_readiness_rx)
         .with_summary_queries(rib_summary_rx);
+    // GetPolicyStats reads the RIB's published export roster (ADR-0136)
+    // instead of queueing on the RIB.
+    let export_roster = rib_manager.export_roster();
     if config.flowspec.validation == config::FlowSpecValidationMode::Rfc9117 {
         rib_manager = rib_manager.with_flowspec_validation(config.global.asn);
     }
@@ -5383,6 +5386,7 @@ async fn run<T>(
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
         peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         import_roster,
+        export_roster,
         rib_readiness_tx: rib_readiness_tx.clone(),
         rib_summary_tx,
         validation_snapshot: {

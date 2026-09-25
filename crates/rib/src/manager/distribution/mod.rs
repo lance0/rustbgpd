@@ -3544,8 +3544,8 @@ impl RibManager {
             // the group's old instance. The peer manager already skips
             // content-equal reinstalls at the fan-out; this guards the
             // seam itself for any other sender.
-            if manager.peer_export_policies.get(&peer) != Some(&export_policy) {
-                manager.peer_export_policies.insert(peer, export_policy);
+            if manager.export_chains.get(&peer) != Some(&export_policy) {
+                manager.export_chains.insert(peer, export_policy);
             }
             // Update-group membership recompute on the policy replacement
             // seam (per-peer gRPC edits, ADR-0076 live-impact txns, and
@@ -3962,15 +3962,15 @@ impl RibManager {
         for replacement in &present {
             checkpoint();
             receipt.policy_equality_attempts += 1;
-            let equal = self.peer_export_policies.get(&replacement.peer)
-                == Some(&replacement.export_policy);
+            let equal =
+                self.export_chains.get(&replacement.peer) == Some(&replacement.export_policy);
             if equal {
                 receipt.policy_equality_equal += 1;
             } else {
                 receipt.policy_equality_changed += 1;
             }
             if let (Some(Some(old)), Some(new)) = (
-                self.peer_export_policies.get(&replacement.peer),
+                self.export_chains.get(&replacement.peer),
                 replacement.export_policy.as_ref(),
             ) {
                 for (old_policy, new_policy) in old
@@ -3996,7 +3996,7 @@ impl RibManager {
                 }
             }
             if !equal {
-                self.peer_export_policies
+                self.export_chains
                     .insert(replacement.peer, replacement.export_policy.clone());
             }
         }

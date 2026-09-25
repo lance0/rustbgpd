@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::broadcast;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use super::helpers::{prefix_family, unicast_route_family};
 use super::{
@@ -128,53 +128,6 @@ pub(super) fn send_mrt_snapshot(
     let snapshot = build();
     if reply.send(snapshot).is_err() {
         warn!("MRT snapshot query caller dropped before receiving response");
-    }
-}
-
-/// An installed export chain (`None` = the global fallback) without its
-/// counter instance. Install paths rule this out
-/// ([`RibManager::create_installed_export_counters`]); a read that meets one
-/// fails closed instead of omitting the row (ADR-0136).
-#[derive(Debug, Clone, Copy)]
-pub(super) struct MissingExportCounters(pub(super) Option<IpAddr>);
-
-/// Snapshot an installed export chain's counter instance (ADR-0136).
-///
-/// Reads only the instance the install created: it never compiles a chain or
-/// creates counters inside the actor.
-pub(super) fn snapshot_export_chain(
-    owner: Option<IpAddr>,
-    chain: &rustbgpd_policy::PolicyChain,
-) -> Result<crate::update::ExportPolicyTermHits, MissingExportCounters> {
-    let counters = chain
-        .installed_hit_counters()
-        .ok_or(MissingExportCounters(owner))?;
-    Ok(crate::update::ExportPolicyTermHits {
-        peer: owner,
-        evals: counters.evals(),
-        eval_errors: counters.eval_errors(),
-        last_error: counters.last_error().map(|error| error.to_string()),
-        terms: counters.term_hit_rows(),
-    })
-}
-
-/// Answer an export term-hits query. A missing counter instance drops the
-/// reply, which the API reports as `UNAVAILABLE`, rather than send a success
-/// that silently lacks the chain's row.
-pub(super) fn reply_export_policy_term_hits(
-    reply: tokio::sync::oneshot::Sender<Vec<crate::update::ExportPolicyTermHits>>,
-    rows: Result<Vec<crate::update::ExportPolicyTermHits>, MissingExportCounters>,
-) {
-    match rows {
-        Ok(rows) => {
-            if reply.send(rows).is_err() {
-                debug!("export policy stats caller dropped before receiving response");
-            }
-        }
-        Err(MissingExportCounters(peer)) => error!(
-            peer = %peer.map_or_else(|| "global".to_string(), |peer| peer.to_string()),
-            "installed export policy chain has no counter instance; failing the policy stats read"
-        ),
     }
 }
 
@@ -2743,49 +2696,6 @@ impl RibManager {
         }
     }
 
-    /// Snapshot the live per-term hit counters of installed export
-    /// chains (ADR-0096 Decision 3.3): one entry per peer with an
-    /// installed chain, plus the shared global fallback instance for
-    /// peers evaluated before any per-peer install. Read-only — no
-    /// counter is touched.
-    pub(super) fn handle_query_export_policy_term_hits(
-        &mut self,
-        peer: Option<IpAddr>,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::update::ExportPolicyTermHits>>,
-    ) {
-        if reply.is_closed() {
-            return;
-        }
-        reply_export_policy_term_hits(reply, self.export_policy_term_hits(peer));
-    }
-
-    pub(super) fn export_policy_term_hits(
-        &self,
-        peer: Option<IpAddr>,
-    ) -> Result<Vec<crate::update::ExportPolicyTermHits>, MissingExportCounters> {
-        let mut out = Vec::new();
-        if let Some(peer) = peer {
-            if let Some(chain) = self.export_policy_for(peer) {
-                out.push(snapshot_export_chain(Some(peer), chain)?);
-            }
-        } else {
-            let mut peers: Vec<IpAddr> = self
-                .peer_export_policies
-                .iter()
-                .filter_map(|(peer, chain)| chain.as_ref().map(|_| *peer))
-                .collect();
-            peers.sort_unstable();
-            for peer in peers {
-                if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
-                    out.push(snapshot_export_chain(Some(peer), chain)?);
-                }
-            }
-            if let Some(chain) = self.export_policy.as_ref() {
-                out.push(snapshot_export_chain(None, chain)?);
-            }
-        }
-        Ok(out)
-    }
     /// Serve `QueryOrrStatus`: per-vantage resolution/SPF/bound-peer
     /// status plus topology totals, from the cached `OrrState` (fresh by
     /// construction while any vantage is configured; empty otherwise).

@@ -15,7 +15,9 @@ use super::*;
 #[path = "update_groups_harness.rs"]
 mod update_groups_harness;
 use crate::manager::distribution::OutboundCommitBatch;
-use update_groups_harness::{RunningManager, spawn_running_manager};
+use update_groups_harness::{
+    RunningManager, spawn_running_manager, spawn_running_manager_with_roster,
+};
 
 #[test]
 fn policy_transition_production_slice_boundaries_are_exact() {
@@ -1405,15 +1407,12 @@ fn real_caller_grouped_exact_precommit_fast_and_slow_paths_are_equivalent() {
     assert_plain_unicast_update(&normal[2].0.updates[1], 2, vec![routes[2].clone()], vec![]);
 }
 
-async fn query_first_export_term_hits(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
-    let (reply, response) = oneshot::channel();
-    tx.send(RibUpdate::QueryExportPolicyTermHits {
-        peer: Some(peer),
-        reply,
-    })
-    .await
-    .unwrap();
-    let hits = response.await.unwrap();
+async fn query_first_export_term_hits(
+    tx: &mpsc::Sender<RibUpdate>,
+    roster: &crate::export_roster::ExportRosterReader,
+    peer: IpAddr,
+) -> (u64, u64) {
+    let hits = published_export_rows(tx, roster, Some(peer)).await;
     assert_eq!(hits.len(), 1, "peer must report its installed chain");
     assert_eq!(
         hits[0].terms.len(),
@@ -2184,6 +2183,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     // accounting, readiness interleaving), so pin the flush budget to zero:
     // one test-sized stride per poll, exactly as before the budget loops.
     manager.flush_poll_budget = std::time::Duration::ZERO;
+    let roster = manager.export_roster();
     let handle = tokio::spawn(manager.run());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
@@ -2269,7 +2269,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     let transition_hits = (ROUTE_COUNT as u64, ROUTE_COUNT as u64);
     for &peer in &peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             transition_hits,
             "every installed member must expose the destination group's staged evaluations"
         );
@@ -2359,7 +2359,7 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     }
     for peer in peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (transition_hits.0 + 1, transition_hits.1 + 1),
             "later group evaluations must advance every installed member's shared counters"
         );
@@ -2595,7 +2595,8 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
     reason = "the existing-destination regression checks every grouped counter handle before and after later staging"
 )]
 async fn clean_policy_transition_existing_destination_shares_every_members_counters() {
-    let RunningManager { tx, handle } = spawn_running_manager(64, BgpMetrics::new());
+    let (RunningManager { tx, handle }, roster) =
+        spawn_running_manager_with_roster(64, BgpMetrics::new());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -2689,7 +2690,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     for peer in moving.into_iter().chain([destination_member]) {
         assert_eq!(query_update_group(&tx, peer).await, "group:1");
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (1, 1),
             "every member must expose the maintained destination group's counter instance"
         );
@@ -2714,7 +2715,7 @@ async fn clean_policy_transition_existing_destination_shares_every_members_count
     assert_eq!(destination_receiver.recv().await.unwrap().announce.len(), 1);
     for peer in moving.into_iter().chain([destination_member]) {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (2, 2),
             "later staging must advance every member's shared counter view"
         );
@@ -3128,7 +3129,7 @@ async fn abandoned_authoritative_replacement_batch_is_skipped() {
     });
 
     assert!(
-        !manager.peer_export_policies.contains_key(&peer),
+        !manager.export_chains.contains_key(&peer),
         "abandoned batch must not install its chains"
     );
     assert!(
@@ -3396,7 +3397,8 @@ async fn clean_policy_transition_matches_force_ungrouped_member_views() {
 async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejection() {
     let metrics = BgpMetrics::new();
     metrics.set_rib_policy_transition_last_duration(std::time::Duration::from_secs(987));
-    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
+    let (RunningManager { tx, handle }, roster) =
+        spawn_running_manager_with_roster(64, metrics.clone());
     let probes = Arc::new(AtomicUsize::new(0));
     let reuses = Arc::new(AtomicUsize::new(0));
     let old_policy = community_chain(0xFDE8_0001);
@@ -3519,7 +3521,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
 
     for &peer in &peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (1, 1),
             "authoritative fallback must install the destination group's actual counter instance for every grouped member"
         );
@@ -3544,7 +3546,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     assert_eq!(receivers[0].recv().await.unwrap().announce.len(), 1);
     for &peer in &peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (2, 2),
             "later evaluations must remain visible through every fallback member"
         );
@@ -3585,7 +3587,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     for &peer in &peers {
         assert_eq!(query_update_group(&tx, peer).await, rollback_group);
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (2, 2),
             "rollback must expose the rebuilt prior group's counter instance for every member"
         );
@@ -3612,7 +3614,7 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
     }
     for peer in peers {
         assert_eq!(
-            query_first_export_term_hits(&tx, peer).await,
+            query_first_export_term_hits(&tx, &roster, peer).await,
             (3, 3),
             "post-rollback evaluations must keep every prior member's counters live"
         );
@@ -4471,21 +4473,21 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
 
     /// (total evaluations, deny-term guard hits) of the peer's
     /// installed chain instance.
-    async fn hits_for(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> (u64, u64) {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryExportPolicyTermHits {
-            peer: Some(peer),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        let hits = reply_rx.await.unwrap();
+    async fn hits_for(
+        tx: &mpsc::Sender<RibUpdate>,
+        roster: &crate::export_roster::ExportRosterReader,
+        peer: IpAddr,
+    ) -> (u64, u64) {
+        let hits = published_export_rows(tx, roster, Some(peer)).await;
         assert_eq!(hits.len(), 1, "peer must report an installed chain");
         (hits[0].evals, hits[0].terms[0].hits)
     }
 
     let metrics = BgpMetrics::new();
-    let RunningManager { tx, handle } = spawn_running_manager(64, metrics.clone());
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let roster = manager.export_roster();
+    let handle = tokio::spawn(manager.run());
 
     let denied = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 4, 1));
@@ -4505,7 +4507,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     )
     .await;
     assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
-    assert_eq!(hits_for(&tx, peer).await, (1, 0));
+    assert_eq!(hits_for(&tx, &roster, peer).await, (1, 0));
 
     // Content-equal reinstall (fresh instance, zeroed counters — the
     // SIGHUP / txn no-op shape). The installed instance must survive.
@@ -4527,7 +4529,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     .await;
     assert_eq!(out_rx.recv().await.unwrap().announce.len(), 1);
     assert_eq!(
-        hits_for(&tx, peer).await,
+        hits_for(&tx, &roster, peer).await,
         (2, 0),
         "term-hit counters must survive a content-equal reinstall and keep counting \
          (a frozen/zero reading means the query snapshots a fresh instance while the \
@@ -4538,7 +4540,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     // emitting — still on the surviving instance. The query rides the
     // same serial channel, so its reply proves the route was staged.
     send_route(&tx, source, denied).await;
-    assert_eq!(hits_for(&tx, peer).await, (3, 1));
+    assert_eq!(hits_for(&tx, &roster, peer).await, (3, 1));
 
     // A content-CHANGED chain installs fresh: the peer regroups and the
     // query snapshots the NEW instance — the join-time table rebuild
@@ -4556,7 +4558,7 @@ async fn content_identical_replace_keeps_export_term_hit_counters() {
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
     assert_eq!(query_update_group(&tx, peer).await, "group:1");
     assert_eq!(
-        hits_for(&tx, peer).await,
+        hits_for(&tx, &roster, peer).await,
         (3, 0),
         "a content-changed install must evaluate through a fresh instance \
          (rebuild evals only; no carried deny-term history)"
@@ -5317,7 +5319,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
 
     let (reply, mut response) = oneshot::channel();
     query_tx
-        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .try_send(RibUpdate::QueryLocRibCount { reply })
         .unwrap();
     manager.drain_general_queries_if_unfenced();
     assert!(
@@ -5331,7 +5333,7 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
 
     let (reply, mut response) = oneshot::channel();
     query_tx
-        .try_send(RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
+        .try_send(RibUpdate::QueryLocRibCount { reply })
         .unwrap();
     manager.drain_general_queries_if_unfenced();
     assert!(response.try_recv().is_ok());
@@ -5341,7 +5343,11 @@ async fn post_commit_query_trace_accounts_work_until_first_general_query() {
     manager.post_commit_query_trace = Some(fresh_trace());
     let (reply, mut response) = oneshot::channel();
     summary_tx
-        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            reply,
+        })
         .unwrap();
     manager.drain_general_queries_if_unfenced();
     assert!(response.try_recv().is_ok());
@@ -7924,7 +7930,11 @@ fn initial_export_services_interior_readiness_and_fences_other_lanes() {
         fleet.manager.summary_rx = Some(summary_rx);
         let (reply, summary) = oneshot::channel();
         summary_tx
-            .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+            .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+            })
             .unwrap();
         let summary = Arc::new(Mutex::new(summary));
         let (mutation_tx, mutation_rx) = mpsc::channel(1);
@@ -8509,7 +8519,7 @@ fn replacement_readiness_terminal_paths_restore_service_before_ack() {
         );
         if case == "closed_outbound" {
             assert_eq!(
-                fleet.manager.peer_export_policies[&fleet.members[0]].as_ref(),
+                fleet.manager.export_chains[&fleet.members[0]].as_ref(),
                 Some(&next),
                 "closed outbound emission must not undo the accepted policy replacement"
             );
@@ -8596,7 +8606,7 @@ fn replacement_readiness_closed_forward_and_rollback_replies_keep_their_semantic
         };
         for peer in &fleet.members {
             assert_eq!(
-                fleet.manager.peer_export_policies[peer].as_ref(),
+                fleet.manager.export_chains[peer].as_ref(),
                 Some(expected),
                 "{case}"
             );
@@ -9458,13 +9468,13 @@ fn rollback_batch_reverses_order_reports_missing_and_rejects_duplicates() {
     );
     for peer in &fleet.members[..2] {
         assert_eq!(
-            fleet.manager.peer_export_policies.get(peer),
+            fleet.manager.export_chains.get(peer),
             Some(&Some(prior.clone()))
         );
     }
 
     let duplicate = fleet.members[0];
-    let before = fleet.manager.peer_export_policies[&duplicate].clone();
+    let before = fleet.manager.export_chains[&duplicate].clone();
     let error = fleet
         .manager
         .restore_export_policy_replacements_synchronously(vec![
@@ -9479,7 +9489,7 @@ fn rollback_batch_reverses_order_reports_missing_and_rejects_duplicates() {
         ])
         .expect_err("duplicates must reject before the first mutation");
     assert!(error.to_string().contains("duplicate peer"));
-    assert_eq!(fleet.manager.peer_export_policies[&duplicate], before);
+    assert_eq!(fleet.manager.export_chains[&duplicate], before);
 }
 
 /// The canonical batched cohort: every member of one per-client-best
@@ -9792,7 +9802,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
     assert!(fleet.receivers[3].try_recv().is_err());
     let incumbent_stats = fleet.manager.export_policy_stats[&incumbent];
     let hits = Arc::clone(
-        fleet.manager.peer_export_policies[&incumbent]
+        fleet.manager.export_chains[&incumbent]
             .as_ref()
             .unwrap()
             .hit_counters(),
@@ -9880,7 +9890,7 @@ fn batched_authoritative_rollback_shares_an_occupied_destination() {
     for (index, peer) in movers.iter().enumerate() {
         assert_eq!(fleet.manager.grouped_member_of(*peer), Some(destination));
         assert!(Arc::ptr_eq(
-            fleet.manager.peer_export_policies[peer]
+            fleet.manager.export_chains[peer]
                 .as_ref()
                 .unwrap()
                 .hit_counters(),
@@ -10259,8 +10269,20 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
             let expected_comparison = fleet
                 .manager
                 .update_group_comparison(fleet.members[0], fleet.members[1]);
-            let expected_terms =
-                format!("{:?}", fleet.manager.export_policy_term_hits(None).unwrap());
+            // The export roster is not a frozen projection: during the
+            // synchronous replacement it keeps designating the instances of
+            // the last completed operation (ADR-0136).
+            fleet.manager.publish_export_roster();
+            let roster = fleet.manager.export_roster();
+            let designated = |roster: &crate::export_roster::ExportRoster| {
+                let peers: Vec<_> = roster
+                    .peers()
+                    .iter()
+                    .map(|(peer, counters)| (*peer, counters.as_ref().map(|c| c.id())))
+                    .collect();
+                (roster.version(), peers)
+            };
+            let expected_roster = designated(&roster.load());
             let (summary_tx, summary_rx) = mpsc::channel(8);
             fleet.manager.summary_rx = Some(summary_rx);
             let (query_tx, query_rx) = mpsc::channel(1);
@@ -10282,9 +10304,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                 .unwrap();
             let (neighbors_reply, neighbors_response) = oneshot::channel();
             let neighbors_response = Arc::new(Mutex::new(neighbors_response));
-            let (terms_reply, terms_response) = oneshot::channel();
-            let terms_response = Arc::new(Mutex::new(terms_response));
-            let queries = Mutex::new(Some((neighbors_reply, terms_reply)));
+            let queries = Mutex::new(Some(neighbors_reply));
             let visits = Arc::new(AtomicUsize::new(0));
             let captures = Arc::new(AtomicUsize::new(0));
             let peers = fleet.members.clone();
@@ -10292,7 +10312,6 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                 let visits = visits.clone();
                 let captures = captures.clone();
                 let neighbors_response = neighbors_response.clone();
-                let terms_response = terms_response.clone();
                 let general_response = general_response.clone();
                 move |observed| {
                     if observed == "summary_capture" {
@@ -10312,19 +10331,12 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                     );
                     match visits.fetch_add(1, Ordering::Relaxed) {
                         0 => {
-                            let (neighbors_reply, terms_reply) =
-                                queries.lock().unwrap().take().unwrap();
+                            let neighbors_reply = queries.lock().unwrap().take().unwrap();
                             summary_tx
                                 .try_send(RibSummaryQuery::NeighborRibSnapshots {
                                     peers: peers.clone(),
                                     comparison: Some((peers[0], peers[1])),
                                     reply: neighbors_reply,
-                                })
-                                .unwrap();
-                            summary_tx
-                                .try_send(RibSummaryQuery::ExportPolicyTermHits {
-                                    peer: None,
-                                    reply: terms_reply,
                                 })
                                 .unwrap();
                         }
@@ -10337,15 +10349,9 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                             assert_eq!(reply.snapshots, expected_rows);
                             assert_eq!(reply.comparison, Some(expected_comparison.clone()));
                             assert_eq!(
-                                format!(
-                                    "{:?}",
-                                    terms_response
-                                        .lock()
-                                        .unwrap()
-                                        .try_recv()
-                                        .expect("term summary served inside replacement")
-                                ),
-                                expected_terms
+                                designated(&roster.load()),
+                                expected_roster,
+                                "no publication inside the replacement"
                             );
                         }
                         _ => {}
@@ -10397,8 +10403,7 @@ fn replacement_summaries_answer_frozen_interiors_before_restore_or_apply_ack() {
                 fleet
                     .members
                     .iter()
-                    .all(|peer| fleet.manager.peer_export_policies.get(peer)
-                        == Some(&Some(next.clone())))
+                    .all(|peer| fleet.manager.export_chains.get(peer) == Some(&Some(next.clone())))
             );
             fleet.manager.drain_queries(1);
             assert_eq!(general_response.lock().unwrap().try_recv().unwrap(), 4);
@@ -10425,7 +10430,7 @@ fn replacement_summaries_keep_abandoned_apply_and_restore_ownership_rules() {
         fleet
             .members
             .iter()
-            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(old.clone())))
+            .all(|peer| fleet.manager.export_chains.get(peer) == Some(&Some(old.clone())))
     );
     let (reply, response) = oneshot::channel();
     drop(response);
@@ -10439,8 +10444,357 @@ fn replacement_summaries_keep_abandoned_apply_and_restore_ownership_rules() {
         fleet
             .members
             .iter()
-            .all(|peer| fleet.manager.peer_export_policies.get(peer) == Some(&Some(next.clone())))
+            .all(|peer| fleet.manager.export_chains.get(peer) == Some(&Some(next.clone())))
     );
     assert!(fleet.manager.replacement_readiness.is_none());
     assert!(fleet.manager.summary_rx.is_some());
+}
+
+// -- ADR-0136 export roster ------------------------------------------------
+
+/// Each designated peer's counter-instance id in `roster`.
+fn designated_ids(roster: &crate::export_roster::ExportRoster) -> BTreeMap<IpAddr, Option<u64>> {
+    roster
+        .peers()
+        .iter()
+        .map(|(peer, counters)| (*peer, counters.as_ref().map(|c| c.id())))
+        .collect()
+}
+
+/// The published roster of a running manager once all earlier work has
+/// passed the publication point: its version and designated ids.
+async fn published_ids(
+    tx: &mpsc::Sender<RibUpdate>,
+    roster: &crate::export_roster::ExportRosterReader,
+) -> (u64, BTreeMap<IpAddr, Option<u64>>) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    response.await.unwrap();
+    let loaded = roster.load();
+    (loaded.version(), designated_ids(&loaded))
+}
+
+/// A `Weak` to the instance the roster designates for `peer`.
+fn retire_watch(
+    roster: &crate::export_roster::ExportRosterReader,
+    peer: IpAddr,
+) -> std::sync::Weak<rustbgpd_policy::PolicyHitCounters> {
+    Arc::downgrade(roster.load().for_peer(peer).expect("an installed instance"))
+}
+
+/// [`peer_context_chain`] matching `asn`: peer-dependent, so never grouped.
+fn peer_context_chain_for(asn: u32) -> PolicyChain {
+    let mut chain = peer_context_chain();
+    chain.policies[0].policy.entries[0]
+        .match_neighbor_set
+        .as_mut()
+        .unwrap()
+        .remote_asns = vec![asn];
+    chain
+}
+
+async fn send_peer_down(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) {
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 0,
+    })
+    .await
+    .unwrap();
+}
+
+async fn replace_one(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr, chain: PolicyChain) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer,
+        export_policy: Some(chain),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+}
+
+/// ADR-0136 stale entries: a real RIB driven through session flaps, update-
+/// group join, leave, regroup and emptying, per-peer and batch replacement,
+/// a rollback with a departed member, and shutdown. After each unit the
+/// published roster designates exactly the installed instances (test builds
+/// also assert "published equals projection" at every run-loop publication
+/// point), each mutating unit publishes once, and a retired instance stops
+/// upgrading once no roster holds it.
+/// Break-to-red: dropping the version advance from `ExportChains::remove`
+/// leaves the departed peer's retired instance published.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one running RIB walks every roster-changing transition in order"
+)]
+async fn export_roster_follows_the_rib_through_every_owner_transition() {
+    let (RunningManager { tx, handle }, roster) =
+        spawn_running_manager_with_roster(64, BgpMetrics::new());
+    let a = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 1));
+    let b = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 2));
+    let c = IpAddr::V4(Ipv4Addr::new(10, 36, 0, 3));
+    let grouped = |peer| {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(community_chain(0xFDE8_3601));
+        spec
+    };
+    let ungrouped = |peer| {
+        let mut spec = PeerUpSpec::ibgp(peer);
+        spec.export_policy = Some(peer_context_chain());
+        spec
+    };
+    let (initial, _) = published_ids(&tx, &roster).await;
+    let _a_rx = peer_up(&tx, grouped(a)).await;
+    let _b_rx = peer_up(&tx, grouped(b)).await;
+    let _c_rx = peer_up(&tx, ungrouped(c)).await;
+    let group = query_update_group(&tx, a).await;
+    assert_eq!(query_update_group(&tx, b).await, group);
+    assert_ne!(query_update_group(&tx, c).await, group);
+    let (version, ids) = published_ids(&tx, &roster).await;
+    assert_eq!(version, initial + 3, "one publication per PeerUp");
+    assert_eq!(
+        ids[&a], ids[&b],
+        "grouped members share the group's instance"
+    );
+    assert!(ids[&a].is_some() && ids[&c].is_some() && ids[&a] != ids[&c]);
+    let group_instance = retire_watch(&roster, a);
+
+    // Ungrouped flap: the session registers a new instance; the old one is
+    // retired.
+    let retired = retire_watch(&roster, c);
+    send_peer_down(&tx, c).await;
+    let (down, after_down) = published_ids(&tx, &roster).await;
+    assert_eq!(down, version + 1);
+    assert!(!after_down.contains_key(&c), "peer down removes the entry");
+    assert!(
+        retired.upgrade().is_none(),
+        "the departed instance is released"
+    );
+    let _c_rx = peer_up(&tx, ungrouped(c)).await;
+    let (up, after_up) = published_ids(&tx, &roster).await;
+    assert_eq!(up, down + 1);
+    assert!(after_up[&c].is_some() && after_up[&c] != ids[&c]);
+
+    // Grouped flap: the member rejoins its group's instance.
+    send_peer_down(&tx, b).await;
+    let _b_rx = peer_up(&tx, grouped(b)).await;
+    let (_, rejoined) = published_ids(&tx, &roster).await;
+    assert_eq!(rejoined[&b], ids[&a]);
+
+    // Per-peer replacement of the ungrouped peer installs a new instance; a
+    // content-equal one keeps the installed instance and its id.
+    replace_one(&tx, c, peer_context_chain()).await;
+    let (_, equal) = published_ids(&tx, &roster).await;
+    assert_eq!(equal[&c], rejoined[&c]);
+    let retired = retire_watch(&roster, c);
+    replace_one(&tx, c, peer_context_chain_for(65098)).await;
+    let (_, replaced) = published_ids(&tx, &roster).await;
+    assert_ne!(replaced[&c], rejoined[&c]);
+    assert!(retired.upgrade().is_none());
+
+    // Regroup: a member moved to another policy leaves for a new group, and
+    // moving it back rejoins the original group's instance.
+    replace_one(&tx, b, community_chain(0xFDE8_3602)).await;
+    let (_, regrouped) = published_ids(&tx, &roster).await;
+    assert_ne!(regrouped[&b], regrouped[&a]);
+    assert_eq!(
+        regrouped[&a], ids[&a],
+        "the remaining member keeps its group"
+    );
+    let moved = retire_watch(&roster, b);
+    replace_one(&tx, b, community_chain(0xFDE8_3601)).await;
+    let (_, back) = published_ids(&tx, &roster).await;
+    assert_eq!(back[&b], ids[&a]);
+    assert!(
+        moved.upgrade().is_none(),
+        "the emptied group's instance is released"
+    );
+
+    // A batch replacement of every peer is one unit and one publication.
+    let (before_batch, prior) = published_ids(&tx, &roster).await;
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+        replacements: vec![
+            crate::update::PeerExportPolicyReplacement {
+                peer: a,
+                export_policy: Some(community_chain(0xFDE8_3603)),
+            },
+            crate::update::PeerExportPolicyReplacement {
+                peer: b,
+                export_policy: Some(community_chain(0xFDE8_3603)),
+            },
+            crate::update::PeerExportPolicyReplacement {
+                peer: c,
+                export_policy: Some(peer_context_chain_for(65097)),
+            },
+        ],
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_eq!(response.await.unwrap(), Ok(()));
+    let (after_batch, batched) = published_ids(&tx, &roster).await;
+    assert_eq!(
+        after_batch,
+        before_batch + 1,
+        "one publication for the batch"
+    );
+    assert_eq!(batched[&a], batched[&b]);
+    assert!(
+        batched
+            .iter()
+            .all(|(peer, id)| id.is_some() && *id != prior[peer])
+    );
+    assert!(group_instance.upgrade().is_none());
+
+    // Rollback with a member that has since departed: a partial restore
+    // publishes the chains actually installed, once.
+    send_peer_down(&tx, c).await;
+    let (before_restore, _) = published_ids(&tx, &roster).await;
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+        replacements: vec![
+            crate::update::PeerExportPolicyReplacement {
+                peer: a,
+                export_policy: Some(community_chain(0xFDE8_3601)),
+            },
+            crate::update::PeerExportPolicyReplacement {
+                peer: c,
+                export_policy: Some(peer_context_chain()),
+            },
+        ],
+        reply,
+    })
+    .await
+    .unwrap();
+    response.await.unwrap().unwrap();
+    let (after_restore, restored) = published_ids(&tx, &roster).await;
+    assert_eq!(after_restore, before_restore + 1);
+    assert!(
+        !restored.contains_key(&c),
+        "a departed member is not restored"
+    );
+    assert_ne!(restored[&a], batched[&a]);
+    assert_eq!(restored[&b], batched[&b]);
+
+    // Group emptying, then shutdown: the cell closes and every instance is
+    // released once no roster holds it.
+    let last = [retire_watch(&roster, a), retire_watch(&roster, b)];
+    send_peer_down(&tx, a).await;
+    send_peer_down(&tx, b).await;
+    let (_, empty) = published_ids(&tx, &roster).await;
+    assert!(empty.is_empty());
+    assert!(last.iter().all(|weak| weak.upgrade().is_none()));
+    drop(tx);
+    handle.await.unwrap();
+    assert!(roster.is_closed());
+    assert!(roster.load().peers().is_empty());
+}
+
+/// ADR-0136: the global fallback slot publishes like any entry, and a
+/// replaced fallback instance is released.
+#[tokio::test]
+async fn export_roster_publishes_a_global_fallback_change() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(community_chain(0xFDE8_3701)),
+        None,
+        BgpMetrics::new(),
+    );
+    let roster = manager.export_roster();
+    let first = Arc::downgrade(
+        roster
+            .load()
+            .global()
+            .expect("fallback published at construction"),
+    );
+    assert_eq!(roster.load().version(), 1);
+    manager
+        .export_chains
+        .set_global(Some(community_chain(0xFDE8_3702)));
+    manager.publish_export_roster();
+    let loaded = roster.load();
+    assert_eq!(loaded.version(), 2);
+    assert_ne!(
+        loaded.global().map(|c| c.id()),
+        first.upgrade().map(|c| c.id())
+    );
+    drop(loaded);
+    assert!(first.upgrade().is_none());
+    manager.export_chains.set_global(None);
+    manager.publish_export_roster();
+    assert!(roster.load().global().is_none());
+    assert_eq!(manager.export_chains.publications(), 3);
+}
+
+/// ADR-0136: a grouped clean transition switches its whole cohort once, at
+/// the terminal `CommitMembers` batch. While it is parked between batches
+/// some members already evaluate on the new group's instance, but the
+/// roster stays readable and designates only the pre-commit instance.
+/// Break-to-red: publishing at a parked transition exposes a mixed cohort.
+#[tokio::test]
+async fn export_roster_switches_a_grouped_cohort_once_at_the_terminal_commit() {
+    const MEMBER_COUNT: usize = 2 * super::super::COMMIT_MEMBERS_PER_POLL + 1;
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(MEMBER_COUNT, 2, None);
+    manager.publish_export_roster();
+    let roster = manager.export_roster();
+    let designated = |roster: &crate::export_roster::ExportRoster| -> Vec<Option<u64>> {
+        peers
+            .iter()
+            .map(|peer| roster.for_peer(*peer).map(|c| c.id()))
+            .collect()
+    };
+    let before = roster.load();
+    let old = designated(&before);
+    assert!(old[0].is_some() && old.iter().all(|id| *id == old[0]));
+    let version = before.version();
+    drop(before);
+
+    let mut response = start_clean_transition(&mut manager, &peers, &community_chain(0xFDE8_3801));
+    let mut mid_commit_reads = 0;
+    loop {
+        let (kind, outcome) = step_parked_transition(&mut manager);
+        assert_ne!(outcome, "fallback");
+        // The run loop reaches its publication point after every poll.
+        manager.publish_export_roster();
+        if outcome == "committed" {
+            break;
+        }
+        if kind == "commit" {
+            let switched = peers
+                .iter()
+                .filter(|peer| {
+                    manager.export_chains[*peer]
+                        .as_ref()
+                        .and_then(PolicyChain::installed_hit_counters)
+                        .map(|c| c.id())
+                        != old[0]
+                })
+                .count();
+            assert!(switched > 0 && switched < MEMBER_COUNT, "parked mid-commit");
+            let loaded = roster.load();
+            assert_eq!(loaded.version(), version, "no publication between batches");
+            assert_eq!(designated(&loaded), old, "only pre-commit instances");
+            assert_eq!(capture_export_rows(&loaded, None).await.len(), MEMBER_COUNT);
+            mid_commit_reads += 1;
+        }
+    }
+    assert_eq!(mid_commit_reads, 2);
+    assert_eq!(
+        response.try_recv().unwrap(),
+        Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    let after = roster.load();
+    assert_eq!(
+        after.version(),
+        version + 1,
+        "one publication for the cohort"
+    );
+    let new = designated(&after);
+    assert!(new[0].is_some() && new[0] != old[0] && new.iter().all(|id| *id == new[0]));
 }

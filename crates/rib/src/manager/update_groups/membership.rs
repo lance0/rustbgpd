@@ -454,7 +454,7 @@ impl RibManager {
             .export_chain
             .as_ref()
             .map(PolicyChain::share);
-        self.peer_export_policies.insert(peer, export_chain);
+        self.export_chains.insert(peer, export_chain);
 
         // The joining member's advertised-count seed (RTC groups only):
         // the O(table) walk rides the join replay's existing cost.

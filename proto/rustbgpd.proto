@@ -1885,8 +1885,10 @@ message PolicyChainStats {
   // advances on every chain install — including a content-equal
   // reinstall — so counters that reset to zero are attributable to a
   // replacement rather than read as continuous history. Export chains
-  // do not track an install generation yet and always report 0
-  // (LAN-311).
+  // report the process-wide counter-instance id (ADR-0136): nonzero,
+  // shared by update-group members that share counters, and new
+  // whenever the counters restart, including each session
+  // registration of an ungrouped peer. Compare it only for equality.
   uint64 policy_generation = 5;
   // Routes denied by an evaluation error since chain install
   // (ADR-0103 Decision 4 fail-closed rail: checked-arithmetic

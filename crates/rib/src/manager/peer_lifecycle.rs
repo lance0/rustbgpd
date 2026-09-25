@@ -620,7 +620,7 @@ impl RibManager {
         self.outbound_limit_control.reap_peer(peer);
         self.metrics
             .reap_outbound_prefix_capacity(&peer.to_string());
-        self.peer_export_policies.remove(&peer);
+        self.export_chains.remove(&peer);
         self.peer_sendable_families.remove(&peer);
         self.peer_advertised_llgr_families.remove(&peer);
         self.peer_is_ebgp.remove(&peer);
@@ -789,7 +789,7 @@ impl RibManager {
             peer_router_id,
             // Resolve the embedding fallback once. Later accepted `None`
             // policies must remain permit-all when this record is promoted.
-            export_policy: export_policy.or_else(|| self.export_policy.clone()),
+            export_policy: export_policy.or_else(|| self.export_chains.global().cloned()),
             sendable_families,
             is_ebgp,
             route_reflector_client,
@@ -1164,7 +1164,7 @@ impl RibManager {
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
-        self.peer_export_policies.insert(peer, export_policy);
+        self.export_chains.insert(peer, export_policy);
         self.peer_sendable_families.insert(peer, sendable_families);
         self.peer_advertised_llgr_families
             .insert(peer, negotiated_llgr_families);

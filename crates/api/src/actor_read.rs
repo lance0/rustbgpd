@@ -243,7 +243,11 @@ mod tests {
         let (summary_tx, summary_rx) = mpsc::channel(1);
         drop(summary_rx);
         let error = rib_summary_read(&tx, Some(&summary_tx), |reply| {
-            RibSummaryQuery::ExportPolicyTermHits { peer: None, reply }
+            RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+            }
         })
         .await
         .unwrap_err();

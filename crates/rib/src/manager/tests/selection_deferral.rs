@@ -2037,7 +2037,11 @@ fn overflow_fallback_sweeps_every_typed_loc_rib_store() {
     let general = Arc::new(Mutex::new(general));
     let (reply, summary) = oneshot::channel();
     summary_tx
-        .try_send(crate::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .try_send(crate::RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            reply,
+        })
         .unwrap();
     let summary = Arc::new(Mutex::new(summary));
     let (reply, mutation) = oneshot::channel();

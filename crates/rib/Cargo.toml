@@ -12,6 +12,7 @@ description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, 
 readme = "README.md"
 
 [dependencies]
+arc-swap.workspace = true
 rustbgpd-wire.workspace = true
 rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
@@ -41,6 +42,10 @@ criterion.workspace = true
 
 [[bench]]
 name = "rib_ops"
+harness = false
+
+[[bench]]
+name = "export_roster"
 harness = false
 
 [[bench]]

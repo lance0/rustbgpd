@@ -1997,10 +1997,7 @@ mod tests {
                     peers,
                     comparison,
                     reply,
-                } = summary_rx.recv().await.unwrap()
-                else {
-                    panic!("expected neighbor summaries");
-                };
+                } = summary_rx.recv().await.unwrap();
                 assert_eq!(peers, ["192.0.2.1".parse::<IpAddr>().unwrap()]);
                 assert!(comparison.is_none());
                 reply
@@ -2072,10 +2069,7 @@ mod tests {
                 assert_eq!(started.elapsed(), RIB_SNAPSHOT_TIMEOUT);
                 peer.await.unwrap();
                 let RibSummaryQuery::NeighborRibSnapshots { reply, .. } =
-                    summary_rx.try_recv().unwrap()
-                else {
-                    panic!("expected neighbor summaries");
-                };
+                    summary_rx.try_recv().unwrap();
                 assert_eq!(reply.is_closed(), !full);
                 assert!(summary_rx.try_recv().is_err());
                 assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));

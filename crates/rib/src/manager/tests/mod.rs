@@ -23,6 +23,43 @@ use crate::test_support::{
 };
 use crate::update::{EffectiveDistributionMode, RouteQueryScope, route_query_key};
 
+/// Capture the published export rows of a running manager (ADR-0136). A
+/// primary-lane round trip first: every primary message is its own run-loop
+/// turn, so the publication point has run for all earlier work.
+async fn published_export_rows(
+    tx: &mpsc::Sender<RibUpdate>,
+    roster: &crate::export_roster::ExportRosterReader,
+    peer: Option<IpAddr>,
+) -> Vec<crate::update::ExportPolicyTermHits> {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply })
+        .await
+        .unwrap();
+    response.await.unwrap();
+    capture_export_rows(&roster.load(), peer).await
+}
+
+/// Capture `roster`'s export rows with a far deadline.
+async fn capture_export_rows(
+    roster: &crate::export_roster::ExportRoster,
+    peer: Option<IpAddr>,
+) -> Vec<crate::update::ExportPolicyTermHits> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    crate::export_roster::capture_export(roster, peer, deadline)
+        .await
+        .unwrap()
+}
+
+/// Publish a directly driven manager's export roster, as its run loop would
+/// after the unit just completed, and capture its rows.
+async fn manager_export_rows(
+    manager: &mut RibManager,
+    peer: Option<IpAddr>,
+) -> Vec<crate::update::ExportPolicyTermHits> {
+    manager.publish_export_roster();
+    capture_export_rows(&manager.export_roster().load(), peer).await
+}
+
 fn evpn_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::L2Vpn, Safi::Evpn)]
 }

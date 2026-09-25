@@ -60,7 +60,7 @@ async fn accepted_session_policy_targets_survivor_without_outbound_commit() {
     let sessions = &manager.live_sessions[&peer()];
     assert_eq!(sessions[0].export_policy, Some(next));
     assert_eq!(sessions[1].export_policy, Some(old.clone()));
-    assert_eq!(manager.peer_export_policies[&peer()], Some(old.clone()));
+    assert_eq!(manager.export_chains[&peer()], Some(old.clone()));
     // Unknown and retired sessions cannot overwrite either current record.
     record(&mut manager, 99, None);
     assert_eq!(manager.live_sessions[&peer()].len(), 2);
@@ -95,17 +95,17 @@ async fn accepted_session_policy_rollback_and_none_survive_promotion() {
         peer: peer(),
         session_id: 8,
     });
-    assert_eq!(manager.peer_export_policies[&peer()], Some(old.clone()));
+    assert_eq!(manager.export_chains[&peer()], Some(old.clone()));
     record(&mut manager, 7, None);
     register(&mut manager, 9);
     manager.handle_update(RibUpdate::PeerDown {
         peer: peer(),
         session_id: 9,
     });
-    assert_eq!(manager.peer_export_policies[&peer()], None);
+    assert_eq!(manager.export_chains[&peer()], None);
     // A fresh embedding PeerUp still inherits the configured fallback.
     register(&mut manager, 10);
-    assert_eq!(manager.peer_export_policies[&peer()], Some(old));
+    assert_eq!(manager.export_chains[&peer()], Some(old));
 }
 
 #[tokio::test]
@@ -156,7 +156,7 @@ fn register_ungrouped(manager: &mut RibManager, peer: IpAddr, export_policy: Opt
 }
 
 fn installed_counter_id(manager: &RibManager, peer: IpAddr) -> Option<u64> {
-    manager.peer_export_policies[&peer]
+    manager.export_chains[&peer]
         .as_ref()
         .expect("peer has an installed chain")
         .installed_hit_counters()
@@ -180,8 +180,8 @@ async fn export_counters_are_created_at_every_install_path() {
     );
     assert!(
         manager
-            .export_policy
-            .as_ref()
+            .export_chains
+            .global()
             .unwrap()
             .installed_hit_counters()
             .is_some(),
@@ -221,103 +221,76 @@ async fn export_counters_are_created_at_every_install_path() {
     let restored = installed_counter_id(&manager, target).expect("rollback creates counters");
     assert!(restored > batched);
 
-    let rows = manager.export_policy_term_hits(None).unwrap();
+    let rows = manager_export_rows(&mut manager, None).await;
     assert_eq!(rows.len(), 2, "per-peer row plus the global fallback");
     assert_eq!(rows[0].peer, Some(target));
+    assert_eq!(rows[0].counter_instance, restored);
     assert_eq!(installed_counter_id(&manager, target), Some(restored));
 }
 
-/// ADR-0136: an export statistics read never compiles a chain or creates
-/// counters inside the actor; it only reads an instance that install created.
-/// Break-to-red: reading through `PolicyChain::hit_counters` creates (and
-/// compiles) the instance here.
-#[test]
-fn export_stats_read_does_not_create_or_compile_counters() {
-    let uninstalled = chain(PolicyAction::Deny);
-    assert!(super::super::queries::snapshot_export_chain(Some(peer()), &uninstalled).is_err());
-    assert!(
-        uninstalled.installed_hit_counters().is_none(),
-        "the read left no counter instance behind"
-    );
-
-    let installed = chain(PolicyAction::Deny);
-    let id = installed.hit_counters().id();
-    let row = super::super::queries::snapshot_export_chain(Some(peer()), &installed)
-        .expect("installed chain reports a row");
-    assert_eq!(row.terms, installed.hit_counters().term_hit_rows());
-    assert_eq!(installed.hit_counters().id(), id);
-}
-
-/// ADR-0136 failure semantics: an installed export chain without its counter
-/// instance fails the statistics read closed, on the live path and on the
-/// frozen replacement projection. The reply is dropped (the API reports
-/// `UNAVAILABLE`) instead of succeeding with that peer's row missing, while a
-/// peer with no export policy still legitimately reports no row.
-/// Break-to-red: omitting the uncounted chain's row (the previous `None`
-/// drop) turns both reads into short successes.
+/// ADR-0136: a published export roster entry holds its chain's counter
+/// instance, so an installed chain without counters cannot reach a read.
+/// A chain inserted past every install path gets its instance when the
+/// roster that designates it is published, and a read reports that instance;
+/// a disabled peer reports no row and an unaffected peer the global fallback.
 #[tokio::test]
-async fn export_stats_read_fails_closed_on_installed_chain_without_counters() {
+async fn export_roster_entries_always_hold_the_evaluated_instance() {
     let uncounted: IpAddr = Ipv4Addr::new(10, 0, 0, 7).into();
     let disabled: IpAddr = Ipv4Addr::new(10, 0, 0, 8).into();
     let (_tx, rx) = mpsc::channel(16);
-    let (summary_tx, summary_rx) = mpsc::channel(16);
     let mut manager = RibManager::new(
         rx,
         dummy_query_rx(),
         Some(chain(PolicyAction::Permit)),
         None,
         BgpMetrics::new(),
-    )
-    .with_summary_queries(summary_rx);
-    // Bypass every install path: the chain never gets its instance.
+    );
+    // Bypass every install path: the chain has no instance yet.
     manager
-        .peer_export_policies
+        .export_chains
         .insert(uncounted, Some(chain(PolicyAction::Deny)));
-    manager.peer_export_policies.insert(disabled, None);
-
-    let live = |manager: &mut RibManager, peer| {
-        let (reply, mut response) = oneshot::channel();
-        manager.handle_query_export_policy_term_hits(peer, reply);
-        response.try_recv()
-    };
+    manager.export_chains.insert(disabled, None);
     assert!(
-        matches!(
-            live(&mut manager, None),
-            Err(oneshot::error::TryRecvError::Closed)
-        ),
-        "a fleet read must not succeed without the uncounted chain's row"
-    );
-    assert!(matches!(
-        live(&mut manager, Some(uncounted)),
-        Err(oneshot::error::TryRecvError::Closed)
-    ));
-    assert!(
-        live(&mut manager, Some(disabled)).unwrap().is_empty(),
-        "no export policy installed is still an empty success"
-    );
-    assert_eq!(
-        live(&mut manager, Some(peer())).unwrap().len(),
-        1,
-        "an unaffected peer reads the counted global fallback"
-    );
-
-    let (reply, mut frozen) = oneshot::channel();
-    manager.with_replacement_summary_reads("apply", |manager| {
-        summary_tx
-            .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
-            .unwrap();
-        manager.replacement_checkpoint(true);
-    });
-    assert!(
-        matches!(frozen.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
-        "the frozen projection fails closed too"
-    );
-    assert!(
-        manager.peer_export_policies[&uncounted]
+        manager.export_chains[&uncounted]
             .as_ref()
             .unwrap()
             .installed_hit_counters()
-            .is_none(),
-        "failing the read never creates the missing instance"
+            .is_none()
+    );
+
+    let rows = manager_export_rows(&mut manager, None).await;
+    let installed = manager.export_chains[&uncounted]
+        .as_ref()
+        .unwrap()
+        .installed_hit_counters()
+        .expect("publication gives the installed chain its instance")
+        .id();
+    let global = manager
+        .export_chains
+        .global()
+        .unwrap()
+        .installed_hit_counters()
+        .unwrap()
+        .id();
+    let shape: Vec<_> = rows
+        .iter()
+        .map(|row| (row.peer, row.counter_instance))
+        .collect();
+    assert_eq!(shape, [(Some(uncounted), installed), (None, global)]);
+
+    assert!(
+        manager_export_rows(&mut manager, Some(disabled))
+            .await
+            .is_empty(),
+        "no export policy installed is an empty success"
+    );
+    let fallback = manager_export_rows(&mut manager, Some(peer())).await;
+    assert_eq!(
+        fallback
+            .iter()
+            .map(|row| (row.peer, row.counter_instance))
+            .collect::<Vec<_>>(),
+        [(Some(peer()), global)],
+        "an unaffected peer reads the counted global fallback"
     );
 }
