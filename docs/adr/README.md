@@ -159,6 +159,7 @@ states that the whole decision is Superseded.
 | [0133](0133-installed-import-counter-reads.md) | Installed import-counter reads | Accepted | 2026-09-13 | Active |
 | [0134](0134-reload-monitoring-and-validation-endpoints.md) | Reload-apply BMP collectors, RPKI cache endpoints, and MRT dumps | Proposed | 2026-09-15 | Unstated |
 | [0135](0135-flowspec-feasibility.md) | Opt-in FlowSpec cross-RIB feasibility validation | Accepted | 2026-09-20 | Active |
+| [0136](0136-owner-published-counter-reads.md) | Owner-published counter reads | Proposed | 2026-09-25 | Unstated |
 
 ## Supporting records
 
@@ -172,13 +173,14 @@ ADR or from repository history.
 
 ## Lifecycle metadata gaps
 
-The four records below do not state one of the navigation lifecycles above.
+The five records below do not state one of the navigation lifecycles above.
 They remain **Unstated** rather than being inferred as Parked:
 
 - [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
 - [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
 - [ADR-0129](0129-prefix-sid-domain-boundary.md)
 - [ADR-0134](0134-reload-monitoring-and-validation-endpoints.md)
+- [ADR-0136](0136-owner-published-counter-reads.md)
 
 ## Template
 
