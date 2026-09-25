@@ -422,9 +422,14 @@ analyzer matches each statistics call to its audit record and writes
 `summary.json`: per-stage and import sub-stage timing (admission, collection,
 publications, yields) for in-band, all pair and quiescent calls, deadline
 misses, reload durations, per-row `policy_generation` values, and the flat
-verdict. It exits 0 only if every call returns complete rows within 2 s, at
-least six complete pairs start in the band, and the in-band maximum of the
-summed stage `elapsed_ms` stays within twice the quiescent median plus 50 ms.
+verdict. It exits 0 (PASS) only if every call returns complete rows within 2 s,
+at least six complete pairs start in the band, and the in-band maximum of the
+summed stage `elapsed_ms` stays within twice the quiescent median plus 50 ms;
+a missed criterion exits 1 (FAIL). Every statistics call must match exactly
+one audit record with well-formed `export`, `import` (with its sub-stages) and
+`datasets` stages, or a prefix ending at a failed stage. Otherwise the run
+exits 3 (INVALID), and `invalid_calls` names each such call. Run caps scale
+with `RELOADS`, `CONTROL_SECS` and `QUIESCE_SECS`.
 Re-run the analyzer alone with
 `python3 bench/scale/reloadstall/policy_stats_cell.py analyze RUN_DIR`.
 Neighbor stale rows are counted, not gated. The CPU sample reports load from

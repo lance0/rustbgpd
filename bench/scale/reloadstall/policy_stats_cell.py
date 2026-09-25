@@ -55,27 +55,73 @@ def distribution(values):
             'p95': percentile(values, 95), 'max': max(values, default=None)}
 
 
-STAGE = re.compile(r'stage=(\w+) elapsed_ms=(\d+) budget_ms=(\d+) rpc_elapsed_ms=(\d+) code=(\w+)(.*)')
+STAGE = re.compile(r'stage=(\w+) elapsed_ms=(\d+) budget_ms=(\d+) rpc_elapsed_ms=(\d+) code=(\w+)'
+                   r'(?: (admission=pending|admission_ms=\d+ collection_ms=\d+ publications=\d+/\d+ yields=\d+))?')
+STAGE_ORDER = ('export', 'import', 'datasets')  # a fleet `--direction both` request
+IMPORT_DETAIL = ('admission_ms', 'collection_ms', 'publications_read', 'publications_selected', 'yields')
 
 
 def parse_summary(summary):
-    """Parse a GetPolicyStats audit request_summary into per-stage records."""
+    """Parse a GetPolicyStats audit request_summary into per-stage records.
+
+    Raises ValueError on any segment that is not exactly one stage record, so
+    a malformed audit can never shrink the summed stage time silently.
+    """
     stages = []
     for segment in summary.split(';'):
-        match = STAGE.search(segment)
+        segment = segment.strip()
+        match = STAGE.fullmatch(segment)
         if not match:
-            continue
-        name, elapsed, budget, rpc, code, rest = match.groups()
+            raise ValueError(f'malformed audit segment: {segment!r}')
+        name, elapsed, budget, rpc, code, detail = match.groups()
         stage = {'stage': name, 'elapsed_ms': int(elapsed), 'budget_ms': int(budget),
                  'rpc_elapsed_ms': int(rpc), 'code': code}
-        if 'admission=pending' in rest:
+        if detail == 'admission=pending':
             stage['admission'] = 'pending'
-        detail = re.search(r'admission_ms=(\d+) collection_ms=(\d+) publications=(\d+)/(\d+) yields=(\d+)', rest)
-        if detail:
-            stage.update(zip(('admission_ms', 'collection_ms', 'publications_read', 'publications_selected', 'yields'),
-                             map(int, detail.groups())))
+        elif detail:
+            stage.update(zip(IMPORT_DETAIL, map(int, re.findall(r'\d+', detail))))
         stages.append(stage)
     return stages
+
+
+def stage_set_problem(stages, result):
+    """Why these stages are not a complete audit of a `both` call, or None.
+
+    Stages run in STAGE_ORDER and stop at the first failure, so a record must
+    be a prefix of it ending at any non-Ok stage; a successful handler must
+    carry all three. The import stage must carry its sub-stages (or pending).
+    """
+    names = [s['stage'] for s in stages]
+    if names != list(STAGE_ORDER[:len(names)]) or not names:
+        return f'stage sequence {names}, expected a prefix of {list(STAGE_ORDER)}'
+    failed = [i for i, s in enumerate(stages) if s['code'] != 'Ok']
+    if failed and failed[0] != len(stages) - 1:
+        return f'stages recorded after failed stage {names[failed[0]]}'
+    if result == 'handler_ok' and (failed or len(stages) != len(STAGE_ORDER)):
+        return f'handler_ok with incomplete or failed stages {names}'
+    for s in stages:
+        if s['stage'] == 'import' and s.get('admission') != 'pending' and not all(k in s for k in IMPORT_DETAIL):
+            return 'import stage without admission/collection/publications/yields'
+        if s['stage'] != 'import' and ('admission' in s or 'yields' in s):
+            return f"{s['stage']} stage carries import sub-stages"
+    return None
+
+
+def classify_stats_call(summary, result):
+    """Return (stages, stage_sum_ms, invalid_reason) for one matched audit."""
+    try:
+        stages = parse_summary(summary)
+    except ValueError as exc:
+        return [], None, str(exc)
+    problem = stage_set_problem(stages, result)
+    return stages, (None if problem else sum(s['elapsed_ms'] for s in stages)), problem
+
+
+def run_verdict(errors, invalid_calls, flat):
+    """INVALID (incomplete evidence) outranks FAIL (a criterion missed)."""
+    if invalid_calls:
+        return 'INVALID'
+    return 'PASS' if not errors and flat['pass'] else 'FAIL'
 
 
 def flat_verdict(in_band_sums, quiescent_sums):
@@ -174,7 +220,7 @@ def probe(args):
     workers = []
     reload_n = 0
     armed = False
-    deadline = time.monotonic() + 150 * args.reloads + 300
+    deadline = time.monotonic() + args.cap_secs
     with open(args.output, 'w', buffering=1) as out:
         def emit(row):
             with lock:
@@ -325,6 +371,7 @@ def analyze(root, peers, reloads):
 
     audits = [r for r in records if str(r.get('method', '')).endswith('GetPolicyStats') and r.get('request_summary')]
     used = set()
+    invalid_calls = []
     per_reload = []
     for index in range(1, reloads + 1):
         if min(len(sighups), len(commits), len(completes)) < index:
@@ -353,8 +400,14 @@ def analyze(root, peers, reloads):
                     used.add(matched[0])
                     audit = audits[matched[0]]
                     row['audit'] = {'result': audit.get('result'), 'request_summary': audit['request_summary']}
-                    row['stages'] = parse_summary(audit['request_summary'])
-                    row['stage_sum_ms'] = sum(s['elapsed_ms'] for s in row['stages'])
+                    row['stages'], row['stage_sum_ms'], reason = classify_stats_call(
+                        audit['request_summary'], audit.get('result'))
+                    if reason:
+                        row['invalid_audit'] = reason
+                else:
+                    row['invalid_audit'] = f'matched {len(matched)} audit records'
+                if 'invalid_audit' in row:
+                    invalid_calls.append({'reload': index, 'phase': call['phase'], 'reason': row['invalid_audit']})
             rows.append(row)
         check(collections.Counter((r['phase'], r['op']) for r in rows) ==
               collections.Counter({('pair', 'neighbor'): 1, ('pair', 'policy_stats'): 1, ('quiescent', 'policy_stats'): 1}),
@@ -376,7 +429,7 @@ def analyze(root, peers, reloads):
     settled = re.findall(r'^reload (\d+) daemon_applied complete_before=(\d+) complete_after=(\d+)$', engine, re.M)
     check(len(settled) == reloads and all(int(a) == int(b) + 1 for _, b, a in settled), 'engine settlement records')
 
-    stats = [c for r in per_reload for c in r['calls'] if c['op'] == 'policy_stats' and 'stages' in c]
+    stats = [c for r in per_reload for c in r['calls'] if c['op'] == 'policy_stats' and 'invalid_audit' not in c]
     groups = {'in_band': [c for c in stats if c['in_band']], 'pair_all': [c for c in stats if c['phase'] == 'pair'],
               'quiescent': [c for c in stats if c['phase'] == 'quiescent']}
     timing = {}
@@ -399,6 +452,7 @@ def analyze(root, peers, reloads):
     neighbors = [c for r in per_reload for c in r['calls'] if c['op'] == 'neighbor' and c.get('shape')]
     result = {
         'environment': json.loads((root / 'environment.json').read_text()),
+        'verdict': run_verdict(errors, invalid_calls, flat), 'invalid_calls': invalid_calls,
         'checks_pass': not errors, 'errors': errors, 'flat': flat,
         'in_band_pairs': pairs_in_band, 'deadline_misses': len(misses),
         'calls_over_2s': sum(c['duration_ms'] > EXTERNAL_LIMIT_MS for r in per_reload for c in r['calls']),
@@ -412,10 +466,11 @@ def analyze(root, peers, reloads):
         'reloads': per_reload,
     }
     (root / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
-    brief = {k: result[k] for k in ('checks_pass', 'errors', 'flat', 'in_band_pairs', 'deadline_misses', 'calls_over_2s')}
+    brief = {k: result[k] for k in ('verdict', 'invalid_calls', 'checks_pass', 'errors', 'flat', 'in_band_pairs',
+                                    'deadline_misses', 'calls_over_2s')}
     brief['timing'] = {k: {'stage_sum_ms': v['stage_sum_ms'], 'external_ms': v['external_ms']} for k, v in timing.items()}
     print(json.dumps(brief, indent=2))
-    return 0 if not errors and flat['pass'] else 1
+    return {'PASS': 0, 'FAIL': 1, 'INVALID': 3}[result['verdict']]
 
 
 def main():
@@ -432,6 +487,7 @@ def main():
     s.add_argument('--reloads', type=int, required=True)
     s.add_argument('--pair-offset', type=float, required=True)
     s.add_argument('--quiescent-offset', type=float, required=True)
+    s.add_argument('--cap-secs', type=float, required=True)
     s = sub.add_parser('analyze')
     s.add_argument('root')
     a = p.parse_args()

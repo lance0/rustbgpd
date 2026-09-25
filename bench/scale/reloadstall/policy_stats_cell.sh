@@ -8,7 +8,10 @@
 #   PEERS=1000 PREFIXES=400000 RELOADS=12 CONTROL_SECS=15 QUIESCE_SECS=40
 #   DAEMON_CPUS=2-3 ENGINE_CPUS=4-5 PROBE_CPUS=8-15 PAIR_OFFSET=0.50
 #   QUIESCENT_OFFSET=20
-# Exit: 0 all checks pass, 1 a check failed (verdict retained), 2 setup/runtime.
+# Exit: 0 PASS, 1 FAIL (a criterion missed; verdict retained), 2 setup/runtime,
+# 3 INVALID (a stats call lacks a complete audit stage record).
+# Caps scale with the shape: each reload cycle is about QUIESCE_SECS plus the
+# reload and delivery time, so a longer quiesce extends the run cap.
 set -euo pipefail
 BIN=$(realpath "$1"); ENGINE=$(realpath "$2"); RUN_DIR=$(realpath -m "$3")
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../../.." && pwd)
@@ -17,6 +20,10 @@ CONTROL_SECS=${CONTROL_SECS:-15}; QUIESCE_SECS=${QUIESCE_SECS:-40}
 DAEMON_CPUS=${DAEMON_CPUS:-2-3}; ENGINE_CPUS=${ENGINE_CPUS:-4-5}; PROBE_CPUS=${PROBE_CPUS:-8-15}
 PAIR_OFFSET=${PAIR_OFFSET:-0.50}; QUIESCENT_OFFSET=${QUIESCENT_OFFSET:-20}
 PORT=1793; MPORT=9183
+CYCLE_MARGIN_SECS=60
+RUN_CAP_SECS=$((CONTROL_SECS + RELOADS * (QUIESCE_SECS + CYCLE_MARGIN_SECS) + 300))
+awk -v q="$QUIESCENT_OFFSET" -v s="$QUIESCE_SECS" 'BEGIN { exit !(q > 0 && q + 5 < s) }' ||
+    { echo 'QUIESCENT_OFFSET must leave the probe inside QUIESCE_SECS' >&2; exit 2; }
 [[ ! -e $RUN_DIR ]] || { echo 'run directory exists; keep earlier runs' >&2; exit 2; }
 # shellcheck source=/dev/null
 source "$REPO/tests/soak/fd-headroom.sh"
@@ -40,7 +47,7 @@ json.dump({
     'binaries': {n: sha(p) for n, p in (('rustbgpd', f'{bins}/rustbgpd'), ('rbgp', f'{bins}/rbgp'), ('reloadstall', engine))},
     'versions': {n: run(f'{bins}/{n}', '--version') for n in ('rustbgpd', 'rbgp')},
     'shape': {'peers': $PEERS, 'prefixes': $PREFIXES, 'reloads': $RELOADS, 'control_secs': $CONTROL_SECS,
-              'quiesce_secs': $QUIESCE_SECS, 'pair_offset_s': $PAIR_OFFSET, 'quiescent_offset_s': $QUIESCENT_OFFSET},
+              'quiesce_secs': $QUIESCE_SECS, 'run_cap_secs': $RUN_CAP_SECS, 'pair_offset_s': $PAIR_OFFSET, 'quiescent_offset_s': $QUIESCENT_OFFSET},
     'placement': {'daemon_cpus': '$DAEMON_CPUS', 'engine_cpus': '$ENGINE_CPUS', 'probe_cpus': '$PROBE_CPUS'},
     'kernel': platform.release(), 'nproc': os.cpu_count(), 'loadavg_start': open('/proc/loadavg').read().split()[:3],
     'cpu_model': next((l.split(':', 1)[1].strip() for l in open('/proc/cpuinfo') if l.startswith('model name')), None),
@@ -100,11 +107,11 @@ done
 setsid taskset -c "$PROBE_CPUS" python3 "$HERE/policy_stats_cell.py" probe --log "$RUN_DIR/rustbgpd.log" \
     --rbgp "$BIN/rbgp" --socket "unix://$SCEN/grpc.sock" --output "$RUN_DIR/probes.jsonl" \
     --cpus "$PROBE_CPUS" --peers "$PEERS" --reloads "$RELOADS" --pair-offset "$PAIR_OFFSET" \
-    --quiescent-offset "$QUIESCENT_OFFSET" >"$RUN_DIR/probe.log" 2>&1 & PPID_=$!
+    --quiescent-offset "$QUIESCENT_OFFSET" --cap-secs "$RUN_CAP_SECS" >"$RUN_DIR/probe.log" 2>&1 & PPID_=$!
 curl -fsS --max-time 5 "http://127.0.0.1:$MPORT/metrics" >"$RUN_DIR/metrics-before.prom"
 # The engine holds its final evidence boundary after the last reload; wait
 # for every probe (including the last quiescent one) before acknowledging.
-deadline=$(($(date +%s) + 120 * RELOADS + 300))
+deadline=$(($(date +%s) + RUN_CAP_SECS))
 until [[ -f $RUN_DIR/final-evidence/ready ]]; do
     kill -0 "$HPID" 2>/dev/null || fail 'engine exited before final evidence'
     (($(date +%s) < deadline)) || fail 'reload cap exceeded'
