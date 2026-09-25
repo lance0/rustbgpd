@@ -779,9 +779,10 @@ impl PeerManager {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer,
                 deadline,
+                progress,
                 reply,
             } => {
-                return self.dispatch_import_policy_term_hits(peer, deadline, reply);
+                return self.dispatch_import_policy_term_hits(peer, deadline, progress, reply);
             }
             PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
                 if !reply.is_closed() {
@@ -854,6 +855,7 @@ impl PeerManager {
         &self,
         peer: Option<IpAddr>,
         deadline: tokio::time::Instant,
+        progress: Arc<rustbgpd_api::peer_types::ImportPolicyStatsProgress>,
         mut reply: oneshot::Sender<
             Result<
                 Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>,
@@ -861,7 +863,12 @@ impl PeerManager {
             >,
         >,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        use rustbgpd_transport::handle::ImportPolicyStatsError;
+        use rustbgpd_transport::handle::{ImportPolicyStatsError, consume_budget_counted};
+        use std::sync::atomic::Ordering;
+
+        // Audit timing only: the handler reports admission wait, collection
+        // time, publications read and scheduler yields from this record.
+        let _ = progress.admitted.set(tokio::time::Instant::now());
 
         // Import chains and counters live in sessions. Normal reads detach
         // this collector; prestage reads finish it before session application,
@@ -893,18 +900,29 @@ impl PeerManager {
                 .map(|(key, managed)| (key.address, managed.handle.import_policy_counters()))
                 .collect()
         };
+        progress.targets.store(targets.len(), Ordering::Relaxed);
         Some(tokio::spawn(async move {
+            let progress = &progress;
             let collection = async move {
                 let mut out = Vec::new();
                 let queries = stream::iter(targets)
                     .map(|(address, publication)| async move {
-                        let outcome =
-                            PeerHandle::read_import_policy_counters(publication, deadline).await;
+                        let outcome = PeerHandle::read_import_policy_counters_counting(
+                            publication,
+                            deadline,
+                            &progress.yields,
+                        )
+                        .await;
                         (address, outcome)
                     })
                     .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
                 tokio::pin!(queries);
                 while let Some((address, outcome)) = queries.next().await {
+                    // Count a completed read even when the guard below then
+                    // fails the snapshot, so a deadline miss reports it.
+                    if outcome.is_ok() {
+                        progress.read.fetch_add(1, Ordering::Relaxed);
+                    }
                     if deadline <= tokio::time::Instant::now() {
                         return Err(ImportPolicyStatsError::TimedOut);
                     }
@@ -917,7 +935,7 @@ impl PeerManager {
                     }
                     // Ready publications must still offer cancellation and other
                     // runtime tasks a turn between bounded units of collection.
-                    tokio::task::coop::consume_budget().await;
+                    consume_budget_counted(&progress.yields).await;
                 }
                 out.sort_unstable_by_key(|(address, _)| *address);
                 if deadline <= tokio::time::Instant::now() {
@@ -932,6 +950,7 @@ impl PeerManager {
                 () = reply.closed() => return,
                 result = collection => result,
             };
+            let _ = progress.collected.set(tokio::time::Instant::now());
             let _ = reply.send(result);
         }))
     }
@@ -1998,8 +2017,8 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::QueryImportPolicyTermHits { peer, deadline, reply } => {
-                            self.dispatch_import_policy_term_hits(peer, deadline, reply);
+                        PeerManagerCommand::QueryImportPolicyTermHits { peer, deadline, progress, reply } => {
+                            self.dispatch_import_policy_term_hits(peer, deadline, progress, reply);
                         }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));

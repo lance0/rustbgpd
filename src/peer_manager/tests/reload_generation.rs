@@ -3836,6 +3836,7 @@ async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() 
                 PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                     peer: None,
                     deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                    progress: Arc::default(),
                     reply,
                 }
                 .into(),

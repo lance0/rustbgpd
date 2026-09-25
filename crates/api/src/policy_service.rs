@@ -17,10 +17,10 @@ use crate::actor_read::{
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
-    ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
-    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
-    PolicyStatementDefinition, ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition,
-    ValidationPolicyScopeSnapshot,
+    ConfigEvent, EnqueuedOperatorQuery, ImportPolicyStatsProgress, NamedPolicyDefinition,
+    OwnedCatalogMutation, OwnedCatalogMutationOutcome, PeerManagerCommand,
+    PeerManagerOperatorQuery, PolicyStatementDefinition, ValidationPolicyDimensionSnapshot,
+    ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
@@ -107,6 +107,40 @@ async fn policy_stats_request<T>(
         )));
     }
     result
+}
+
+/// Append the import stage's peer-manager sub-stages to its completed audit
+/// record: admission wait until the peer manager dispatched the query,
+/// collection time until the collector finished (or until now, when it had
+/// not), session publications read of those selected, and scheduler yields.
+fn append_import_progress(
+    audit: &GrpcAuditHandle,
+    progress: &ImportPolicyStatsProgress,
+    started: tokio::time::Instant,
+) {
+    use std::sync::atomic::Ordering;
+
+    let detail = match progress.admitted.get() {
+        None => "admission=pending".to_string(),
+        Some(&admitted) => {
+            let collected = progress
+                .collected
+                .get()
+                .copied()
+                .unwrap_or_else(tokio::time::Instant::now);
+            format!(
+                "admission_ms={} collection_ms={} publications={}/{} yields={}",
+                admitted.saturating_duration_since(started).as_millis(),
+                collected.saturating_duration_since(admitted).as_millis(),
+                progress.read.load(Ordering::Relaxed),
+                progress.targets.load(Ordering::Relaxed),
+                progress.yields.load(Ordering::Relaxed),
+            )
+        }
+    };
+    let summary = audit.summary();
+    let summary = summary.as_ref().map_or("", GrpcRequestSummary::as_str);
+    audit.set_summary(GrpcRequestSummary::new(format!("{summary} {detail}")));
 }
 
 /// Map the v1-supported `AddressFamily` proto values to `(Afi, Safi)`.
@@ -1509,6 +1543,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             }));
         }
         if want_import {
+            let progress = std::sync::Arc::new(ImportPolicyStatsProgress::default());
+            let started = tokio::time::Instant::now();
             let chains = policy_stats_request(deadline, "import", audit.as_ref(), async {
                 let chains = peer_manager_operator_read(
                     &self.peer_mgr_tx,
@@ -1516,6 +1552,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     |reply| PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                         peer,
                         deadline,
+                        progress: std::sync::Arc::clone(&progress),
                         reply,
                     },
                 )
@@ -1533,7 +1570,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     )),
                 }
             })
-            .await?;
+            .await;
+            if let Some(audit) = &audit {
+                append_import_progress(audit, &progress, started);
+            }
+            let chains = chains?;
             out.extend(
                 chains
                     .into_iter()
@@ -2460,6 +2501,7 @@ mod tests {
             let PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer,
                 deadline,
+                progress: _,
                 reply,
             } = operator_rx.recv().await.unwrap().query
             else {
@@ -3861,6 +3903,7 @@ policy customer-in(peer_lp: u32) {
                     PeerManagerCommand::QueryImportPolicyTermHits {
                         peer,
                         deadline,
+                        progress: _,
                         reply,
                     } => {
                         assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
@@ -4076,7 +4119,10 @@ policy customer-in(peer_lp: u32) {
             let summary = audit.summary().unwrap();
             let import = summary.as_str().split("; ").last().unwrap();
             assert!(import.starts_with("stage=import "), "{summary:?}");
-            assert!(import.ends_with(&format!("code={code:?}")), "{summary:?}");
+            assert!(
+                import.ends_with(&format!("code={code:?} admission=pending")),
+                "{summary:?}"
+            );
             assert!(!summary.as_str().contains("datasets"));
         }
     }
@@ -4392,12 +4438,67 @@ policy customer-in(peer_lp: u32) {
                 "existing=safe; ",
                 "stage=peer_validation elapsed_ms=700 budget_ms=2000 rpc_elapsed_ms=700 code=Ok; ",
                 "stage=export elapsed_ms=700 budget_ms=1300 rpc_elapsed_ms=1400 code=Ok; ",
-                "stage=import elapsed_ms=600 budget_ms=600 rpc_elapsed_ms=2000 code=DeadlineExceeded",
+                "stage=import elapsed_ms=600 budget_ms=600 rpc_elapsed_ms=2000 code=DeadlineExceeded ",
+                "admission=pending",
             )
         );
         assert_eq!(
             tokio::time::Instant::now() - started,
             POLICY_STATS_AGGREGATE_TIMEOUT
+        );
+    }
+
+    /// A held peer manager's admission wait, the collection time, the
+    /// publications read and the scheduler yields the collector recorded all
+    /// land in the import stage's audit record.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_audit_records_import_sub_stages() {
+        use std::sync::atomic::Ordering;
+
+        const HOLD: Duration = Duration::from_millis(300);
+        const COLLECTION: Duration = Duration::from_millis(200);
+
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            // The held peer manager leaves the import query queued.
+            tokio::time::sleep(HOLD).await;
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::QueryImportPolicyTermHits {
+                        progress, reply, ..
+                    } => {
+                        // Stamp the record as the peer-manager collector does.
+                        progress.admitted.set(tokio::time::Instant::now()).unwrap();
+                        progress.targets.store(3, Ordering::Relaxed);
+                        tokio::time::sleep(COLLECTION).await;
+                        progress.read.store(3, Ordering::Relaxed);
+                        progress.yields.store(2, Ordering::Relaxed);
+                        progress.collected.set(tokio::time::Instant::now()).unwrap();
+                        let _ = reply.send(Ok(Vec::new()));
+                    }
+                    PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(policy_stats_rpc_request("", "import"));
+        request.extensions_mut().insert(audit.clone());
+        PolicyServiceRpc::get_policy_stats(&svc, request)
+            .await
+            .expect("import stats complete within the budget");
+
+        assert_eq!(
+            audit.summary().unwrap().as_str(),
+            concat!(
+                "stage=import elapsed_ms=500 budget_ms=2000 rpc_elapsed_ms=500 code=Ok ",
+                "admission_ms=300 collection_ms=200 publications=3/3 yields=2; ",
+                "stage=datasets elapsed_ms=0 budget_ms=1500 rpc_elapsed_ms=500 code=Ok",
+            )
         );
     }
 
