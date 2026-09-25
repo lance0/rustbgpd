@@ -134,7 +134,9 @@ the v0.70.0 release commit: it passes every gate under the current
 reload-window cadence rule on reanalysis, and its original on-host verdict
 failed only the superseded zero-miss cadence rule. The
 [2026-09-21 run](../soaks/soak-rs-flagship-24h-2026-09-21.md) qualified the
-v0.71.0 tag on its on-host verdict, every gate passing. Use the
+v0.71.0 tag on its on-host verdict, every gate passing. The
+[2026-09-24 run](../soaks/soak-rs-flagship-24h-2026-09-24.md) on the v0.72.0
+tag failed management correctness on one expired `policy stats` read. Use the
 [runner procedure](../../tests/soak/README.md) and its
 [precommitted gates](../soaks/soak-acceptance-gates.md#readiness-acceptance-and-kubernetes-probes).
 

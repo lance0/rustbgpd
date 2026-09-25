@@ -47,7 +47,11 @@ resolved.
   since-superseded metrics-cadence rule) and on the v0.71.0 tag
   ([2026-09-21](../soaks/soak-rs-flagship-24h-2026-09-21.md)). In the
   v0.71.0 run the slowest `policy stats` read took 1969 ms, 31 ms under the
-  2 s deadline. Both runs are IPv4-only; no dual-stack soak has run, and a
+  2 s deadline. The same soak on the v0.72.0 tag
+  ([2026-09-24](../soaks/soak-rs-flagship-24h-2026-09-24.md)) failed on one
+  such read: one of 17,556 `policy stats` calls returned `DEADLINE_EXCEEDED`
+  inside a reload commit, its import stage exhausting the remainder of the
+  2 s deadline. All three runs are IPv4-only; no dual-stack soak has run, and a
   soak covers only the tag it ran on. This issue stays open until the final
   phase coverage passes on the final runtime candidate. Retrying an operator
   command does not
