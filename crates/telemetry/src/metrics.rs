@@ -949,7 +949,7 @@ impl BgpMetrics {
         let inbound_connections_dropped = IntCounterVec::new(
             Opts::new(
                 "bgp_inbound_connections_dropped_total",
-                "Inbound connections dropped by the accept-path admission checks, by bounded reason (ADR-0120): unconfigured source, per-source rate limit, or dynamic-neighbor slot saturation.",
+                "Inbound connections dropped by the accept-path admission checks, by bounded reason: unconfigured source, per-source rate limit, dynamic-neighbor slot saturation (ADR-0120), or a configured neighbor held by its NOTIFICATION reconnect backoff.",
             ),
             &["reason"],
         )

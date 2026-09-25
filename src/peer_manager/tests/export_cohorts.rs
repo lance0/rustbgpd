@@ -134,6 +134,7 @@ async fn content_equal_policy_fanout_skips_unaffected_peers() {
                             tcp_ao_protected: false,
                             slow_peer: false,
                             reconnect_in_secs: 0,
+                            notification_idle_failures: 0,
                         });
                     }
                     PeerCommand::Shutdown => break,

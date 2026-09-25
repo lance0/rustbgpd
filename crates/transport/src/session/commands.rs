@@ -1224,6 +1224,7 @@ impl PeerSession {
             tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
             tcp_ao_protected: self.tcp_ao_protected,
             slow_peer: self.slow_peer,
+            notification_idle_failures: self.notification_idle_failures,
             reconnect_in_secs: self.reconnect_timer.as_ref().map_or(0, |timer| {
                 let remaining = timer
                     .deadline()
@@ -1345,6 +1346,15 @@ impl PeerSession {
                 self.stop_requested = false;
                 self.reconnect_timer = None;
                 self.notification_idle_failures = 0;
+                self.drive_fsm(Event::ManualStart).await;
+                ControlFlow::Continue(())
+            }
+            PeerCommand::StartInbound {
+                notification_idle_failures,
+            } => {
+                self.stop_requested = false;
+                self.reconnect_timer = None;
+                self.notification_idle_failures = notification_idle_failures;
                 self.drive_fsm(Event::ManualStart).await;
                 ControlFlow::Continue(())
             }
@@ -1715,7 +1725,13 @@ impl PeerSession {
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
-            PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+            PeerCommand::ActivateMaxPrefixMetrics {
+                notification_idle_failures,
+                reply,
+            } => {
+                self.notification_idle_failures = self
+                    .notification_idle_failures
+                    .max(notification_idle_failures);
                 // The legacy command name predates current-session truth.
                 // Collision promotion activates every metric lease owned only
                 // by the active primary, not just max-prefix capacity.

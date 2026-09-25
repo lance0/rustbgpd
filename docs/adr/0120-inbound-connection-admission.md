@@ -143,3 +143,24 @@ on every reload until restart.
   the lengths are configurable.
 - SECURITY.md's inbound-handling section now describes a mechanism that
   exists.
+
+## Amendments
+
+### 2026-09-25 — `notification_backoff` joins the drop-reason vocabulary
+
+`bgp_inbound_connections_dropped_total{reason}` gains a fourth value,
+`notification_backoff`. The vocabulary stays closed and label-free beyond
+`reason`; it grows only when a new drop site is added, as here. The new site
+covers a different case from this ADR's limiter. A configured neighbor whose
+session is Idle and waiting out an escalated reconnect wait, after two or more
+consecutive NOTIFICATION teardowns in either direction, has its inbound
+connections closed until the wait ends. This follows RFC 4271 §8.2.2, which
+refuses connections in Idle, and BIRD's error delay. Otherwise a neighbor that
+reconnected to us bypassed the wait, and each cycle reloaded and withdrew its
+table for every other member.
+
+The exemption above still holds. Static neighbors never reach the accept-rate
+limiter, and a single NOTIFICATION or a TCP flap still re-establishes at once.
+The Consequences bullet "a flapping static neighbor is never throttled" refers
+to this limiter only. See
+[Debugging a session that won't establish](../reference/operations.md#debugging-a-session-that-wont-establish).

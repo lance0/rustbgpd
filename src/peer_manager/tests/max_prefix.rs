@@ -513,6 +513,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         tcp_ao_protected: false,
                         slow_peer: false,
                         reconnect_in_secs: 0,
+                        notification_idle_failures: 0,
                     });
                 }
                 PeerCommand::Stop { .. } => {
@@ -1019,6 +1020,7 @@ async fn inbound_replace_preserves_old_primary_terminal_breach() {
         stream,
         None,
         rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
+        0,
     )
     .await;
 

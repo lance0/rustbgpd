@@ -521,6 +521,9 @@ pub struct PeerManager {
     /// `[inbound_admission]` is disabled (the default); built once at
     /// startup — every field is restart-required.
     inbound_admission: Option<admission::InboundAdmission>,
+    /// Throttles the log line for inbound connections held by a neighbor's
+    /// NOTIFICATION reconnect backoff.
+    notification_backoff_log: admission::LogThrottle,
     /// Dead-lettered hot-apply / Route Refresh / `GShut` intent from dynamic
     /// peers auto-removed by `BackToIdle`. Restored on the next inbound
     /// from the same address. Bounded at `dynamic_neighbor_limit` so a
@@ -1238,6 +1241,7 @@ impl PeerManager {
             inbound_admission: admission::InboundAdmission::from_config(
                 &current_config.inbound_admission,
             ),
+            notification_backoff_log: admission::LogThrottle::default(),
             dead_lettered_pending: HashMap::new(),
             dead_lettered_pending_order: VecDeque::new(),
             next_session_id: 1,

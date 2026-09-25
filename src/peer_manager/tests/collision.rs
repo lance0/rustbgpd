@@ -193,6 +193,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         tcp_ao_protected: false,
                         slow_peer: false,
                         reconnect_in_secs: 0,
+                        notification_idle_failures: 0,
                     });
                 }
                 PeerCommand::CollisionDump => {
@@ -417,6 +418,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
                         tcp_ao_protected: false,
                         slow_peer: false,
                         reconnect_in_secs: 0,
+                        notification_idle_failures: 0,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -1010,7 +1012,7 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
     let candidate_task = tokio::spawn(async move {
         while let Some(command) = candidate_rx.recv().await {
             match command {
-                PeerCommand::ActivateMaxPrefixMetrics { reply } => {
+                PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     if !candidate_terminated.load(Ordering::SeqCst) {
                         candidate_early.store(true, Ordering::SeqCst);
                     }

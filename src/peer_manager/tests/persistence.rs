@@ -57,6 +57,7 @@ fn persistence_probe_handle(peer_addr: IpAddr) -> PeerHandle {
                         tcp_ao_protected: false,
                         slow_peer: false,
                         reconnect_in_secs: 0,
+                        notification_idle_failures: 0,
                     });
                 }
                 PeerCommand::Shutdown | PeerCommand::Stop { .. } | PeerCommand::CollisionDump => {

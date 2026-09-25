@@ -1010,3 +1010,292 @@ async fn dead_lettered_pending_over_cap_evicts_oldest_entry() {
         "newly inserted pending entry should be retained"
     );
 }
+
+// ── NOTIFICATION reconnect backoff on the inbound path ───────────────
+
+/// Commands observed by [`backoff_session_handle`].
+#[derive(Default)]
+struct BackoffSessionCounters {
+    shutdown: AtomicU32,
+    collision_dump: AtomicU32,
+    activate: AtomicU32,
+    /// `notification_idle_failures` carried by the last promotion.
+    promoted_with: AtomicU32,
+}
+
+/// A session that reports `state` with the given NOTIFICATION streak and
+/// pending reconnect wait.
+fn backoff_session_handle(
+    peer_addr: IpAddr,
+    state: SessionState,
+    notification_idle_failures: u32,
+    reconnect_in_secs: u64,
+    counters: Arc<BackoffSessionCounters>,
+) -> PeerHandle {
+    let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(cmd) = rx.recv().await {
+            match cmd {
+                PeerCommand::QueryState { reply } => {
+                    let _ = reply.send(PeerSessionState {
+                        notification_idle_failures,
+                        reconnect_in_secs,
+                        ..policy_test_peer_state(peer_addr, state)
+                    });
+                }
+                PeerCommand::ActivateMaxPrefixMetrics {
+                    notification_idle_failures,
+                    reply,
+                } => {
+                    counters.activate.fetch_add(1, Ordering::SeqCst);
+                    counters
+                        .promoted_with
+                        .store(notification_idle_failures, Ordering::SeqCst);
+                    let _ = reply.send(());
+                }
+                PeerCommand::CollisionDump => {
+                    counters.collision_dump.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                PeerCommand::Shutdown => {
+                    counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(tx, task)
+}
+
+fn backoff_test_manager(
+    primary_failures: u32,
+    reconnect_in_secs: u64,
+) -> (PeerManager, Arc<BackoffSessionCounters>) {
+    let mut mgr = test_peer_manager();
+    // The helper-inserted primary is session 1; keep a replacement distinct.
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(BackoffSessionCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        65002,
+        backoff_session_handle(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            SessionState::Idle,
+            primary_failures,
+            reconnect_in_secs,
+            primary.clone(),
+        ),
+        false,
+    );
+    (mgr, primary)
+}
+
+/// RFC 4271 §8.2.2: after two consecutive NOTIFICATION teardowns the Idle
+/// session's escalated wait also holds the neighbor's inbound connections.
+#[tokio::test]
+async fn escalated_notification_backoff_drops_static_inbound_and_counts_it() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let (mut mgr, primary) = backoff_test_manager(2, 60);
+    let (server, mut client) = localhost_inbound_stream().await;
+    let remote = server.peer_addr().unwrap();
+
+    mgr.handle_inbound(server, remote, None, None).await;
+
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert_eq!(
+        managed.session_id, 1,
+        "the waiting session must not be replaced"
+    );
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        inbound_drop_metric(&mgr.metrics, "notification_backoff"),
+        Some(1.0)
+    );
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "the held connection is closed without an OPEN"
+    );
+}
+
+/// The first NOTIFICATION teardown keeps immediate inbound recovery, and a
+/// streak whose wait has already run out holds nothing. Either way the real
+/// replacement session starts with the streak it replaces.
+#[tokio::test]
+async fn inbound_outside_escalated_backoff_is_accepted_and_keeps_the_streak() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for (failures, reconnect_in_secs) in [(0, 0), (1, 30), (3, 0)] {
+        let (mut mgr, primary) = backoff_test_manager(failures, reconnect_in_secs);
+        let (server, _client) = localhost_inbound_stream().await;
+        let remote = server.peer_addr().unwrap();
+
+        mgr.handle_inbound(server, remote, None, None).await;
+
+        assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
+        let managed = &mgr.peers[&key(peer_addr)];
+        assert_ne!(
+            managed.session_id, 1,
+            "streak {failures}: inbound must replace the session"
+        );
+        let replacement = managed.handle.query_state().await.unwrap();
+        assert_eq!(replacement.notification_idle_failures, failures);
+        assert_eq!(
+            inbound_drop_metric(&mgr.metrics, "notification_backoff"),
+            None
+        );
+    }
+}
+
+/// A pending candidate is not promoted over a primary that is waiting out an
+/// escalated NOTIFICATION backoff, whether the candidate's OPEN is resolved or
+/// the primary reports `BackToIdle` first.
+#[tokio::test]
+async fn escalated_notification_backoff_drops_pending_candidate() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for via_back_to_idle in [false, true] {
+        let (mut mgr, primary) = backoff_test_manager(2, 60);
+        let candidate = Arc::new(BackoffSessionCounters::default());
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            backoff_session_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                0,
+                0,
+                candidate.clone(),
+            ),
+            2,
+        );
+
+        let notification = if via_back_to_idle {
+            SessionNotification::BackToIdle {
+                session_id: 1,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr,
+            }
+        } else {
+            SessionNotification::OpenReceived {
+                session_id: 2,
+                role: rustbgpd_transport::SessionRole::InboundCandidate,
+                peer_addr,
+                remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                peer_asn: 65002,
+            }
+        };
+        mgr.handle_session_notification(notification).await;
+
+        let managed = &mgr.peers[&key(peer_addr)];
+        assert_eq!(managed.session_id, 1, "BackToIdle={via_back_to_idle}");
+        assert!(managed.pending_inbound.is_none());
+        assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
+        assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+        assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            inbound_drop_metric(&mgr.metrics, "notification_backoff"),
+            Some(1.0)
+        );
+    }
+}
+
+/// Below the hold threshold a candidate is promoted over the Idle primary and
+/// inherits its streak.
+#[tokio::test]
+async fn promoted_candidate_inherits_the_primary_notification_streak() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    for via_back_to_idle in [false, true] {
+        let (mut mgr, primary) = backoff_test_manager(1, 30);
+        let candidate = Arc::new(BackoffSessionCounters::default());
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            backoff_session_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                0,
+                0,
+                candidate.clone(),
+            ),
+            2,
+        );
+        let notification = if via_back_to_idle {
+            SessionNotification::BackToIdle {
+                session_id: 1,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr,
+            }
+        } else {
+            SessionNotification::OpenReceived {
+                session_id: 2,
+                role: rustbgpd_transport::SessionRole::InboundCandidate,
+                peer_addr,
+                remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                peer_asn: 65002,
+            }
+        };
+        mgr.handle_session_notification(notification).await;
+
+        assert_eq!(mgr.peers[&key(peer_addr)].session_id, 2);
+        assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
+        assert_eq!(candidate.activate.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            candidate.promoted_with.load(Ordering::SeqCst),
+            1,
+            "BackToIdle={via_back_to_idle}"
+        );
+    }
+}
+
+/// When the Idle primary's state query times out after its `BackToIdle`, its
+/// NOTIFICATION streak and reconnect wait are unknown. The pending candidate
+/// is dropped rather than promoted with streak 0, which could bypass an
+/// escalated wait.
+#[tokio::test(start_paused = true)]
+async fn back_to_idle_with_timed_out_primary_query_drops_pending_candidate() {
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let mut mgr = test_peer_manager();
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        stalled_policy_query_handle(),
+        false,
+    );
+    let candidate = Arc::new(BackoffSessionCounters::default());
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        backoff_session_handle(
+            peer_addr,
+            SessionState::OpenConfirm,
+            0,
+            0,
+            candidate.clone(),
+        ),
+        2,
+    );
+
+    mgr.handle_session_notification(SessionNotification::BackToIdle {
+        session_id: 1,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr,
+    })
+    .await;
+
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert_eq!(
+        managed.session_id, 1,
+        "the unqueried primary keeps ownership"
+    );
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(candidate.activate.load(Ordering::SeqCst), 0);
+    assert_eq!(candidate.shutdown.load(Ordering::SeqCst), 1);
+}

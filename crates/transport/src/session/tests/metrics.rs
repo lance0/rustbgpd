@@ -371,7 +371,10 @@ async fn collision_candidate_is_silent_until_exact_promotion() {
     let (reply, done) = oneshot::channel();
     assert_eq!(
         candidate
-            .handle_command(PeerCommand::ActivateMaxPrefixMetrics { reply })
+            .handle_command(PeerCommand::ActivateMaxPrefixMetrics {
+                notification_idle_failures: 0,
+                reply,
+            })
             .await,
         ControlFlow::Continue(())
     );

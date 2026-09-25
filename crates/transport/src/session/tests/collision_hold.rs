@@ -62,7 +62,10 @@ async fn collision_candidate_holds_keepalive_and_input_until_promotion() {
     let (reply, done) = oneshot::channel();
     assert_eq!(
         candidate
-            .handle_command(PeerCommand::ActivateMaxPrefixMetrics { reply })
+            .handle_command(PeerCommand::ActivateMaxPrefixMetrics {
+                notification_idle_failures: 0,
+                reply,
+            })
             .await,
         ControlFlow::Continue(())
     );

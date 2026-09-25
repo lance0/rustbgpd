@@ -388,12 +388,20 @@ pub enum InboundConnectionDropReason {
     /// The process-global `dynamic_neighbor_limit` slots were all
     /// occupied.
     DynamicLimit,
+    /// A configured neighbor dialled in while its session waited out an
+    /// escalated reconnect wait after consecutive NOTIFICATION teardowns.
+    NotificationBackoff,
 }
 
 impl InboundConnectionDropReason {
     /// Every canonical inbound drop reason, for vocabulary walks in
     /// tests and docs.
-    pub const ALL: [Self; 3] = [Self::Unconfigured, Self::RateLimited, Self::DynamicLimit];
+    pub const ALL: [Self; 4] = [
+        Self::Unconfigured,
+        Self::RateLimited,
+        Self::DynamicLimit,
+        Self::NotificationBackoff,
+    ];
 
     /// The canonical reason string shared by every surface.
     #[must_use]
@@ -402,6 +410,7 @@ impl InboundConnectionDropReason {
             Self::Unconfigured => "unconfigured",
             Self::RateLimited => "rate_limited",
             Self::DynamicLimit => "dynamic_limit",
+            Self::NotificationBackoff => "notification_backoff",
         }
     }
 }

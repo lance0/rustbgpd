@@ -4,7 +4,8 @@ use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_telemetry::reason_labels::InboundConnectionDropReason;
 use rustbgpd_transport::{
-    PeerHandle, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot, TcpAoRotationGeneration,
+    PeerHandle, PeerSessionState, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot,
+    TcpAoRotationGeneration,
 };
 use tokio::net::TcpStream;
 use tracing::{info, warn};
@@ -13,6 +14,21 @@ use super::{
     ManagedPeer, PEER_LIFECYCLE_COMMAND_TIMEOUT, PEER_QUERY_TIMEOUT, PeerManager, PendingInbound,
     TcpAoDesiredInventory,
 };
+
+/// NOTIFICATION streak at which a neighbor's Idle reconnect wait also holds
+/// its inbound connections. The first NOTIFICATION teardown keeps immediate
+/// inbound recovery; from the second the wait is escalated.
+const INBOUND_HOLD_NOTIFICATION_STREAK: u32 = 2;
+
+/// RFC 4271 §8.2.2 refuses incoming connections in Idle. A session waiting out
+/// an escalated NOTIFICATION reconnect wait holds its neighbor's inbound
+/// connections too, as BIRD's error delay does; otherwise a neighbor that
+/// reconnects to us bypasses the wait and every cycle's RIB churn with it.
+fn notification_backoff_holds_inbound(state: &PeerSessionState) -> bool {
+    state.fsm_state == SessionState::Idle
+        && state.reconnect_in_secs > 0
+        && state.notification_idle_failures >= INBOUND_HOLD_NOTIFICATION_STREAK
+}
 
 fn accepted_selected_owner(
     managed: &ManagedPeer,
@@ -697,12 +713,23 @@ impl PeerManager {
                     );
                     return;
                 }
-                // Accept immediately — no collision possible
+                if let Some(state) = current_state
+                    .as_ref()
+                    .filter(|state| notification_backoff_holds_inbound(state))
+                {
+                    self.record_notification_backoff_drop(peer_addr, state, "inbound connection");
+                    return;
+                }
+                // Accept immediately — no collision possible. The replacement
+                // keeps the NOTIFICATION streak so the backoff still escalates.
                 self.replace_with_inbound(
                     peer_key.clone(),
                     stream,
                     tcp_ao_info,
                     accepted_generation,
+                    current_state
+                        .as_ref()
+                        .map_or(0, |state| state.notification_idle_failures),
                 )
                 .await;
             }
@@ -766,7 +793,9 @@ impl PeerManager {
         peer_asn: u32,
     ) {
         let peer_addr = peer_key.address;
-        let Some(primary_state) = self.resolve_by_primary_state(&peer_key).await else {
+        let Some((primary_state, primary_notification_failures)) =
+            self.resolve_by_primary_state(&peer_key).await
+        else {
             return;
         };
 
@@ -811,16 +840,13 @@ impl PeerManager {
                     "collision: remote wins, replacing with inbound"
                 );
                 self.drain_before_candidate_promotion().await;
-                if let Some((old_handle, old_session_id, new_session_id)) =
-                    self.promote_pending_inbound_handle(&peer_key)
-                {
+                if let Some(promoted) = self.promote_pending_inbound_handle(&peer_key) {
                     self.finish_inbound_promotion(
                         &peer_key,
-                        old_session_id,
-                        old_handle,
-                        new_session_id,
+                        promoted,
                         "remote-wins collision loser",
                         true,
+                        primary_notification_failures,
                     )
                     .await;
                 }
@@ -844,16 +870,20 @@ impl PeerManager {
     }
 
     /// Apply the rules that do not compare identifiers. Returns the
-    /// primary's state when it is `OpenSent` or `OpenConfirm` and the caller
-    /// must compare; otherwise the candidate has been promoted or dropped.
-    async fn resolve_by_primary_state(&mut self, peer_key: &PeerKey) -> Option<SessionState> {
+    /// primary's state and NOTIFICATION streak when it is `OpenSent` or
+    /// `OpenConfirm` and the caller must compare; otherwise the candidate has
+    /// been promoted or dropped.
+    async fn resolve_by_primary_state(
+        &mut self,
+        peer_key: &PeerKey,
+    ) -> Option<(SessionState, u32)> {
         let peer_addr = peer_key.address;
         let managed = self.peers.get(peer_key)?;
 
-        let primary_state = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
-            StateQueryOutcome::State(state) => state.fsm_state,
+        let primary = match managed.handle.query_state_outcome(PEER_QUERY_TIMEOUT).await {
+            StateQueryOutcome::State(state) => Some(state),
             // The primary task has exited: it has no connection either.
-            StateQueryOutcome::SessionGone => SessionState::Idle,
+            StateQueryOutcome::SessionGone => None,
             StateQueryOutcome::TimedOut => {
                 // As on accept: a wedged primary may be Established, so a
                 // missed deadline must not tear it down. The remote retries.
@@ -869,20 +899,29 @@ impl PeerManager {
             }
         };
 
+        let primary_state = primary
+            .as_ref()
+            .map_or(SessionState::Idle, |state| state.fsm_state);
         match primary_state {
             SessionState::Idle | SessionState::Connect | SessionState::Active => {
                 let enabled = self.peers.get(peer_key).is_some_and(|m| m.enabled);
                 if enabled && !self.bfd_withholding(&peer_addr) {
-                    info!(
-                        peer = %peer_addr,
-                        primary_state = primary_state.as_str(),
-                        rule = "no_primary_connection",
-                        "collision: no primary connection, promoting inbound"
-                    );
+                    if !primary
+                        .as_ref()
+                        .is_some_and(notification_backoff_holds_inbound)
+                    {
+                        info!(
+                            peer = %peer_addr,
+                            primary_state = primary_state.as_str(),
+                            rule = "no_primary_connection",
+                            "collision: no primary connection, promoting inbound"
+                        );
+                    }
                     // No Cease 6/7: the primary has no established TCP
                     // connection to send it on. Its shutdown aborts any
                     // outbound connect attempt and reconnect timer.
-                    self.promote_pending_inbound(peer_key).await;
+                    self.promote_pending_inbound_unless_backoff(peer_key, primary.as_ref())
+                        .await;
                 } else {
                     info!(
                         peer = %peer_addr,
@@ -906,8 +945,72 @@ impl PeerManager {
                     .await;
                 None
             }
-            SessionState::OpenSent | SessionState::OpenConfirm => Some(primary_state),
+            SessionState::OpenSent | SessionState::OpenConfirm => Some((
+                primary_state,
+                primary.map_or(0, |state| state.notification_idle_failures),
+            )),
         }
+    }
+
+    /// Count and (throttled) log an inbound connection held by the neighbor's
+    /// escalated NOTIFICATION reconnect wait.
+    fn record_notification_backoff_drop(
+        &mut self,
+        peer: std::net::IpAddr,
+        primary: &PeerSessionState,
+        connection: &'static str,
+    ) {
+        self.metrics
+            .record_inbound_connection_drop(InboundConnectionDropReason::NotificationBackoff);
+        if let Some(suppressed) = self.notification_backoff_log.should_log() {
+            info!(
+                peer = %peer,
+                connection,
+                notification_failures = primary.notification_idle_failures,
+                reconnect_in_secs = primary.reconnect_in_secs,
+                suppressed,
+                "dropping inbound connection while the neighbor waits out its NOTIFICATION reconnect backoff"
+            );
+        }
+    }
+
+    /// Promote the pending candidate over a primary that has no connection,
+    /// carrying the primary's NOTIFICATION streak. While the primary waits out
+    /// an escalated NOTIFICATION reconnect wait the candidate is dropped
+    /// instead. Returns whether it was promoted.
+    pub(super) async fn promote_pending_inbound_unless_backoff(
+        &mut self,
+        peer_key: &PeerKey,
+        primary: Option<&PeerSessionState>,
+    ) -> bool {
+        if let Some(state) = primary.filter(|state| notification_backoff_holds_inbound(state)) {
+            if let Some(pending) = self
+                .peers
+                .get_mut(peer_key)
+                .and_then(|m| m.pending_inbound.take())
+            {
+                self.record_notification_backoff_drop(
+                    peer_key.address,
+                    state,
+                    "collision candidate",
+                );
+                let _ = self
+                    .quiesce_retiring_session(
+                        peer_key,
+                        pending.session_id,
+                        pending.handle,
+                        "notification-backoff pending inbound",
+                        false,
+                    )
+                    .await;
+            }
+            return false;
+        }
+        self.promote_pending_inbound(
+            peer_key,
+            primary.map_or(0, |state| state.notification_idle_failures),
+        )
+        .await
     }
 
     /// Close the pending inbound candidate with Cease 6/7.
@@ -953,33 +1056,36 @@ impl PeerManager {
         Box::pin(self.drain_ready_session_notifications()).await;
     }
 
-    pub(super) async fn promote_pending_inbound(&mut self, peer_key: &PeerKey) -> bool {
+    pub(super) async fn promote_pending_inbound(
+        &mut self,
+        peer_key: &PeerKey,
+        primary_notification_failures: u32,
+    ) -> bool {
         self.drain_before_candidate_promotion().await;
-        let Some((old_handle, old_session_id, new_session_id)) =
-            self.promote_pending_inbound_handle(peer_key)
-        else {
+        let Some(promoted) = self.promote_pending_inbound_handle(peer_key) else {
             return false;
         };
         self.finish_inbound_promotion(
             peer_key,
-            old_session_id,
-            old_handle,
-            new_session_id,
+            promoted,
             "promote pending inbound old primary",
             false,
+            primary_notification_failures,
         )
         .await;
         true
     }
 
+    /// Retire the old primary returned by [`Self::promote_pending_inbound_handle`]
+    /// as `(old_handle, old_session_id, new_session_id)`, then activate the
+    /// promoted session with the old primary's NOTIFICATION streak.
     async fn finish_inbound_promotion(
         &mut self,
         peer_key: &PeerKey,
-        old_session_id: u64,
-        old_handle: PeerHandle,
-        new_session_id: u64,
+        (old_handle, old_session_id, new_session_id): (PeerHandle, u64, u64),
         context: &'static str,
         collision_dump: bool,
+        primary_notification_failures: u32,
     ) {
         let _ = self
             .quiesce_retiring_session(
@@ -990,14 +1096,19 @@ impl PeerManager {
                 collision_dump,
             )
             .await;
-        self.activate_promoted_max_prefix_metrics(peer_key, new_session_id)
-            .await;
+        self.activate_promoted_max_prefix_metrics(
+            peer_key,
+            new_session_id,
+            primary_notification_failures,
+        )
+        .await;
     }
 
     async fn activate_promoted_max_prefix_metrics(
         &self,
         peer_key: &PeerKey,
         expected_session_id: u64,
+        primary_notification_failures: u32,
     ) {
         let Some(managed) = self.peers.get(peer_key) else {
             return;
@@ -1013,7 +1124,10 @@ impl PeerManager {
         }
         if let Err(error) = managed
             .handle
-            .activate_max_prefix_metrics_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .activate_max_prefix_metrics_timeout(
+                primary_notification_failures,
+                PEER_LIFECYCLE_COMMAND_TIMEOUT,
+            )
             .await
         {
             // Missing gauges are safer than allowing a collision loser to
@@ -1033,6 +1147,7 @@ impl PeerManager {
         stream: TcpStream,
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
         tcp_ao_generation: TcpAoRotationGeneration,
+        notification_idle_failures: u32,
     ) {
         let peer_addr = peer_key.address;
         let session_id = self.allocate_session_id();
@@ -1118,7 +1233,7 @@ impl PeerManager {
         }
         if let Err(e) = managed
             .handle
-            .start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .start_inbound_timeout(notification_idle_failures, PEER_LIFECYCLE_COMMAND_TIMEOUT)
             .await
         {
             warn!(peer = %peer_addr, error = %e, "failed to start inbound session");

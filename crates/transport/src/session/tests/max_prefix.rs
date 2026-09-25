@@ -411,7 +411,10 @@ async fn promoted_collision_candidate_publishes_after_old_primary_quiesces() {
     let (reply, done) = oneshot::channel();
     assert_eq!(
         candidate
-            .handle_command(PeerCommand::ActivateMaxPrefixMetrics { reply })
+            .handle_command(PeerCommand::ActivateMaxPrefixMetrics {
+                notification_idle_failures: 0,
+                reply,
+            })
             .await,
         ControlFlow::Continue(())
     );
