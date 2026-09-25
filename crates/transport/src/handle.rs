@@ -3,6 +3,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -777,6 +778,7 @@ impl InstalledImportPolicy {
     async fn observe(
         &self,
         deadline: tokio::time::Instant,
+        yields: &AtomicU64,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
         let Some(counters) = &self.counters else {
             return Ok(None);
@@ -797,7 +799,10 @@ impl InstalledImportPolicy {
             };
             match error_snapshot {
                 Ok(snapshot) => break snapshot,
-                Err(std::sync::TryLockError::WouldBlock) => tokio::task::yield_now().await,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    yields.fetch_add(1, Ordering::Relaxed);
+                    tokio::task::yield_now().await;
+                }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
                     return Err(ImportPolicyStatsError::CountersUnavailable);
                 }
@@ -805,12 +810,12 @@ impl InstalledImportPolicy {
         };
         let mut terms = Vec::new();
         for (policy_index, (policy, labels)) in self.labels.iter().enumerate() {
-            tokio::task::coop::consume_budget().await;
+            consume_budget_counted(yields).await;
             if deadline <= tokio::time::Instant::now() {
                 return Err(ImportPolicyStatsError::TimedOut);
             }
             for (term_index, term) in labels.iter().enumerate() {
-                tokio::task::coop::consume_budget().await;
+                consume_budget_counted(yields).await;
                 if deadline <= tokio::time::Instant::now() {
                     return Err(ImportPolicyStatsError::TimedOut);
                 }
@@ -834,6 +839,16 @@ impl InstalledImportPolicy {
             terms,
         }))
     }
+}
+
+/// Spend one unit of the task's cooperative budget, counting the checkpoint in
+/// `yields` when the budget is already exhausted and the task therefore yields
+/// to the scheduler. Diagnostic only: the yield itself is unchanged.
+pub async fn consume_budget_counted(yields: &AtomicU64) {
+    if !tokio::task::coop::has_budget_remaining() {
+        yields.fetch_add(1, Ordering::Relaxed);
+    }
+    tokio::task::coop::consume_budget().await;
 }
 
 /// Outcome of a bounded read from a peer-session task.
@@ -1215,8 +1230,22 @@ impl PeerHandle {
     ///
     /// Reports deadline expiry, selected task closure, or unavailable counters.
     pub async fn read_import_policy_counters(
+        publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
+        Self::read_import_policy_counters_counting(publication, deadline, &AtomicU64::new(0)).await
+    }
+
+    /// [`Self::read_import_policy_counters`], adding each scheduler yield of
+    /// the observation to `yields`.
+    ///
+    /// # Errors
+    ///
+    /// Reports deadline expiry, selected task closure, or unavailable counters.
+    pub async fn read_import_policy_counters_counting(
         mut publication: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
         deadline: tokio::time::Instant,
+        yields: &AtomicU64,
     ) -> Result<Option<ImportPolicyTermHits>, ImportPolicyStatsError> {
         if deadline <= tokio::time::Instant::now() {
             return Err(ImportPolicyStatsError::TimedOut);
@@ -1229,7 +1258,7 @@ impl PeerHandle {
                 // Release the watch guard before reading counters or yielding.
                 let installed = publication.borrow_and_update().clone();
                 if let Some(installed) = installed {
-                    let snapshot = installed.observe(deadline).await?;
+                    let snapshot = installed.observe(deadline, yields).await?;
                     publication
                         .has_changed()
                         .map_err(|_| ImportPolicyStatsError::SessionGone)?;

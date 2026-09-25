@@ -1233,6 +1233,9 @@ pub enum PeerManagerCommand {
         /// Original absolute RPC deadline, shared by publication acquisition
         /// and counter observation across the selected session roster.
         deadline: tokio::time::Instant,
+        /// Collection progress shared with the requesting handler; it
+        /// survives a deadline miss or a dropped reply.
+        progress: Arc<ImportPolicyStatsProgress>,
         /// Reply channel: successful rows are sorted by peer address.
         reply: oneshot::Sender<
             Result<
@@ -1606,6 +1609,7 @@ pub enum PeerManagerOperatorQuery {
     QueryImportPolicyTermHits {
         peer: Option<IpAddr>,
         deadline: tokio::time::Instant,
+        progress: Arc<ImportPolicyStatsProgress>,
         reply: oneshot::Sender<
             Result<
                 Vec<(IpAddr, ImportPolicyTermHits)>,
@@ -1617,6 +1621,24 @@ pub enum PeerManagerOperatorQuery {
     QueryPolicyDatasets {
         reply: oneshot::Sender<Vec<PolicyDatasetStatusRow>>,
     },
+}
+
+/// Sub-stage progress of one `GetPolicyStats` import collection, recorded by
+/// the peer manager and read by the requesting handler for its audit record.
+/// Measurement only: nothing here gates, cancels or bounds the collection.
+#[derive(Debug, Default)]
+pub struct ImportPolicyStatsProgress {
+    /// When the peer manager dispatched the query (end of admission wait).
+    pub admitted: std::sync::OnceLock<tokio::time::Instant>,
+    /// When the collector produced its result, successful or not.
+    pub collected: std::sync::OnceLock<tokio::time::Instant>,
+    /// Session publications selected for collection.
+    pub targets: std::sync::atomic::AtomicUsize,
+    /// Session publications whose counters were read.
+    pub read: std::sync::atomic::AtomicUsize,
+    /// Cooperative-budget checkpoints in the collection that yielded to the
+    /// scheduler.
+    pub yields: std::sync::atomic::AtomicU64,
 }
 
 /// One operator query stamped with its send instant, so the peer manager can
@@ -1650,10 +1672,12 @@ impl From<PeerManagerOperatorQuery> for PeerManagerCommand {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer,
                 deadline,
+                progress,
                 reply,
             } => Self::QueryImportPolicyTermHits {
                 peer,
                 deadline,
+                progress,
                 reply,
             },
             PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {

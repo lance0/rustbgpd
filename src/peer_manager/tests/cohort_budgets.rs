@@ -245,6 +245,7 @@ async fn assert_api_policy_reads(entry: ApiPolicyEntry) {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer: None,
                 deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                progress: Arc::default(),
                 reply,
             }
             .into(),
@@ -1155,6 +1156,7 @@ async fn operator_reads_are_served_while_the_cohort_rib_reply_is_held() {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer: None,
                 deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                progress: Arc::default(),
                 reply,
             }
             .into(),
@@ -1352,6 +1354,7 @@ async fn assert_operator_reads_during_rollback(reject_first_restore: bool) {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer: None,
                 deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                progress: Arc::default(),
                 reply,
             }
             .into(),

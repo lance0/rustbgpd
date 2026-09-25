@@ -1371,6 +1371,7 @@ async fn term_hits(
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer: None,
                 deadline: tokio::time::Instant::now() + READER_DEADLINE,
+                progress: Arc::default(),
                 reply,
             }
             .into(),

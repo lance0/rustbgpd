@@ -1281,9 +1281,17 @@ the shared two-second deadline.
 `elapsed_ms`, its remaining shared `budget_ms` at entry, cumulative
 `rpc_elapsed_ms`, and the gRPC `code`. A waiting stage records `state=waiting`
 so cancellation retains the active API stage. A failed stage is the
-last completed entry; no later stages run. These additive diagnostic fields
-do not change RPC responses or the two-second deadline. They identify the
-API wait, not its underlying actor or session cause. `RUST_LOG=info,policy_stats=debug`
+last completed entry; no later stages run. The completed `import` entry also
+splits its peer-manager wait: `admission_ms` (until the peer manager
+dispatched the query), `collection_ms` (until the collector finished, or
+until the stage ended if it had not), `publications=read/selected` session
+counter publications, and `yields`, the collection's cooperative-budget
+checkpoints that yielded to the scheduler. An import query the peer manager
+never dispatched records `admission=pending` instead. The remainder of the
+stage's `elapsed_ms` is reply delivery. These additive diagnostic fields
+do not change RPC responses, the two-second deadline, or the collection's
+scheduling. Apart from that import split, they identify the API wait, not its
+underlying actor or session cause. `RUST_LOG=info,policy_stats=debug`
 also emits structured stage-completion events; no per-peer records are emitted
 for a fleet request.
 

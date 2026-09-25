@@ -354,6 +354,7 @@ async fn policy_query_timeout_does_not_masquerade_as_missing_session() {
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: Some(configured),
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -413,6 +414,7 @@ async fn import_policy_stats_omit_an_answered_chainless_peer() {
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: Some(peer),
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -457,6 +459,7 @@ async fn import_policy_stats_over_concurrency_cap_use_one_deadline_without_block
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -546,6 +549,7 @@ async fn import_policy_stats_unordered_reads_release_ready_later_publications() 
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -626,6 +630,7 @@ async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries(
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -651,6 +656,7 @@ async fn import_policy_stats_caller_drop_cancels_snapshot_and_in_flight_queries(
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -699,6 +705,7 @@ async fn import_policy_stats_ready_fleet_cooperates_and_cancellation_releases_ta
         .dispatch_import_policy_term_hits(
             None,
             tokio::time::Instant::now() + Duration::from_secs(2),
+            Arc::default(),
             reply,
         )
         .unwrap();
@@ -755,6 +762,7 @@ async fn import_policy_stats_pins_at_most_64_active_descriptors() {
         .dispatch_import_policy_term_hits(
             None,
             tokio::time::Instant::now() + Duration::from_secs(2),
+            Arc::default(),
             reply,
         )
         .unwrap();
@@ -785,6 +793,84 @@ async fn import_policy_stats_pins_at_most_64_active_descriptors() {
     for (_, managed) in manager.peers.drain() {
         managed.handle.shutdown().await.unwrap().unwrap();
     }
+}
+
+/// A query queued behind a held peer manager records its admission wait, and
+/// a full collection records every publication it read plus the scheduler
+/// yields of its term walk (256 terms per session exhaust the coop budget).
+#[tokio::test(start_paused = true)]
+async fn import_policy_stats_progress_records_admission_publications_and_yields() {
+    use std::sync::atomic::Ordering;
+
+    const HOLD: Duration = Duration::from_millis(250);
+    const SESSIONS: usize = 8;
+
+    let (tx, rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let (controls, mut control_rx) = mpsc::unbounded_channel();
+    let mut chain = validation_policy_chain(ImportValidationDependency::Rpki);
+    let term = chain.policies[0].policy.entries[0].clone();
+    chain.policies[0].policy.entries = vec![term; 256];
+    for host in 1..=SESSIONS {
+        let address = IpAddr::V4(Ipv4Addr::new(198, 18, 0, u8::try_from(host).unwrap()));
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            controlled_policy_query_handle(address, &controls),
+            false,
+        );
+        let (_, publication) = control_rx.try_recv().unwrap();
+        publication
+            .send(Some(installed_policy(0, Some(&chain))))
+            .unwrap();
+    }
+
+    let progress = Arc::new(rustbgpd_api::peer_types::ImportPolicyStatsProgress::default());
+    let (reply, response) = oneshot::channel();
+    let sent = tokio::time::Instant::now();
+    tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
+        peer: None,
+        deadline: sent + Duration::from_secs(2),
+        progress: Arc::clone(&progress),
+        reply,
+    })
+    .await
+    .unwrap();
+    // The manager is not running yet: the query waits in its queue.
+    tokio::time::advance(HOLD).await;
+    assert!(progress.admitted.get().is_none());
+    let manager_task = tokio::spawn(manager.run());
+
+    let rows = response.await.unwrap().expect("complete fleet snapshot");
+    assert_eq!(rows.len(), SESSIONS);
+    let admitted = *progress.admitted.get().expect("dispatch stamps admission");
+    assert!(
+        admitted - sent >= HOLD,
+        "admission wait {:?}",
+        admitted - sent
+    );
+    assert!(
+        progress
+            .collected
+            .get()
+            .is_some_and(|done| *done >= admitted)
+    );
+    assert_eq!(progress.targets.load(Ordering::Relaxed), SESSIONS);
+    assert_eq!(progress.read.load(Ordering::Relaxed), SESSIONS);
+    assert!(progress.yields.load(Ordering::Relaxed) > 0);
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager_task.await.unwrap();
 }
 
 /// LAN-661: one successful fleet row followed by a stalled session fails the
@@ -821,6 +907,7 @@ async fn import_policy_stats_mixed_success_and_timeout_is_atomic() {
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -883,6 +970,7 @@ async fn import_policy_stats_all_peers_session_gone_after_admission_is_atomic() 
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: None,
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -928,6 +1016,7 @@ async fn import_policy_stats_selected_session_gone_is_truthful() {
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: Some(peer),
         deadline: tokio::time::Instant::now() + EXPLAIN_QUERY_TIMEOUT,
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -965,6 +1054,7 @@ async fn import_policy_stats_expired_deadline_precedes_resolution_and_selected_s
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
         deadline: tokio::time::Instant::now(),
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -981,6 +1071,7 @@ async fn import_policy_stats_expired_deadline_precedes_resolution_and_selected_s
     tx.send(PeerManagerCommand::QueryImportPolicyTermHits {
         peer: Some(peer),
         deadline: tokio::time::Instant::now(),
+        progress: Arc::default(),
         reply,
     })
     .await
@@ -1044,6 +1135,7 @@ async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readine
                 PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                     peer: Some(address),
                     deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                    progress: Arc::default(),
                     reply,
                 }
                 .into(),
@@ -1128,6 +1220,7 @@ async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
             PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                 peer: Some(address),
                 deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                progress: Arc::default(),
                 reply,
             }
             .into(),
@@ -1294,6 +1387,7 @@ async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadlin
                 PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                     peer: None,
                     deadline,
+                    progress: Arc::default(),
                     reply,
                 }
                 .into(),
