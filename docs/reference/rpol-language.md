@@ -1635,7 +1635,7 @@ them without resetting anything
 
 ```console
 $ rbgp policy stats --neighbor 10.0.0.2 --direction both
-10.0.0.2 export chain — 1204 routes evaluated since install
+10.0.0.2 export chain — 1204 routes evaluated since install (counter instance 4127)
   POLICY                           TERM                     HITS
   customer-in(200)                 rpki-guard               3
   customer-in(200)                 customer-routes          990
@@ -1656,8 +1656,9 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
 - TOML chain members count too; their unnamed statements report by
   `term_index` (`statement 0`, `statement 1`, ...).
 - `--direction` selects **export** (the default), **import**, or
-  **both**. Export chains are read from the RIB manager; import chains
-  are read from each session's published installed-counter state.
+  **both**. Export chains are read from the roster the RIB manager
+  publishes; import chains are read from each session's published
+  installed-counter state.
   Chainless sessions contribute no row. Every backend wait shares one
   absolute two-second deadline for the whole RPC; exhausting it fails the
   RPC as `DEADLINE_EXCEEDED`. A departed session, closed publication, or
@@ -1670,7 +1671,11 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   replacement, not continuous history. A session's initial chain
   reports generation 0; content-equal re-resolves are not reinstalled,
   so the generation moves only when the peer's resolved chain content
-  does. Export chains do not track an install generation yet.
+  does. Export chains report their counter-instance id instead
+  (`counter instance N` in text output): nonzero, shared by update-group
+  members that share counters, and new whenever the counters restart,
+  including each session registration of an ungrouped peer. Compare it
+  only for equality.
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.
 - Chains that have denied routes through the **evaluation-error rail**

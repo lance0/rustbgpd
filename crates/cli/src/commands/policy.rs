@@ -925,12 +925,11 @@ struct JsonPolicyStats {
     /// `None` when no evaluation has errored since chain install.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
-    /// Install identity of the chain instance the counters belong to.
-    /// `None` for export chains (install generation not tracked yet,
-    /// LAN-311); import chains always report it, so counters that
-    /// reset to zero read as "new chain instance", not continuous
-    /// history.
-    policy_generation: Option<u64>,
+    /// Identity of the chain instance the counters belong to, so
+    /// counters that reset to zero read as "new chain instance", not
+    /// continuous history: the install generation for import chains, the
+    /// counter-instance id for export chains.
+    policy_generation: u64,
     terms: Vec<JsonPolicyTermStat>,
 }
 
@@ -978,7 +977,7 @@ fn stats_to_json(
             routes_evaluated: chain.routes_evaluated,
             eval_errors: chain.eval_errors,
             last_error: (!chain.last_error.is_empty()).then(|| chain.last_error.clone()),
-            policy_generation: (chain.direction == "import").then_some(chain.policy_generation),
+            policy_generation: chain.policy_generation,
             terms: chain
                 .terms
                 .iter()
@@ -1005,6 +1004,25 @@ fn stats_to_json(
         })
         .collect();
     JsonPolicyStatsDoc { chains, datasets }
+}
+
+/// One chain's heading line. Import chains carry their install generation
+/// (bumps on every chain install, content-equal reinstalls included);
+/// export chains carry their counter-instance id (new whenever the counters
+/// restart).
+fn stats_chain_heading(chain: &crate::proto::PolicyChainStats, peer: Option<&str>) -> String {
+    let identity = if chain.direction == "import" {
+        "install generation"
+    } else {
+        "counter instance"
+    };
+    format!(
+        "{} {} chain — {} routes evaluated since install ({identity} {})",
+        operator_peer_address(peer, &chain.peer_address),
+        chain.direction,
+        chain.routes_evaluated,
+        chain.policy_generation
+    )
 }
 
 /// `rbgp policy stats [--peer ADDR] [--direction import|export|both]`
@@ -1043,20 +1061,7 @@ pub async fn stats(
         outln!("No installed policy chains")?;
     }
     for chain in &resp.chains {
-        // Import chains carry an install generation (bumps on every
-        // chain install, content-equal reinstalls included); export
-        // chains do not track one yet (LAN-311).
-        let generation = if chain.direction == "import" {
-            format!(" (install generation {})", chain.policy_generation)
-        } else {
-            String::new()
-        };
-        outln!(
-            "{} {} chain — {} routes evaluated since install{generation}",
-            operator_peer_address(peer, &chain.peer_address),
-            chain.direction,
-            chain.routes_evaluated
-        )?;
+        outln!("{}", stats_chain_heading(chain, peer))?;
         // LAN-301: evaluation errors are fail-closed denies — surface
         // the count and the most recent blame line when nonzero.
         if chain.eval_errors > 0 {
@@ -3209,7 +3214,7 @@ mod tests {
         let mut expected = serde_json::json!({
             "chains": [{
                 "peer_address": "global", "direction": "export",
-                "routes_evaluated": 0, "eval_errors": 0, "policy_generation": null,
+                "routes_evaluated": 0, "eval_errors": 0, "policy_generation": 19,
                 "terms": [{
                     "policy_index": 0, "policy": null, "term_index": 0,
                     "term": null, "hits": 0,
@@ -3226,9 +3231,9 @@ mod tests {
             expected
         );
 
-        // Import generation zero is present; export generations are intentionally
-        // null even if a backend supplies a nonzero value. Chain errors are omitted
-        // when empty, while dataset errors and anonymous policy/term names are null.
+        // Export rows carry their counter-instance id and import generation zero
+        // is present. Chain errors are omitted when empty, while dataset errors
+        // and anonymous policy/term names are null.
         response.chains[0].direction = "import".into();
         response.chains[0].policy_generation = 0;
         expected["chains"][0]["direction"] = serde_json::json!("import");
@@ -3242,6 +3247,29 @@ mod tests {
         assert_eq!(
             serde_json::to_value(stats_to_json(&response, None)).unwrap(),
             serde_json::json!({"chains": []})
+        );
+    }
+
+    /// Both directions name the identity their counters belong to: the
+    /// install generation for import, the counter-instance id for export.
+    #[test]
+    fn stats_heading_names_each_directions_counter_identity() {
+        let mut chain = proto::PolicyChainStats {
+            peer_address: "fe80::2".into(),
+            direction: "export".into(),
+            routes_evaluated: 7,
+            policy_generation: 41,
+            ..Default::default()
+        };
+        assert_eq!(
+            stats_chain_heading(&chain, Some("fe80::2%eth0")),
+            "fe80::2%eth0 export chain — 7 routes evaluated since install (counter instance 41)"
+        );
+        chain.direction = "import".into();
+        chain.policy_generation = 0;
+        assert_eq!(
+            stats_chain_heading(&chain, None),
+            "fe80::2 import chain — 7 routes evaluated since install (install generation 0)"
         );
     }
 
