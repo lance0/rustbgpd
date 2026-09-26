@@ -2,8 +2,9 @@
 
 - Max-prefix shutdown latches and inbound `block` episodes now have lasting
   alerting. The new `bgp_max_prefix_latched{peer,interface}` gauge is 1 while
-  a max-prefix shutdown latch holds a peer off, until an explicit enable or a
-  successful timed restart, and is seeded and reaped with the other exact
+  a max-prefix shutdown latch holds a peer off, until an explicit enable or
+  until the timed hold-down expires into a successful restart or, under strict
+  BFD, into the BFD withhold. It is seeded and reaped with the other exact
   peer-identity gauges. The shipped alert pack adds `BgpMaxPrefixLatched`
   (critical, joined to `bgp_peer_info`), which keeps firing after the
   10-minute `BgpMaxPrefixLimitExceeded` event alert resolves, and

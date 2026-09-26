@@ -1584,3 +1584,35 @@ async fn bfd_busy_down_up_down_retries_final_stop() {
     assert!(matches!(receiver.try_recv(), Ok(PeerCommand::BfdDown)));
     assert!(mgr.bfd_withholding(&peer));
 }
+
+/// Load-bearing strict-BFD expiry proof: a hold-down that expires while
+/// strict BFD withholds BGP clears the latch without a Start, so the latch
+/// gauge must read 0 even though no restart was attempted. Removing the
+/// publish in the BFD-withhold branch leaves it at 1.
+#[tokio::test(start_paused = true)]
+async fn strict_bfd_max_prefix_expiry_clears_latched_gauge_without_start() {
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 95));
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, _desired) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters.clone()));
+    let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+    managed.enabled = false;
+    managed.max_prefix_restart_seconds = Some(30);
+    mgr.seed_peer_truth_metrics(&key(peer), false);
+    assert!(mgr.install_max_prefix_latch(key(peer), 1, "max-prefix".to_string(), Some(30)));
+    let latched = |mgr: &PeerManager| {
+        peer_identity_gauge(&mgr.metrics, "bgp_max_prefix_latched", "10.0.0.95", "")
+    };
+    assert_eq!(latched(&mgr), Some(1.0));
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+
+    assert!(!mgr.max_prefix_latches.contains_key(&key(peer)));
+    assert!(mgr.bfd_withholding(&peer), "BGP waits for BFD Up");
+    assert_eq!(counters.start.load(Ordering::SeqCst), 0);
+    assert_eq!(latched(&mgr), Some(0.0));
+    assert_eq!(
+        peer_identity_gauge(&mgr.metrics, "bgp_peer_admin_enabled", "10.0.0.95", ""),
+        Some(1.0)
+    );
+}

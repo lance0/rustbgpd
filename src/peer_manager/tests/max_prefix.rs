@@ -1186,7 +1186,8 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
 /// manager latch through its whole life. Dropping the install publish leaves
 /// the breach at 0; dropping the latch-map read from the seed re-adds a
 /// latched peer at 0; dropping the clear on explicit enable or on a
-/// successful timed restart leaves the recovered peer at 1. A duplicate
+/// successful timed restart leaves the recovered peer at 1 (the strict-BFD
+/// expiry clear is pinned in the BFD tests). A duplicate
 /// terminal notice must not move it.
 #[tokio::test(start_paused = true)]
 async fn max_prefix_latched_gauge_follows_latch_until_enable_or_timed_restart() {

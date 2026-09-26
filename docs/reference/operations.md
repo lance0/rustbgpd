@@ -1309,8 +1309,9 @@ Explicit enable clears the latch, including any armed countdown, and requests
 an immediate start (subject to strict BFD withholding).
 
 From Prometheus, `bgp_max_prefix_latched{peer,interface}` (see the
-[Health metrics](#health)) is 1 for exactly this latch and returns to 0 on
-explicit enable or a successful timed restart.
+[Health metrics](#health)) is 1 for exactly this latch. It returns to 0 on
+explicit enable, or when the timed hold-down expires into a successful restart
+or, under strict BFD, into the BFD withhold (BGP then starts on BFD Up).
 The latched peer also reads `bgp_peer_admin_enabled` = 0, so the shipped
 `BgpSessionNotEstablished` alert stays silent for it. The shipped
 `BgpMaxPrefixLimitExceeded` alert pages on the breach and resolves 10 minutes
@@ -1460,7 +1461,7 @@ one beside it, so `group_left` joins never match two identities for one peer.
 | Metric | What it tells you |
 |--------|-------------------|
 | `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers both an operator disable and a max-prefix shutdown latch, even though the configuration still says enabled; `bgp_max_prefix_latched` separates the two |
-| `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable or a successful timed restart; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
+| `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
 | `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |

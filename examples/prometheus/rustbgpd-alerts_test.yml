@@ -551,7 +551,8 @@ tests:
                 Peer 192.0.2.40 on interface "" at edge1:9179 is held down
                 after a max-prefix shutdown. It stays down until `rbgp
                 neighbor <addr> enable` or, when max_prefix_restart_seconds
-                is set, one successful timed restart.
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
           - exp_labels:
               severity: critical
               peer: 192.0.2.42
@@ -562,7 +563,8 @@ tests:
                 Peer 192.0.2.42 on interface "" at edge1:9179 is held down
                 after a max-prefix shutdown. It stays down until `rbgp
                 neighbor <addr> enable` or, when max_prefix_restart_seconds
-                is set, one successful timed restart.
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
       - eval_time: 31m
         alertname: BgpMaxPrefixLimitExceeded
         exp_alerts: []
@@ -582,7 +584,8 @@ tests:
                 Peer 192.0.2.40 on interface "" at edge1:9179 is held down
                 after a max-prefix shutdown. It stays down until `rbgp
                 neighbor <addr> enable` or, when max_prefix_restart_seconds
-                is set, one successful timed restart.
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
 
   # ── BgpMaxPrefixBlocking ──────────────────────────────────────
   # Load-bearing: pending at 4m30s and firing at 5m30s pins the 5-minute

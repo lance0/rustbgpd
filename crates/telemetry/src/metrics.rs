@@ -823,7 +823,8 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_max_prefix_latched",
                 "Peer latched off by a max-prefix shutdown (1 = latched until explicit \
-                 enable or a successful timed restart, 0 = not latched)",
+                 enable, or until the timed hold-down expires into a successful restart \
+                 or, under strict BFD, into the BFD withhold; 0 = not latched)",
             ),
             &["peer", "interface"],
         )

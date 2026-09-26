@@ -229,7 +229,9 @@ groups:
 
       - alert: BgpMaxPrefixLatched
         # Level alert for the shutdown latch: 1 from the breach until an
-        # explicit enable or a successful timed restart. The latched peer
+        # explicit enable, or until the timed hold-down expires into a
+        # successful restart or, under strict BFD, into the BFD withhold
+        # (BGP then starts on BFD Up). The latched peer
         # reads bgp_peer_admin_enabled == 0, so BgpSessionNotEstablished
         # stays silent for it by design. The `bgp_peer_info` join names the
         # member; the `or ignoring` fallback keeps a peer without an identity
@@ -250,7 +252,9 @@ groups:
             Peer {{ $labels.peer }} on interface "{{ $labels.interface }}" at
             {{ $labels.instance }} is held down after a max-prefix shutdown.
             It stays down until `rbgp neighbor <addr> enable` or, when
-            max_prefix_restart_seconds is set, one successful timed restart.
+            max_prefix_restart_seconds is set, until the hold-down expires
+            into a successful restart or, under strict BFD, into the BFD
+            withhold.
 
       - alert: BgpMaxPrefixBlocking
         # Inbound sibling of BgpOutboundPrefixBlocking. Under
