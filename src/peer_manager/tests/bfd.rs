@@ -1616,3 +1616,183 @@ async fn strict_bfd_max_prefix_expiry_clears_latched_gauge_without_start() {
         Some(1.0)
     );
 }
+
+/// Exercise the real startup registration operation, including disabled peers
+/// retained by max-prefix latches. Only genuine admin changes need an immediate
+/// publication; the final resync must still release newly registered strict peers.
+#[tokio::test]
+async fn configured_bfd_registration_batches_redundant_publications() {
+    let peers: Vec<_> = (1..=12)
+        .map(|host| IpAddr::V4(Ipv4Addr::new(127, 24, 0, host)))
+        .collect();
+    let configured: HashMap<_, _> = peers.iter().map(|&p| (p, bfd_params(p, true))).collect();
+    let mut expected = configured.clone();
+    let (desired_tx, mut desired) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let mut mgr = test_peer_manager().with_bfd_coupling(desired_tx, state_rx, configured);
+    mgr.republish_bfd_desired();
+    assert_eq!(desired.borrow().sessions.len(), peers.len());
+    assert!(desired.borrow().sessions.iter().all(|p| p.enabled));
+    // An actor acknowledgement before registration cannot release later holds.
+    mgr.handle_bfd_state_change(up_ack(peers[0])).await;
+    for &peer in &peers[10..] {
+        mgr.install_max_prefix_latch(key(peer), 1, "max-prefix".into(), None);
+        expected.get_mut(&peer).unwrap().enabled = false;
+    }
+    mgr.add_configured_peers(peers.iter().map(|&p| make_config(p, 65002)).collect())
+        .await
+        .unwrap();
+    assert_eq!(
+        mgr.bfd_coupling.as_ref().unwrap().desired_publications,
+        4,
+        "initial + two actual disable transitions + one final registration resync"
+    );
+    let actual: HashMap<_, _> = desired
+        .borrow()
+        .sessions
+        .iter()
+        .cloned()
+        .map(|p| (p.peer, p))
+        .collect();
+    assert_eq!(actual, expected);
+    for (index, peer) in peers.iter().enumerate() {
+        assert_eq!(mgr.peers.get(&key(*peer)).unwrap().enabled, index < 10);
+        assert_eq!(mgr.bfd_withholding(peer), index < 10);
+    }
+    mgr.handle_bfd_state_change(up_ack(peers[0])).await;
+    assert!(!mgr.bfd_withholding(&peers[0]));
+    // Repeated enable outside registration still needs a fresh actor ack.
+    desired.borrow_and_update();
+    mgr.enable_peer(key(peers[0])).await.unwrap();
+    assert!(desired.has_changed().unwrap());
+    assert!(mgr.bfd_withholding(&peers[0]));
+    mgr.handle_bfd_state_change(up_ack(peers[0])).await;
+    assert!(!mgr.bfd_withholding(&peers[0]));
+    // A disabled startup member ignores Up until explicitly enabled.
+    let disabled = peers[10];
+    mgr.handle_bfd_state_change(up_ack(disabled)).await;
+    assert!(!mgr.peers.get(&key(disabled)).unwrap().enabled);
+    mgr.enable_peer(key(disabled)).await.unwrap();
+    assert!(mgr.bfd_withholding(&disabled));
+    assert!(
+        desired
+            .borrow()
+            .sessions
+            .iter()
+            .find(|p| p.peer == disabled)
+            .unwrap()
+            .enabled
+    );
+    mgr.handle_bfd_state_change(up_ack(disabled)).await;
+    assert!(!mgr.bfd_withholding(&disabled));
+}
+
+#[tokio::test]
+async fn configured_bfd_registration_partial_error_resyncs_and_ends_batch() {
+    let first = IpAddr::V4(Ipv4Addr::new(127, 24, 1, 1));
+    let later = IpAddr::V4(Ipv4Addr::new(127, 24, 1, 2));
+    let configured = HashMap::from([
+        (first, bfd_params(first, true)),
+        (later, bfd_params(later, true)),
+    ]);
+    let (desired_tx, mut desired) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let mut mgr = test_peer_manager().with_bfd_coupling(desired_tx, state_rx, configured);
+    mgr.republish_bfd_desired();
+    let original = desired.borrow_and_update().clone();
+    let (index, error) = mgr
+        .add_configured_peers(vec![
+            make_config(first, 65002),
+            make_config(first, 65002),
+            make_config(later, 65002),
+        ])
+        .await
+        .unwrap_err();
+    assert_eq!(index, 1);
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::PeerLifecycleError::AlreadyExists(_)
+    ));
+    assert!(!mgr.bfd_coupling.as_ref().unwrap().registering);
+    assert_eq!(mgr.bfd_coupling.as_ref().unwrap().desired_publications, 2);
+    assert_eq!(*desired.borrow(), original);
+    assert!(
+        desired.has_changed().unwrap(),
+        "partial success still needs a fresh resync"
+    );
+    assert!(mgr.bfd_withholding(&first));
+    assert!(!mgr.peers.contains_key(&key(later)));
+    desired.borrow_and_update();
+    mgr.add_peer(make_config(later, 65002), false)
+        .await
+        .unwrap();
+    assert!(
+        desired.has_changed().unwrap(),
+        "ordinary adds must no longer be batched"
+    );
+    assert!(mgr.bfd_withholding(&later));
+}
+
+#[tokio::test]
+async fn bfd_registration_preserves_immediate_admin_transitions() {
+    let peer = IpAddr::V4(Ipv4Addr::new(127, 24, 2, 1));
+    let counters = Arc::new(BfdCouplingCounters::default());
+    let (mut mgr, mut desired) = coupled_mgr(peer, true, fake_bfd_peer_handle(counters));
+    mgr.republish_bfd_desired();
+    desired.borrow_and_update();
+    mgr.bfd_coupling.as_mut().unwrap().registering = true;
+    mgr.mark_bfd_withheld(peer);
+    mgr.set_bfd_peer_disabled(peer, true);
+    assert!(
+        desired.has_changed().unwrap(),
+        "a real disable cannot wait for batch end"
+    );
+    assert!(!desired.borrow_and_update().sessions[0].enabled);
+    assert!(
+        !mgr.bfd_withholding(&peer),
+        "disable clears the previous hold immediately"
+    );
+    mgr.set_bfd_peer_disabled(peer, false);
+    assert!(
+        desired.has_changed().unwrap(),
+        "a real re-enable cannot wait for batch end"
+    );
+    assert!(desired.borrow_and_update().sessions[0].enabled);
+    mgr.set_bfd_peer_disabled(peer, false);
+    assert!(
+        !desired.has_changed().unwrap(),
+        "unchanged registration membership is redundant"
+    );
+    mgr.bfd_coupling.as_mut().unwrap().registering = false;
+    mgr.republish_bfd_desired();
+}
+
+#[tokio::test]
+async fn bfd_registration_preserves_disabled_delete_and_readd() {
+    let peer = IpAddr::V4(Ipv4Addr::new(127, 24, 3, 1));
+    let configured = HashMap::from([(peer, bfd_params(peer, true))]);
+    let (desired_tx, desired) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let mut mgr = test_peer_manager().with_bfd_coupling(desired_tx, state_rx, configured);
+    mgr.republish_bfd_desired();
+    mgr.add_configured_peers(vec![make_config(peer, 65002)])
+        .await
+        .unwrap();
+    mgr.disable_peer(key(peer), None).await.unwrap();
+    assert!(!desired.borrow().sessions[0].enabled);
+    assert!(!mgr.bfd_withholding(&peer));
+    mgr.delete_peer(key(peer), false).await.unwrap();
+    assert!(!desired.borrow().sessions[0].enabled);
+    mgr.add_peer_with_admin_state(make_config(peer, 65002), false, false)
+        .await
+        .unwrap();
+    assert!(!mgr.peers.get(&key(peer)).unwrap().enabled);
+    assert!(!desired.borrow().sessions[0].enabled);
+    assert!(!mgr.bfd_withholding(&peer));
+    mgr.delete_peer(key(peer), false).await.unwrap();
+    mgr.add_peer(make_config(peer, 65002), false).await.unwrap();
+    assert!(desired.borrow().sessions[0].enabled);
+    assert!(mgr.bfd_withholding(&peer));
+    mgr.handle_bfd_state_change(up_ack(peer)).await;
+    assert!(!mgr.bfd_withholding(&peer));
+}

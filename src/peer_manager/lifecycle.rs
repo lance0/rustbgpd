@@ -553,12 +553,16 @@ impl PeerManager {
     }
 
     /// Startup registration as one operation: one import-roster publication
-    /// however many peers it adds (ADR-0136).
+    /// however many peers it adds (ADR-0136), plus one final BFD resync.
+    /// Genuine BFD admin-state changes still publish immediately.
     pub(super) async fn add_configured_peers(
         &mut self,
         configs: Vec<PeerManagerNeighborConfig>,
     ) -> Result<(), (usize, PeerLifecycleError)> {
         let batch = self.peers.begin_batch();
+        if let Some(coupling) = self.bfd_coupling.as_mut() {
+            coupling.registering = true;
+        }
         let mut result = Ok(());
         for (index, config) in configs.into_iter().enumerate() {
             if let Err(error) = self.add_peer(config, false).await {
@@ -567,6 +571,13 @@ impl PeerManager {
             }
         }
         self.peers.end_batch(batch);
+        if let Some(coupling) = self.bfd_coupling.as_mut() {
+            coupling.registering = false;
+        }
+        // The command owns this await through success or partial failure.
+        // Resync after registration: an initial BFD ack may have arrived
+        // before the strict peers existed and could not release their holds.
+        self.republish_bfd_desired();
         result
     }
 
