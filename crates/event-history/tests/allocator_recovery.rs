@@ -401,3 +401,192 @@ async fn repeated_open_failure_quarantines_and_keeps_the_earlier_copy() {
     assert_eq!(read("events.db.stale.1-wal"), b"earlier wal");
     assert!(!dir.path().join("events.db.stale-wal").exists());
 }
+
+/// Every file in `dir` with its bytes (`None` when unreadable), for
+/// asserting that a failed start left the store exactly as it found it.
+fn snapshot_files(dir: &std::path::Path) -> Vec<(String, Option<Vec<u8>>)> {
+    let mut files: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_file())
+        .map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read(&path).ok())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// An intact store with three committed events, plus its config.
+async fn intact_store() -> (TempDir, EventHistoryConfig) {
+    let dir = TempDir::new().unwrap();
+    let cfg = EventHistoryConfig {
+        path: dir.path().join("events.db"),
+        batch_interval: Duration::from_millis(5),
+        ..EventHistoryConfig::default()
+    };
+    write_committed_events(cfg.clone(), 3).await;
+    (dir, cfg)
+}
+
+/// Start against a store the host will not let EHM open, on the first open
+/// and on the retry, and assert that the store is left exactly in place.
+async fn assert_host_error_leaves_store_in_place(dir: &TempDir, cfg: &EventHistoryConfig) {
+    let before = snapshot_files(dir.path());
+    let retries = count_probe_retries(|| {});
+
+    for required in [true, false] {
+        let err = EventHistoryManager::start(EventHistoryConfig {
+            required,
+            ..cfg.clone()
+        })
+        .await
+        .expect_err("a store the host will not open must not start");
+        assert!(
+            matches!(err, EventHistoryError::Sqlite(_)),
+            "the host error must reach startup, got {err:?}"
+        );
+    }
+    assert_eq!(
+        retries.load(Ordering::Acquire),
+        2,
+        "each start retries once"
+    );
+    let quarantined: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains("stale"))
+        .collect();
+    assert!(
+        quarantined.is_empty(),
+        "an intact store must not be quarantined: {quarantined:?}"
+    );
+    // SQLite may leave empty side files behind when it opens a store
+    // read-only; every file that was there must be byte-for-byte intact.
+    let after = snapshot_files(dir.path());
+    for file in &before {
+        assert!(after.contains(file), "{} changed or moved", file.0);
+    }
+}
+
+/// Once the host condition clears, the same store opens with its history.
+async fn assert_store_reopens_intact(cfg: EventHistoryConfig) {
+    let manager = EventHistoryManager::start(cfg).await.unwrap();
+    assert!(!manager.state().degraded());
+    assert_eq!(drain_and_count(&manager).await, vec![1, 2, 3]);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn unopenable_wal_leaves_an_intact_store_in_place() {
+    // Load-bearing break: a side file the host will not let SQLite open
+    // (EISDIR here, EACCES for a root-owned file) failed both attempts,
+    // so the intact store was quarantined as corrupt.
+    let (dir, cfg) = intact_store().await;
+    let wal = dir.path().join("events.db-wal");
+    let _ = fs::remove_file(&wal);
+    fs::create_dir(&wal).unwrap();
+
+    assert_host_error_leaves_store_in_place(&dir, &cfg).await;
+
+    fs::remove_dir(&wal).unwrap();
+    assert_store_reopens_intact(cfg).await;
+}
+
+/// Whether permissions deny this process a write to `probe`; with
+/// `CAP_DAC_OVERRIDE` (root) they do not, and the permission cases have
+/// nothing to test.
+#[cfg(unix)]
+fn permissions_bind(probe: &std::path::Path) -> bool {
+    let existed = probe.exists();
+    let bind = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(probe)
+        .is_err();
+    if !bind {
+        if !existed {
+            fs::remove_file(probe).unwrap();
+        }
+        eprintln!("skipping: file permissions do not bind this process");
+    }
+    bind
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_store_file_refuses_to_start() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A root-owned events.db: SQLite opens it read-only, and an existing
+    // store bootstraps without writing, so startup used to succeed and
+    // the first append degraded the log.
+    let (dir, cfg) = intact_store().await;
+    fs::set_permissions(&cfg.path, fs::Permissions::from_mode(0o444)).unwrap();
+    if !permissions_bind(&cfg.path) {
+        return;
+    }
+
+    assert_host_error_leaves_store_in_place(&dir, &cfg).await;
+
+    // SQLite created the side files with the database file's mode, so the
+    // operator's fix covers the whole set, as it would for a chown.
+    for entry in fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert_store_reopens_intact(cfg).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn root_owned_side_files_leave_an_intact_store_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Side files left by a manual run as root: the daemon's user can
+    // neither read nor write them.
+    let (dir, cfg) = intact_store().await;
+    let side = [
+        dir.path().join("events.db-wal"),
+        dir.path().join("events.db-shm"),
+    ];
+    for file in &side {
+        fs::write(file, b"").unwrap();
+        fs::set_permissions(file, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    if !permissions_bind(&side[0]) {
+        return;
+    }
+
+    assert_host_error_leaves_store_in_place(&dir, &cfg).await;
+
+    for file in &side {
+        fs::remove_file(file).unwrap();
+    }
+    assert_store_reopens_intact(cfg).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_state_dir_leaves_an_intact_store_in_place() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A read-only state directory (a read-only remount, or a directory the
+    // daemon's user cannot write): SQLite cannot create the WAL.
+    let (dir, cfg) = intact_store().await;
+    let set_mode = |mode| {
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+    };
+    set_mode(0o555);
+    if !permissions_bind(&dir.path().join("probe")) {
+        set_mode(0o755);
+        return;
+    }
+
+    assert_host_error_leaves_store_in_place(&dir, &cfg).await;
+
+    set_mode(0o755);
+    assert_store_reopens_intact(cfg).await;
+}
