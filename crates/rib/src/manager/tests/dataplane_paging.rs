@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::*;
 use crate::adj_rib_in::AdjRibIn;
+use crate::attr_set::AttrSet;
 use crate::manager::queries::{DATAPLANE_PAGE_MAX_NEXT_HOPS, DATAPLANE_PAGE_MAX_PREFIXES};
 use crate::route::{FibInstallCandidate, NextHopScope, Route};
 use crate::update::{
@@ -58,7 +59,7 @@ fn route(prefix: Prefix, peer: Ipv4Addr, next_hop: IpAddr, as_path: &[u32]) -> R
     route.peer = IpAddr::V4(peer);
     route.peer_router_id = peer;
     route.next_hop = next_hop;
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(as_path.to_vec())],
@@ -394,7 +395,7 @@ fn prefix_cursor_has_live_churn_semantics() {
         IpAddr::V4(replacement_peer),
         &[65001],
     );
-    replacement.attributes = Arc::new(vec![
+    replacement.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65001])],
@@ -458,9 +459,11 @@ fn paged_fib_matches_full_single_strict_relaxed_and_weighted_views() {
         );
         strict.path_id = u32::try_from(index).unwrap();
         let mut weighted = route(weighted_prefix, source, IpAddr::V4(source), &[65100]);
-        Arc::make_mut(&mut weighted.attributes).push(PathAttribute::ExtendedCommunities(vec![
-            ExtendedCommunity::link_bandwidth(65001, if index == 0 { 40e9 } else { 10e9 }),
-        ]));
+        AttrSet::edit(&mut weighted.attributes, |attrs| {
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::link_bandwidth(65001, if index == 0 { 40e9 } else { 10e9 }),
+            ]));
+        });
         apply_routes(&mut manager, source, vec![strict, weighted]);
     }
 

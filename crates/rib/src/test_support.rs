@@ -10,7 +10,6 @@
 //! their own builders.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_wire::{
@@ -18,6 +17,7 @@ use rustbgpd_wire::{
     Ipv6Prefix, Origin, PathAttribute, Prefix,
 };
 
+use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecRoute, Route, RouteOrigin};
 
 /// The BGP Identifier of the session peer at `peer`: the address itself
@@ -47,7 +47,7 @@ pub(crate) fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(next_hop),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(next_hop)),
@@ -67,7 +67,7 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V6(next_hop),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6(next_hop)),
@@ -95,7 +95,7 @@ pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref:
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
@@ -122,7 +122,7 @@ pub(crate) fn make_route_with_path_id(prefix: Prefix, path_id: u32) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(1, 1, 1, 1),

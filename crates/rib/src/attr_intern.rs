@@ -27,15 +27,16 @@
 
 use std::sync::Arc;
 
-use rustbgpd_wire::PathAttribute;
 use rustc_hash::FxHashSet;
 
-/// Deduplicates identical `Arc<Vec<PathAttribute>>` allocations across
+use crate::attr_set::AttrSet;
+
+/// Deduplicates identical `Arc<AttrSet>` allocations across
 /// all peers and route families. See the module docs for ownership and
 /// reclaim rules.
 #[derive(Debug, Default)]
 pub struct AttrInternTable {
-    set: FxHashSet<Arc<Vec<PathAttribute>>>,
+    set: FxHashSet<Arc<AttrSet>>,
 }
 
 impl AttrInternTable {
@@ -55,7 +56,7 @@ impl AttrInternTable {
     /// attribute set, immediately re-interns the replacement, then recomputes
     /// every affected route before distribution. That ordering invalidates any
     /// old pointer-keyed export memo before the transformed route is emitted.
-    pub fn intern(&mut self, attrs: &mut Arc<Vec<PathAttribute>>) {
+    pub fn intern(&mut self, attrs: &mut Arc<AttrSet>) {
         if let Some(existing) = self.set.get(attrs) {
             *attrs = Arc::clone(existing);
         } else {
@@ -91,12 +92,12 @@ impl AttrInternTable {
 
 #[cfg(test)]
 mod tests {
-    use rustbgpd_wire::Origin;
+    use rustbgpd_wire::{Origin, PathAttribute};
 
     use super::*;
 
-    fn attrs(med: u32) -> Arc<Vec<PathAttribute>> {
-        Arc::new(vec![
+    fn attrs(med: u32) -> Arc<AttrSet> {
+        AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::Med(med),
         ])

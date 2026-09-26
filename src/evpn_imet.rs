@@ -47,10 +47,10 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_wire::{
     AsPath, EthernetTagId, EvpnImet, EvpnRoute, EvpnRouteKey, ExtendedCommunity, Origin,
@@ -350,7 +350,7 @@ fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
         next_hop: instance.local_vtep_ip,
         link_local_next_hop: None,
         peer: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Local,
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
@@ -371,6 +371,7 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     use rustbgpd_rib::{RibCommandError, route::RouteOrigin};
     use rustbgpd_wire::{PmsiTunnelIdentifier, PmsiTunnelType};

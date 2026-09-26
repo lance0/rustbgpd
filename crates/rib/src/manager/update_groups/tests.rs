@@ -869,9 +869,9 @@ fn lane_count_rows(manager: &RibManager) -> Vec<(IpAddr, [usize; 2])> {
 /// difference a [`strip_communities_chain`] erases post-policy.
 fn cand_with_comm(p: Prefix, src: IpAddr, lp: u32, comm: u32) -> Route {
     let mut route = cand(p, src, lp);
-    let mut attrs = (*route.attributes).clone();
+    let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::Communities(vec![comm]));
-    route.attributes = Arc::new(attrs);
+    route.attributes = AttrSet::new(attrs);
     route
 }
 
@@ -1647,7 +1647,7 @@ fn lane_entry(route: Route, winner_source: IpAddr, label: &str, comm: Option<u32
     RunnerUp {
         route,
         nh: Some(NextHopAction::Self_),
-        source_attrs: comm.map(|c| Arc::new(vec![PathAttribute::Communities(vec![c])])),
+        source_attrs: comm.map(|c| AttrSet::new(vec![PathAttribute::Communities(vec![c])])),
         policy_label: Some(Arc::from(label)),
         winner_source,
     }
@@ -1671,7 +1671,7 @@ fn adv_entry_derivation_matrix() {
         new: Some((route_with_comm(p, OTHER1, 7), Some(NextHopAction::Self_))),
         old_source: None,
         policy_label: Some(Arc::from(rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION)),
-        source_attrs: Some(Arc::new(vec![PathAttribute::Communities(vec![7])])),
+        source_attrs: Some(AttrSet::new(vec![PathAttribute::Communities(vec![7])])),
         lane: None,
     });
     let adv = group
@@ -3094,9 +3094,9 @@ fn pcb_resync_substitution_applies_rs_control() {
     let mut group = per_client_best_group(None);
     group.apply_delta(&announce_delta(k, MEMBER, None));
     let mut substituted = route(k, OTHER2);
-    let mut attrs = (*substituted.attributes).clone();
+    let mut attrs = substituted.attributes.to_vec();
     attrs.push(PathAttribute::Communities(vec![scrub_comm]));
-    substituted.attributes = Arc::new(attrs);
+    substituted.attributes = AttrSet::new(attrs);
     group.apply_lane(
         k,
         Some(lane_entry(substituted, MEMBER, "lane", Some(scrub_comm))),
@@ -3318,9 +3318,9 @@ fn replay_group(lane_comm: Option<u32>) -> GroupRibOut {
     group.apply_delta(&announce_delta(prefix(3), MEMBER, None));
     let mut lane_route = route(prefix(2), OTHER2);
     if let Some(community) = lane_comm {
-        let mut attrs = (*lane_route.attributes).clone();
+        let mut attrs = lane_route.attributes.to_vec();
         attrs.push(PathAttribute::Communities(vec![community]));
-        lane_route.attributes = Arc::new(attrs);
+        lane_route.attributes = AttrSet::new(attrs);
     }
     group.apply_lane(
         prefix(2),
@@ -3696,7 +3696,7 @@ fn vpn_route(n: u8, src: IpAddr) -> VpnRibRoute {
         next_hop: src,
         link_local_next_hop: None,
         peer: src,
-        attributes: std::sync::Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: crate::test_support::session_router_id(src),
@@ -4057,7 +4057,7 @@ const fn rt(n: u64) -> u64 {
 
 fn vpn_route_with_rts(n: u8, src: IpAddr, rts: &[u64]) -> VpnRibRoute {
     let mut route = vpn_route(n, src);
-    route.attributes = std::sync::Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::ExtendedCommunities(
             rts.iter().copied().map(ExtendedCommunity::new).collect(),
@@ -4547,9 +4547,9 @@ fn plain_group_staging_keeps_best_changed_exactly() {
 // --- walk records blocked staged output, never acts on it.
 
 fn with_otc_attr(mut route: Route) -> Route {
-    let mut attrs = (*route.attributes).clone();
+    let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::OnlyToCustomer(64_496));
-    route.attributes = Arc::new(attrs);
+    route.attributes = AttrSet::new(attrs);
     route
 }
 
@@ -5485,9 +5485,9 @@ fn per_client_best_groups_are_excluded_from_clean_transition_inventory() {
 /// with a control-space value, an RFC 7947 tag for [`RS_ASN`].
 fn route_with_comm(p: Prefix, src: IpAddr, comm: u32) -> Route {
     let mut route = route(p, src);
-    let mut attrs = (*route.attributes).clone();
+    let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::Communities(vec![comm]));
-    route.attributes = Arc::new(attrs);
+    route.attributes = AttrSet::new(attrs);
     route
 }
 

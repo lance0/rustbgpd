@@ -1,10 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{EvpnRibRoute, RouteOrigin};
 use rustbgpd_rib::{
     bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
@@ -72,7 +72,7 @@ fn route(index: usize, route_type: u8) -> EvpnRibRoute {
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: peer,

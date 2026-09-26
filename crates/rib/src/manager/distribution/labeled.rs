@@ -3,6 +3,7 @@ use super::{
     gauge_val, labeled_route_family, labeled_routes_equal, route_type, should_suppress_ibgp_inner,
     warn,
 };
+use crate::attr_set::AttrSet;
 use crate::loc_rib::labeled_tiebreak_orr;
 use crate::route::{LabeledRibRoute, LabeledRibRouteKey};
 use rustbgpd_wire::Prefix;
@@ -18,7 +19,7 @@ fn labeled_suppression_probe(route: &crate::route::LabeledRibRoute) -> crate::ro
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: route.peer,
-        attributes: std::sync::Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: route.received_at,
         origin_type: route.origin_type,
         peer_router_id: route.peer_router_id,
@@ -309,10 +310,9 @@ impl RibManager {
                     let mut modified = (*candidate).clone();
                     if !result.modifications.is_empty() {
                         checkpoint.borrow_mut()();
-                        let nh = rustbgpd_policy::apply_modifications(
-                            std::sync::Arc::make_mut(&mut modified.attributes),
-                            &result.modifications,
-                        );
+                        let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                            rustbgpd_policy::apply_modifications(attrs, &result.modifications)
+                        });
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
@@ -637,10 +637,9 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint.borrow_mut()();
-                let nh = rustbgpd_policy::apply_modifications(
-                    std::sync::Arc::make_mut(&mut modified.attributes),
-                    &result.modifications,
-                );
+                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
+                });
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }

@@ -7,6 +7,7 @@
 //! `distribution::no_export_export_suppressed`.
 
 use super::*;
+use crate::attr_set::AttrSet;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
 fn no_export_chain(add: bool) -> PolicyChain {
@@ -48,7 +49,9 @@ fn no_export_chain(add: bool) -> PolicyChain {
 }
 
 fn with_communities(mut route: Route, communities: Vec<u32>) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(communities));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(communities));
+    });
     route
 }
 
@@ -381,9 +384,11 @@ async fn vpn_no_export_source_route_suppressed_to_honor_ebgp_only() {
     }
 
     let mut tagged = plain.clone();
-    Arc::make_mut(&mut tagged.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_EXPORT,
-    ]));
+    AttrSet::edit(&mut tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_EXPORT,
+        ]));
+    });
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -465,9 +470,11 @@ async fn labeled_no_export_source_route_suppressed_to_honor_ebgp_only() {
     }
 
     let mut tagged = plain.clone();
-    Arc::make_mut(&mut tagged.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED,
-    ]));
+    AttrSet::edit(&mut tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED,
+        ]));
+    });
     tx.send(RibUpdate::LabeledRoutesReceived {
         session_id: 0,
         peer: source,

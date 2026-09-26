@@ -4,6 +4,7 @@ use super::{
     RouteContext, Safi, debug, flowspec_route_family, gauge_val, record_export_policy_eval,
     route_type, should_suppress_ibgp_inner, warn,
 };
+use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
 
 impl RibManager {
@@ -264,7 +265,7 @@ impl RibManager {
                         link_local_next_hop: None,
                         next_hop_scope: None,
                         peer: best.peer,
-                        attributes: std::sync::Arc::new(vec![]),
+                        attributes: AttrSet::new(vec![]),
                         received_at: best.received_at,
                         origin_type: best.origin_type,
                         peer_router_id: best.peer_router_id,

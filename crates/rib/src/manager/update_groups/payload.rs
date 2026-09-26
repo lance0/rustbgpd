@@ -9,6 +9,7 @@ use rustbgpd_wire::{ExtendedCommunity, LargeCommunity, PathAttribute, Prefix, Vp
 use rustc_hash::FxHashMap;
 
 use super::{GroupRibOut, PolicyLabel, RtcMembership};
+use crate::attr_set::AttrSet;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 
 /// One entry of a shared group staging pass: the new staged route (or a
@@ -33,7 +34,7 @@ pub(in crate::manager) struct GroupDelta {
     /// control decisions — per-target suppression and prepend — are
     /// made on the source route, exactly like the ungrouped path's
     /// pre-policy gate; only the scrub reads the post-policy `new`.
-    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) source_attrs: Option<Arc<AttrSet>>,
     /// ADR-0126 Decision 5: the RECOMPUTED (post-pass) exception-lane
     /// entry for this delta's prefix, carried on per-client-best
     /// announce deltas so [`emit_group_deltas_for_member_with_checkpoint`] stays a
@@ -49,7 +50,7 @@ pub(in crate::manager) struct GroupDelta {
 /// Capture a source route's attributes for RFC 7947 decisions at the
 /// member-emit seams. `None` — no communities at all — keeps the
 /// common case allocation-free (the capture itself is an `Arc` clone).
-pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Vec<PathAttribute>>> {
+pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<AttrSet>> {
     (!source.communities().is_empty() || !source.large_communities().is_empty())
         .then(|| Arc::clone(&source.attributes))
 }
@@ -64,7 +65,7 @@ pub(in crate::manager) fn capture_source_attrs(source: &Route) -> Option<Arc<Vec
 pub(in crate::manager) struct RunnerUp {
     pub(in crate::manager) route: Route,
     pub(in crate::manager) nh: Option<NextHopAction>,
-    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) source_attrs: Option<Arc<AttrSet>>,
     pub(in crate::manager) policy_label: Option<PolicyLabel>,
     /// Source of the winner this entry substitutes for. Every ADR-0126
     /// Decision 5 lane arm is member-scoped "toward `source(w)`", and
@@ -88,7 +89,7 @@ pub(in crate::manager) struct AdvEntry<'a> {
     /// pre-policy RFC 7947 control attributes. Passthrough mode ignores this
     /// field and derives equivalent input from [`Self::route`]; its dense
     /// staged entries leave the field `None`.
-    pub(in crate::manager) source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) source_attrs: Option<&'a Arc<AttrSet>>,
     /// Decision attribution of the permitting evaluation (`None` = absent or
     /// empty chain) — join-time counter replay residue.
     pub(in crate::manager) policy_label: Option<&'a PolicyLabel>,
@@ -126,7 +127,7 @@ pub(in crate::manager) struct LaneDelta {
     /// Captured source attributes of the REPLACED lane entry — the
     /// was-side input for rs-control verdict flips across the
     /// transition, mirroring [`RsTagTransition::prior_source_attrs`].
-    pub(in crate::manager) prior_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) prior_source_attrs: Option<Arc<AttrSet>>,
     /// The post-policy lane route is content-equal across the
     /// transition (`routes_equal`) — the transition was recorded only
     /// because the SOURCE control communities moved. The emit arm then
@@ -152,7 +153,7 @@ pub(in crate::manager) struct PerClientBestPrefixStage {
     /// Captured pre-policy SOURCE attributes of the winner candidate.
     /// The first permitted candidate need not be the Loc-RIB best, so
     /// the caller cannot capture these from the Loc-RIB.
-    pub(in crate::manager) winner_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) winner_source_attrs: Option<Arc<AttrSet>>,
     /// The recomputed runner-up (`None` = lane empty), rebuilt from
     /// scratch every pass — no stale second-best by construction
     /// (ADR-0126 Decision 6).
@@ -162,7 +163,7 @@ pub(in crate::manager) struct PerClientBestPrefixStage {
 /// Communities and large communities carried by a captured source
 /// attribute list (empty slices when nothing was captured).
 pub(in crate::manager) fn source_control_input(
-    attrs: Option<&Arc<Vec<PathAttribute>>>,
+    attrs: Option<&Arc<AttrSet>>,
 ) -> (&[u32], &[LargeCommunity]) {
     let Some(attrs) = attrs else {
         return (&[], &[]);
@@ -195,9 +196,9 @@ pub(in crate::manager) struct RsTagTransition {
     /// Next-hop-override residue for the staged entry.
     pub(in crate::manager) nh: Option<NextHopAction>,
     /// Captured source attributes before this pass.
-    pub(in crate::manager) prior_source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) prior_source_attrs: Option<Arc<AttrSet>>,
     /// Captured source attributes after this pass.
-    pub(in crate::manager) source_attrs: Option<Arc<Vec<PathAttribute>>>,
+    pub(in crate::manager) source_attrs: Option<Arc<AttrSet>>,
 }
 
 /// The `Arc`-shared unicast announce payload of one group staging pass:
@@ -419,7 +420,7 @@ impl GroupStageOutput {
         checkpoint: &mut impl FnMut(),
     ) -> bool {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
-        let attrs_tagged = |attrs: Option<&Arc<Vec<PathAttribute>>>| {
+        let attrs_tagged = |attrs: Option<&Arc<AttrSet>>| {
             let (communities, large_communities) = source_control_input(attrs);
             rs_control_route_tagged(communities, large_communities, rs_asn)
         };

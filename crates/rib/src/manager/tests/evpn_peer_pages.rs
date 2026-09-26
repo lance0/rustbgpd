@@ -1,4 +1,5 @@
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::update::{EvpnRoutePage, EvpnRouteQueryKey, RoutePageError, RoutePageVersion};
 
 fn page(
@@ -103,7 +104,9 @@ fn evpn_received_pages_invalidate_for_types_three_four_and_attributes() {
     manager.process_evpn_announce_chunk(peer, vec![route.clone()]);
     let first = page(&mut manager, scope, None, None, 1).unwrap();
     let dataplane_generation = manager.evpn_dataplane_generation;
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![123]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![123]));
+    });
     manager.process_evpn_announce_chunk(peer, vec![route.clone()]);
     assert_eq!(manager.evpn_dataplane_generation, dataplane_generation);
     assert_eq!(
@@ -286,15 +289,17 @@ fn evpn_non_best_attribute_change_still_invalidates_received_pages() {
     let other: IpAddr = "10.0.0.2".parse().unwrap();
     manager.ribs.insert(other, AdjRibIn::new(other));
     let mut best = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    best.attributes = Arc::new(vec![PathAttribute::LocalPref(200)]);
+    best.attributes = AttrSet::new(vec![PathAttribute::LocalPref(200)]);
     let mut candidate = best.clone();
     candidate.peer = other;
-    candidate.attributes = Arc::new(vec![PathAttribute::LocalPref(100)]);
+    candidate.attributes = AttrSet::new(vec![PathAttribute::LocalPref(100)]);
     manager.process_evpn_announce_chunk(peer, vec![best.clone()]);
     manager.process_evpn_announce_chunk(other, vec![candidate.clone()]);
     let scope = RouteQueryScope::Received { peer: Some(other) };
     let before = page(&mut manager, scope, None, None, 1).unwrap();
-    Arc::make_mut(&mut candidate.attributes).push(PathAttribute::Communities(vec![7]));
+    AttrSet::edit(&mut candidate.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![7]));
+    });
     manager.process_evpn_announce_chunk(other, vec![candidate]);
     assert_eq!(manager.loc_rib.get_evpn(&best.key()).unwrap().peer, peer);
     assert_eq!(

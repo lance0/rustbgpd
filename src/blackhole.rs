@@ -1595,6 +1595,7 @@ fn netlink_errno(err: &rtnetlink::Error) -> Option<i32> {
 pub(super) mod tests {
     use super::*;
     use prometheus::Registry;
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::RouteEvent;
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute};
@@ -2541,7 +2542,7 @@ pub(super) mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::Communities(communities),
             ]),
@@ -2693,7 +2694,7 @@ pub(super) mod tests {
                 vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
             );
             let mut partial = canonical.clone();
-            partial.attributes = Arc::new(vec![
+            partial.attributes = AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::CommunitiesPartial(vec![rustbgpd_wire::COMMUNITY_BLACKHOLE]),
             ]);
@@ -2708,7 +2709,7 @@ pub(super) mod tests {
         }
 
         let mut untagged = route(v4(32), RouteOrigin::Ebgp, Vec::new());
-        untagged.attributes = Arc::new(vec![
+        untagged.attributes = AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::CommunitiesPartial(vec![0x0001_0002]),
         ]);

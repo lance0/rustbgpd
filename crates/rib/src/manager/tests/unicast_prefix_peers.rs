@@ -5,6 +5,7 @@ use rustbgpd_wire::{Ipv4Prefix, Prefix};
 
 use super::super::{AdjRibInEpoch, PrefixAnnouncers, UnicastPrefixPeers};
 use super::*;
+use crate::attr_set::AttrSet;
 
 fn peer(n: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, n))
@@ -64,7 +65,9 @@ fn make_add_path_route(source: IpAddr, p: Prefix, path_id: u32, med: u32) -> Rou
         unreachable!()
     };
     let mut route = make_route(prefix, source);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Med(med));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(med));
+    });
     route.path_id = path_id;
     route
 }

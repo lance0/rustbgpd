@@ -581,7 +581,7 @@ fn encode_peer_index_table_inner(
 /// - IPv6: `PathAttribute::MpReachNlri` with IPv6 next-hop, empty NLRI
 #[must_use]
 pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
-    let mut attrs = (*route.attributes).clone();
+    let mut attrs = route.attributes.to_vec();
     match route.prefix {
         Prefix::V4(_) => {
             match route.next_hop {
@@ -649,7 +649,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 /// reduced form (NH-Len + NH bytes only).
 #[must_use]
 pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
-    let mut attrs = (*route.attributes).clone();
+    let mut attrs = route.attributes.to_vec();
     attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
@@ -1643,6 +1643,7 @@ fn encode_snapshot_inner<const FIX_ORIGINATED_TIME: bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::route::{Route, RouteOrigin};
     use rustbgpd_wire::{
         Aggregator, AsPath, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
@@ -1797,7 +1798,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
@@ -2005,7 +2006,7 @@ mod tests {
             addr: Ipv4Addr::new(198, 51, 100, 0),
             len: 24,
         });
-        let attributes = Arc::new(vec![
+        let attributes = AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
@@ -2164,7 +2165,7 @@ mod tests {
             "192.0.2.1".parse().unwrap(),
             "192.0.2.9".parse().unwrap(),
         );
-        route.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]);
         for add_path in [false, true] {
             for path_id in [0, 0x5566_7788_u32] {
                 route.path_id = path_id;
@@ -2450,9 +2451,9 @@ mod tests {
             router_id: Ipv4Addr::new(192, 0, 2, 9),
             partial: true,
         };
-        let mut attrs = route.attributes.as_ref().clone();
+        let mut attrs = route.attributes.to_vec();
         attrs.push(PathAttribute::Aggregator(aggregator));
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
 
         let snapshot = encode_snapshot(
             Ipv4Addr::new(1, 2, 3, 4),
@@ -2504,7 +2505,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
@@ -2541,7 +2542,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],

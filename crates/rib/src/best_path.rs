@@ -36,16 +36,16 @@ fn aspa_preference(v: AspaValidation) -> u8 {
 /// Least preferred (RFC 9494 §4.3/§4.4) is a route this speaker holds
 /// LLGR-stale **or** any route carrying the `LLGR_STALE` community, which
 /// covers one received already tagged by an upstream helper. The rule does
-/// not depend on the source session's LLGR state. `communities` runs only
-/// when the local flag is clear; two least-preferred routes tie here and
-/// fall through to normal tie-breaking.
+/// not depend on the source session's LLGR state. `has_llgr_stale_community`
+/// runs only when the local flag is clear; two least-preferred routes tie
+/// here and fall through to normal tie-breaking.
 #[inline]
-pub(crate) fn stale_tier<'a>(
+pub(crate) fn stale_tier(
     is_stale: bool,
     is_llgr_stale: bool,
-    communities: impl FnOnce() -> &'a [u32],
+    has_llgr_stale_community: impl FnOnce() -> bool,
 ) -> u8 {
-    if is_llgr_stale || communities().contains(&COMMUNITY_LLGR_STALE) {
+    if is_llgr_stale || has_llgr_stale_community() {
         2
     } else {
         u8::from(is_stale)
@@ -67,7 +67,15 @@ pub(crate) fn stale_tier_reason(loser_tier: u8, loser_is_llgr_stale: bool) -> Be
 }
 
 pub(crate) fn stale_rank(route: &Route) -> u8 {
-    stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
+}
+
+/// Whether a COMMUNITIES list carries `LLGR_STALE`, for rankers of route
+/// types without a cached [`crate::attr_set::SelectionSummary`].
+pub(crate) fn carries_llgr_stale(communities: &[u32]) -> bool {
+    communities.contains(&COMMUNITY_LLGR_STALE)
 }
 
 /// The identifier a route is compared by at RFC 4271 §9.1.2.2 step (f),
@@ -244,24 +252,23 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         return (cmp, BestPathReason::AspaPreference);
     }
 
-    let cmp = b.local_pref().cmp(&a.local_pref());
+    let (sa, sb) = (a.attributes.summary(), b.attributes.summary());
+    let cmp = sb.local_pref.cmp(&sa.local_pref);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::HigherLocalPref);
     }
 
-    let a_len = a.as_path().map_or(0, AsPath::len);
-    let b_len = b.as_path().map_or(0, AsPath::len);
-    let cmp = a_len.cmp(&b_len);
+    let cmp = sa.as_path_len.cmp(&sb.as_path_len);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::ShorterAsPath);
     }
 
-    let cmp = a.origin().cmp(&b.origin());
+    let cmp = sa.origin.cmp(&sb.origin);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::LowerOrigin);
     }
 
-    let cmp = a.med().cmp(&b.med());
+    let cmp = sa.med.cmp(&sb.med);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::LowerMed);
     }
@@ -275,7 +282,7 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         return decided;
     }
 
-    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    let cmp = sa.cluster_list_len.cmp(&sb.cluster_list_len);
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::ShorterClusterList);
     }
@@ -601,28 +608,29 @@ fn cmp_chain(
         return cmp;
     }
 
+    // Steps 1-5.6 read the attribute sets' cached selection summaries.
+    let (sa, sb) = (a.attributes.summary(), b.attributes.summary());
+
     // 1. Highest LOCAL_PREF wins → reverse comparison
-    let cmp = b.local_pref().cmp(&a.local_pref());
+    let cmp = sb.local_pref.cmp(&sa.local_pref);
     if cmp != Ordering::Equal {
         return cmp;
     }
 
     // 2. Shortest AS_PATH
-    let a_len = a.as_path().map_or(0, AsPath::len);
-    let b_len = b.as_path().map_or(0, AsPath::len);
-    let cmp = a_len.cmp(&b_len);
+    let cmp = sa.as_path_len.cmp(&sb.as_path_len);
     if cmp != Ordering::Equal {
         return cmp;
     }
 
     // 3. Lowest ORIGIN (IGP=0 < EGP=1 < Incomplete=2)
-    let cmp = a.origin().cmp(&b.origin());
+    let cmp = sa.origin.cmp(&sb.origin);
     if cmp != Ordering::Equal {
         return cmp;
     }
 
     // 4. Lowest MED (always-compare / deterministic)
-    let cmp = a.med().cmp(&b.med());
+    let cmp = sa.med.cmp(&sb.med);
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -654,12 +662,15 @@ fn cmp_chain(
     // 5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)):
     //      ORIGINATOR_ID substitutes when present (RFC 4456 §9); a
     //      locally originated route ranks ahead of any identifier.
-    if let Some((cmp, _)) = compare_bgp_identifier(bgp_identity(a), bgp_identity(b)) {
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, sa.originator_id, a.peer_router_id),
+        (b.origin_type, sb.originator_id, b.peer_router_id),
+    ) {
         return cmp;
     }
 
     // 5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
-    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    let cmp = sa.cluster_list_len.cmp(&sb.cluster_list_len);
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -775,12 +786,12 @@ fn same_multipath_class(a: &Route, b: &Route) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::route::{Route, RouteOrigin};
 
     fn base_route(peer: Ipv4Addr) -> Route {
@@ -790,7 +801,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(peer),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65001])],
@@ -810,28 +821,44 @@ mod tests {
     }
 
     fn with_local_pref(mut r: Route, lp: u32) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::LocalPref(lp));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::LocalPref(lp));
+        });
         r
     }
 
     fn with_as_path(mut r: Route, asns: Vec<u32>) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::AsPath(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(asns)],
-        }));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::AsPath(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(asns)],
+            }));
+        });
         r
     }
 
     fn with_origin(mut r: Route, origin: Origin) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::Origin(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::Origin(origin));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::Origin(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::Origin(origin));
+        });
         r
     }
 
     fn with_med(mut r: Route, med: u32) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::Med(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::Med(med));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::Med(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::Med(med));
+        });
         r
     }
 
@@ -990,7 +1017,9 @@ mod tests {
     fn default_local_pref_when_absent() {
         // Route with no LOCAL_PREF attribute should default to 100
         let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
-        Arc::make_mut(&mut a.attributes).retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
+        AttrSet::edit(&mut a.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
+        });
         let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
         // Same local_pref, same as_path, same origin, no MED → a later
         // tiebreak (the lower BGP Identifier) decides
@@ -1044,14 +1073,22 @@ mod tests {
     }
 
     fn with_cluster_list(mut r: Route, ids: Vec<Ipv4Addr>) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::ClusterList(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::ClusterList(ids));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::ClusterList(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::ClusterList(ids));
+        });
         r
     }
 
     fn with_originator_id(mut r: Route, id: Ipv4Addr) -> Route {
-        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::OriginatorId(_)));
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::OriginatorId(id));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.retain(|a| !matches!(a, PathAttribute::OriginatorId(_)));
+        });
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::OriginatorId(id));
+        });
         r
     }
 
@@ -1382,10 +1419,12 @@ mod tests {
     /// A route that arrived carrying `LLGR_STALE` (tagged by an upstream
     /// helper), with the local `is_llgr_stale` flag clear.
     fn received_llgr_stale(mut r: Route) -> Route {
-        Arc::make_mut(&mut r.attributes).push(PathAttribute::Communities(vec![
-            0xFDE9_0064, // 65001:100
-            rustbgpd_wire::COMMUNITY_LLGR_STALE,
-        ]));
+        AttrSet::edit(&mut r.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![
+                0xFDE9_0064, // 65001:100
+                rustbgpd_wire::COMMUNITY_LLGR_STALE,
+            ]));
+        });
         r
     }
 
@@ -2126,13 +2165,13 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
     use std::time::Instant;
 
     use proptest::prelude::*;
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::route::{Route, RouteOrigin};
 
     fn arb_origin() -> impl Strategy<Value = Origin> {
@@ -2237,7 +2276,7 @@ mod proptests {
                         link_local_next_hop: None,
                         next_hop_scope: None,
                         peer: IpAddr::V4(peer),
-                        attributes: Arc::new(attributes),
+                        attributes: AttrSet::new(attributes),
                         received_at: Instant::now(),
                         origin_type,
                         peer_router_id: peer_router_id_for(origin_type, rid_oct),
@@ -2289,7 +2328,7 @@ mod proptests {
             .cloned()
             .collect();
         attributes.extend(b.attributes.iter().filter(|at| is_tail(at)).cloned());
-        b.attributes = Arc::new(attributes);
+        b.attributes = AttrSet::new(attributes);
         b.is_stale = a.is_stale;
         b.is_llgr_stale = a.is_llgr_stale;
         b.validation_state = a.validation_state;
@@ -2309,11 +2348,13 @@ mod proptests {
         route.origin_type = RouteOrigin::Local;
         route.peer = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         route.peer_router_id = Ipv4Addr::UNSPECIFIED;
-        Arc::make_mut(&mut route.attributes).retain(|attr| {
-            !matches!(
-                attr,
-                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
-            )
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.retain(|attr| {
+                !matches!(
+                    attr,
+                    PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+                )
+            });
         });
         route
     }
@@ -2463,12 +2504,16 @@ mod proptests {
                 [(&mut a, originator_a, 2), (&mut b, originator_b, 1)]
             {
                 if substitute {
-                    Arc::make_mut(&mut route.attributes)
-                        .push(PathAttribute::OriginatorId(route.peer_router_id));
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+                        attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+                    });
                 }
-                Arc::make_mut(&mut route.attributes).push(PathAttribute::ClusterList(
-                    vec![Ipv4Addr::new(10, 0, 0, 9); cluster_len],
-                ));
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::ClusterList(vec![
+                        Ipv4Addr::new(10, 0, 0, 9);
+                        cluster_len
+                    ]));
+                });
             }
             assert_eq!(legacy_best_path_cmp(&a, &b), Ordering::Greater);
             assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
@@ -2487,135 +2532,137 @@ mod proptests {
     }
 
     proptest! {
-        /// The historical oracle predates effective BGP Identifier ordering
-        /// and the Add-Path identity tie. Compare only their common domain:
-        /// no ORIGINATOR_ID, equal peer identifiers, and equal path IDs.
-        /// Other attributes (including CLUSTER_LIST) remain randomized.
-        #[test]
-        fn best_path_cmp_matches_legacy_without_identifier_or_path_id_ties(
-            mut a in arb_route(), mut b in arb_route()
-        ) {
-            for route in [&mut a, &mut b] {
-                Arc::make_mut(&mut route.attributes)
-                    .retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
-                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
-                route.path_id = 0;
-            }
-            prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
-            prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
-        }
-
-        /// The same equivalence over pairs that tie down to the tail, so
-        /// `CLUSTER_LIST` length and peer address genuinely decide. The
-        /// broad draw above never gets that far: independently drawn pairs
-        /// are settled by the stale tier, the RPKI or ASPA state, or
-        /// `LOCAL_PREF`, and sampling found none reaching past `AS_PATH`.
-        #[test]
-        fn best_path_cmp_matches_legacy_on_tie_biased_pairs(
-            (mut a, mut b) in arb_tie_biased_pair()
-        ) {
-            for route in [&mut a, &mut b] {
-                Arc::make_mut(&mut route.attributes)
-                    .retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
-                route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
-                route.path_id = 0;
-            }
-            prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
-            prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
-        }
-
-        /// The two hand-maintained ladders must agree on the steps the
-        /// legacy oracle cannot police: the effective BGP Identifier
-        /// (step 5.5) and the Add-Path identifier tie, neither of which
-        /// exists in the frozen fixture. Tie-biased pairs keep their own
-        /// identifiers and path IDs, so both steps decide here.
-        #[test]
-        fn with_reason_agrees_with_plain_cmp_on_tie_biased_pairs(
-            (a, b) in arb_tie_biased_pair()
-        ) {
-            let (ord, _) = best_path_cmp_with_reason(&a, &b);
-            prop_assert_eq!(ord, best_path_cmp(&a, &b));
-        }
-
-        /// With both costs unknown the ORR comparator degenerates to
-        /// the standard chain — the both-None fall-through is total.
-        #[test]
-        fn orr_both_unknown_matches_plain_cmp(a in arb_route(), b in arb_route()) {
-            prop_assert_eq!(best_path_cmp_orr(&a, &b, None, None), best_path_cmp(&a, &b));
-        }
-
-        /// The explain-only ladder (`best_path_cmp_with_reason`) must
-        /// agree with the hot-path comparator on arbitrary inputs —
-        /// the randomized counterpart of the per-step agreement matrix
-        /// in `with_reason_ordering_matches_plain_cmp_at_every_step`.
-        #[test]
-        fn with_reason_agrees_with_plain_cmp(a in arb_route(), b in arb_route()) {
-            let (ord, _) = best_path_cmp_with_reason(&a, &b);
-            prop_assert_eq!(ord, best_path_cmp(&a, &b));
-        }
-
-        #[test]
-        fn antisymmetry(a in arb_route(), b in arb_route()) {
-            let ab = best_path_cmp(&a, &b);
-            let ba = best_path_cmp(&b, &a);
-            prop_assert_eq!(ab, ba.reverse());
-        }
-
-        #[test]
-        fn transitivity(a in arb_route(), b in arb_route(), c in arb_route()) {
-            use std::cmp::Ordering::*;
-            let ab = best_path_cmp(&a, &b);
-            let bc = best_path_cmp(&b, &c);
-            let ac = best_path_cmp(&a, &c);
-            if ab == Less && bc == Less {
-                prop_assert_eq!(ac, Less);
-            }
-            if ab == Greater && bc == Greater {
-                prop_assert_eq!(ac, Greater);
-            }
-        }
-
-        /// `transitivity` over the chain's tail. The broad draw above
-        /// never ties three routes down to step 5.5, so it cannot see an
-        /// intransitive tiebreaker; these triples always get there, with
-        /// locally originated routes mixed among iBGP routes.
-        #[test]
-        fn transitivity_on_tie_biased_triples((a, b, c) in arb_tie_biased_triple()) {
-            use std::cmp::Ordering::*;
-            for (x, y, z) in [(&a, &b, &c), (&a, &c, &b), (&b, &a, &c)] {
-                let xy = best_path_cmp(x, y);
-                let yz = best_path_cmp(y, z);
-                let xz = best_path_cmp(x, z);
-                if xy != Greater && yz != Greater {
-                    let expected = if xy == Equal && yz == Equal { Equal } else { Less };
-                    prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+            /// The historical oracle predates effective BGP Identifier ordering
+            /// and the Add-Path identity tie. Compare only their common domain:
+            /// no ORIGINATOR_ID, equal peer identifiers, and equal path IDs.
+            /// Other attributes (including CLUSTER_LIST) remain randomized.
+            #[test]
+            fn best_path_cmp_matches_legacy_without_identifier_or_path_id_ties(
+                mut a in arb_route(), mut b in arb_route()
+            ) {
+                for route in [&mut a, &mut b] {
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+     attrs.retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
+    });
+                    route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                    route.path_id = 0;
                 }
-                if xy != Less && yz != Less {
-                    let expected = if xy == Equal && yz == Equal { Equal } else { Greater };
-                    prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+                prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
+                prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
+            }
+
+            /// The same equivalence over pairs that tie down to the tail, so
+            /// `CLUSTER_LIST` length and peer address genuinely decide. The
+            /// broad draw above never gets that far: independently drawn pairs
+            /// are settled by the stale tier, the RPKI or ASPA state, or
+            /// `LOCAL_PREF`, and sampling found none reaching past `AS_PATH`.
+            #[test]
+            fn best_path_cmp_matches_legacy_on_tie_biased_pairs(
+                (mut a, mut b) in arb_tie_biased_pair()
+            ) {
+                for route in [&mut a, &mut b] {
+                    AttrSet::edit(&mut route.attributes, |attrs| {
+     attrs.retain(|attr| !matches!(attr, PathAttribute::OriginatorId(_)));
+    });
+                    route.peer_router_id = Ipv4Addr::new(192, 0, 2, 1);
+                    route.path_id = 0;
+                }
+                prop_assume!(!carries_llgr_stale(&a) && !carries_llgr_stale(&b));
+                prop_assert_eq!(best_path_cmp(&a, &b), legacy_best_path_cmp(&a, &b));
+            }
+
+            /// The two hand-maintained ladders must agree on the steps the
+            /// legacy oracle cannot police: the effective BGP Identifier
+            /// (step 5.5) and the Add-Path identifier tie, neither of which
+            /// exists in the frozen fixture. Tie-biased pairs keep their own
+            /// identifiers and path IDs, so both steps decide here.
+            #[test]
+            fn with_reason_agrees_with_plain_cmp_on_tie_biased_pairs(
+                (a, b) in arb_tie_biased_pair()
+            ) {
+                let (ord, _) = best_path_cmp_with_reason(&a, &b);
+                prop_assert_eq!(ord, best_path_cmp(&a, &b));
+            }
+
+            /// With both costs unknown the ORR comparator degenerates to
+            /// the standard chain — the both-None fall-through is total.
+            #[test]
+            fn orr_both_unknown_matches_plain_cmp(a in arb_route(), b in arb_route()) {
+                prop_assert_eq!(best_path_cmp_orr(&a, &b, None, None), best_path_cmp(&a, &b));
+            }
+
+            /// The explain-only ladder (`best_path_cmp_with_reason`) must
+            /// agree with the hot-path comparator on arbitrary inputs —
+            /// the randomized counterpart of the per-step agreement matrix
+            /// in `with_reason_ordering_matches_plain_cmp_at_every_step`.
+            #[test]
+            fn with_reason_agrees_with_plain_cmp(a in arb_route(), b in arb_route()) {
+                let (ord, _) = best_path_cmp_with_reason(&a, &b);
+                prop_assert_eq!(ord, best_path_cmp(&a, &b));
+            }
+
+            #[test]
+            fn antisymmetry(a in arb_route(), b in arb_route()) {
+                let ab = best_path_cmp(&a, &b);
+                let ba = best_path_cmp(&b, &a);
+                prop_assert_eq!(ab, ba.reverse());
+            }
+
+            #[test]
+            fn transitivity(a in arb_route(), b in arb_route(), c in arb_route()) {
+                use std::cmp::Ordering::*;
+                let ab = best_path_cmp(&a, &b);
+                let bc = best_path_cmp(&b, &c);
+                let ac = best_path_cmp(&a, &c);
+                if ab == Less && bc == Less {
+                    prop_assert_eq!(ac, Less);
+                }
+                if ab == Greater && bc == Greater {
+                    prop_assert_eq!(ac, Greater);
                 }
             }
-        }
 
-        /// Every locally originated route the daemon builds ranks ahead of
-        /// every session-learned route it ties above step 5.5 — with or
-        /// without an identifier key for Local, since its empty
-        /// `CLUSTER_LIST` and `0.0.0.0` peer already win the later steps.
-        #[test]
-        fn production_local_route_leads_tied_session_routes(
-            (mut session, local) in arb_tie_biased_pair(), rid_oct in 1u8..=4
-        ) {
-            session.origin_type = RouteOrigin::Ibgp;
-            session.peer_router_id = peer_router_id_for(RouteOrigin::Ibgp, rid_oct);
-            let local = production_local(local);
-            prop_assert_eq!(best_path_cmp(&local, &session), Ordering::Less);
-            prop_assert_eq!(best_path_cmp(&session, &local), Ordering::Greater);
-        }
+            /// `transitivity` over the chain's tail. The broad draw above
+            /// never ties three routes down to step 5.5, so it cannot see an
+            /// intransitive tiebreaker; these triples always get there, with
+            /// locally originated routes mixed among iBGP routes.
+            #[test]
+            fn transitivity_on_tie_biased_triples((a, b, c) in arb_tie_biased_triple()) {
+                use std::cmp::Ordering::*;
+                for (x, y, z) in [(&a, &b, &c), (&a, &c, &b), (&b, &a, &c)] {
+                    let xy = best_path_cmp(x, y);
+                    let yz = best_path_cmp(y, z);
+                    let xz = best_path_cmp(x, z);
+                    if xy != Greater && yz != Greater {
+                        let expected = if xy == Equal && yz == Equal { Equal } else { Less };
+                        prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+                    }
+                    if xy != Less && yz != Less {
+                        let expected = if xy == Equal && yz == Equal { Equal } else { Greater };
+                        prop_assert_eq!(xz, expected, "{:?} {:?}", xy, yz);
+                    }
+                }
+            }
 
-        #[test]
-        fn totality(a in arb_route(), b in arb_route()) {
-            let result = best_path_cmp(&a, &b);
-            prop_assert!(matches!(result, std::cmp::Ordering::Less | std::cmp::Ordering::Equal | std::cmp::Ordering::Greater));
+            /// Every locally originated route the daemon builds ranks ahead of
+            /// every session-learned route it ties above step 5.5 — with or
+            /// without an identifier key for Local, since its empty
+            /// `CLUSTER_LIST` and `0.0.0.0` peer already win the later steps.
+            #[test]
+            fn production_local_route_leads_tied_session_routes(
+                (mut session, local) in arb_tie_biased_pair(), rid_oct in 1u8..=4
+            ) {
+                session.origin_type = RouteOrigin::Ibgp;
+                session.peer_router_id = peer_router_id_for(RouteOrigin::Ibgp, rid_oct);
+                let local = production_local(local);
+                prop_assert_eq!(best_path_cmp(&local, &session), Ordering::Less);
+                prop_assert_eq!(best_path_cmp(&session, &local), Ordering::Greater);
+            }
+
+            #[test]
+            fn totality(a in arb_route(), b in arb_route()) {
+                let result = best_path_cmp(&a, &b);
+                prop_assert!(matches!(result, std::cmp::Ordering::Less | std::cmp::Ordering::Equal | std::cmp::Ordering::Greater));
+            }
         }
-    }
 }

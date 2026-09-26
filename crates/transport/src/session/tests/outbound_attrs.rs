@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 #[test]
 fn ebgp_prepends_asn() {
@@ -50,7 +51,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         ]),
@@ -165,7 +166,7 @@ fn route_server_client_force_next_hop_self_still_wins() {
 fn llgr_stale_to_non_llgr_ibgp_peer_carries_no_export_and_lpref_zero() {
     let session = make_test_session(65001, 65001);
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -211,7 +212,7 @@ fn llgr_stale_to_non_llgr_ibgp_peer_carries_no_export_and_lpref_zero() {
 fn llgr_rewrite_preserves_partial_communities() {
     let session = make_test_session(65001, 65001);
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -248,7 +249,7 @@ fn outbound_attribute_preparation_preserves_partial_community_variants() {
     let extended = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
     let large = rustbgpd_wire::LargeCommunity::new(65_000, 1, 100);
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -304,7 +305,7 @@ fn plain_ebgp_strips_non_transitive_extended_communities_for_unicast() {
     let transitive = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
     let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -324,7 +325,7 @@ fn plain_ebgp_strips_non_transitive_extended_communities_for_unicast() {
     ));
 
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -369,7 +370,7 @@ fn plain_ebgp_strips_non_transitive_extended_communities_for_mp_export() {
 fn non_transitive_extended_communities_preserve_on_exempt_or_opted_in_export() {
     let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -413,7 +414,7 @@ fn non_transitive_extended_communities_preserve_on_exempt_or_opted_in_export() {
 fn fresh_route_to_non_llgr_ibgp_peer_unmodified() {
     let session = make_test_session(65001, 65001);
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -453,7 +454,7 @@ fn llgr_peer_keeps_llgr_stale_community() {
     }];
     session.negotiated = Some(Arc::new(negotiated));
     let route = Route {
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -495,7 +496,7 @@ fn ibgp_default_local_pref_when_missing() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -531,7 +532,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -575,7 +576,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
         ]),
@@ -605,10 +606,12 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
     // RFC 4456 section 8: preserve the originator and prepend to the ordered path.
     let originator = Ipv4Addr::new(10, 0, 0, 43);
     let previous = [Ipv4Addr::new(10, 0, 0, 7), Ipv4Addr::new(10, 0, 0, 8)];
-    Arc::make_mut(&mut route.attributes).extend([
-        PathAttribute::OriginatorId(originator),
-        PathAttribute::ClusterList(previous.to_vec()),
-    ]);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.extend([
+            PathAttribute::OriginatorId(originator),
+            PathAttribute::ClusterList(previous.to_vec()),
+        ]);
+    });
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
     assert!(
@@ -717,7 +720,7 @@ fn ibgp_unaffected() {
     let mut session = make_test_session(65001, 65001);
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512])],
@@ -747,7 +750,7 @@ fn route_server_skipped() {
     session.config.route_server_client = true;
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512])],
@@ -805,7 +808,7 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
     let mut session = make_test_session(100, 200);
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512, 65535])],
@@ -951,7 +954,7 @@ async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
             type_code: 40,
             data: Bytes::from(srv6_test_service(5)),
         });
-        let mut attrs = route.attributes.as_ref().clone();
+        let mut attrs = route.attributes.to_vec();
         attrs.push(prefix_sid.clone());
         attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
             afi,

@@ -1861,6 +1861,7 @@ mod tests {
     use crate::import_roster::ImportRosterPublisher;
     use crate::peer_types::{CatalogMutationError, PolicyAsPathPrependConfig};
     use crate::proto::policy_service_server::PolicyService as PolicyServiceRpc;
+    use rustbgpd_rib::AttrSet;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::oneshot;
 
@@ -3208,7 +3209,7 @@ policy customer-in(peer_lp: u32) {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.9".parse().unwrap(),
-            attributes: std::sync::Arc::new(Vec::new()),
+            attributes: AttrSet::new(Vec::new()),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,

@@ -390,7 +390,6 @@ pub fn loc_rib_open_pdu(local_asn: u32, router_id: Ipv4Addr) -> Bytes {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv6Addr;
-    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{
@@ -399,6 +398,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::route::RouteOrigin;
 
     fn base_attrs() -> Vec<PathAttribute> {
@@ -417,7 +417,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: next_hop,
-            attributes: Arc::new(base_attrs()),
+            attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: crate::test_support::session_router_id(next_hop),
@@ -451,7 +451,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)),
             link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: Arc::new(base_attrs()),
+            attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -507,7 +507,7 @@ mod tests {
         };
         let mut attrs = base_attrs();
         attrs.push(PathAttribute::Aggregator(aggregator));
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
 
         let parsed = decode_pdu(&synthesize_unicast_announce(&route).unwrap());
         assert!(
@@ -664,7 +664,7 @@ mod tests {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16);
         let nh = Ipv4Addr::new(192, 0, 2, 1);
         let mut route = unicast_route(Prefix::V4(prefix), IpAddr::V4(nh));
-        route.attributes = Arc::new(rich_attrs());
+        route.attributes = AttrSet::new(rich_attrs());
         let insert_pos = 2; // after ORIGIN + AS_PATH
         let expected = clone_based_oracle(
             &[Ipv4NlriEntry { path_id: 0, prefix }],
@@ -688,7 +688,7 @@ mod tests {
         ] {
             let nh: IpAddr = "2001:db8::1".parse().unwrap();
             let mut route = unicast_route(prefix, nh);
-            route.attributes = Arc::new(rich_attrs());
+            route.attributes = AttrSet::new(rich_attrs());
             route.link_local_next_hop = Some("fe80::1".parse().unwrap());
             let afi = match prefix {
                 Prefix::V4(_) => Afi::Ipv4,
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn borrowed_encode_vpn_matches_clone_based_oracle() {
         let mut route = vpn_route();
-        route.attributes = Arc::new(rich_attrs());
+        route.attributes = AttrSet::new(rich_attrs());
         let mut mp_reach = empty_mp_reach(Afi::Ipv4, Safi::MplsVpn, route.next_hop);
         mp_reach.vpn_announced = vec![VpnNlriEntry {
             path_id: 0,
@@ -747,7 +747,7 @@ mod tests {
         };
         route.next_hop = "2001:db8::1".parse().unwrap();
         route.link_local_next_hop = Some("fe80::1".parse().unwrap());
-        route.attributes = Arc::new(rich_attrs());
+        route.attributes = AttrSet::new(rich_attrs());
 
         let mut mp_reach = empty_mp_reach(Afi::Ipv6, Safi::MplsVpn, route.next_hop);
         mp_reach.link_local_next_hop = route.link_local_next_hop;
@@ -771,7 +771,7 @@ mod tests {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 9, 0, 0), 16);
         let nh = Ipv4Addr::new(192, 0, 2, 7);
         let mut route = unicast_route(Prefix::V4(prefix), IpAddr::V4(nh));
-        route.attributes = Arc::new(vec![]);
+        route.attributes = AttrSet::new(vec![]);
         let expected = clone_based_oracle(
             &[Ipv4NlriEntry { path_id: 0, prefix }],
             &[],

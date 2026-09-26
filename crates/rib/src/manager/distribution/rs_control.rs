@@ -45,7 +45,7 @@
 //! function values pass through untouched. Sessions with the knob off
 //! keep full transparency: nothing is interpreted or scrubbed.
 
-use std::sync::Arc;
+use crate::attr_set::AttrSet;
 
 use rustbgpd_policy::RouteModifications;
 use rustbgpd_wire::{AsPath, AsPathSegment, LargeCommunity};
@@ -244,7 +244,9 @@ pub(super) fn apply_rs_control_egress(route: &mut crate::route::Route, rs_asn: u
         as_path_prepend,
         ..RouteModifications::default()
     };
-    rustbgpd_policy::apply_modifications(Arc::make_mut(&mut route.attributes), &mods);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        rustbgpd_policy::apply_modifications(attrs, &mods)
+    });
 }
 
 #[cfg(test)]

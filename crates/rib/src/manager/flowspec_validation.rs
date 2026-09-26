@@ -899,6 +899,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::route::Route;
     use crate::test_support::{make_flowspec_route, make_route};
     use crate::{RibUpdate, SelectionDeferralConfig, SelectionDeferralWaiterConfig};
@@ -917,7 +918,7 @@ mod tests {
         let mut flow = make_flowspec_route(peer);
         flow.attributes = vec![path(65001)];
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), peer);
-        cover.attributes = Arc::new(vec![path(65001)]);
+        cover.attributes = AttrSet::new(vec![path(65001)]);
         let mut rib = AdjRibIn::new(flow.peer);
         rib.insert(cover.clone());
         rib.insert_flowspec(flow.clone());
@@ -942,7 +943,7 @@ mod tests {
         let mut route = cover.clone();
         route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
         route.path_id = path_id;
-        route.attributes = Arc::new(vec![path(asn)]);
+        route.attributes = AttrSet::new(vec![path(asn)]);
         route
     }
 
@@ -1012,7 +1013,7 @@ mod tests {
         flow.attributes = attributes.clone();
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), cover_peer);
         cover.origin_type = RouteOrigin::Ibgp;
-        cover.attributes = Arc::new(attributes);
+        cover.attributes = AttrSet::new(attributes);
         // Separate reflector sessions preserve one originator identity. Losing
         // only the unicast session must leave the received FlowSpec available.
         for (peer, announced, flowspec_announced) in [
@@ -1579,7 +1580,7 @@ mod tests {
                 }
             }
         }));
-        cover.attributes = Arc::new(vec![path(65002)]);
+        cover.attributes = AttrSet::new(vec![path(65002)]);
         manager
             .ribs
             .get_mut(&flow.peer)

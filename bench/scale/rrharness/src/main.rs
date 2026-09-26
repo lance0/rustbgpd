@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{OutboundRouteUpdate, RibUpdate};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::fanout_bench_export_encoder;
@@ -52,7 +53,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(src),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: src,

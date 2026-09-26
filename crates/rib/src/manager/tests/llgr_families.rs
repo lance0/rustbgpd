@@ -1,10 +1,12 @@
 use super::*;
+use crate::attr_set::AttrSet;
 
 fn make_llgr_vpn6_route(peer: Ipv4Addr, segment: u16, local_pref: u32) -> VpnRibRoute {
     let mut route = make_vpn6_rib_route_with_rts(peer, segment, vec![]);
-    let attributes = Arc::make_mut(&mut route.attributes);
-    attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
-    attributes.push(PathAttribute::LocalPref(local_pref));
+    AttrSet::edit(&mut route.attributes, |attributes| {
+        attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
+        attributes.push(PathAttribute::LocalPref(local_pref));
+    });
     route
 }
 
@@ -411,9 +413,11 @@ async fn vpn_llgr_eor_clears_llgr_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 60, 100, 100);
     let mut kept_tagged = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 61, 100, 100);
-    Arc::make_mut(&mut kept_tagged.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_LLGR_STALE,
-    ]));
+    AttrSet::edit(&mut kept_tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+    });
     let dropped = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 62, 100, 100);
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
@@ -518,9 +522,11 @@ async fn bgpls_llgr_eor_clears_llgr_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x60, 100);
     let mut kept_tagged = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x61, 100);
-    Arc::make_mut(&mut kept_tagged.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_LLGR_STALE,
-    ]));
+    AttrSet::edit(&mut kept_tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+    });
     let dropped = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x62, 100);
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
@@ -625,9 +631,11 @@ async fn rtc_llgr_eor_clears_llgr_stale() {
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let kept = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
     let mut kept_tagged = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 101, 100);
-    Arc::make_mut(&mut kept_tagged.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_LLGR_STALE,
-    ]));
+    AttrSet::edit(&mut kept_tagged.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_LLGR_STALE,
+        ]));
+    });
     let dropped = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 102, 100);
     let kept_key = kept.key();
     let kept_tagged_key = kept_tagged.key();
@@ -729,9 +737,11 @@ async fn vpn_llgr_no_llgr_community_drops_route_on_promotion() {
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let mut route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_LLGR,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ]));
+    });
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: source,
@@ -770,9 +780,11 @@ async fn bgpls_llgr_no_llgr_community_drops_route_on_promotion() {
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let mut route = make_bgpls_route(Ipv4Addr::new(10, 0, 0, 1), 0x01, 100);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_LLGR,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ]));
+    });
     tx.send(RibUpdate::BgpLsRoutesReceived {
         session_id: 0,
         peer: source,
@@ -811,9 +823,11 @@ async fn rtc_llgr_no_llgr_community_drops_route_on_promotion() {
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let mut route = make_rtc_rib_route(Ipv4Addr::new(10, 0, 0, 1), 100, 100);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_LLGR,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ]));
+    });
     tx.send(RibUpdate::RtcRoutesReceived {
         session_id: 0,
         peer: source,
@@ -1791,9 +1805,11 @@ async fn unicast_llgr_no_llgr_community_drops_route_on_promotion() {
     let dropped = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
     let kept = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
     let mut no_llgr = make_route(dropped, Ipv4Addr::new(10, 0, 0, 1));
-    Arc::make_mut(&mut no_llgr.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_LLGR,
-    ]));
+    AttrSet::edit(&mut no_llgr.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ]));
+    });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -1870,9 +1886,11 @@ async fn reflector_does_not_propagate_received_llgr_stale_over_fresh_path() {
             route
         };
         let mut tagged = ibgp(prefix, tagged_source, 200);
-        Arc::make_mut(&mut tagged.attributes).push(PathAttribute::Communities(vec![
-            rustbgpd_wire::COMMUNITY_LLGR_STALE,
-        ]));
+        AttrSet::edit(&mut tagged.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_LLGR_STALE,
+            ]));
+        });
         for (source, route) in [
             (fresh_source, ibgp(prefix, fresh_source, 100)),
             (tagged_source, tagged),

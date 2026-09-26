@@ -1,4 +1,5 @@
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::best_path::BestPathReason;
 
 /// Helper: build an IPv6 route with specific peer, AS path, and
@@ -16,7 +17,7 @@ fn make_multipath_route_v6(
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],
@@ -1084,7 +1085,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer_addr),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![asn])],
@@ -1790,7 +1791,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         link_local_next_hop: Some("fe80::1".parse().unwrap()),
         next_hop_scope: Some(Box::new(scope.clone())),
         peer: IpAddr::V6("fe80::2".parse().unwrap()),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6("fe80::2".parse().unwrap())),
@@ -1844,7 +1845,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
             ifindex,
         })),
         peer: IpAddr::V6(peer.parse().unwrap()),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6(peer.parse().unwrap())),
@@ -1958,9 +1959,11 @@ fn make_route_with_link_bw(
 ) -> Route {
     let mut route = make_route_with_as_path(prefix, peer, asns);
     if let Some(bw) = bw {
-        Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(vec![
-            ExtendedCommunity::link_bandwidth(65001, bw),
-        ]));
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::link_bandwidth(65001, bw),
+            ]));
+        });
     }
     route
 }

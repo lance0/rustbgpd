@@ -14,6 +14,8 @@ use rustbgpd_wire::{
     bgpls::{BgpLsNlri, BgpLsNlriKey},
 };
 
+use crate::attr_set::AttrSet;
+
 /// Interface scope required to resolve an IPv6 link-local next-hop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextHopScope {
@@ -111,9 +113,10 @@ pub struct Route {
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
     ///
     /// Wrapped in `Arc` for cheap cloning when routes are copied between
-    /// Adj-RIB-In, Loc-RIB, and Adj-RIB-Out. Use `Arc::make_mut()` for
-    /// the rare cases that need mutation (LLGR community injection).
-    pub attributes: Arc<Vec<PathAttribute>>,
+    /// Adj-RIB-In, Loc-RIB, and Adj-RIB-Out. [`AttrSet::edit`] is the
+    /// copy-on-write mutation path (LLGR community injection); it keeps the
+    /// cached selection summary in step with the attributes.
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or locally originated).
@@ -201,13 +204,7 @@ impl Route {
     /// Extract the ORIGIN attribute value, defaulting to Incomplete.
     #[must_use]
     pub fn origin(&self) -> Origin {
-        self.attributes
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::Origin(o) => Some(*o),
-                _ => None,
-            })
-            .unwrap_or(Origin::Incomplete)
+        self.attributes.summary().origin
     }
 
     /// Extract the `AS_PATH` attribute, returning `None` if absent.
@@ -222,13 +219,7 @@ impl Route {
     /// Extract the `LOCAL_PREF` attribute value, defaulting to 100.
     #[must_use]
     pub fn local_pref(&self) -> u32 {
-        self.attributes
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::LocalPref(lp) => Some(*lp),
-                _ => None,
-            })
-            .unwrap_or(100)
+        self.attributes.summary().local_pref
     }
 
     /// Extract the explicit `LOCAL_PREF` attribute value, if present.
@@ -243,13 +234,7 @@ impl Route {
     /// Extract the MED attribute value, defaulting to 0.
     #[must_use]
     pub fn med(&self) -> u32 {
-        self.attributes
-            .iter()
-            .find_map(|a| match a {
-                PathAttribute::Med(m) => Some(*m),
-                _ => None,
-            })
-            .unwrap_or(0)
+        self.attributes.summary().med
     }
 
     /// Extract the explicit MED attribute value, if present.
@@ -291,10 +276,7 @@ impl Route {
     /// Extract `ORIGINATOR_ID` (RFC 4456) if present.
     #[must_use]
     pub fn originator_id(&self) -> Option<Ipv4Addr> {
-        self.attributes.iter().find_map(|a| match a {
-            PathAttribute::OriginatorId(id) => Some(*id),
-            _ => None,
-        })
+        self.attributes.summary().originator_id
     }
 
     /// Extract `CLUSTER_LIST` (RFC 4456), returning empty slice if absent.
@@ -378,7 +360,7 @@ pub struct BgpLsRibRoute {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes.
-    pub attributes: Arc<Vec<PathAttribute>>,
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).
@@ -518,7 +500,7 @@ pub struct VpnRibRoute {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes. Route Targets ride here as extended communities.
-    pub attributes: Arc<Vec<PathAttribute>>,
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).
@@ -689,7 +671,7 @@ pub struct LabeledRibRoute {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes.
-    pub attributes: Arc<Vec<PathAttribute>>,
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).
@@ -824,7 +806,7 @@ pub struct RtcRibRoute {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes.
-    pub attributes: Arc<Vec<PathAttribute>>,
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).
@@ -1080,7 +1062,7 @@ pub struct EvpnRibRoute {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, extended communities, etc.).
-    pub attributes: Arc<Vec<PathAttribute>>,
+    pub attributes: Arc<AttrSet>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or local).
@@ -1229,7 +1211,6 @@ impl EvpnRibRoute {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
     use std::time::Instant;
 
     use std::collections::HashMap;
@@ -1248,7 +1229,7 @@ mod tests {
             nlri,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -1309,7 +1290,7 @@ mod tests {
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -1405,7 +1386,7 @@ mod tests {
             nlri: RtcNlri::new(65001, rt, 96).unwrap(),
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),

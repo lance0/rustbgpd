@@ -7,6 +7,7 @@ use std::time::Instant;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd_policy::{PolicyChain, RouteContext, evaluate_chain};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
 use rustbgpd_rib::attr_intern::AttrInternTable;
@@ -184,18 +185,18 @@ fn unique_attributes(index: usize) -> Vec<PathAttribute> {
     attrs
 }
 
-fn build_attribute_arcs(case: AttrCase, count: usize) -> Vec<Arc<Vec<PathAttribute>>> {
+fn build_attribute_arcs(case: AttrCase, count: usize) -> Vec<Arc<AttrSet>> {
     match case.allocation {
         AttrAllocation::SharedArc => {
-            let attrs = Arc::new(base_attributes(case.profile));
+            let attrs = AttrSet::new(base_attributes(case.profile));
             vec![attrs; count]
         }
         AttrAllocation::IndependentEqual => {
             let attrs = base_attributes(case.profile);
-            (0..count).map(|_| Arc::new(attrs.clone())).collect()
+            (0..count).map(|_| AttrSet::new(attrs.clone())).collect()
         }
         AttrAllocation::ManyUnique => (0..count)
-            .map(|index| Arc::new(unique_attributes(index)))
+            .map(|index| AttrSet::new(unique_attributes(index)))
             .collect(),
     }
 }
@@ -386,14 +387,10 @@ fn validate_attr_hash_measurement() {
 }
 
 fn make_route(prefix: Prefix, peer_idx: u32) -> Route {
-    make_route_with_attributes(prefix, peer_idx, Arc::new(typical_attributes(peer_idx)))
+    make_route_with_attributes(prefix, peer_idx, AttrSet::new(typical_attributes(peer_idx)))
 }
 
-fn make_route_with_attributes(
-    prefix: Prefix,
-    peer_idx: u32,
-    attributes: Arc<Vec<PathAttribute>>,
-) -> Route {
+fn make_route_with_attributes(prefix: Prefix, peer_idx: u32, attributes: Arc<AttrSet>) -> Route {
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
@@ -702,14 +699,14 @@ fn bench_attr_intern_manager_churn(c: &mut Criterion) {
                         attrs.push(PathAttribute::Communities(vec![
                             u32::try_from(index).expect("fixture community fits u32"),
                         ]));
-                        make_route_with_attributes(*prefix, 1, Arc::new(attrs))
+                        make_route_with_attributes(*prefix, 1, AttrSet::new(attrs))
                     })
                     .collect();
                 manager.bench_seed_loc_rib(routes);
                 let make_target = |variant: u32| {
                     let mut attrs = typical_attributes(1);
                     attrs.push(PathAttribute::Communities(vec![variant]));
-                    make_route_with_attributes(prefixes[count], 1, Arc::new(attrs))
+                    make_route_with_attributes(prefixes[count], 1, AttrSet::new(attrs))
                 };
                 let peer = make_target(0).peer;
                 manager.bench_seed_loc_rib(vec![make_target(0)]);
@@ -770,7 +767,7 @@ fn bench_best_path_cmp(c: &mut Criterion) {
 
     // LOCAL_PREF difference — early exit at step 1
     let mut b_lp = make_route(prefix, 2);
-    b_lp.attributes = Arc::new(vec![
+    b_lp.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002, 65100, 65200])],
@@ -799,8 +796,8 @@ fn bench_best_path_cmp(c: &mut Criterion) {
 
     // Full tiebreak over rich attributes: 32 COMMUNITIES (none of them
     // LLGR_STALE), extended/large communities, ORIGINATOR_ID, CLUSTER_LIST.
-    let a3 = make_route_with_attributes(prefix, 1, Arc::new(rich_attributes(1)));
-    let b3 = make_route_with_attributes(prefix, 2, Arc::new(rich_attributes(2)));
+    let a3 = make_route_with_attributes(prefix, 1, AttrSet::new(rich_attributes(1)));
+    let b3 = make_route_with_attributes(prefix, 2, AttrSet::new(rich_attributes(2)));
     group.bench_function("rich_full_tiebreak", |bench| {
         bench.iter(|| {
             for _ in 0..1000 {
@@ -922,7 +919,7 @@ fn bench_loc_rib_steady(c: &mut Criterion) {
     // Route-server shape: one prefix with 32 rich-attribute paths that tie
     // down to the peer-address step; the installed best is unchanged.
     let rich_paths: Vec<Route> = (1..=32)
-        .map(|i| make_route_with_attributes(prefix, i, Arc::new(rich_attributes(1))))
+        .map(|i| make_route_with_attributes(prefix, i, AttrSet::new(rich_attributes(1))))
         .collect();
     group.bench_function("unchanged_32_rich_paths", |b| {
         b.iter_batched(
@@ -940,7 +937,7 @@ fn bench_loc_rib_steady(c: &mut Criterion) {
     group.finish();
 
     let prefixes = generate_prefixes(100_000);
-    let attributes = Arc::new(typical_attributes(1));
+    let attributes = AttrSet::new(typical_attributes(1));
     let routes: Vec<_> = prefixes
         .iter()
         .map(|prefix| make_route_with_attributes(*prefix, 1, Arc::clone(&attributes)))

@@ -1,4 +1,5 @@
 use super::*;
+use crate::attr_set::AttrSet;
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
@@ -54,24 +55,32 @@ pub(super) fn no_advertise_addition_chain(peer_context: bool) -> PolicyChain {
 }
 
 pub(super) fn with_no_advertise(mut route: Route) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ]));
+    });
     route
 }
 
 fn with_partial_community(mut route: Route, community: u32) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::CommunitiesPartial(vec![community]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::CommunitiesPartial(vec![community]));
+    });
     route
 }
 
 fn with_otc(mut route: Route, asn: u32) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(asn));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomer(asn));
+    });
     route
 }
 
 fn with_partial_otc(mut route: Route, asn: u32) -> Route {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomerPartial(asn));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomerPartial(asn));
+    });
     route
 }
 
@@ -309,11 +318,13 @@ async fn partial_community_attributes_survive_policy_update_group_and_wire_encod
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(198, 51, 100, 91));
-    Arc::make_mut(&mut route.attributes).extend([
-        PathAttribute::CommunitiesPartial(vec![community]),
-        PathAttribute::ExtendedCommunitiesPartial(vec![extended]),
-        PathAttribute::LargeCommunitiesPartial(vec![large]),
-    ]);
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.extend([
+            PathAttribute::CommunitiesPartial(vec![community]),
+            PathAttribute::ExtendedCommunitiesPartial(vec![extended]),
+            PathAttribute::LargeCommunitiesPartial(vec![large]),
+        ]);
+    });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source,
@@ -2727,7 +2738,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(next_hop),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: session_router_id(IpAddr::V4(next_hop)),
@@ -3044,7 +3055,7 @@ async fn local_route_sent_to_ibgp_peer() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3087,7 +3098,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3224,7 +3235,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
         ]),
@@ -3305,7 +3316,7 @@ async fn withdraw_injected_removes_and_distributes() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3394,7 +3405,7 @@ async fn distribute_changes_filters_unsendable_families() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: source,
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
@@ -3454,7 +3465,7 @@ async fn send_initial_table_filters_unsendable_families() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: source,
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
@@ -3539,7 +3550,7 @@ async fn dual_stack_peer_receives_both_families() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: source,
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
@@ -3992,7 +4003,7 @@ async fn rr_local_route_to_all_ibgp() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,

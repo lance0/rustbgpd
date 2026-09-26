@@ -6,6 +6,7 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd::bench_internals::{FibTableConfig, project_fib_intent_counts};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{FibInstallCandidate, FibInstallNextHop, Route, RouteOrigin};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
@@ -40,8 +41,8 @@ fn prefix(idx: usize) -> Prefix {
     ))
 }
 
-fn attrs(peer_idx: usize) -> Arc<Vec<PathAttribute>> {
-    Arc::new(vec![
+fn attrs(peer_idx: usize) -> Arc<AttrSet> {
+    AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![

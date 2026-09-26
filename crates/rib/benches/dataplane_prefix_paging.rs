@@ -5,6 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibManager, Route, RouteOrigin, RouteQueryScope};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -127,7 +128,7 @@ fn prefix(index: usize) -> Prefix {
 }
 
 fn make_routes(prefixes: usize, announcers: usize) -> Vec<Route> {
-    let attributes = Arc::new(vec![
+    let attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65001])],
