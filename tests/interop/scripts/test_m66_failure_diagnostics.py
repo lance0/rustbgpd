@@ -120,6 +120,17 @@ class M66FailureDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("M66 failure:", result.stderr)
         self.assertEqual(calls[-1][0], "containerlab")
 
+    def test_signals_exit_after_one_dump_and_cleanup(self):
+        for signal, status in (("INT", 130), ("TERM", 143), ("HUP", 129)):
+            with self.subTest(signal=signal):
+                result, calls = self.run_driver(
+                    f"kill -{signal} $$\necho AFTER_SIGNAL\nexit 0\n"
+                )
+                self.assertEqual(result.returncode, status)
+                self.assertNotIn("AFTER_SIGNAL", result.stdout)
+                self.assert_full_dump(result, calls)
+                self.assertEqual(sum(call[0] == "containerlab" for call in calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

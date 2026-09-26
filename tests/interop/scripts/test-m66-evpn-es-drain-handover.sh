@@ -150,7 +150,10 @@ m66_cleanup_on_exit() {
     _cleanup_on_exit || true
     return "$exit_code"
 }
-trap m66_cleanup_on_exit EXIT INT TERM HUP
+trap m66_cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # Assert all four pe1 route classes are ABSENT from the vtep RIB
 # right now (used post-drain and post-SIGHUP). $1 = phase label.
