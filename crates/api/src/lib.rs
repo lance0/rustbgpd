@@ -2,8 +2,9 @@
 //!
 //! Tonic bindings for the rustbgpd services: `GlobalService`,
 //! `ConfigService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
-//! `RibService`, `BfdService`, `EventService`, `InjectionService`,
-//! `ControlService`, `EvpnService`, and the `OpenConfig` `gnmi.gNMI` service.
+//! `RibService`, `BfdService`, `RpkiService`, `EventService`,
+//! `InjectionService`, `ControlService`, `EvpnService`, and the `OpenConfig`
+//! `gnmi.gNMI` service.
 //! The authoritative roster is the set of `add_service` registrations in
 //! [`server`].
 
