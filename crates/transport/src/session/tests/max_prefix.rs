@@ -2284,9 +2284,9 @@ async fn add_path_receive_max_shutdown_latches_with_path_count() {
     let notif = read_until_notification(&mut server).await;
     assert_eq!(notif.code, NotificationCode::Cease);
     assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
-    assert_eq!(
-        notif.data.as_ref(),
-        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 2)
+    assert!(
+        notif.data.is_empty(),
+        "a path cap is not a prefix upper bound"
     );
 }
 

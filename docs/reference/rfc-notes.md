@@ -1290,6 +1290,10 @@ prefix for negotiated IPv4/IPv6-unicast Add-Path receive; other families have
 no local receive enforcement. Rejected identities count only when the
 family's received-prefix bound already enables their tracking. This local
 cap is defensive; the draft places the sender-side obligation on the peer.
+If this local cap shuts down a session, Cease/1 carries no optional RFC 4486
+data: that field specifies a prefix upper bound, not paths per prefix. The
+configured path cap remains visible in the local warning, counter, and peer
+latch reason.
 Neighbor output orders rows by numeric AFI/SAFI and carries an optional
 normalized limit whose presence distinguishes active unlimited from inactive.
 The raw `effective_send_max` sentinel is gone: `PathsLimitState` field number

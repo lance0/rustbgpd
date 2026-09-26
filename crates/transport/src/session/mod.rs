@@ -1305,11 +1305,9 @@ impl PeerSession {
                     safi = safi as u8,
                     "per-prefix Add-Path receive limit exceeded"
                 );
-                let mut data = Vec::with_capacity(7);
-                data.extend_from_slice(&(afi as u16).to_be_bytes());
-                data.push(safi as u8);
-                data.extend_from_slice(&violation.bound.to_be_bytes());
-                Bytes::from(data)
+                // RFC 4486 §4's optional Cease/1 data means a *prefix* upper
+                // bound. A per-prefix path-ID cap has no matching wire field.
+                Bytes::new()
             }
             Some((afi, safi)) if violation.received => {
                 warn!(
