@@ -78,6 +78,23 @@ registry.register(Box::new(EventOutboxQueueDepthCollector::new(
         }
         return CHECK.dashboard_metric_references(dashboard)
 
+    def test_early_test_instrumentation_preserves_runtime_metric_inventory(self):
+        rust = '''#[cfg(test)]
+thread_local! { static VISITS: Cell<usize> = const { Cell::new(0) }; }
+let ready = IntGauge::new("bgp_ready", "help").expect("metric");
+registry.register(Box::new(ready.clone())).unwrap();
+#[cfg(test)] mod tests {
+    let hidden = IntGauge::new("bgp_test_only", "help").expect("metric");
+    registry.register(Box::new(hidden.clone())).unwrap();
+}'''
+        for separator in (" ", "\n"):
+            with self.subTest(separator=separator):
+                source = rust.replace("#[cfg(test)] mod", f"#[cfg(test)]{separator}mod")
+                self.assertEqual(CHECK.rust_metric_inventory(source), {"bgp_ready": "ordinary"})
+                self.assertEqual(
+                    CHECK.registered_metric_definitions(source), {"bgp_ready": ("gauge", ())}
+                )
+
     def test_registered_metric_resolves(self):
         CHECK.check_metric_linkage(self.refs(), CHECK.rust_metric_inventory(self.rust()))
 
