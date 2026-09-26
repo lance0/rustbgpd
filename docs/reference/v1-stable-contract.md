@@ -187,10 +187,13 @@ lists each file's version marker and reader behavior. What holds today:
   has nothing older to read. Retired commit-confirm journals refuse boot by
   design; the persistent-state table gives their recovery path.
 - **Newer state under an older binary:** a reader that meets a version it does
-  not understand refuses, quarantines, or ignores it; it does not decode it as
-  its own. Commit-confirm authority refuses boot with the artifact untouched,
+  not understand refuses or quarantines it, or sets it aside unread; it does
+  not decode it as its own. Commit-confirm authority refuses boot with the artifact untouched,
   the GR marker is rejected and the daemon cold-starts, FIB owned state is
-  quarantined, and config-history rows of an unknown version are ignored.
+  quarantined. A config-history row of a newer format is listed as
+  unreadable, keeps its sequence and roster slot, and cannot be a rollback
+  target; while one exists, the daemon records no new history and logs a
+  warning.
   The BLACKHOLE receipt stays in place and BLACKHOLE kernel mutations are
   disabled. The event store stays in place, neither migrated nor
   quarantined. When event history is enabled, the daemon exits at startup
