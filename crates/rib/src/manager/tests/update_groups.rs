@@ -14,6 +14,7 @@ use super::*;
 
 #[path = "update_groups_harness.rs"]
 mod update_groups_harness;
+use crate::attr_set::AttrSet;
 use crate::manager::distribution::OutboundCommitBatch;
 use update_groups_harness::{
     RunningManager, spawn_running_manager, spawn_running_manager_with_roster,
@@ -887,10 +888,12 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     };
     let own_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
     let mut own_route = crate::test_support::make_route(own_prefix, peer_source);
-    Arc::make_mut(&mut own_route.attributes).extend([
-        PathAttribute::Communities(vec![0xFDE8_0002]),
-        PathAttribute::OnlyToCustomer(64_512),
-    ]);
+    AttrSet::edit(&mut own_route.attributes, |attrs| {
+        attrs.extend([
+            PathAttribute::Communities(vec![0xFDE8_0002]),
+            PathAttribute::OnlyToCustomer(64_512),
+        ]);
+    });
     let other_route = crate::test_support::make_route(
         Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24),
         Ipv4Addr::new(192, 0, 2, 64),
@@ -1364,7 +1367,9 @@ fn real_caller_grouped_exact_precommit_fast_and_slow_paths_are_equivalent() {
     let source = Ipv4Addr::new(192, 0, 2, 90);
     let small = crate::test_support::make_route(prefix, source);
     let mut oversized = small.clone();
-    Arc::make_mut(&mut oversized.attributes).push(PathAttribute::Communities(vec![0xFDE8_0002]));
+    AttrSet::edit(&mut oversized.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![0xFDE8_0002]));
+    });
     let routes = [small.clone(), oversized, small];
     let normal = run_exact_precommit_differential(false, &routes);
     let forced_slow = run_exact_precommit_differential(true, &routes);
@@ -3938,7 +3943,9 @@ async fn clean_policy_transition_tagged_source_keeps_rs_members_on_authoritative
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 118, 0), 24);
     let source = Ipv4Addr::new(192, 0, 2, 62);
     let mut steered = make_route_with_as_path(prefix, source, vec![65010]);
-    Arc::make_mut(&mut steered.attributes).push(PathAttribute::LargeCommunities(vec![deny_to_a]));
+    AttrSet::edit(&mut steered.attributes, |attrs| {
+        attrs.push(PathAttribute::LargeCommunities(vec![deny_to_a]));
+    });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: IpAddr::V4(source),
@@ -7390,7 +7397,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(src),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65000 + rank; rank as usize])],

@@ -1,4 +1,5 @@
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::best_path::BestPathReason;
 use crate::update::{ExplainDecision, ExplainEvpnRoute, ExportGateVerdict};
 
@@ -146,15 +147,19 @@ fn exact_evpn_explain_runs_each_export_stop_in_live_order() {
                 manager.loc_rib.remove_evpn(&route.key());
             }
             "no_advertise_suppressed" => {
-                Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-                    rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-                ]));
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Communities(vec![
+                        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+                    ]));
+                });
                 install(&mut manager, &route);
             }
             "no_export_suppressed" => {
-                Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-                    rustbgpd_wire::COMMUNITY_NO_EXPORT,
-                ]));
+                AttrSet::edit(&mut route.attributes, |attrs| {
+                    attrs.push(PathAttribute::Communities(vec![
+                        rustbgpd_wire::COMMUNITY_NO_EXPORT,
+                    ]));
+                });
                 install(&mut manager, &route);
             }
             "llgr_stale_suppressed" => {
@@ -291,7 +296,9 @@ fn exact_evpn_explain_source_scope_deferral_dirty_and_encoder_overlay_are_distin
         .insert_evpn(old.clone());
     let mut fresh = old.clone();
     fresh.peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
-    Arc::make_mut(&mut fresh.attributes).push(PathAttribute::LocalPref(250));
+    AttrSet::edit(&mut fresh.attributes, |attrs| {
+        attrs.push(PathAttribute::LocalPref(250));
+    });
     manager
         .ribs
         .entry(fresh.peer)

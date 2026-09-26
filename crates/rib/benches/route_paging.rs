@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportResult,
     ExactExportSnapshot, RibManager, RouteQueryKey, RouteQueryScope, route_query_key,
@@ -184,7 +185,7 @@ impl ExactExportEncoder for PermissiveExactExport {
 fn make_routes(count: usize) -> Vec<Route> {
     let external_peer = Ipv4Addr::new(198, 51, 100, 1);
     let grouped_member = RibManager::bench_peer_address(0);
-    let attributes = Arc::new(Vec::new());
+    let attributes = AttrSet::new(Vec::new());
     (0..count)
         .map(|index| {
             let host = 0x0a00_0000u32

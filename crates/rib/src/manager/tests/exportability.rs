@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::manager::distribution::OutboundCommitBatch;
 use crate::update::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
@@ -593,8 +594,9 @@ fn post_otc_withdrawal_only_skips_exact_probe_and_keeps_snapshot() {
         .peer_local_roles
         .insert(peer, Some(rustbgpd_wire::BgpRole::Customer));
     let mut otc_blocked = route.clone();
-    Arc::make_mut(&mut otc_blocked.attributes)
-        .push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
+    AttrSet::edit(&mut otc_blocked.attributes, |attrs| {
+        attrs.push(rustbgpd_wire::PathAttribute::OnlyToCustomer(64_512));
+    });
     manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
     let mut cache = crate::manager::distribution::SharedUnicastProbeCache::default();
     assert!(commit_shared_unicast_with_precommit(

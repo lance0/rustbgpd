@@ -6,6 +6,7 @@
 //! class: spurious 2nd-best withdrawals / re-advertisements), the
 //! single-best presentation shape, and the refresh/GShut replays.
 
+use crate::attr_set::AttrSet;
 use rustbgpd_policy::{
     CommunityMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
@@ -63,7 +64,7 @@ fn ebgp_route(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>, communities: V
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(peer)),
@@ -446,7 +447,9 @@ async fn candidate_churn_produces_minimal_deltas() {
 
     // (a) denied best changes attributes: still denied — no wire traffic.
     let mut retagged_best = best_route();
-    Arc::make_mut(&mut retagged_best.attributes).push(PathAttribute::Med(50));
+    AttrSet::edit(&mut retagged_best.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(50));
+    });
     announce_from(&tx, SOURCE_A, vec![retagged_best]).await;
     sync(&tx).await;
     assert!(

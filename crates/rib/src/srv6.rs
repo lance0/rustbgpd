@@ -210,6 +210,7 @@ pub(crate) mod tests {
     };
 
     use super::*;
+    use crate::attr_set::AttrSet;
 
     pub(crate) fn service_attribute(
         kind: u8,
@@ -520,7 +521,7 @@ pub(crate) mod tests {
 
     #[test]
     fn compressed_dt2m_imet_with_argument_is_selected() {
-        use std::{net::Ipv4Addr, sync::Arc, time::Instant};
+        use std::{net::Ipv4Addr, time::Instant};
 
         use crate::{loc_rib::LocRib, route::RouteOrigin};
 
@@ -535,7 +536,7 @@ pub(crate) mod tests {
             next_hop: sid.into(),
             link_local_next_hop: None,
             peer: peer.into(),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 service_attribute(6, sid, 124, Some([40, 24, 16, 16, 0, 0])),
                 PathAttribute::PmsiTunnel(PmsiTunnel {
                     flags: 0,

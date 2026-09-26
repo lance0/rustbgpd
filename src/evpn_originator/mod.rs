@@ -88,6 +88,7 @@ use rustbgpd_evpn::{
     LocalMacOriginator, MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacIpView,
     RemoteMacView, project_evpn_routes,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -1032,7 +1033,7 @@ pub(crate) fn build_originated_route(
         next_hop: instance.local_vtep_ip,
         link_local_next_hop: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Local,
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,

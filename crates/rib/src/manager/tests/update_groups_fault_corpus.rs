@@ -2098,7 +2098,7 @@ fn norm_announce(prefix: Ipv4Prefix, local_pref: u32) -> NormAnnounce {
         route.path_id,
         route.next_hop,
         route.peer,
-        (*route.attributes).clone(),
+        route.attributes.to_vec(),
         None,
     )
 }

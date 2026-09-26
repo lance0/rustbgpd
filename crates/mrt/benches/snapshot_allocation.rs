@@ -22,6 +22,7 @@ use rustbgpd_mrt::codec::encode_snapshot;
 #[cfg(feature = "snapshot-allocation-diagnostics")]
 use rustbgpd_mrt::codec::encode_snapshot_with_allocation_diagnostics;
 use rustbgpd_mrt::reader::{SnapshotEntry, SnapshotNlri};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
@@ -446,7 +447,7 @@ impl Fixture {
         let attributes: Vec<_> = peers
             .iter()
             .map(|peer| {
-                Arc::new(vec![
+                AttrSet::new(vec![
                     PathAttribute::Origin(Origin::Igp),
                     PathAttribute::AsPath(AsPath {
                         segments: vec![AsPathSegment::AsSequence(vec![
@@ -519,7 +520,7 @@ fn make_route(
     prefix_index: usize,
     source_index: usize,
     peers: &[MrtPeerEntry],
-    attributes: &[Arc<Vec<PathAttribute>>],
+    attributes: &[Arc<AttrSet>],
     received_at: Instant,
 ) -> Route {
     let prefix_ordinal = u32::try_from(prefix_index).expect("prefix count fits u32");

@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 #[test]
 #[expect(
@@ -116,7 +117,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
     session.negotiated = Some(Arc::new(negotiated));
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -221,7 +222,7 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: Arc::new(attrs.clone()),
+            attributes: AttrSet::new(attrs.clone()),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -287,7 +288,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(attrs.clone()),
+        attributes: AttrSet::new(attrs.clone()),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -300,7 +301,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
     };
     let route2 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
-        attributes: Arc::new(attrs),
+        attributes: AttrSet::new(attrs),
         ..route1.clone()
     };
     let update = announce_only(&session, vec![route1, route2]);
@@ -320,11 +321,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
     assert_eq!(mp.announced.len(), 2);
 }
 
-fn v4_route_with(
-    attributes: Arc<Vec<PathAttribute>>,
-    third_octet: u8,
-    next_hop: Ipv4Addr,
-) -> Route {
+fn v4_route_with(attributes: Arc<AttrSet>, third_octet: u8, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(20, 0, third_octet, 0), 24)),
         next_hop: IpAddr::V4(next_hop),
@@ -364,8 +361,8 @@ async fn value_grouping_keeps_ipv4_body_next_hops_apart() {
     session.test_install_stream(client);
     session.config.route_server_client = true;
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    let first = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
-    let second = v4_route_with(Arc::new(plain_attrs()), 2, Ipv4Addr::new(10, 0, 0, 3));
+    let first = v4_route_with(AttrSet::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    let second = v4_route_with(AttrSet::new(plain_attrs()), 2, Ipv4Addr::new(10, 0, 0, 3));
     session.send_route_update(announce_only(&session, vec![first, second]));
     let mut next_hops = Vec::new();
     for _ in 0..2 {
@@ -400,7 +397,8 @@ async fn value_grouping_packs_ipv4_mp_reach_from_distinct_allocations() {
     install_test_negotiated_session(&mut session, negotiated_session(65002, true));
     let routes: Vec<Route> = (1..=3u8)
         .map(|octet| {
-            let mut route = v4_route_with(Arc::new(plain_attrs()), octet, Ipv4Addr::UNSPECIFIED);
+            let mut route =
+                v4_route_with(AttrSet::new(plain_attrs()), octet, Ipv4Addr::UNSPECIFIED);
             route.next_hop = IpAddr::V6("fe80::2".parse().unwrap());
             route.link_local_next_hop = Some("fe80::2".parse().unwrap());
             route.peer = IpAddr::V6("fe80::2".parse().unwrap());
@@ -442,7 +440,7 @@ async fn value_grouping_keeps_ipv6_next_hops_apart() {
     session.negotiated = Some(Arc::new(negotiated));
     let mut routes = Vec::new();
     for (i, nh) in ["2001:db8::1", "2001:db8::2"].into_iter().enumerate() {
-        let mut route = v4_route_with(Arc::new(plain_attrs()), 0, Ipv4Addr::UNSPECIFIED);
+        let mut route = v4_route_with(AttrSet::new(plain_attrs()), 0, Ipv4Addr::UNSPECIFIED);
         route.prefix = Prefix::V6(Ipv6Prefix::new(
             Ipv6Addr::new(0x2001, 0xdb8, 1 + u16::try_from(i).unwrap(), 0, 0, 0, 0, 0),
             64,
@@ -483,9 +481,9 @@ async fn value_grouping_keeps_add_path_identifiers() {
         .add_path_families
         .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Send);
     session.negotiated = Some(Arc::new(negotiated));
-    let mut first = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    let mut first = v4_route_with(AttrSet::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
     first.path_id = 7;
-    let mut second = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    let mut second = v4_route_with(AttrSet::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
     second.path_id = 9;
     session.send_route_update(announce_only(&session, vec![first, second]));
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
@@ -506,7 +504,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     session.negotiated = Some(Arc::new(negotiated));
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -606,7 +604,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
 
     // One shared attribute set + next hop => one attribute group. 1500 /24s
     // (4 NLRI bytes each = 6000 bytes) cannot fit a single 4096-byte UPDATE.
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -775,7 +773,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
     session.test_install_stream(client);
     install_test_negotiated_session(&mut session, negotiated_session(65002, true));
 
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -940,7 +938,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
     install_test_negotiated_session(&mut session, negotiated);
 
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -1164,7 +1162,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
     install_test_negotiated_session(&mut session, negotiated);
 
     let padding = Bytes::from(vec![0x5a; 36_000]);
-    let attrs = Arc::new(vec![
+    let attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],

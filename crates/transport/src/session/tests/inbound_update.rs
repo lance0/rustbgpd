@@ -952,20 +952,20 @@ async fn external_neighbor_rr_attributes_are_discarded_for_every_family() {
                 ..
             } => announced
                 .first()
-                .map(|r| (*r.attributes).clone())
+                .map(|r| r.attributes.to_vec())
                 .or_else(|| flowspec_announced.first().map(|r| r.attributes.clone()))
-                .or_else(|| evpn_announced.first().map(|r| (*r.attributes).clone())),
+                .or_else(|| evpn_announced.first().map(|r| r.attributes.to_vec())),
             RibUpdate::BgpLsRoutesReceived { announced, .. } => {
-                announced.first().map(|r| (*r.attributes).clone())
+                announced.first().map(|r| r.attributes.to_vec())
             }
             RibUpdate::VpnRoutesReceived { announced, .. } => {
-                announced.first().map(|r| (*r.attributes).clone())
+                announced.first().map(|r| r.attributes.to_vec())
             }
             RibUpdate::LabeledRoutesReceived { announced, .. } => {
-                announced.first().map(|r| (*r.attributes).clone())
+                announced.first().map(|r| r.attributes.to_vec())
             }
             RibUpdate::RtcRoutesReceived { announced, .. } => {
-                announced.first().map(|r| (*r.attributes).clone())
+                announced.first().map(|r| r.attributes.to_vec())
             }
             _ => panic!("{family:?}: unexpected RIB update"),
         }

@@ -67,6 +67,7 @@ use rustbgpd_evpn::{
     EvpnIpPrefixValue, IpVrf, IpVrfDataplaneStatus, IpVrfId, IpVrfTable, LocalIpRouteObservation,
     RouteSource,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{EvpnRibRoute, RouteOrigin};
 use rustbgpd_rib::{RibCommandError, RibUpdate};
 use rustbgpd_telemetry::BgpMetrics;
@@ -614,7 +615,7 @@ fn try_originate(
         next_hop: originated.next_hop,
         link_local_next_hop: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(originated.attributes),
+        attributes: AttrSet::new(originated.attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Local,
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,

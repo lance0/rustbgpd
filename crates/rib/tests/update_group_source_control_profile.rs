@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_wire::{Ipv4Prefix, PathAttribute, Prefix};
 use rustc_hash::FxHashMap;
 
@@ -46,12 +47,12 @@ fn passthrough_group_avoids_historical_source_control_collection() {
     assert!(source.contains("if !self.source_control_passthrough"));
     assert!(source.contains("source_control_for_route"));
 
-    let safe: FxHashMap<(Prefix, u32), Arc<Vec<PathAttribute>>> = FxHashMap::default();
+    let safe: FxHashMap<(Prefix, u32), Arc<AttrSet>> = FxHashMap::default();
     assert_eq!((safe.len(), safe.capacity()), (0, 0));
 
-    let shared_attrs = Arc::new(vec![PathAttribute::Communities(vec![1])]);
+    let shared_attrs = AttrSet::new(vec![PathAttribute::Communities(vec![1])]);
     let before = ALLOC.live.load(Ordering::Relaxed);
-    let mut historical: FxHashMap<(Prefix, u32), Arc<Vec<PathAttribute>>> = FxHashMap::default();
+    let mut historical: FxHashMap<(Prefix, u32), Arc<AttrSet>> = FxHashMap::default();
     for n in 0..ROUTES as u32 {
         historical.insert((prefix(n), 0), Arc::clone(&shared_attrs));
     }

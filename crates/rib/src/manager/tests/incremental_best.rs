@@ -18,6 +18,7 @@ use std::time::Instant;
 use proptest::prelude::*;
 
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::loc_rib::LocRib;
 use crate::route::RouteOrigin;
 
@@ -78,16 +79,17 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
     let valid_service = service_attribute(5, sid, 19, Some([40, 24, 16, 0, 0, 0]));
     let mut fallback = build_route(0, 0, 0, 0, Instant::now());
     fallback.next_hop = "2001:db8::10".parse().unwrap();
-    Arc::make_mut(&mut fallback.attributes).push(valid_service.clone());
+    AttrSet::edit(&mut fallback.attributes, |attrs| {
+        attrs.push(valid_service.clone());
+    });
     let mut invalid = build_route(1, 0, 0, 0, Instant::now());
     invalid.next_hop = "2001:db8::11".parse().unwrap();
-    Arc::make_mut(&mut invalid.attributes)[2] = PathAttribute::LocalPref(200);
-    Arc::make_mut(&mut invalid.attributes).push(service_attribute(
-        5,
-        sid,
-        19,
-        Some([100, 24, 16, 0, 0, 0]),
-    ));
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        attrs[2] = PathAttribute::LocalPref(200);
+    });
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        attrs.push(service_attribute(5, sid, 19, Some([100, 24, 16, 0, 0, 0])));
+    });
     let announce = |manager: &mut RibManager, route: &Route| {
         manager.enqueue_routes_received(
             route.peer,
@@ -136,7 +138,9 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         assert!(explain.best_reason.is_none());
     }
     // With equal BGP preferences, the invalid sibling must still stay out of ECMP.
-    Arc::make_mut(&mut invalid.attributes)[2] = PathAttribute::LocalPref(100);
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        attrs[2] = PathAttribute::LocalPref(100);
+    });
     announce(&mut manager, &invalid);
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::QueryFibInstallCandidates {
@@ -192,7 +196,9 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         BestPathReason::Srv6SidInvalid
     );
 
-    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() = valid_service;
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        *attrs.last_mut().unwrap() = valid_service;
+    });
     announce(&mut manager, &invalid);
     assert_eq!(
         manager.loc_rib.get(&invalid.prefix).unwrap().peer,
@@ -207,8 +213,9 @@ fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
         assert_eq!(announced[0].peer, invalid.peer);
     }
     // Replacing the installed winner itself exercises the owner fast-path rescan.
-    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() =
-        service_attribute(5, sid, 19, Some([100, 24, 16, 0, 0, 0]));
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        *attrs.last_mut().unwrap() = service_attribute(5, sid, 19, Some([100, 24, 16, 0, 0, 0]));
+    });
     announce(&mut manager, &invalid);
     assert!(manager.loc_rib.get(&invalid.prefix).is_none());
     for (_, out) in &mut receivers {
@@ -231,12 +238,9 @@ fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
     route.peer = LOCAL_PEER;
     route.origin_type = RouteOrigin::Local;
     route.next_hop = "2001:db8::10".parse().unwrap();
-    Arc::make_mut(&mut route.attributes).push(service_attribute(
-        5,
-        sid,
-        19,
-        Some([100, 24, 16, 0, 0, 0]),
-    ));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(service_attribute(5, sid, 19, Some([100, 24, 16, 0, 0, 0])));
+    });
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::InjectRoute {
         route: route.clone(),
@@ -251,8 +255,9 @@ fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
             .attributes,
         route.attributes
     );
-    *Arc::make_mut(&mut route.attributes).last_mut().unwrap() =
-        service_attribute(5, sid, 19, Some([40, 24, 16, 0, 0, 0]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        *attrs.last_mut().unwrap() = service_attribute(5, sid, 19, Some([40, 24, 16, 0, 0, 0]));
+    });
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::InjectRoute {
         route: route.clone(),
@@ -268,12 +273,9 @@ fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
     evpn.peer = LOCAL_PEER;
     evpn.origin_type = RouteOrigin::Local;
     evpn.next_hop = "2001:db8::10".parse().unwrap();
-    Arc::make_mut(&mut evpn.attributes).push(service_attribute(
-        6,
-        sid,
-        23,
-        Some([100, 24, 16, 0, 0, 0]),
-    ));
+    AttrSet::edit(&mut evpn.attributes, |attrs| {
+        attrs.push(service_attribute(6, sid, 23, Some([100, 24, 16, 0, 0, 0])));
+    });
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::InjectEvpn {
         route: evpn.clone(),
@@ -288,8 +290,9 @@ fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
             .attributes,
         evpn.attributes
     );
-    *Arc::make_mut(&mut evpn.attributes).last_mut().unwrap() =
-        service_attribute(6, sid, 23, Some([40, 24, 16, 0, 0, 0]));
+    AttrSet::edit(&mut evpn.attributes, |attrs| {
+        *attrs.last_mut().unwrap() = service_attribute(6, sid, 23, Some([40, 24, 16, 0, 0, 0]));
+    });
     let (reply, mut response) = oneshot::channel();
     manager.handle_update(RibUpdate::InjectEvpn {
         route: evpn.clone(),
@@ -322,7 +325,7 @@ fn build_route(peer: u8, prefix: u8, path_id: u8, variant: u8, received_at: Inst
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: peer_addr(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],

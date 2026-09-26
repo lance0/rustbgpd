@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 /// Labeled `MP_REACH` must carry the original label stack and the stored
 /// next-hop verbatim — even on an eBGP session, where unicast would rewrite
@@ -145,7 +146,7 @@ async fn send_route_update_reflects_labeled_v6_link_local_next_hop() {
         next_hop: IpAddr::V6(global),
         link_local_next_hop: Some(link_local),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -618,7 +619,7 @@ fn prepare_outbound_attributes_labeled_adds_rr_attrs_for_ibgp_reflection() {
     let mut route = make_labeled_rib_route(100);
     route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
     route.peer_router_id = source_id;
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),

@@ -3387,6 +3387,7 @@ mod tests {
 
     use bytes::Bytes;
 
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_wire::{
         Aggregator, AsPath, Ipv4Prefix, Ipv6Prefix, RawAttribute, bgpls::decode_bgpls_vpn_nlri,
     };
@@ -3793,7 +3794,7 @@ mod tests {
                 .unwrap(),
             next_hop: peer,
             peer,
-            attributes: Arc::new(Vec::new()),
+            attributes: AttrSet::new(Vec::new()),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 1),
@@ -3830,7 +3831,7 @@ mod tests {
         let rd: rustbgpd_wire::RouteDistinguisher = "65000:100".parse().unwrap();
         let common = (
             peer,
-            Arc::new(Vec::new()),
+            AttrSet::new(Vec::new()),
             Instant::now(),
             rustbgpd_rib::RouteOrigin::Ibgp,
             Ipv4Addr::new(192, 0, 2, 1),
@@ -3932,7 +3933,7 @@ mod tests {
             let (_, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
             vpn.nlri.prefix = prefix;
             vpn.nlri.labels = vec![MplsLabelEntry::try_new(label, 0, true).unwrap()];
-            vpn.attributes = Arc::new(vec![PathAttribute::Unknown(RawAttribute {
+            vpn.attributes = AttrSet::new(vec![PathAttribute::Unknown(RawAttribute {
                 flags: 0xc0,
                 type_code: 40,
                 data: Bytes::copy_from_slice(value),
@@ -4083,7 +4084,7 @@ mod tests {
         raw.data = [raw.data.as_ref(), l3.data.as_ref(), l3.data.as_ref()]
             .concat()
             .into();
-        evpn.attributes = Arc::new(vec![PathAttribute::Unknown(raw.clone())]);
+        evpn.attributes = AttrSet::new(vec![PathAttribute::Unknown(raw.clone())]);
         let mut mac = EvpnMacIp {
             rd: rustbgpd_wire::RouteDistinguisher::ZERO,
             esi: EthernetSegmentIdentifier::ZERO,
@@ -4151,7 +4152,7 @@ mod tests {
     fn prefix_sid_missing_labels_and_argument_only_remain_absent() {
         use rustbgpd_wire::{EthernetTagId, PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
         let (mut evpn, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
-        vpn.attributes = Arc::new(vec![transposed_service(5, false)]);
+        vpn.attributes = AttrSet::new(vec![transposed_service(5, false)]);
         for labels in [vec![], vec![vpn.nlri.labels[0]; 2]] {
             vpn.nlri.labels = labels;
             assert!(
@@ -4180,7 +4181,7 @@ mod tests {
                 None,
             ),
         ] {
-            evpn.attributes = Arc::new([vec![transposed_service(6, false)], tunnels].concat());
+            evpn.attributes = AttrSet::new([vec![transposed_service(6, false)], tunnels].concat());
             assert_eq!(
                 evpn_route_to_proto(&evpn).prefix_sid.unwrap().services[0].sids[0]
                     .reconstructed_sid
@@ -4194,7 +4195,7 @@ mod tests {
             ethernet_tag: EthernetTagId::MAX_ET,
             label: rustbgpd_wire::MplsLabel::new(0),
         });
-        evpn.attributes = Arc::new(vec![
+        evpn.attributes = AttrSet::new(vec![
             transposed_service(6, true),
             PathAttribute::ExtendedCommunities(vec![rustbgpd_wire::ExtendedCommunity::esi_label(
                 false,
@@ -4258,7 +4259,7 @@ mod tests {
         value.extend([0x80, 0, 19, 0xff, 1, 0, 6, 40, 24, 16, 0, 16, 64]);
         value.extend([254, 0, 2, 0xde, 0xad]);
         for raw in [value.clone(), [value, vec![254, 0, 1]].concat()] {
-            let attributes = Arc::new(vec![PathAttribute::Unknown(RawAttribute {
+            let attributes = AttrSet::new(vec![PathAttribute::Unknown(RawAttribute {
                 flags: 0xe0,
                 type_code: 40,
                 data: Bytes::from(raw.clone()),
@@ -5317,7 +5318,7 @@ mod tests {
             nlri,
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
             peer: Ipv4Addr::new(192, 0, 2, 2).into(),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
                 }),
@@ -5370,7 +5371,7 @@ mod tests {
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
             link_local_next_hop: None,
             peer: Ipv4Addr::new(192, 0, 2, 2).into(),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
                 }),
@@ -5415,7 +5416,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "192.0.2.2".parse().unwrap(),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5453,7 +5454,7 @@ mod tests {
             nlri: rustbgpd_wire::RtcNlri::new(65001, 0x0002_FDE9_0000_0064, 96).unwrap(),
             next_hop: Ipv4Addr::new(192, 0, 2, 1).into(),
             peer: Ipv4Addr::new(192, 0, 2, 2).into(),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],
                 }),
@@ -5482,7 +5483,7 @@ mod tests {
             nlri: rustbgpd_wire::RtcNlri::DEFAULT,
             next_hop: Ipv4Addr::UNSPECIFIED.into(),
             peer: Ipv4Addr::UNSPECIFIED.into(),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6059,7 +6060,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6076,7 +6077,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "2001:db8::1".parse().unwrap(),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -6999,7 +7000,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: Arc::new(attributes),
+            attributes: AttrSet::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7118,7 +7119,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7166,7 +7167,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: Arc::new(vec![PathAttribute::Communities(vec![community_val])]),
+            attributes: AttrSet::new(vec![PathAttribute::Communities(vec![community_val])]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -7213,7 +7214,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: Arc::new(vec![PathAttribute::AsPath(AsPath {
+            attributes: AttrSet::new(vec![PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
             })]),
             received_at: std::time::Instant::now(),

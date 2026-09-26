@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
     ExactExportResult, ExactExportSnapshot, OutboundRouteUpdate, RibManager, RibUpdate, Route,
@@ -302,12 +303,7 @@ fn prefix_v6(index: usize, filler: bool) -> Prefix {
     ))
 }
 
-fn make_route(
-    prefix: Prefix,
-    index: usize,
-    peers: usize,
-    attributes: &Arc<Vec<rustbgpd_wire::PathAttribute>>,
-) -> Route {
+fn make_route(prefix: Prefix, index: usize, peers: usize, attributes: &Arc<AttrSet>) -> Route {
     let peer = RibManager::bench_peer_address(index % peers);
     let next_hop = match prefix {
         Prefix::V4(_) => IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
@@ -333,7 +329,7 @@ fn make_route(
 }
 
 fn routes(v4: usize, v6: usize, peers: usize, filler: bool) -> Vec<Route> {
-    let attributes = Arc::new(Vec::new());
+    let attributes = AttrSet::new(Vec::new());
     let mut routes = Vec::with_capacity(v4.saturating_add(v6));
     for index in 0..v4 {
         routes.push(make_route(

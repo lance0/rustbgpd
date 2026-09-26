@@ -619,10 +619,10 @@ pub(super) async fn query_evpn_routes(
 
 #[cfg(test)]
 mod partial_extended_community_tests {
-    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_evpn::EvpnInstanceTable;
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, ExtendedCommunity, MplsLabel,
@@ -646,7 +646,7 @@ mod partial_extended_community_tests {
             next_hop: ipa("10.0.0.2"),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![attribute]),
+            attributes: AttrSet::new(vec![attribute]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: "10.0.0.99".parse().unwrap(),

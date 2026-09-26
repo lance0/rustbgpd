@@ -20,7 +20,7 @@ fn rib_route(route: EvpnRoute) -> EvpnRibRoute {
         next_hop: IpAddr::V4(PEER),
         link_local_next_hop: None,
         peer: IpAddr::V4(PEER),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: PEER,

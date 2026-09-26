@@ -858,7 +858,7 @@ async fn export_as_path_regex_still_filters_through_distribution() {
     }]);
 
     let with_as_path = |prefix: Ipv4Prefix, asns: Vec<u32>| Route {
-        attributes: Arc::new(vec![PathAttribute::AsPath(AsPath {
+        attributes: AttrSet::new(vec![PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(asns)],
         })]),
         ..make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))
@@ -1530,7 +1530,7 @@ async fn export_memo_shares_identical_modified_attrs_and_keys_peer_varying_chain
 
     // Oracle: the pre-memo private-clone path.
     let oracle = |mods: &RouteModifications| {
-        let mut attrs = (*source_attrs).clone();
+        let mut attrs = source_attrs.to_vec();
         assert!(apply_modifications(&mut attrs, mods).is_none());
         attrs
     };

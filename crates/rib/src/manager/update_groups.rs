@@ -37,13 +37,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, chain_default_permit_label};
-use rustbgpd_wire::{
-    Afi, BgpRole, LargeCommunity, PathAttribute, Prefix, Safi, VpnAddressFamily, VpnRouteKey,
-};
+use rustbgpd_wire::{Afi, BgpRole, LargeCommunity, Prefix, Safi, VpnAddressFamily, VpnRouteKey};
 use rustc_hash::FxHashMap;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
+use crate::attr_set::AttrSet;
 
 #[cfg(test)]
 use rustbgpd_wire::ExtendedCommunity;
@@ -519,7 +518,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// staged route: policy may have stripped a control community (deciding
     /// post-policy leaks a source-prohibited route) or added one (spurious
     /// steering). Proven passthrough groups leave this map empty.
-    source_attrs: FxHashMap<(Prefix, u32), Arc<Vec<PathAttribute>>>,
+    source_attrs: FxHashMap<(Prefix, u32), Arc<AttrSet>>,
     /// Group-uniform proof that export policy preserves the standard and
     /// large communities used by RFC 7947 control. Such groups derive the
     /// control input from their staged route and keep `source_attrs` empty.
@@ -1064,7 +1063,7 @@ impl GroupRibOut {
     pub(in crate::manager) fn source_control_for_route<'a>(
         &self,
         route: &'a Route,
-        source_attrs: Option<&'a Arc<Vec<PathAttribute>>>,
+        source_attrs: Option<&'a Arc<AttrSet>>,
     ) -> (&'a [u32], &'a [LargeCommunity]) {
         if self.source_control_passthrough {
             (route.communities(), route.large_communities())
@@ -1082,7 +1081,7 @@ impl GroupRibOut {
     fn rs_tag_transition(
         &self,
         prefix: Prefix,
-        source_attrs: Option<&Arc<Vec<PathAttribute>>>,
+        source_attrs: Option<&Arc<AttrSet>>,
     ) -> Option<RsTagTransition> {
         if self.source_control_passthrough {
             return None;

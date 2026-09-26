@@ -1,9 +1,12 @@
 use super::*;
+use crate::attr_set::AttrSet;
 
 fn with_vpn_no_advertise(mut route: VpnRibRoute) -> VpnRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ]));
+    });
     route
 }
 
@@ -17,7 +20,7 @@ fn make_vpn_v6_rib_route(peer: Ipv4Addr, local_pref: u32) -> VpnRibRoute {
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
         ]),
@@ -121,10 +124,10 @@ fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
         };
         let mut fallback = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 10), 42, 3, 100);
         fallback.next_hop = "2001:db8::10".parse().unwrap();
-        Arc::make_mut(&mut fallback.attributes).push(service(40)); // Sum = 80.
+        AttrSet::edit(&mut fallback.attributes, |attrs| attrs.push(service(40))); // Sum = 80.
         let mut invalid = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 11), 42, 3, 200);
         invalid.next_hop = "2001:db8::11".parse().unwrap();
-        Arc::make_mut(&mut invalid.attributes).push(service(100)); // Sum = 140 > 128.
+        AttrSet::edit(&mut invalid.attributes, |attrs| attrs.push(service(100))); // Sum = 140 > 128.
         let key = fallback.nlri.key();
 
         manager.handle_vpn_routes_received(fallback.peer, vec![fallback.clone()], vec![]);
@@ -168,7 +171,9 @@ fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
         );
 
         let mut recovered = invalid.clone();
-        *Arc::make_mut(&mut recovered.attributes).last_mut().unwrap() = service(40);
+        AttrSet::edit(&mut recovered.attributes, |attrs| {
+            *attrs.last_mut().unwrap() = service(40);
+        });
         manager.handle_vpn_routes_received(recovered.peer, vec![recovered.clone()], vec![]);
         assert_eq!(manager.loc_rib.get_vpn(&key).unwrap().peer, recovered.peer);
         let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
@@ -1089,7 +1094,9 @@ async fn vpn_route_with_otc_is_not_suppressed_toward_customer_role_peer() {
     drain_eor(&mut out_rx).await;
 
     let mut route = make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(64512));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomer(64512));
+    });
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),

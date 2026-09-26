@@ -1,9 +1,12 @@
 use super::*;
+use crate::attr_set::AttrSet;
 
 fn with_rtc_no_advertise(mut route: crate::route::RtcRibRoute) -> crate::route::RtcRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ]));
+    });
     route
 }
 
@@ -1757,7 +1760,9 @@ async fn rtc_membership_unchanged_skips_restage() {
 const EVPN_ES_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x44];
 
 fn with_ext_communities(mut route: EvpnRibRoute, ecs: Vec<ExtendedCommunity>) -> EvpnRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(ecs));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(ecs));
+    });
     route
 }
 

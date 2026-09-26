@@ -62,6 +62,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
 use rustbgpd_rib::loc_rib::LocRib;
@@ -125,7 +126,7 @@ struct SplitRoute {
     next_hop: IpAddr,
     link_local_next_hop: Option<Ipv6Addr>,
     next_hop_scope: Option<Box<NextHopScope>>,
-    attributes: Arc<Vec<PathAttribute>>,
+    attributes: Arc<AttrSet>,
     is_stale: bool,
     is_llgr_stale: bool,
     validation_state: RpkiValidation,
@@ -167,7 +168,7 @@ fn client_attrs(client: u32, idx: u32) -> Vec<PathAttribute> {
     ]
 }
 
-fn make_route(prefix: Prefix, i: u32, a: &Arc<Vec<PathAttribute>>) -> Route {
+fn make_route(prefix: Prefix, i: u32, a: &Arc<AttrSet>) -> Route {
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, i as u8, 1)),
@@ -190,7 +191,7 @@ fn make_route(prefix: Prefix, i: u32, a: &Arc<Vec<PathAttribute>>) -> Route {
 /// A post-policy egress route for `client`/`idx` with its own (unshared)
 /// attribute set and next-hop — the heavy-policy egress shape.
 fn make_client_route(prefix: Prefix, client: u32, idx: u32) -> Route {
-    let a = Arc::new(client_attrs(client, idx));
+    let a = AttrSet::new(client_attrs(client, idx));
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, (client & 0xFF) as u8, 1, 1)),
@@ -232,7 +233,7 @@ fn rr_shape_heap(pfx: &[Prefix], p: usize, heavy_policy: bool) -> (usize, Vec<Ro
     let ribs: Vec<AdjRibIn> = (0..p)
         .map(|i| {
             let mut r = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, i as u8 + 1, 1)));
-            let a = Arc::new(attrs(i as u32 + 1));
+            let a = AttrSet::new(attrs(i as u32 + 1));
             for x in pfx {
                 r.insert(make_route(*x, i as u32 + 1, &a));
             }
