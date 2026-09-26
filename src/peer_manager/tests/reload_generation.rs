@@ -1677,6 +1677,69 @@ async fn generation_dynamic_hot_group_ack_loss_never_claims_restoration() {
     }
 }
 
+/// Keep the real run-loop poll below the reload chain on a reduced worker
+/// stack. Calling the generation helper directly misses the dispatch frame
+/// that used to exhaust the stack even though this path never recurses.
+#[test]
+fn run_loop_applies_reload_on_reduced_stack() {
+    std::thread::Builder::new()
+        .stack_size(1_572_864)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(async {
+                    let fixture = RsFixture::new();
+                    let prior = fixture.load();
+                    let mut harness = GenerationHarness::new(&prior);
+                    std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20)
+                        .unwrap();
+                    let candidate = fixture.load();
+                    let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+                    let (commands, command_rx) = mpsc::channel(4);
+                    let (internal, internal_rx) = mpsc::channel(4);
+                    harness.mgr.rx = command_rx;
+                    harness.mgr.internal_rx = Some(internal_rx);
+                    let actor = tokio::spawn(Box::pin(harness.mgr.run()));
+                    let (reply, response) = oneshot::channel();
+                    internal
+                        .send(InternalCommand::ApplyReloadGeneration {
+                            candidate: Box::new(candidate),
+                            actions,
+                            datasets: PreparedDatasetGeneration::default(),
+                            reply,
+                        })
+                        .await
+                        .unwrap();
+                    let outcome = tokio::time::timeout(Duration::from_secs(5), response)
+                        .await
+                        .expect("reload did not settle")
+                        .unwrap();
+                    let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+                        panic!("{outcome:?}");
+                    };
+                    assert_eq!(receipt.policy_updated, 3);
+                    assert_eq!(receipt.replaced, 0);
+                    for counters in harness.counters.values() {
+                        assert_eq!(counters.export_installs.load(Ordering::SeqCst), 1);
+                    }
+                    let (reply, response) = oneshot::channel();
+                    commands
+                        .send(PeerManagerCommand::Ping { reply })
+                        .await
+                        .unwrap();
+                    response.await.unwrap();
+                    commands.send(PeerManagerCommand::Shutdown).await.unwrap();
+                    actor.await.unwrap();
+                    harness.rib.abort();
+                }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn policy_only_and_hot_only_peers_keep_their_sessions() {
     let fixture = RsFixture::new();

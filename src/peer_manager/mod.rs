@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1347,6 +1348,959 @@ impl PeerManager {
         self.session_index.get(&session_id).cloned()
     }
 
+    /// Dispatch one accepted command without keeping its handler temporaries in
+    /// every run-loop poll (including the independently selected reload path).
+    /// This is awaited in place: command ownership and cancellation are unchanged.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "command dispatch preserves one exhaustive match over the public actor protocol"
+    )]
+    async fn dispatch_command(&mut self, cmd: PeerManagerCommand) -> ControlFlow<()> {
+        self.operator_read_seam = OperatorReadSeam::Unfenced;
+        match cmd {
+            PeerManagerCommand::Ping { reply } => {
+                let _ = reply.send(());
+            }
+            PeerManagerCommand::AddPeer {
+                config,
+                sync_config_snapshot,
+                reply,
+            } => {
+                let result = self.add_peer(config, sync_config_snapshot).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::AddConfiguredPeers { configs, reply } => {
+                let result = self.add_configured_peers(configs).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
+                let result = self.runtime_create_peer(spec).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DeletePeer {
+                peer,
+                sync_config_snapshot,
+                reply,
+            } => {
+                let result = self.delete_peer_runtime(peer, sync_config_snapshot).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::OwnedNeighborMutation { mutation, reply } => {
+                // Static delete and both dynamic operations validate
+                // before effect; static add reports cleanup explicitly.
+                let outcome = match mutation {
+                    OwnedNeighborMutation::Add(spec) => {
+                        let mut effect = lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
+                        match self
+                            .runtime_create_peer_classified(spec, Some(&mut effect))
+                            .await
+                        {
+                            Ok(()) => OwnedNeighborMutationOutcome::Success,
+                            Err(error) => match effect {
+                                lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
+                                    OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                        OwnedNeighborMutationError::Peer(error),
+                                    )
+                                }
+                                lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
+                                    OwnedNeighborMutationOutcome::FullyCompensated(
+                                        OwnedNeighborMutationError::Peer(error),
+                                    )
+                                }
+                            },
+                        }
+                    }
+                    OwnedNeighborMutation::Delete(peer) => {
+                        match self.delete_peer_runtime(peer, true).await {
+                            Ok(_) => OwnedNeighborMutationOutcome::Success,
+                            Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                OwnedNeighborMutationError::Peer(error),
+                            ),
+                        }
+                    }
+                    OwnedNeighborMutation::DynamicAdd {
+                        prefix,
+                        peer_group,
+                        remote_asn,
+                        description,
+                    } => {
+                        match self.add_dynamic_range(prefix, peer_group, remote_asn, description) {
+                            Ok(()) => OwnedNeighborMutationOutcome::Success,
+                            Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                OwnedNeighborMutationError::Dynamic(error),
+                            ),
+                        }
+                    }
+                    OwnedNeighborMutation::DynamicDelete { prefix } => {
+                        match self.delete_dynamic_range(&prefix) {
+                            Ok(_) => OwnedNeighborMutationOutcome::Success,
+                            Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
+                                OwnedNeighborMutationError::Dynamic(error),
+                            ),
+                        }
+                    }
+                };
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                let policy_routes_prior = self.installed_policy_routes_reachability();
+                let outcome = match mutation {
+                    OwnedCatalogMutation::SetPeerGroup { name, definition } => {
+                        let event = ConfigEvent::SetPeerGroup {
+                            name: name.clone(),
+                            definition: (*definition).clone(),
+                            ack: None,
+                        };
+                        if self.peer_group_policy_only_update(&name, &definition) {
+                            self.apply_policy_change_owned(event, None).await
+                        } else {
+                            let affected: Vec<IpAddr> = self
+                                .current_config
+                                .neighbors
+                                .iter()
+                                .filter(|neighbor| {
+                                    neighbor.peer_group.as_deref() == Some(name.as_str())
+                                })
+                                .filter_map(|neighbor| neighbor.address.parse().ok())
+                                .collect();
+                            self.apply_peer_group_change_owned(event, affected).await
+                        }
+                    }
+                    OwnedCatalogMutation::SyncRpolPolicies {
+                        rpol_files,
+                        rpol,
+                        dataset_bindings,
+                    } => {
+                        self.sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings)
+                            .await
+                    }
+                    OwnedCatalogMutation::DeletePeerGroup { name } => {
+                        self.apply_peer_group_change_owned(
+                            ConfigEvent::DeletePeerGroup { name, ack: None },
+                            Vec::new(),
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetNeighborPeerGroup {
+                        address,
+                        peer_group,
+                    } => {
+                        self.apply_peer_group_change_owned(
+                            ConfigEvent::SetNeighborPeerGroup {
+                                address,
+                                peer_group,
+                                ack: None,
+                            },
+                            vec![address],
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::ClearNeighborPeerGroup { address } => {
+                        self.apply_peer_group_change_owned(
+                            ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                            vec![address],
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetPolicy { name, definition } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetPolicy {
+                                name,
+                                definition: *definition,
+                                ack: None,
+                            },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::DeletePolicy { name } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::DeletePolicy { name, ack: None },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetNeighborSet { name, definition } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetNeighborSet {
+                                name,
+                                definition,
+                                ack: None,
+                            },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::DeleteNeighborSet { name } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::DeleteNeighborSet { name, ack: None },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetGlobalImportChain { policy_names } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetGlobalImportChain {
+                                policy_names,
+                                ack: None,
+                            },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetGlobalExportChain { policy_names } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetGlobalExportChain {
+                                policy_names,
+                                ack: None,
+                            },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::ClearGlobalImportChain => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::ClearGlobalImportChain { ack: None },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::ClearGlobalExportChain => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::ClearGlobalExportChain { ack: None },
+                            None,
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetNeighborImportChain {
+                        address,
+                        policy_names,
+                    } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetNeighborImportChain {
+                                address,
+                                policy_names,
+                                ack: None,
+                            },
+                            Some(vec![address]),
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::SetNeighborExportChain {
+                        address,
+                        policy_names,
+                    } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::SetNeighborExportChain {
+                                address,
+                                policy_names,
+                                ack: None,
+                            },
+                            Some(vec![address]),
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::ClearNeighborImportChain { address } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                            Some(vec![address]),
+                        )
+                        .await
+                    }
+                    OwnedCatalogMutation::ClearNeighborExportChain { address } => {
+                        self.apply_policy_change_owned(
+                            ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                            Some(vec![address]),
+                        )
+                        .await
+                    }
+                };
+                if matches!(&outcome, OwnedCatalogMutationOutcome::Success) {
+                    self.reap_retired_policy_routes(&policy_routes_prior);
+                }
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::ReconfigurePeer { config, reply } => {
+                let result = self.reconfigure_peer_runtime(config).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ListPeers { reply } => {
+                self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply })
+                    .await;
+            }
+            PeerManagerCommand::QueryWarmCheckpointCapture { reply } => {
+                self.answer_warm_checkpoint_capture(reply).await;
+            }
+            PeerManagerCommand::SubscribeSessionEvents { reply } => {
+                let _ = reply.send(self.session_events_tx.subscribe());
+            }
+            PeerManagerCommand::SubscribePolicyEvents { reply } => {
+                let _ = reply.send(self.policy_events_tx.subscribe());
+            }
+            PeerManagerCommand::QueryPolicyEventHistory { peer, limit, reply } => {
+                self.handle_query_policy_event_history(peer, limit, reply);
+            }
+            PeerManagerCommand::QuerySessionEventHistory {
+                peer,
+                event_types,
+                limit,
+                reply,
+            } => {
+                self.handle_query_session_event_history(peer, &event_types, limit, reply);
+            }
+            PeerManagerCommand::DiffRuntimeConfig {
+                candidate_toml,
+                reply,
+            } => {
+                let result = self.diff_runtime_config(&candidate_toml);
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::PlanConfigTransaction {
+                candidate_toml,
+                expected_runtime_snapshot_token,
+                verify_external_inputs,
+                mut reply,
+            } => {
+                let planning = self.plan_config_transaction(
+                    &candidate_toml,
+                    expected_runtime_snapshot_token.as_deref(),
+                    verify_external_inputs,
+                );
+                tokio::pin!(planning);
+                let result = tokio::select! {
+                    biased;
+                    () = reply.closed() => return ControlFlow::Continue(()),
+                    result = &mut planning => result,
+                };
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                if let Some(prior) = self.staged_policy_routes_prior.take() {
+                    self.reap_retired_policy_routes(&prior);
+                }
+                self.config_snapshot_staged = false;
+                let _ = reply.send(());
+            }
+            PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                let result = raw_config_document_bounded(&mut self.current_config)
+                    .map_err(|error| {
+                        format!("failed to serialize runtime config snapshot: {error}")
+                    })
+                    .map(
+                        |toml| rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                            toml,
+                            rpol_files: self.current_config.policy.rpol_files.clone(),
+                            rpol: self.current_config.policy.rpol.clone(),
+                        },
+                    );
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::EffectiveRuntimeConfig { reply } => {
+                let _ = reply.send(self.current_config.effective_redacted_toml());
+            }
+            PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
+                // API publication rollback restores policy chains before the
+                // staged config. Reads report each source's current values.
+                let result = self
+                    .apply_resolved_policy_snapshot_with_prestage_reads(
+                        targets,
+                        false,
+                        OperatorReadAdmission::Served,
+                    )
+                    .await
+                    .map_err(|failure| failure.message);
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ApplyPolicyImpactSnapshot {
+                static_targets,
+                dynamic_ranges,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_impact_snapshot(static_targets, dynamic_ranges)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
+                let result = self.apply_peer_reshape_snapshot(targets).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::BounceDynamicRangePeers {
+                ranges,
+                purge_ranges,
+                reply,
+            } => {
+                let outcome = self
+                    .bounce_dynamic_peers_for_ranges(&ranges, &purge_ranges)
+                    .await;
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::StageFibTables { tables, reply } => {
+                let result = self.stage_fib_tables_candidate(&tables);
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
+                self.set_fib_tables_snapshot(&tables);
+                let _ = reply.send(());
+            }
+            PeerManagerCommand::ApplyConfigEvent { event, reply } => {
+                let result = apply_config_event(&mut self.current_config, &event)
+                    .map_err(|error| error.to_string());
+                // A committed transaction event replaces the whole
+                // config, dataset bindings included.
+                self.peers.set_datasets(&self.current_config);
+                if result.is_ok() {
+                    self.reconcile_stale_dynamic_max_prefix_restarts();
+                }
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::GetPeerState { peer, reply } => {
+                self.answer_normal_operator_query(PeerManagerOperatorQuery::GetPeerState {
+                    peer,
+                    reply,
+                })
+                .await;
+            }
+            PeerManagerCommand::HasPeerAddress { address, reply } => {
+                let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
+            }
+            PeerManagerCommand::EnablePeer { peer, reply } => {
+                let result = self.enable_peer(peer).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DisablePeer {
+                peer,
+                reason,
+                reply,
+            } => {
+                let result = self.disable_peer(peer, reason).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ResetPeer {
+                peer,
+                reason,
+                reply,
+            } => {
+                let result = self.reset_peer(peer, reason).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SoftResetIn {
+                peer,
+                families,
+                reply,
+            } => {
+                let result = self.soft_reset_in(peer, families).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::RefreshOutbound { peer, reply } => {
+                let result = self.refresh_outbound(peer).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ReplayOutbound { peer, reply } => {
+                self.replay_outbound(peer, reply).await;
+            }
+            PeerManagerCommand::SoftResetImportValidationDependents { dependency, reply } => {
+                let result = self
+                    .soft_reset_import_validation_dependents(dependency)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetGracefulShutdown {
+                peer,
+                enabled,
+                reply,
+            } => {
+                let result = self.set_graceful_shutdown(peer, enabled).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::AcceptInbound {
+                stream,
+                peer_addr,
+                tcp_ao_info,
+                tcp_ao_generation,
+            } => {
+                self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation)
+                    .await;
+            }
+            PeerManagerCommand::ApplyTcpAoRotation {
+                generation,
+                operation,
+                listener_keys,
+                current_listener_keys,
+                static_keyrings,
+                current_static_keyrings,
+                reply,
+            } => {
+                let result = self
+                    .apply_tcp_ao_rotation(
+                        generation,
+                        operation,
+                        &listener_keys,
+                        &current_listener_keys,
+                        &static_keyrings,
+                        &current_static_keyrings,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::PreflightTcpAoRotation {
+                generation,
+                operation,
+                listener_keys,
+                current_listener_keys,
+                static_keyrings,
+                current_static_keyrings,
+                reply,
+            } => {
+                let result = self
+                    .preflight_tcp_ao_rotation(
+                        generation,
+                        operation,
+                        &listener_keys,
+                        &current_listener_keys,
+                        &static_keyrings,
+                        &current_static_keyrings,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::MarkTcpAoRotationFailed {
+                generation,
+                operation,
+                error,
+                reply,
+            } => {
+                self.mark_tcp_ao_rotation_failed(generation, operation, &error);
+                let _ = reply.send(Ok(()));
+            }
+            PeerManagerCommand::ReconcilePeers {
+                added,
+                removed,
+                changed,
+                reply,
+            } => {
+                let policy_routes_prior = self.installed_policy_routes_reachability();
+                let result = self.reconcile_peers(added, removed, changed).await;
+                if result.authority == PeerReconcileAuthority::Known && result.failures.is_empty() {
+                    self.reap_retired_policy_routes(&policy_routes_prior);
+                }
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::HotUpdatePeer { config, reply } => {
+                let policy_routes_prior = self.installed_policy_routes_reachability();
+                let outcome = self.hot_update_peer_owned(config).await;
+                if matches!(&outcome, OwnedHotUpdatePeerOutcome::Success) {
+                    self.reap_retired_policy_routes(&policy_routes_prior);
+                }
+                let _ = reply.send(outcome);
+            }
+            PeerManagerCommand::SyncExplainConfig {
+                enabled,
+                cache_size,
+                reject_retention_enabled,
+                reject_retention_capacity,
+                reply,
+            } => {
+                // ADR-0073 / LAN-472: make the diagnostic-retention
+                // snapshot fresh before any subsequent
+                // reconcile/peer-group command on this FIFO channel
+                // constructs a session via build_transport_config.
+                self.current_config.policy.explain.enabled = enabled;
+                self.current_config.policy.explain.cache_size = cache_size;
+                self.current_config.policy.reject_retention.enabled = reject_retention_enabled;
+                self.current_config.policy.reject_retention.capacity = reject_retention_capacity;
+                let _ = reply.send(());
+            }
+            PeerManagerCommand::RefreshDatasetDependents {
+                swapped,
+                failed,
+                reply,
+            } => {
+                let result = self.refresh_dataset_dependents(&swapped, &failed).await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ListPolicies { reply } => {
+                let _ = reply.send(named_policies_from_config(&self.current_config));
+            }
+            PeerManagerCommand::GetValidationPolicyPosture { reply } => {
+                let _ = reply.send(self.validation_policy_posture());
+            }
+            PeerManagerCommand::ExplainImportPolicy {
+                address,
+                afi,
+                safi,
+                prefix,
+                path_id,
+                reply,
+            } => {
+                // Resolve the unique session for this address and
+                // forward to its task. A missing/exited task is a
+                // genuine no-session result; timeout remains
+                // distinct so overload cannot masquerade as
+                // absence (LAN-661).
+                let result = match self
+                    .unique_peer_key_for_address(address)
+                    .and_then(|key| self.peers.get(&key))
+                {
+                    Some(managed) => {
+                        managed
+                            .handle()
+                            .explain_import_policy_timeout(
+                                afi,
+                                safi,
+                                prefix,
+                                path_id,
+                                EXPLAIN_QUERY_TIMEOUT,
+                            )
+                            .await
+                    }
+                    None => SessionQueryOutcome::SessionGone,
+                };
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ListRejectedRoutes { address, reply } => {
+                // LAN-472: same resolution + bounded-forward
+                // shape as ExplainImportPolicy. A missing/exited
+                // session maps to NOT_FOUND, while a stalled live
+                // task remains an explicit timeout.
+                let result = match self
+                    .unique_peer_key_for_address(address)
+                    .and_then(|key| self.peers.get(&key))
+                {
+                    Some(managed) => {
+                        managed
+                            .handle()
+                            .list_rejected_routes_timeout(EXPLAIN_QUERY_TIMEOUT)
+                            .await
+                    }
+                    None => SessionQueryOutcome::SessionGone,
+                };
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::GetPolicy { name, reply } => {
+                let _ = reply.send(named_policy_from_config(&self.current_config, &name));
+            }
+            PeerManagerCommand::SetPolicy {
+                name,
+                definition,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetPolicy {
+                            name,
+                            definition,
+                            ack: None,
+                        },
+                        None,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DeletePolicy { name, reply } => {
+                let result = self
+                    .apply_policy_change(ConfigEvent::DeletePolicy { name, ack: None }, None)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ListNeighborSets { reply } => {
+                let _ = reply.send(named_neighbor_sets_from_config(&self.current_config));
+            }
+            PeerManagerCommand::GetNeighborSet { name, reply } => {
+                let _ = reply.send(named_neighbor_set_from_config(&self.current_config, &name));
+            }
+            PeerManagerCommand::SetNeighborSet {
+                name,
+                definition,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetNeighborSet {
+                            name,
+                            definition,
+                            ack: None,
+                        },
+                        None,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DeleteNeighborSet { name, reply } => {
+                let result = self
+                    .apply_policy_change(ConfigEvent::DeleteNeighborSet { name, ack: None }, None)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::GetGlobalPolicyChains { reply } => {
+                let _ = reply.send(global_policy_chains_from_config(&self.current_config));
+            }
+            PeerManagerCommand::SetGlobalImportChain {
+                policy_names,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetGlobalImportChain {
+                            policy_names,
+                            ack: None,
+                        },
+                        None,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetGlobalExportChain {
+                policy_names,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetGlobalExportChain {
+                            policy_names,
+                            ack: None,
+                        },
+                        None,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ClearGlobalImportChain { reply } => {
+                let result = self
+                    .apply_policy_change(ConfigEvent::ClearGlobalImportChain { ack: None }, None)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                let result = self
+                    .apply_policy_change(ConfigEvent::ClearGlobalExportChain { ack: None }, None)
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
+                let policy_routes_prior = self.installed_policy_routes_reachability();
+                let result = self.set_honor_graceful_shutdown(enabled).await;
+                if result.is_ok() {
+                    self.reap_retired_policy_routes(&policy_routes_prior);
+                }
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
+                let policy_routes_prior = self.installed_policy_routes_reachability();
+                let result = self.set_honor_blackhole(enabled).await;
+                if result.is_ok() {
+                    self.reap_retired_policy_routes(&policy_routes_prior);
+                }
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
+                let _ = reply.send(neighbor_policy_chains_from_config(
+                    &self.current_config,
+                    address,
+                ));
+            }
+            PeerManagerCommand::SetNeighborImportChain {
+                address,
+                policy_names,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetNeighborImportChain {
+                            address,
+                            policy_names,
+                            ack: None,
+                        },
+                        Some(vec![address]),
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetNeighborExportChain {
+                address,
+                policy_names,
+                reply,
+            } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::SetNeighborExportChain {
+                            address,
+                            policy_names,
+                            ack: None,
+                        },
+                        Some(vec![address]),
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ClearNeighborImportChain { address, reply } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::ClearNeighborImportChain { address, ack: None },
+                        Some(vec![address]),
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ClearNeighborExportChain { address, reply } => {
+                let result = self
+                    .apply_policy_change(
+                        ConfigEvent::ClearNeighborExportChain { address, ack: None },
+                        Some(vec![address]),
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ListPeerGroups { reply } => {
+                let _ = reply.send(named_peer_groups_from_config(&self.current_config));
+            }
+            PeerManagerCommand::GetPeerGroup { name, reply } => {
+                let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
+            }
+            PeerManagerCommand::SetPeerGroup {
+                name,
+                definition,
+                reply,
+            } => {
+                let event = ConfigEvent::SetPeerGroup {
+                    name: name.clone(),
+                    definition: definition.clone(),
+                    ack: None,
+                };
+                let result = if self.peer_group_policy_only_update(&name, &definition) {
+                    self.apply_policy_change(event, None).await
+                } else {
+                    let affected: Vec<IpAddr> = self
+                        .current_config
+                        .neighbors
+                        .iter()
+                        .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
+                        .filter_map(|neighbor| neighbor.address.parse().ok())
+                        .collect();
+                    self.apply_peer_group_change(event, affected).await
+                };
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DeletePeerGroup { name, reply } => {
+                let result = self
+                    .apply_peer_group_change(
+                        ConfigEvent::DeletePeerGroup { name, ack: None },
+                        Vec::new(),
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::SetNeighborPeerGroup {
+                address,
+                peer_group,
+                reply,
+            } => {
+                let result = self
+                    .apply_peer_group_change(
+                        ConfigEvent::SetNeighborPeerGroup {
+                            address,
+                            peer_group,
+                            ack: None,
+                        },
+                        vec![address],
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::ClearNeighborPeerGroup { address, reply } => {
+                let result = self
+                    .apply_peer_group_change(
+                        ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
+                        vec![address],
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply } => {
+                let _ = reply.send(neighbor_peer_group_from_config(
+                    &self.current_config,
+                    address,
+                ));
+            }
+            PeerManagerCommand::ListDynamicRanges { reply } => {
+                let ranges = self
+                    .dynamic_ranges
+                    .iter()
+                    .map(|r| DynamicNeighborInfo {
+                        prefix: format!("{}/{}", r.addr, r.prefix_len),
+                        peer_group: r.peer_group.clone(),
+                        remote_asn: r.remote_asn,
+                        description: r.description.clone().unwrap_or_default(),
+                    })
+                    .collect();
+                let _ = reply.send(ranges);
+            }
+            PeerManagerCommand::AddDynamicRange {
+                prefix,
+                peer_group,
+                remote_asn,
+                description,
+                reply,
+            } => {
+                let result = self.add_dynamic_range(prefix, peer_group, remote_asn, description);
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
+                let result = self.delete_dynamic_range(&prefix).map(|cfg| {
+                    rustbgpd_api::peer_types::RemovedDynamicRange {
+                        prefix: cfg.prefix,
+                        peer_group: cfg.peer_group,
+                        remote_asn: cfg.remote_asn,
+                        description: cfg.description,
+                    }
+                });
+                let _ = reply.send(result);
+            }
+            PeerManagerCommand::Shutdown => {
+                info!("peer manager shutting down {} peers", self.peers.len());
+                let drained = self.peers.drain();
+                let mut shutdowns = JoinSet::new();
+                for (addr, managed) in drained {
+                    let (primary, _, mut managed) = managed.into_parts();
+                    if shutdowns.len() == PEER_SHUTDOWN_CONCURRENCY
+                        && let Some(Err(error)) = shutdowns.join_next().await
+                    {
+                        error!(%error, "peer shutdown worker failed");
+                    }
+                    shutdowns.spawn(async move {
+                        debug!(peer = %addr, "shutting down peer");
+                        if let Some(pending) = managed.pending_inbound.take() {
+                            let _ = Self::shutdown_handle_bounded_owned(
+                                addr.address,
+                                "PeerManager shutdown pending inbound",
+                                pending.handle,
+                            )
+                            .await;
+                        }
+                        if Self::shutdown_handle_bounded_owned(
+                            addr.address,
+                            "PeerManager shutdown primary",
+                            primary,
+                        )
+                        .await
+                        .joined()
+                        {
+                            debug!(peer = %addr, "peer shut down");
+                        }
+                    });
+                }
+                while let Some(result) = shutdowns.join_next().await {
+                    if let Err(error) = result {
+                        error!(%error, "peer shutdown worker failed");
+                    }
+                }
+                return ControlFlow::Break(());
+            }
+        }
+        self.finish_operator_seam();
+        ControlFlow::Continue(())
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     #[expect(
         clippy::too_many_lines,
@@ -1409,739 +2363,9 @@ impl PeerManager {
                         debug!("peer manager channel closed");
                         return;
                     };
-                    self.operator_read_seam = OperatorReadSeam::Unfenced;
-                    match cmd {
-                        PeerManagerCommand::Ping { reply } => {
-                            let _ = reply.send(());
-                        }
-                        PeerManagerCommand::AddPeer { config, sync_config_snapshot, reply } => {
-                            let result = self.add_peer(config, sync_config_snapshot).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::AddConfiguredPeers { configs, reply } => {
-                            let result = self.add_configured_peers(configs).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
-                            let result = self.runtime_create_peer(spec).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DeletePeer { peer, sync_config_snapshot, reply } => {
-                            let result = self.delete_peer_runtime(peer, sync_config_snapshot).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::OwnedNeighborMutation { mutation, reply } => {
-                            // Static delete and both dynamic operations validate
-                            // before effect; static add reports cleanup explicitly.
-                            let outcome = match mutation {
-                                OwnedNeighborMutation::Add(spec) => {
-                                    let mut effect =
-                                        lifecycle::RuntimeCreatePeerFailureEffect::NoEffect;
-                                    match self
-                                        .runtime_create_peer_classified(spec, Some(&mut effect))
-                                        .await
-                                    {
-                                        Ok(()) => OwnedNeighborMutationOutcome::Success,
-                                        Err(error) => match effect {
-                                            lifecycle::RuntimeCreatePeerFailureEffect::NoEffect => {
-                                                OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                                    OwnedNeighborMutationError::Peer(error),
-                                                )
-                                            }
-                                            lifecycle::RuntimeCreatePeerFailureEffect::FullyCompensated => {
-                                                OwnedNeighborMutationOutcome::FullyCompensated(
-                                                    OwnedNeighborMutationError::Peer(error),
-                                                )
-                                            }
-                                        },
-                                    }
-                                }
-                                OwnedNeighborMutation::Delete(peer) => {
-                                    match self.delete_peer_runtime(peer, true).await {
-                                        Ok(_) => OwnedNeighborMutationOutcome::Success,
-                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                            OwnedNeighborMutationError::Peer(error),
-                                        ),
-                                    }
-                                }
-                                OwnedNeighborMutation::DynamicAdd {
-                                    prefix,
-                                    peer_group,
-                                    remote_asn,
-                                    description,
-                                } => match self.add_dynamic_range(
-                                        prefix,
-                                        peer_group,
-                                        remote_asn,
-                                        description,
-                                    ) {
-                                        Ok(()) => OwnedNeighborMutationOutcome::Success,
-                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                            OwnedNeighborMutationError::Dynamic(error),
-                                        ),
-                                    },
-                                OwnedNeighborMutation::DynamicDelete { prefix } => {
-                                    match self.delete_dynamic_range(&prefix) {
-                                        Ok(_) => OwnedNeighborMutationOutcome::Success,
-                                        Err(error) => OwnedNeighborMutationOutcome::RejectedNoEffect(
-                                            OwnedNeighborMutationError::Dynamic(error),
-                                        ),
-                                    }
-                                }
-                            };
-                            let _ = reply.send(outcome);
-                        }
-                        PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let outcome = match mutation {
-                                OwnedCatalogMutation::SetPeerGroup { name, definition } => {
-                                    let event = ConfigEvent::SetPeerGroup {
-                                        name: name.clone(),
-                                        definition: (*definition).clone(),
-                                        ack: None,
-                                    };
-                                    if self.peer_group_policy_only_update(&name, &definition) {
-                                        self.apply_policy_change_owned(event, None).await
-                                    } else {
-                                        let affected: Vec<IpAddr> = self.current_config
-                                            .neighbors
-                                            .iter()
-                                            .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
-                                            .filter_map(|neighbor| neighbor.address.parse().ok())
-                                            .collect();
-                                        self.apply_peer_group_change_owned(event, affected).await
-                                    }
-                                }
-                                OwnedCatalogMutation::SyncRpolPolicies {
-                                    rpol_files,
-                                    rpol,
-                                    dataset_bindings,
-                                } => self
-                                    .sync_rpol_policies_owned(rpol_files, rpol, dataset_bindings)
-                                    .await,
-                                OwnedCatalogMutation::DeletePeerGroup { name } => {
-                                    self.apply_peer_group_change_owned(
-                                        ConfigEvent::DeletePeerGroup { name, ack: None },
-                                        Vec::new(),
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetNeighborPeerGroup { address, peer_group } => {
-                                    self.apply_peer_group_change_owned(
-                                        ConfigEvent::SetNeighborPeerGroup { address, peer_group, ack: None },
-                                        vec![address],
-                                    ).await
-                                }
-                                OwnedCatalogMutation::ClearNeighborPeerGroup { address } => {
-                                    self.apply_peer_group_change_owned(
-                                        ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
-                                        vec![address],
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetPolicy { name, definition } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetPolicy {
-                                            name,
-                                            definition: *definition,
-                                            ack: None,
-                                        },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::DeletePolicy { name } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::DeletePolicy { name, ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetNeighborSet { name, definition } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetNeighborSet { name, definition, ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::DeleteNeighborSet { name } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::DeleteNeighborSet { name, ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetGlobalImportChain { policy_names } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetGlobalImportChain { policy_names, ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetGlobalExportChain { policy_names } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetGlobalExportChain { policy_names, ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::ClearGlobalImportChain => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::ClearGlobalImportChain { ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::ClearGlobalExportChain => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::ClearGlobalExportChain { ack: None },
-                                        None,
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetNeighborImportChain { address, policy_names } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetNeighborImportChain { address, policy_names, ack: None },
-                                        Some(vec![address]),
-                                    ).await
-                                }
-                                OwnedCatalogMutation::SetNeighborExportChain { address, policy_names } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::SetNeighborExportChain { address, policy_names, ack: None },
-                                        Some(vec![address]),
-                                    ).await
-                                }
-                                OwnedCatalogMutation::ClearNeighborImportChain { address } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::ClearNeighborImportChain { address, ack: None },
-                                        Some(vec![address]),
-                                    ).await
-                                }
-                                OwnedCatalogMutation::ClearNeighborExportChain { address } => {
-                                    self.apply_policy_change_owned(
-                                        ConfigEvent::ClearNeighborExportChain { address, ack: None },
-                                        Some(vec![address]),
-                                    ).await
-                                }
-                            };
-                            if matches!(&outcome, OwnedCatalogMutationOutcome::Success) {
-                                self.reap_retired_policy_routes(&policy_routes_prior);
-                            }
-                            let _ = reply.send(outcome);
-                        }
-                        PeerManagerCommand::ReconfigurePeer { config, reply } => {
-                            let result = self.reconfigure_peer_runtime(config).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ListPeers { reply } => {
-                            self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
-                        }
-                        PeerManagerCommand::QueryWarmCheckpointCapture { reply } => {
-                            self.answer_warm_checkpoint_capture(reply).await;
-                        }
-                        PeerManagerCommand::SubscribeSessionEvents { reply } => {
-                            let _ = reply.send(self.session_events_tx.subscribe());
-                        }
-                        PeerManagerCommand::SubscribePolicyEvents { reply } => {
-                            let _ = reply.send(self.policy_events_tx.subscribe());
-                        }
-                        PeerManagerCommand::QueryPolicyEventHistory { peer, limit, reply } => {
-                            self.handle_query_policy_event_history(peer, limit, reply);
-                        }
-                        PeerManagerCommand::QuerySessionEventHistory {
-                            peer,
-                            event_types,
-                            limit,
-                            reply,
-                        } => {
-                            self.handle_query_session_event_history(
-                                peer,
-                                &event_types,
-                                limit,
-                                reply,
-                            );
-                        }
-                        PeerManagerCommand::DiffRuntimeConfig { candidate_toml, reply } => {
-                            let result = self.diff_runtime_config(&candidate_toml);
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::PlanConfigTransaction {
-                            candidate_toml,
-                            expected_runtime_snapshot_token,
-                            verify_external_inputs,
-                            mut reply,
-                        } => {
-                            let planning = self.plan_config_transaction(
-                                &candidate_toml,
-                                expected_runtime_snapshot_token.as_deref(),
-                                verify_external_inputs,
-                            );
-                            tokio::pin!(planning);
-                            let result = tokio::select! {
-                                biased;
-                                () = reply.closed() => continue,
-                                result = &mut planning => result,
-                            };
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
-                            if let Some(prior) = self.staged_policy_routes_prior.take() {
-                                self.reap_retired_policy_routes(&prior);
-                            }
-                            self.config_snapshot_staged = false;
-                            let _ = reply.send(());
-                        }
-                        PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
-                            let result = raw_config_document_bounded(&mut self.current_config)
-                                .map_err(|error| {
-                                    format!(
-                                        "failed to serialize runtime config snapshot: {error}"
-                                    )
-                                })
-                                .map(|toml| {
-                                    rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
-                                        toml,
-                                        rpol_files: self.current_config.policy.rpol_files.clone(),
-                                        rpol: self.current_config.policy.rpol.clone(),
-                                    }
-                                });
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::EffectiveRuntimeConfig { reply } => {
-                            let _ = reply.send(self.current_config.effective_redacted_toml());
-                        }
-                        PeerManagerCommand::ApplyResolvedPolicySnapshot { targets, reply } => {
-                            // API publication rollback restores policy chains before the
-                            // staged config. Reads report each source's current values.
-                            let result = self
-                                .apply_resolved_policy_snapshot_with_prestage_reads(
-                                    targets,
-                                    false,
-                                    OperatorReadAdmission::Served,
-                                )
-                                .await
-                                .map_err(|failure| failure.message);
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ApplyPolicyImpactSnapshot {
-                            static_targets,
-                            dynamic_ranges,
-                            reply,
-                        } => {
-                            let result = self
-                                .apply_policy_impact_snapshot(static_targets, dynamic_ranges)
-                                .await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
-                            let result = self.apply_peer_reshape_snapshot(targets).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::BounceDynamicRangePeers {
-                            ranges,
-                            purge_ranges,
-                            reply,
-                        } => {
-                            let outcome = self
-                                .bounce_dynamic_peers_for_ranges(&ranges, &purge_ranges)
-                                .await;
-                            let _ = reply.send(outcome);
-                        }
-                        PeerManagerCommand::StageFibTables { tables, reply } => {
-                            let result = self.stage_fib_tables_candidate(&tables);
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetFibTablesSnapshot { tables, reply } => {
-                            self.set_fib_tables_snapshot(&tables);
-                            let _ = reply.send(());
-                        }
-                        PeerManagerCommand::ApplyConfigEvent { event, reply } => {
-                            let result = apply_config_event(&mut self.current_config, &event)
-                                .map_err(|error| error.to_string());
-                            // A committed transaction event replaces the whole
-                            // config, dataset bindings included.
-                            self.peers.set_datasets(&self.current_config);
-                            if result.is_ok() {
-                                self.reconcile_stale_dynamic_max_prefix_restarts();
-                            }
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::GetPeerState { peer, reply } => {
-                            self.answer_normal_operator_query(PeerManagerOperatorQuery::GetPeerState { peer, reply }).await;
-                        }
-                        PeerManagerCommand::HasPeerAddress { address, reply } => {
-                            let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
-                        }
-                        PeerManagerCommand::EnablePeer { peer, reply } => {
-                            let result = self.enable_peer(peer).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DisablePeer { peer, reason, reply } => {
-                            let result = self.disable_peer(peer, reason).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ResetPeer { peer, reason, reply } => {
-                            let result = self.reset_peer(peer, reason).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SoftResetIn { peer, families, reply } => {
-                            let result = self.soft_reset_in(peer, families).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::RefreshOutbound { peer, reply } => {
-                            let result = self.refresh_outbound(peer).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ReplayOutbound { peer, reply } => {
-                            self.replay_outbound(peer, reply).await;
-                        }
-                        PeerManagerCommand::SoftResetImportValidationDependents {
-                            dependency,
-                            reply,
-                        } => {
-                            let result =
-                                self.soft_reset_import_validation_dependents(dependency).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetGracefulShutdown { peer, enabled, reply } => {
-                            let result = self.set_graceful_shutdown(peer, enabled).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::AcceptInbound { stream, peer_addr, tcp_ao_info, tcp_ao_generation } => {
-                            self.accept_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation).await;
-                        }
-                        PeerManagerCommand::ApplyTcpAoRotation { generation, operation, listener_keys, current_listener_keys, static_keyrings, current_static_keyrings, reply } => {
-                            let result = self.apply_tcp_ao_rotation(generation, operation, &listener_keys, &current_listener_keys, &static_keyrings, &current_static_keyrings).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::PreflightTcpAoRotation { generation, operation, listener_keys, current_listener_keys, static_keyrings, current_static_keyrings, reply } => {
-                            let result = self.preflight_tcp_ao_rotation(generation, operation, &listener_keys, &current_listener_keys, &static_keyrings, &current_static_keyrings).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::MarkTcpAoRotationFailed { generation, operation, error, reply } => {
-                            self.mark_tcp_ao_rotation_failed(generation, operation, &error);
-                            let _ = reply.send(Ok(()));
-                        }
-                        PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let result = self.reconcile_peers(added, removed, changed).await;
-                            if result.authority == PeerReconcileAuthority::Known
-                                && result.failures.is_empty()
-                            {
-                                self.reap_retired_policy_routes(&policy_routes_prior);
-                            }
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::HotUpdatePeer { config, reply } => {
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let outcome = self.hot_update_peer_owned(config).await;
-                            if matches!(&outcome, OwnedHotUpdatePeerOutcome::Success) {
-                                self.reap_retired_policy_routes(&policy_routes_prior);
-                            }
-                            let _ = reply.send(outcome);
-                        }
-                        PeerManagerCommand::SyncExplainConfig {
-                            enabled,
-                            cache_size,
-                            reject_retention_enabled,
-                            reject_retention_capacity,
-                            reply,
-                        } => {
-                            // ADR-0073 / LAN-472: make the diagnostic-retention
-                            // snapshot fresh before any subsequent
-                            // reconcile/peer-group command on this FIFO channel
-                            // constructs a session via build_transport_config.
-                            self.current_config.policy.explain.enabled = enabled;
-                            self.current_config.policy.explain.cache_size = cache_size;
-                            self.current_config.policy.reject_retention.enabled =
-                                reject_retention_enabled;
-                            self.current_config.policy.reject_retention.capacity =
-                                reject_retention_capacity;
-                            let _ = reply.send(());
-                        }
-                        PeerManagerCommand::RefreshDatasetDependents { swapped, failed, reply } => {
-                            let result = self.refresh_dataset_dependents(&swapped, &failed).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ListPolicies { reply } => {
-                            let _ = reply.send(named_policies_from_config(&self.current_config));
-                        }
-                        PeerManagerCommand::GetValidationPolicyPosture { reply } => {
-                            let _ = reply.send(self.validation_policy_posture());
-                        }
-                        PeerManagerCommand::ExplainImportPolicy {
-                            address, afi, safi, prefix, path_id, reply,
-                        } => {
-                            // Resolve the unique session for this address and
-                            // forward to its task. A missing/exited task is a
-                            // genuine no-session result; timeout remains
-                            // distinct so overload cannot masquerade as
-                            // absence (LAN-661).
-                            let result = match self
-                                .unique_peer_key_for_address(address)
-                                .and_then(|key| self.peers.get(&key))
-                            {
-                                Some(managed) => {
-                                    managed
-                                        .handle()
-                                        .explain_import_policy_timeout(
-                                            afi, safi, prefix, path_id, EXPLAIN_QUERY_TIMEOUT,
-                                        )
-                                        .await
-                                }
-                                None => SessionQueryOutcome::SessionGone,
-                            };
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ListRejectedRoutes { address, reply } => {
-                            // LAN-472: same resolution + bounded-forward
-                            // shape as ExplainImportPolicy. A missing/exited
-                            // session maps to NOT_FOUND, while a stalled live
-                            // task remains an explicit timeout.
-                            let result = match self
-                                .unique_peer_key_for_address(address)
-                                .and_then(|key| self.peers.get(&key))
-                            {
-                                Some(managed) => {
-                                    managed
-                                        .handle()
-                                        .list_rejected_routes_timeout(EXPLAIN_QUERY_TIMEOUT)
-                                        .await
-                                }
-                                None => SessionQueryOutcome::SessionGone,
-                            };
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::GetPolicy { name, reply } => {
-                            let _ = reply.send(named_policy_from_config(&self.current_config, &name));
-                        }
-                        PeerManagerCommand::SetPolicy { name, definition, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetPolicy { name, definition, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DeletePolicy { name, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::DeletePolicy { name, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ListNeighborSets { reply } => {
-                            let _ = reply.send(named_neighbor_sets_from_config(&self.current_config));
-                        }
-                        PeerManagerCommand::GetNeighborSet { name, reply } => {
-                            let _ = reply.send(named_neighbor_set_from_config(&self.current_config, &name));
-                        }
-                        PeerManagerCommand::SetNeighborSet { name, definition, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetNeighborSet { name, definition, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DeleteNeighborSet { name, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::DeleteNeighborSet { name, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::GetGlobalPolicyChains { reply } => {
-                            let _ = reply.send(global_policy_chains_from_config(&self.current_config));
-                        }
-                        PeerManagerCommand::SetGlobalImportChain { policy_names, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetGlobalImportChain { policy_names, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetGlobalExportChain { policy_names, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetGlobalExportChain { policy_names, ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ClearGlobalImportChain { reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::ClearGlobalImportChain { ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ClearGlobalExportChain { reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::ClearGlobalExportChain { ack: None },
-                                None,
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let result = self.set_honor_graceful_shutdown(enabled).await;
-                            if result.is_ok() {
-                                self.reap_retired_policy_routes(&policy_routes_prior);
-                            }
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
-                            let policy_routes_prior =
-                                self.installed_policy_routes_reachability();
-                            let result = self.set_honor_blackhole(enabled).await;
-                            if result.is_ok() {
-                                self.reap_retired_policy_routes(&policy_routes_prior);
-                            }
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
-                            let _ = reply.send(neighbor_policy_chains_from_config(&self.current_config, address));
-                        }
-                        PeerManagerCommand::SetNeighborImportChain { address, policy_names, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetNeighborImportChain { address, policy_names, ack: None },
-                                Some(vec![address]),
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetNeighborExportChain { address, policy_names, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::SetNeighborExportChain { address, policy_names, ack: None },
-                                Some(vec![address]),
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ClearNeighborImportChain { address, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::ClearNeighborImportChain { address, ack: None },
-                                Some(vec![address]),
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ClearNeighborExportChain { address, reply } => {
-                            let result = self.apply_policy_change(
-                                ConfigEvent::ClearNeighborExportChain { address, ack: None },
-                                Some(vec![address]),
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ListPeerGroups { reply } => {
-                            let _ = reply.send(named_peer_groups_from_config(&self.current_config));
-                        }
-                        PeerManagerCommand::GetPeerGroup { name, reply } => {
-                            let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
-                        }
-                        PeerManagerCommand::SetPeerGroup { name, definition, reply } => {
-                            let event = ConfigEvent::SetPeerGroup { name: name.clone(), definition: definition.clone(), ack: None };
-                            let result = if self.peer_group_policy_only_update(&name, &definition) {
-                                self.apply_policy_change(event, None).await
-                            } else {
-                                let affected: Vec<IpAddr> = self.current_config
-                                    .neighbors
-                                    .iter()
-                                    .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
-                                    .filter_map(|neighbor| neighbor.address.parse().ok())
-                                    .collect();
-                                self.apply_peer_group_change(event, affected).await
-                            };
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DeletePeerGroup { name, reply } => {
-                            let result = self.apply_peer_group_change(
-                                ConfigEvent::DeletePeerGroup { name, ack: None },
-                                Vec::new(),
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::SetNeighborPeerGroup { address, peer_group, reply } => {
-                            let result = self.apply_peer_group_change(
-                                ConfigEvent::SetNeighborPeerGroup { address, peer_group, ack: None },
-                                vec![address],
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::ClearNeighborPeerGroup { address, reply } => {
-                            let result = self.apply_peer_group_change(
-                                ConfigEvent::ClearNeighborPeerGroup { address, ack: None },
-                                vec![address],
-                            ).await;
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::GetNeighborPeerGroupMembership { address, reply } => {
-                            let _ = reply.send(neighbor_peer_group_from_config(&self.current_config, address));
-                        }
-                        PeerManagerCommand::ListDynamicRanges { reply } => {
-                            let ranges = self.dynamic_ranges.iter().map(|r| {
-                                DynamicNeighborInfo {
-                                    prefix: format!("{}/{}", r.addr, r.prefix_len),
-                                    peer_group: r.peer_group.clone(),
-                                    remote_asn: r.remote_asn,
-                                    description: r.description.clone().unwrap_or_default(),
-                                }
-                            }).collect();
-                            let _ = reply.send(ranges);
-                        }
-                        PeerManagerCommand::AddDynamicRange {
-                            prefix,
-                            peer_group,
-                            remote_asn,
-                            description,
-                            reply,
-                        } => {
-                            let result = self
-                                .add_dynamic_range(prefix, peer_group, remote_asn, description);
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::DeleteDynamicRange { prefix, reply } => {
-                            let result = self.delete_dynamic_range(&prefix).map(|cfg| {
-                                rustbgpd_api::peer_types::RemovedDynamicRange {
-                                    prefix: cfg.prefix,
-                                    peer_group: cfg.peer_group,
-                                    remote_asn: cfg.remote_asn,
-                                    description: cfg.description,
-                                }
-                            });
-                            let _ = reply.send(result);
-                        }
-                        PeerManagerCommand::Shutdown => {
-                            info!("peer manager shutting down {} peers", self.peers.len());
-                            let drained = self.peers.drain();
-                            let mut shutdowns = JoinSet::new();
-                            for (addr, managed) in drained {
-                                let (primary, _, mut managed) = managed.into_parts();
-                                if shutdowns.len() == PEER_SHUTDOWN_CONCURRENCY
-                                    && let Some(Err(error)) = shutdowns.join_next().await
-                                {
-                                    error!(%error, "peer shutdown worker failed");
-                                }
-                                shutdowns.spawn(async move {
-                                    debug!(peer = %addr, "shutting down peer");
-                                    if let Some(pending) = managed.pending_inbound.take() {
-                                        let _ = Self::shutdown_handle_bounded_owned(
-                                            addr.address,
-                                            "PeerManager shutdown pending inbound",
-                                            pending.handle,
-                                        )
-                                        .await;
-                                    }
-                                    if Self::shutdown_handle_bounded_owned(
-                                        addr.address,
-                                        "PeerManager shutdown primary",
-                                        primary,
-                                    )
-                                    .await
-                                    .joined()
-                                    {
-                                        debug!(peer = %addr, "peer shut down");
-                                    }
-                                });
-                            }
-                            while let Some(result) = shutdowns.join_next().await {
-                                if let Err(error) = result {
-                                    error!(%error, "peer shutdown worker failed");
-                                }
-                            }
-                            return;
-                        }
+                    if Box::pin(self.dispatch_command(cmd)).await.is_break() {
+                        return;
                     }
-                    self.finish_operator_seam();
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     self.operator_read_seam = OperatorReadSeam::Unfenced;
