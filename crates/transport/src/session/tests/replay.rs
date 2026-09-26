@@ -982,3 +982,51 @@ async fn replay_outbound_rejects_empty_or_mixed_families_before_enrollment_or_tr
         );
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn replay_terminal_pacing_fences_all_markers_and_cancels_tail() {
+    for cancel in [false, true] {
+        let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        session.config.bmp_rib_out = true;
+        session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        let (bulk, mut receiver) = mpsc::channel(1);
+        session.writer_bulk_tx = Some(bulk);
+        let (token, _enrolled) = BmpReplay::new(Duration::from_secs(5));
+        session.pending_replay = Some(pending(&session, Arc::clone(&token)));
+        let mut terminal = empty_outbound_update();
+        terminal.replay = Some(token);
+        terminal.end_of_rib = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        session.handle_outbound_route_update(terminal);
+        assert_eq!(receiver.len(), 1);
+        assert!(session.pending_outbound.is_some());
+        assert!(session.pending_replay.as_ref().unwrap().target.is_none());
+        assert!(bmp_rx.try_recv().is_err());
+        if cancel {
+            session.finish_outbound_replay(super::replay::ReplayProgress::Completed(false));
+            assert!(session.pending_outbound.is_none());
+            assert!(session.outbound_admission_timer.is_none());
+            receiver.try_recv().unwrap();
+            session.advance_pending_outbound();
+            assert!(
+                receiver.is_empty(),
+                "canceled terminal tail must not be sent"
+            );
+            assert!(bmp_rx.try_recv().is_err());
+        } else {
+            let first = receiver.try_recv().unwrap();
+            session.advance_pending_outbound();
+            assert!(session.pending_outbound.is_none());
+            let second = receiver.try_recv().unwrap();
+            let target = session.pending_replay.as_ref().unwrap().target.unwrap();
+            assert_eq!(target, u64::try_from(first.len() + second.len()).unwrap());
+            assert!(
+                bmp_rx.try_recv().is_err(),
+                "queue admission is not the write fence"
+            );
+            session.finish_outbound_replay(super::replay::ReplayProgress::Completed(true));
+            assert!(
+                matches!(bmp_rx.try_recv().unwrap(), BmpEvent::OutboundReplayComplete { end_of_rib, .. } if end_of_rib.len() == 2)
+            );
+        }
+    }
+}

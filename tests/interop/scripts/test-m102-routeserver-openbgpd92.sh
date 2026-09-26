@@ -1172,5 +1172,5 @@ esac
 # shellcheck disable=SC1091 # resolved from SCRIPT_DIR at runtime
 source "$SCRIPT_DIR/test-lib.sh"
 PAYLOADS="$(mktemp /tmp/m102.XXXXXX.tsv)"
-trap on_exit EXIT INT TERM HUP
+trap on_exit EXIT
 main "$@"

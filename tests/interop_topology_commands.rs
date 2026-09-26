@@ -1335,15 +1335,15 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
         .find("PAYLOADS=\"$(mktemp /tmp/m102.XXXXXX.tsv)\"")
         .expect("M102 allocates host payload state");
     let custom_trap = script
-        .find("trap on_exit EXIT INT TERM HUP")
-        .expect("M102 installs its composed cleanup trap");
+        .find("trap on_exit EXIT\n")
+        .expect("M102 installs composed EXIT cleanup and inherits shared signal exits");
     let main_invoke = script.rfind("main \"$@\"").expect("M102 invokes main");
     assert!(
         self_test_dispatch < source
             && source < capture_allocation
             && capture_allocation < custom_trap
             && custom_trap < main_invoke,
-        "M102 must dispatch offline self-tests before shared preflight, then allocate capture state and install its final trap before main"
+        "M102 must dispatch offline self-tests before shared preflight, then allocate capture state and install EXIT cleanup before main"
     );
     let on_exit = script
         .split_once("on_exit() {")

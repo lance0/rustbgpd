@@ -65,7 +65,7 @@ cleanup() {
     containerlab destroy -t "$TOPOLOGY" --cleanup >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 # Fail fast: every later step builds on the state the failed check proves.
 fail() {

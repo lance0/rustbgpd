@@ -159,7 +159,7 @@ m105_on_exit() {
     _cleanup_on_exit
     exit "$status"
 }
-trap m105_on_exit EXIT INT TERM HUP
+trap m105_on_exit EXIT
 
 start_capture() {
     cleanup_capture

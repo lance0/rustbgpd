@@ -123,7 +123,8 @@ async fn outbound_root_cause_survives_writer_exit() {
 
 /// Load-bearing: omitting a cause, classifying a snapshot breach as generic
 /// post-commit failure, or labeling any exact-export site as saturation changes
-/// one of these production-source inventory counts.
+/// one of these production-source inventory counts. Only admission expiry uses
+/// the saturation cause in this module.
 #[test]
 fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
     let source = include_str!("../outbound.rs");
@@ -135,7 +136,7 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
         production
             .matches("trigger_outbound_out_of_resources_teardown(")
             .count(),
-        17
+        18
     );
     assert_eq!(
         production
@@ -161,7 +162,26 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
             .count(),
         14
     );
-    assert!(!production.contains("SessionFailureCause::OutboundSaturation"));
+    let (before_expiry, expiry_and_after) = production
+        .split_once("pub(super) fn expire_outbound_admission(")
+        .expect("admission expiry has a dedicated handler");
+    let (expiry, after_expiry) = expiry_and_after
+        .split_once("pub(super) fn advance_pending_outbound(")
+        .expect("bounded admission follows its expiry handler");
+    assert_eq!(
+        expiry
+            .matches("trigger_outbound_out_of_resources_teardown(")
+            .count(),
+        1
+    );
+    assert_eq!(
+        expiry
+            .matches("SessionFailureCause::OutboundSaturation")
+            .count(),
+        1
+    );
+    assert!(!before_expiry.contains("SessionFailureCause::OutboundSaturation"));
+    assert!(!after_expiry.contains("SessionFailureCause::OutboundSaturation"));
 }
 
 /// ADR-0051: when the writer's bulk channel saturates, the session must
@@ -270,6 +290,10 @@ async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
 ///    writer-exit → `TcpConnectionFails` wiring, with **no manually
 ///    injected FSM events** (the vacuity this test exists to prevent);
 /// 3. leave the session task alive and responsive afterwards.
+#[expect(
+    clippy::too_many_lines,
+    reason = "stopped reader handshake, production teardown, and final wire assertions form one regression"
+)]
 #[tokio::test]
 async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -300,17 +324,19 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     let outbound_tx = session.outbound_tx.clone();
     let exact_export_snapshot: Arc<dyn rustbgpd_rib::ExactExportSnapshot> =
         session.publish_export_profile();
+    // Keep the independent writer timer at its original interval; shorten only
+    // the session's resource-admission interval for this stopped-reader proof.
+    session.config.peer.send_hold_time = 1;
+    let mut teardown = session.writer_teardown_tx.as_ref().unwrap().subscribe();
     let session_task = tokio::spawn(async move { session.run().await });
-    // Slow reader: trickles just enough that the writer stays wedged
-    // while the flood fills the bulk queue, but keeps draining so the
-    // in-flight frame completes within the teardown linger and the
-    // whole wire (including the final Cease) is observable to EOF.
+    // The peer stops reading until resource expiry. The teardown handshake
+    // then releases it to observe the final Cease during the writer's linger.
     let reader = tokio::spawn(async move {
+        teardown.changed().await.unwrap();
         let mut peer = peer;
         let mut collected = Vec::new();
         let mut buf = [0u8; 1024];
         loop {
-            tokio::time::sleep(Duration::from_millis(20)).await;
             match peer.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => collected.extend_from_slice(&buf[..n]),
@@ -320,9 +346,8 @@ async fn saturation_teardown_from_run_loop_ceases_closes_and_deregisters() {
     });
     // Flood through the REAL outbound path (outbound channel → run
     // loop → send_route_update → enqueue_bulk). 3× the writer queue
-    // depth guarantees `try_send` hits `Full` and the production
-    // saturation detection fires. No `trigger_outbound_saturation_-
-    // teardown` call, no injected FSM events.
+    // depth fills the writer and leaves pending output until resource expiry.
+    // No direct teardown call and no injected FSM events.
     let flood_total = 3 * OUTBOUND_BUFFER;
     for _ in 0..flood_total {
         let mut update = empty_outbound_update();

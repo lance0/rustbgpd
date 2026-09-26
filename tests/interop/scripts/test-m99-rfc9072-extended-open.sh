@@ -40,7 +40,7 @@ m99_on_exit() {
     _cleanup_on_exit
     exit "$exit_code"
 }
-trap m99_on_exit EXIT INT TERM HUP
+trap m99_on_exit EXIT
 
 preflight_m99() {
     local errors=0

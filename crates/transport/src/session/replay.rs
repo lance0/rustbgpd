@@ -97,6 +97,14 @@ pub(super) async fn poll_completion(
 impl PeerSession {
     pub(super) fn cancel_outbound_replay(&mut self) {
         self.pending_replay = None;
+        if self
+            .pending_outbound
+            .as_ref()
+            .is_some_and(|pending| pending.update.replay.is_some())
+        {
+            self.pending_outbound = None;
+            self.outbound_admission_timer = None;
+        }
     }
 
     /// Keep each admission future's queue position and the operation's original
@@ -256,9 +264,14 @@ impl PeerSession {
         }
     }
 
-    pub(super) fn enqueue_replay_terminal(&mut self, update: &OutboundRouteUpdate) {
+    pub(super) fn enqueue_replay_terminal_slice(
+        &mut self,
+        update: &OutboundRouteUpdate,
+        offset: &mut usize,
+        budget: usize,
+    ) -> bool {
         let Some(token) = update.replay.as_ref() else {
-            return;
+            return true;
         };
         if !token.is_valid()
             || !self
@@ -266,7 +279,7 @@ impl PeerSession {
                 .as_ref()
                 .is_some_and(|pending| Arc::ptr_eq(&pending.replay, token))
         {
-            return;
+            return true;
         }
         let export = self.export_encoder.snapshot();
         let mut terminal = Vec::with_capacity(update.end_of_rib.len());
@@ -280,24 +293,29 @@ impl PeerSession {
                 Bytes::from(pdu)
             } else {
                 self.cancel_outbound_replay();
-                return;
+                return true;
             };
             terminal.push(pdu);
         }
-        for pdu in &terminal {
+        for pdu in terminal.iter().skip(*offset).take(budget) {
             // The terminal BMP tap is deliberately withheld until all preceding
             // bulk bytes and these exact EoRs have completed local writing.
             if self.enqueue_bulk_encoded(pdu.clone(), false).is_err() {
                 self.cancel_outbound_replay();
-                return;
+                return true;
             }
+            *offset += 1;
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+        if *offset < terminal.len() {
+            return false;
         }
         if let Some(pending) = &mut self.pending_replay {
             pending.target = Some(self.writer_bulk_admitted);
             pending.end_of_rib = terminal;
         }
+        true
     }
 
     pub(super) fn finish_outbound_replay(&mut self, progress: ReplayProgress) {
@@ -326,6 +344,9 @@ impl PeerSession {
         let Some(mut pending) = self.pending_replay.take() else {
             return;
         };
+        // Expiry can win while only part of a paced terminal is admitted.
+        // Never let its remaining markers certify an abandoned replay.
+        self.cancel_outbound_replay();
         if !completed || !pending.replay.is_valid() || pending.end_of_rib.is_empty() {
             return;
         }

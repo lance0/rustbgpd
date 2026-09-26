@@ -374,7 +374,7 @@ _m43_cleanup_on_exit() {
     return "$exit_code"
 }
 
-trap _m43_cleanup_on_exit EXIT INT TERM HUP
+trap _m43_cleanup_on_exit EXIT
 
 assert_two_key_inventory() {
     log "Checking selected IDs and complete redacted TCP-AO inventory..."
