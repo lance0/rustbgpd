@@ -56,6 +56,7 @@ ip link add "${VXLAN}" type vxlan \
     local "${LOCAL_IP}" \
     nolearning 2>/dev/null || true
 ip link set dev "${VXLAN}" master "${BRIDGE}"
+ip link set dev "${VXLAN}" multicast off
 ip link set dev "${VXLAN}" up
 bridge link set dev "${VXLAN}" learning off
 

@@ -25,8 +25,14 @@ BRIDGE="br${VNI}"
 VXLAN="vxlan${VNI}"
 
 # Bridge for the VNI. Not VLAN-aware — Gate 7b probe rejects
-# vlan_filtering=1 explicitly.
-ip link add name "${BRIDGE}" type bridge 2>/dev/null || true
+# vlan_filtering=1 explicitly. Disable host multicast membership before
+# link-up: startup IGMP reports can cross a dual-homed CE and become
+# unrelated local Type 2 learns on the other PE. These unicast VXLAN
+# fixtures still forward Ethernet multicast/broadcast through the bridge.
+ip link add name "${BRIDGE}" type bridge mcast_snooping 0 2>/dev/null || true
+# Apply this on re-exec too, when the bridge already exists.
+ip link set dev "${BRIDGE}" type bridge mcast_snooping 0
+ip link set dev "${BRIDGE}" multicast off
 ip link set dev "${BRIDGE}" up
 
 # VXLAN port: nolearning hands FDB ownership to EVPN. local_ip
@@ -38,6 +44,7 @@ ip link add "${VXLAN}" type vxlan \
     local "${LOCAL_IP}" \
     nolearning 2>/dev/null || true
 ip link set dev "${VXLAN}" master "${BRIDGE}"
+ip link set dev "${VXLAN}" multicast off
 ip link set dev "${VXLAN}" up
 
 # Pre-load a foreign static FDB entry with a distinguishable MAC
