@@ -173,8 +173,9 @@ The [stability guide](stability.md) lists which surfaces are alpha.
 
 ### On-disk runtime state
 
-Files under `runtime_state_dir`, and the commit-confirm locator beside the
-launch config, are outside the inventoried v1 surface. No inventory digest pins
+Files under `runtime_state_dir`, the event store wherever
+`[event_history].path` places it, and the commit-confirm locator beside the
+launch config are outside the inventoried v1 surface. No inventory digest pins
 their formats, and the migration window above covers configuration and the
 inventoried surfaces, not these files. The
 [persistent-state table](../how-to/deployment.md#persistent-state-on-disk)
@@ -191,10 +192,11 @@ lists each file's version marker and reader behavior. What holds today:
   the GR marker is rejected and the daemon cold-starts, FIB owned state is
   quarantined, and config-history rows of an unknown version are ignored.
   The BLACKHOLE receipt stays in place and BLACKHOLE kernel mutations are
-  disabled. The event store stays in place untouched. When event history is
-  enabled, the daemon exits at startup if `[event_history].required` is
-  true and otherwise runs live-only without durable history; with event
-  history disabled the store is never opened.
+  disabled. The event store stays in place, neither migrated nor
+  quarantined. When event history is enabled, the daemon exits at startup
+  if `[event_history].required` is true and otherwise runs live-only
+  without durable history; with event history disabled the store is never
+  opened.
 - **Binary rollback:** follow the
   [rollback procedure](../how-to/deployment.md#rollback). It settles pending
   commit-confirm transactions and moves `config-history/` aside when the
