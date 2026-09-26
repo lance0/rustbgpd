@@ -1,7 +1,7 @@
 //! gRPC connection handling for `rbgp`.
 //!
 //! Supports both Unix domain socket (`unix:///path`) and TCP (`host:port` or
-//! `http://host:port`) endpoints, HTTPS with explicit CA trust and optional
+//! `http://host:port`) endpoints, HTTPS with explicit CA trust and required
 //! client identity, and orthogonal bearer-token authentication loaded from a file.
 
 use std::fs;
