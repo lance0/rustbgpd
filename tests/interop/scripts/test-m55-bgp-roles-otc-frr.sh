@@ -198,6 +198,10 @@ grpc_inject_route "$INJECTED_PREFIX"
 assert_frr_route_has_otc "$FRR_CUSTOMER" "$INJECTED_PREFIX"
 
 wait_received_presence "$WITHDRAWN_PREFIX" true "raw accepted baseline route before malformed withdrawal"
+# The fixture holds the baseline until it is observed, then sends the leak and
+# the malformed-OTC withdrawal.
+log "Signalling raw fixture to send the leak and malformed UPDATEs..."
+docker exec "$RAW_CUSTOMER" touch /tmp/m55-go
 wait_received_presence "$LEAK_PREFIX" false "raw Customer OTC route rejected as I1 leak"
 wait_received_presence "$MALFORMED_PREFIX" false "malformed OTC announcement treated as withdraw"
 wait_received_presence "$WITHDRAWN_PREFIX" false "withdrawal in malformed OTC UPDATE still applied"
