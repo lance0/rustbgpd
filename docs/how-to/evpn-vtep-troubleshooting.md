@@ -386,6 +386,9 @@ nexthop **group**, not a single-dst `dst <ip>` row.
      destination. During fallback, backup preinstallation and group-wide
      failover are unavailable; updated intent reconciles each MAC separately.
      MACs blocked by foreign kernel rows do not participate in this comparison.
+     This includes unmarked static or permanent master rows on local bridge
+     ports, such as an attachment port's own MAC. These rows are preserved;
+     dynamic local learns remain eligible for remote MAC moves.
    - Mixed address-family alias members: one FDB nexthop group
      cannot mix IPv4 and IPv6 VTEPs, so rustbgpd warns once per
      `(VNI, MAC)` and falls back to the primary VTEP. Homogeneous

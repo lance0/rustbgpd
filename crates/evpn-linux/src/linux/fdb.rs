@@ -14,13 +14,15 @@
 //!
 //! ## VNI resolution on dump
 //!
-//! Bridge FDB messages carry the VXLAN ifindex in `header.ifindex`.
+//! Bridge FDB messages identify their holding port in `header.ifindex`.
 //! For traditional VXLAN devices, the link-cache's
 //! `vxlan_ifindex_to_vni` map turns that back into an `EvpnInstanceId`.
 //! Collect-metadata / SVD VXLAN devices can carry many VNIs on one
 //! ifindex, so rows on an observed SVD ifindex must include an explicit
 //! VNI attribute (`NDA_SRC_VNI` or `NDA_VNI`) before they enter the
-//! snapshot. Entries whose ifindex can't be attributed are silently
+//! snapshot. Unmarked static master rows on local ports use the existing
+//! bridge-port VNI/VLAN attribution to protect foreign rows at shared
+//! bridge FDB keys. Entries whose ifindex can't be attributed are silently
 //! dropped from the snapshot.
 
 use std::collections::HashMap;
@@ -64,11 +66,14 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 /// Dump every bridge FDB entry in the kernel and key them by
 /// `(EvpnInstanceId, Option<VLAN>, MacAddress)`.
 ///
-/// Each FDB entry's `header.ifindex` points at the **VXLAN port** for
-/// bridge-family neighbours. We map traditional VXLAN rows via the
+/// Each FDB entry's `header.ifindex` identifies its bridge port.
+/// We map traditional VXLAN rows via the
 /// link cache's `vxlan_ifindex_to_vni` table. Rows on known
 /// collect-metadata / SVD ports must carry explicit VNI metadata,
 /// because their ifindex no longer identifies a single VNI.
+/// Unmarked static master rows on attributable local ports are also
+/// retained: a remote FDB replace can overwrite these bridge-wide keys.
+/// Dynamic local learns remain outside this remote-programming snapshot.
 ///
 /// ## Multi-row merge
 ///
@@ -157,10 +162,8 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     if msg.header.family != AddressFamily::Bridge {
         return None;
     }
-    // Bridge-family FDB header.ifindex points at the VXLAN port, not
-    // the bridge. (For non-VXLAN bridge ports it's the slave ifindex,
-    // but those aren't EVPN-managed so we drop them via the
-    // attribution lookup below.)
+    // Bridge-family FDB header.ifindex identifies the port holding
+    // the row; the bridge master key is shared across all its ports.
     let port_ifindex = msg.header.ifindex;
 
     let mut mac: Option<MacAddress> = None;
@@ -218,6 +221,14 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
         }
     }
     let mac = mac?;
+    let mut flags = KernelFdbFlags::default();
+    let hf = msg.header.flags;
+    flags.extern_learn = hf.contains(NeighbourFlags::ExtLearned);
+    flags.self_flag = hf.contains(NeighbourFlags::Own);
+    // Controller is the netlink-packet-route spelling for NTF_MASTER.
+    flags.master = master || hf.contains(NeighbourFlags::Controller);
+    decode_state(msg.header.state, &mut flags);
+
     let from_svd;
     let vni_raw = if let Some(vni) = cache.vxlan_ifindex_to_vni.get(&port_ifindex) {
         if let Some(explicit) = explicit_vni
@@ -230,6 +241,23 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
     } else if cache.svd_vxlan_ifindexes.contains(&port_ifindex) {
         from_svd = true;
         explicit_vni?
+    } else if !flags.extern_learn && flags.master && (flags.permanent || flags.noarp) {
+        // A local interface MAC or operator static row is foreign to
+        // our programmer even when a remote Type 2 names the same MAC.
+        // Reuse local-port attribution, including its VLAN ambiguity gate.
+        from_svd = false;
+        let vni = if cache
+            .bridge_ports_requiring_vlan_attribution
+            .contains(&port_ifindex)
+        {
+            *cache.bridge_port_vlan_to_vni.get(&(port_ifindex, vlan?))?
+        } else {
+            *cache.bridge_port_to_vni.get(&port_ifindex)?
+        };
+        if explicit_vni.is_some_and(|explicit| explicit != vni) {
+            return None;
+        }
+        vni
     } else {
         return None;
     };
@@ -237,22 +265,6 @@ fn parse_fdb_entry(msg: &NeighbourMessage, cache: &LinkCache) -> Option<FdbSnaps
         vlan = infer_svd_bridge_vlan(cache, port_ifindex, vni_raw);
     }
     let vni = EvpnInstanceId::new(vni_raw).ok()?;
-
-    let mut flags = KernelFdbFlags::default();
-    let hf = msg.header.flags;
-    if hf.contains(NeighbourFlags::ExtLearned) {
-        flags.extern_learn = true;
-    }
-    if hf.contains(NeighbourFlags::Own) {
-        flags.self_flag = true;
-    }
-    // `NeighbourFlags::Controller` is the netlink-packet-route
-    // spelling for `NTF_MASTER` — the bit set by `bridge fdb add
-    // ... master`.
-    if master || hf.contains(NeighbourFlags::Controller) {
-        flags.master = true;
-    }
-    decode_state(msg.header.state, &mut flags);
 
     Some((
         (vni, vlan, mac),
@@ -1043,6 +1055,124 @@ mod tests {
             matches!(err, DataplaneError::InvalidArgument(_)),
             "duplicate-VNI topology must fail closed instead of picking an arbitrary ifindex: {err:?}"
         );
+    }
+
+    #[test]
+    fn local_static_master_rows_block_remote_install_but_dynamic_rows_do_not() {
+        use crate::group_state::GroupOwnedMap;
+        use crate::snapshot::{InstanceProbe, InstanceProbes, KernelSnapshot, OwnedSet};
+        use rustbgpd_evpn::{EvpnInstanceTable, RemoteMacEntry, RemoteMacSource, RemoteMacTable};
+
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let mac = MacAddress::new([2, 3, 4, 5, 6, 7]);
+        let mut cache = LinkCache::default();
+        cache.bridge_port_to_vni.insert(12, 100);
+        for (state, blocked) in [
+            (NeighbourState::Permanent, true),
+            (NeighbourState::Noarp, true),
+            (NeighbourState::Reachable, false),
+        ] {
+            let mut msg = NeighbourMessage::default();
+            msg.header.family = AddressFamily::Bridge;
+            msg.header.ifindex = 12;
+            msg.header.state = state;
+            msg.attributes = vec![
+                NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()),
+                NeighbourAttribute::Controller(10),
+            ];
+            let mut snapshot = KernelSnapshot::new();
+            if let Some((_, row)) = parse_fdb_entry(&msg, &cache) {
+                snapshot.insert_fdb(vni, row);
+            }
+            let mut desired = RemoteMacTable::builder();
+            desired
+                .insert(
+                    vni,
+                    mac,
+                    RemoteMacEntry {
+                        remote_vtep_ip: ipa("10.0.0.2"),
+                        mobility_sequence: None,
+                        alias_vtep_ips: Vec::new(),
+                        alias_group_key: None,
+                        single_active_backup_vtep_ip: None,
+                        source: RemoteMacSource::EvpnRibBestPath,
+                    },
+                )
+                .unwrap();
+            let mut probes = InstanceProbes::new();
+            probes.insert(vni, InstanceProbe::Ready);
+            let plan = crate::compute_diff(
+                &desired.build(),
+                &snapshot,
+                &OwnedSet::new(),
+                &probes,
+                &GroupOwnedMap::new(),
+                &EvpnInstanceTable::new(),
+            );
+            assert_eq!(
+                plan.foreign_blocked_keys.contains(&(vni, mac)),
+                blocked,
+                "{state:?}"
+            );
+            if blocked {
+                assert!(
+                    plan.is_noop(),
+                    "foreign local static row must survive: {state:?}"
+                );
+            } else {
+                assert_eq!(
+                    plan.ops,
+                    vec![DataplaneOp::AddRemoteFdb {
+                        vni,
+                        mac,
+                        vlan: None,
+                        dst: ipa("10.0.0.2"),
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_static_master_rows_require_matching_bridge_vlan_attribution() {
+        let mut cache = LinkCache::default();
+        cache.bridge_port_to_vni.insert(12, 200);
+        cache.bridge_ports_requiring_vlan_attribution.insert(12);
+        cache.bridge_port_vlan_to_vni.insert((12, 10), 100);
+        for (port, vlan, explicit_vni, expected_vni) in [
+            (12, Some(10), None, Some(100)),
+            (12, Some(10), Some(100), Some(100)),
+            (12, Some(10), Some(200), None),
+            (12, Some(20), None, None),
+            (12, None, None, None),
+            (13, Some(10), None, None),
+        ] {
+            let mut msg = NeighbourMessage::default();
+            msg.header.family = AddressFamily::Bridge;
+            msg.header.ifindex = port;
+            msg.header.state = NeighbourState::Permanent;
+            msg.attributes = vec![
+                NeighbourAttribute::LinkLayerAddress(vec![2, 3, 4, 5, 6, 7]),
+                NeighbourAttribute::Controller(10),
+            ];
+            if let Some(vid) = vlan {
+                msg.attributes.push(NeighbourAttribute::Vlan(vid));
+            }
+            if let Some(vni) = explicit_vni {
+                msg.attributes.push(NeighbourAttribute::Vni(vni));
+            }
+            let row = parse_fdb_entry(&msg, &cache);
+            assert_eq!(
+                row.as_ref().map(|(key, _)| key.0.as_u32()),
+                expected_vni,
+                "port={port}, vlan={vlan:?}, explicit_vni={explicit_vni:?}"
+            );
+            if let Some((key, entry)) = row {
+                assert_eq!(key.1, vlan);
+                assert!(entry.flags.master && entry.flags.permanent);
+                assert!(!entry.is_extern_learned());
+            }
+        }
     }
 
     #[test]

@@ -15,6 +15,8 @@
 //! The snapshot still needs to surface flag information so the diff
 //! pass can recognize *update* opportunities on entries we own and
 //! *skip* operations on entries we don't.
+//! Attributable local static master rows are included for that protection;
+//! dynamic local learns remain outside the remote-programming snapshot.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -497,10 +499,10 @@ pub enum InstanceProbe {
 }
 
 /// Snapshot of every kernel FDB entry the dataplane is interested in,
-/// keyed by `(VNI, VLAN, MAC)`. The Linux netlink dump derives the VNI
-/// from the FDB entry's **VXLAN-port** ifindex (which is what
-/// bridge-family `RTM_NEWNEIGH` messages carry in `header.ifindex`) by
-/// looking it up in the link cache's `vxlan_ifindex_to_vni` table.
+/// keyed by `(VNI, VLAN, MAC)`. The Linux netlink dump attributes VXLAN
+/// rows through the port's VNI or explicit VNI metadata for SVD ports.
+/// Unmarked local static master rows use the link cache's bridge-port
+/// VNI/VLAN attribution so ownership checks can preserve them.
 /// VLAN is Linux attribution only: EVPN route identity remains
 /// `(VNI, MAC)` with Ethernet Tag ID `0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
