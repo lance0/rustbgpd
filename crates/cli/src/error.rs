@@ -8,6 +8,10 @@ pub enum CliError {
         addr: String,
         detail: String,
     },
+    Tls {
+        detail: String,
+        hint: &'static str,
+    },
     Rpc(String),
     Argument(String),
     Io(std::io::Error),
@@ -22,6 +26,7 @@ impl fmt::Display for CliError {
                 "cannot reach rustbgpd at {addr} ({detail})\n  \
                  hint: is the daemon running? if it uses a different endpoint, pass -s or set RUSTBGPD_ADDR"
             ),
+            CliError::Tls { detail, hint } => write!(f, "TLS error: {detail}\n  hint: {hint}"),
             CliError::Rpc(msg) => write!(f, "{msg}"),
             CliError::Argument(msg) => write!(f, "{msg}"),
             CliError::Io(e) => write!(f, "{e}"),
@@ -38,6 +43,19 @@ impl fmt::Debug for CliError {
 
 impl From<tonic::Status> for CliError {
     fn from(s: tonic::Status) -> Self {
+        // TLS 1.3 peer alerts can arrive after connect, on the first RPC.
+        // Classify only an actual TLS cause, never an ordinary transport close
+        // or an application authentication/authorization rejection.
+        if matches!(
+            s.code(),
+            tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Internal
+        ) && let Some((detail, hint)) = crate::connection::tls_failure_class(&s)
+        {
+            return CliError::Tls {
+                detail: detail.into(),
+                hint,
+            };
+        }
         // tonic's `Code` Display strings are full sentences ("The system is
         // not in a state required for the operation's execution: ..."), so
         // every code maps to a short lowercase prefix and the daemon-side

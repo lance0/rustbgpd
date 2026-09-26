@@ -94,6 +94,23 @@ Preferred posture:
 - Native mTLS accepts TLS 1.2 and TLS 1.3 with the rustls/ring default cipher
   suites. There is no configuration setting for a different protocol-version
   floor or cipher list.
+- Connect with `rbgp` using an explicit CA and client identity. The server-name
+  override verifies the certificate's DNS name when connecting by IP; it does
+  not disable verification. The equivalent `grpcurl` invocation is shown below:
+
+  ```bash
+  rbgp -s https://192.0.2.1:50051 --tls-server-name router.example \
+    --tls-ca ca.pem --tls-cert operator.pem --tls-key operator.key health
+  grpcurl -cacert ca.pem -cert operator.pem -key operator.key \
+    -servername router.example -import-path . -proto proto/rustbgpd.proto \
+    192.0.2.1:50051 rustbgpd.v1.ControlService/GetHealth
+  ```
+
+  `rbgp` requires `--tls-ca`, `--tls-cert`, and `--tls-key` for HTTPS and does
+  not load system trust roots. The client certificate's principal must also
+  be authorized by
+  `[security.grpc.roles]`. See the [CLI connection guide](../../crates/cli/README.md#connection-and-authentication)
+  for the matching environment variables and optional bearer authentication.
 - For multi-host fan-out, off-host TLS termination, or richer
   authorization fan-out, an Envoy / nginx mTLS sidecar in front of
   the daemon is still a valid pattern; see
