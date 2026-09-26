@@ -365,9 +365,10 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 - Every Cease 6/7 above is sent when collision resolution runs on the
   candidate's OPEN. Disabling the neighbor, or a BFD down that holds BGP,
   also tears down a pending inbound candidate at that moment, independently
-  of any OPEN. That teardown is an ordinary stop: a candidate in OpenSent,
-  OpenConfirm or Established sends Cease 6/2 (Administrative Shutdown), and
-  one that has not reached OpenSent closes without a NOTIFICATION.
+  of any OPEN. That teardown is an ordinary stop: a candidate that has
+  reached Established sends Cease 6/2 (Administrative Shutdown), and one in
+  any earlier state, OpenSent and OpenConfirm included, closes its TCP
+  connection without a NOTIFICATION.
 - The Cease 6/7 outcomes above apply to an inbound candidate session, which
   exists only after the TCP connection is accepted. At accept, before any
   candidate exists, the raw TCP connection is closed without a NOTIFICATION,
