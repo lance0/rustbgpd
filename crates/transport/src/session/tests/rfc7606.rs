@@ -3,11 +3,55 @@ use super::*;
 const RELEASED_PARTIAL_MED: [u8; 7] = [0xa0, 0x04, 0x04, 0x00, 0x00, 0x00, 0x64];
 const RELEASED_PARTIAL_ORIGINATOR_ID: [u8; 7] = [0xa0, 0x09, 0x04, 0xc0, 0x00, 0x02, 0x09];
 const RELEASED_PARTIAL_CLUSTER_LIST: [u8; 7] = [0xa0, 0x0a, 0x04, 0xc0, 0x00, 0x02, 0x0a];
+const EMPTY_CLUSTER_LIST: [u8; 3] = [0x80, 0x0a, 0x00];
 const RELEASED_PARTIAL_MP_REACH: [u8; 16] = [
     0xa0, 0x0e, 0x0d, 0x00, 0x01, 0x01, 0x04, 0x0a, 0x69, 0x00, 0x0a, 0x00, 0x18, 0xc6, 0x33, 0x64,
 ];
 const RELEASED_PARTIAL_MP_UNREACH: [u8; 10] =
     [0xa0, 0x0f, 0x07, 0x00, 0x01, 0x01, 0x18, 0xc6, 0x33, 0x64];
+
+/// RFC 7606 §7.10: an empty `CLUSTER_LIST` on iBGP withdraws the previously
+/// accepted route while leaving the session Established.
+#[tokio::test]
+async fn empty_cluster_list_from_internal_neighbor_withdraws_without_reset() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65001).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial route");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&EMPTY_CLUSTER_LIST),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("empty CLUSTER_LIST must reach the RIB")
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
 
 /// RFC 7606 §7.4 + §2: a malformed MED treats the UPDATE as though its
 /// routes had been withdrawn — previously accepted routes for the same

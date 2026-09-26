@@ -3,6 +3,13 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.21.3 - Unreleased
+
+- Reject a zero-length `CLUSTER_LIST` with Attribute Length Error. Revised
+  decoding treats an UPDATE from an internal neighbor as withdrawn and
+  discards the malformed attribute from an external neighbor, per RFC 7606
+  section 7.10. Non-empty multiples of four bytes remain accepted.
+
 ## 0.21.2 - 2026-09-20
 
 - Documented the sender-side length cap in `encode_shutdown_communication`.

@@ -29,6 +29,10 @@ it corrects the `FlowSpecAction::TrafficAction::terminal` field documentation.
 cap against the 255-byte RFC 9003 section 3 receive limit. Neither patch
 changes a public item, an encoding, or a decoding.
 
+The staged 0.21.3 patch rejects a zero-length `CLUSTER_LIST` on decode. Under
+RFC 7606 section 7.10, revised decoding treats the UPDATE as withdrawn for
+an internal neighbor and discards the attribute for an external neighbor.
+
 - `UpdateMessage::parse_revised_observed_with_error_context` and
   `validate::validate_update_attributes_with_context` retain offending
   attribute types through `UpdateDecodeError` and `UpdateValidationError`.
@@ -339,7 +343,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.21.2", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.21.3", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

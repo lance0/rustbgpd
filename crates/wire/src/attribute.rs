@@ -1981,13 +1981,17 @@ fn decode_attribute_value(
             Ok(PathAttribute::OriginatorId(addr))
         }
         attr_type::CLUSTER_LIST => {
-            let (chunks, []) = value.as_chunks::<4>() else {
+            let (chunks, remainder) = value.as_chunks::<4>();
+            if chunks.is_empty() || !remainder.is_empty() {
                 return Err(DecodeError::UpdateAttributeError {
                     subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                     data: attr_error_data(flags, type_code, value),
-                    detail: format!("CLUSTER_LIST length {} not a multiple of 4", value.len()),
+                    detail: format!(
+                        "CLUSTER_LIST length {} invalid (must be a non-zero multiple of 4)",
+                        value.len()
+                    ),
                 });
-            };
+            }
             let ids = chunks
                 .iter()
                 .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
@@ -2202,8 +2206,8 @@ fn decode_mp_reach_nlri(
             link_local_next_hop = ll;
             nh
         }
-        // RTC next-hop is an ordinary host address (RFC 4684 says nothing
-        // special): reuse the Unicast 4/16/32-byte forms, no RD prefix.
+        // RFC 4684 §4 defines 4- and 16-byte RTC next hops. Reuse the Unicast
+        // decoder, which also accepts 32-byte IPv6 global/link-local form.
         MpNlriFamily::Unicast | MpNlriFamily::Evpn | MpNlriFamily::Labeled | MpNlriFamily::Rtc => {
             match afi {
                 Afi::Ipv4 => match nh_len {
@@ -5854,6 +5858,40 @@ mod tests {
         ));
     }
     #[test]
+    fn cluster_list_empty_is_length_error() {
+        let buf = [0x80, 0x0A, 0x00];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn revised_cluster_list_length_follows_neighbor_role() {
+        let empty = [0x80, 0x0A, 0x00];
+        for (is_ibgp, disposition) in [
+            (false, ErrorDisposition::AttributeDiscard),
+            (true, ErrorDisposition::TreatAsWithdraw),
+        ] {
+            let decoded = decode_path_attributes_revised(&empty, true, is_ibgp, &[]).unwrap();
+            assert!(decoded.attributes.is_empty());
+            assert_eq!(decoded.malformed.len(), 1);
+            assert_eq!(decoded.malformed[0].disposition, disposition);
+            assert_eq!(decoded.malformed[0].type_code, attr_type::CLUSTER_LIST);
+        }
+        for wire in [
+            &[0x80, 0x0A, 0x04, 1, 2, 3, 4][..],
+            &[0x80, 0x0A, 0x08, 1, 2, 3, 4, 5, 6, 7, 8][..],
+        ] {
+            let decoded = decode_path_attributes_revised(wire, true, true, &[]).unwrap();
+            assert_eq!(decoded.attributes.len(), 1);
+            assert!(decoded.malformed.is_empty());
+        }
+    }
+    #[test]
     fn cluster_list_trailing_partial_id_is_length_error() {
         // Two whole cluster IDs plus one trailing byte: a non-empty 4-byte remainder.
         let buf = [0x80, 0x0A, 0x09, 10, 0, 0, 1, 10, 0, 0, 2, 3];
@@ -5863,7 +5901,10 @@ mod tests {
                 subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
                 detail,
                 ..
-            } => assert_eq!(detail, "CLUSTER_LIST length 9 not a multiple of 4"),
+            } => assert_eq!(
+                detail,
+                "CLUSTER_LIST length 9 invalid (must be a non-zero multiple of 4)"
+            ),
             other => panic!("expected ATTRIBUTE_LENGTH_ERROR, got: {other:?}"),
         }
     }

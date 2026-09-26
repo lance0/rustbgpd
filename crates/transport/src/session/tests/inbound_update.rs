@@ -891,8 +891,8 @@ async fn external_neighbor_rr_discard_counts_once_with_configured_discard() {
     );
 }
 
-/// Boundary: a zero-length `CLUSTER_LIST` decodes as an empty list. From an
-/// external neighbor it is discarded like any other, and counted once.
+/// A malformed zero-length `CLUSTER_LIST` from an external neighbor is
+/// discarded while its route survives, per RFC 7606 §7.10.
 #[tokio::test]
 async fn external_neighbor_empty_cluster_list_is_discarded() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
@@ -904,10 +904,7 @@ async fn external_neighbor_empty_cluster_list_is_discarded() {
     )
     .await;
     assert!(!has_rr_attribute(&route.attributes));
-    assert_eq!(
-        discarded_type_code_counts(&session),
-        vec![("10".to_string(), 1.0)]
-    );
+    assert_single_malformed_disposition(&session, "attribute_discard");
 }
 
 /// Every family path stores attributes derived from the one normalized set,
