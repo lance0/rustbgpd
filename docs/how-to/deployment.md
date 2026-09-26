@@ -1465,7 +1465,7 @@ processes is unsupported even when their configuration files differ.
 | `blackhole-owned.json` | Exact BLACKHOLE prefix authority. Mode `0600`; adoption and deletion require this receipt plus the kernel marker. | Yes |
 | `events.db`, `events.db-wal`, `events.db-shm` | Durable event history (SQLite, ADR-0072), created and used while `[event_history].enabled = true`. Disabling the feature later leaves the files in place unopened. `[event_history].path` can move it; the files below always sit beside it. | Yes |
 | `events.last_id` | Event-ID allocator hint written beside `events.db`. Diagnostic only; not authoritative for allocator recovery. | Yes |
-| `events.db.stale` (+`-wal`/`-shm`), `events.db.stale.<n>` | Quarantined event store that failed to open cleanly. A new quarantine moves the previous set to the lowest unused `<n>`. Never read back as the live store. | Yes; not pruned |
+| `events.db.stale`, `events.db.stale-wal`, `events.db.stale-shm`; `events.db.stale.<n>`, `events.db.stale.<n>-wal`, `events.db.stale.<n>-shm` | Quarantined event store that failed to open cleanly, moved together with its `-wal`/`-shm` files. A new quarantine moves the previous set, all three files, to the lowest unused `<n>`. Never read back as the live store. | Yes; not pruned |
 | `crash/panic-*.toml` | Panic reports (message, location, thread, binary version, timestamp; never environment or arguments). Write-only; the newest 10 are kept, and `rbgp doctor` includes them in support bundles. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 

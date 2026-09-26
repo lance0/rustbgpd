@@ -191,9 +191,10 @@ lists each file's version marker and reader behavior. What holds today:
   the GR marker is rejected and the daemon cold-starts, FIB owned state is
   quarantined, and config-history rows of an unknown version are ignored.
   The BLACKHOLE receipt stays in place and BLACKHOLE kernel mutations are
-  disabled. The event store stays in place untouched: with
-  `[event_history].required = true` the daemon exits at startup, and
-  otherwise it runs live-only without durable history.
+  disabled. The event store stays in place untouched. When event history is
+  enabled, the daemon exits at startup if `[event_history].required` is
+  true and otherwise runs live-only without durable history; with event
+  history disabled the store is never opened.
 - **Binary rollback:** follow the
   [rollback procedure](../how-to/deployment.md#rollback). It settles pending
   commit-confirm transactions and moves `config-history/` aside when the
