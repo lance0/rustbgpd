@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.21.3 - Unreleased
 
 - Reject a zero-length `CLUSTER_LIST` with Attribute Length Error. Revised
   decoding treats an UPDATE from an internal neighbor as withdrawn and
