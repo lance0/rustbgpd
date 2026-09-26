@@ -629,6 +629,18 @@ fn bench_fanout(c: &mut Criterion) {
                 )
             });
         });
+        // A modifying chain takes the export memo's modified-attribute path
+        // for every (route, peer).
+        group.bench_with_input(BenchmarkId::new("with_modifying_policy", n), &n, |b, &n| {
+            b.iter_custom(|iterations| {
+                measure_replacement_fanout(
+                    iterations,
+                    n,
+                    |peers| build(peers, Some(community_export_chain(0xFDE8_0001))),
+                    expected_fanout_receipt,
+                )
+            });
+        });
     }
     group.finish();
 }
