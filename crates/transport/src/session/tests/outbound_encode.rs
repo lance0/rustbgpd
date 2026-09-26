@@ -176,6 +176,131 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     assert_eq!(parsed.announced.len(), 2);
 }
 
+fn announce_only(session: &PeerSession, announce: Vec<Route>) -> OutboundRouteUpdate {
+    let next_hop_override = vec![None; announce.len()];
+    OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        announce: announce.into(),
+        next_hop_override: next_hop_override.into(),
+        ..OutboundRouteUpdate::default()
+    }
+}
+
+fn update_messages_sent(session: &PeerSession) -> f64 {
+    counter_samples(&session.metrics, "bgp_messages_sent_total")
+        .into_iter()
+        .find(|(labels, _)| {
+            labels.get("peer").map(String::as_str) == Some(session.peer_label.as_str())
+                && labels.get("type").map(String::as_str) == Some("update")
+        })
+        .map_or(0.0, |(_, value)| value)
+}
+
+/// A resync replays routes whose post-policy attributes were allocated in
+/// many RIB passes: equal values behind distinct `Arc`s. Grouping by pointer
+/// emitted one UPDATE per allocation, and 5,000 of them overran the
+/// 4,096-frame writer queue in one synchronous envelope, so a healthy peer
+/// was torn down with Cease/8. Grouping by value packs them.
+#[tokio::test]
+async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let routes: Vec<Route> = (0..5_000u32)
+        .map(|i| Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | (i << 8)), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
+            next_hop_scope: None,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            attributes: Arc::new(attrs.clone()),
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        })
+        .collect();
+    let update = announce_only(&session, routes);
+    session.send_route_update(update);
+    assert!(
+        session.writer_bulk_tx.is_some(),
+        "writer queue saturated and the session was torn down"
+    );
+    let sent = update_messages_sent(&session);
+    assert!(
+        (1.0..=16.0).contains(&sent),
+        "5,000 /24s with one attribute value need a handful of UPDATEs, sent {sent}"
+    );
+}
+
+/// The IPv6 `MP_REACH_NLRI` grouping keys on value too.
+#[tokio::test]
+async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.route_server_client = true;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ];
+    let route1 = Route {
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+        next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(attrs.clone()),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    };
+    let route2 = Route {
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
+        attributes: Arc::new(attrs),
+        ..route1.clone()
+    };
+    let update = announce_only(&session, vec![route1, route2]);
+    session.send_route_update(update);
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(mp.announced.len(), 2);
+}
+
 #[tokio::test]
 async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

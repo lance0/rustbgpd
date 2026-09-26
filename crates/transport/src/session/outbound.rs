@@ -48,6 +48,48 @@ struct AttrGroupKey {
     next_hop: Option<IpAddr>,
     link_local_next_hop: Option<Ipv6Addr>,
 }
+
+type AttrGroupValue = (Arc<Vec<PathAttribute>>, Option<IpAddr>, Option<Ipv6Addr>);
+
+/// Groups one envelope's announcements by final attribute *value*, so
+/// routes whose attributes are equal but separately allocated share
+/// UPDATEs. Post-policy attribute `Arc`s are allocated per RIB distribution
+/// pass, so a resync replaying routes stored across many passes would
+/// otherwise emit one UPDATE per original pass and can overrun the bounded
+/// writer queue. Pointer lookups stay the fast path; each pointer key pins
+/// its `Arc` so a freed allocation cannot alias a later one.
+#[derive(Default)]
+struct AttrGroupIndex {
+    by_ptr: HashMap<AttrGroupKey, (Arc<Vec<PathAttribute>>, usize)>,
+    by_value: HashMap<AttrGroupValue, usize>,
+}
+
+impl AttrGroupIndex {
+    /// The group for these attributes: `Ok(existing)`, or `Err(next)` after
+    /// registering `next` as the index of a new group the caller pushes.
+    fn group(
+        &mut self,
+        attrs: &Arc<Vec<PathAttribute>>,
+        next_hop: Option<IpAddr>,
+        link_local_next_hop: Option<Ipv6Addr>,
+        next: usize,
+    ) -> Result<usize, usize> {
+        let key = AttrGroupKey {
+            attrs_ptr: Arc::as_ptr(attrs) as usize,
+            next_hop,
+            link_local_next_hop,
+        };
+        if let Some((_, idx)) = self.by_ptr.get(&key) {
+            return Ok(*idx);
+        }
+        let idx = *self
+            .by_value
+            .entry((Arc::clone(attrs), next_hop, link_local_next_hop))
+            .or_insert(next);
+        self.by_ptr.insert(key, (Arc::clone(attrs), idx));
+        if idx == next { Err(next) } else { Ok(idx) }
+    }
+}
 struct V4BodyGroup {
     attrs: Arc<Vec<PathAttribute>>,
     prefixes: Vec<Ipv4NlriEntry>,
@@ -357,9 +399,9 @@ impl PeerSession {
                 );
             }
         } else {
-            let mut v4_body_index: HashMap<AttrGroupKey, usize> = HashMap::default();
+            let mut v4_body_index = AttrGroupIndex::default();
             let mut v4_body_groups: Vec<V4BodyGroup> = Vec::new();
-            let mut v4_mp_index: HashMap<AttrGroupKey, usize> = HashMap::default();
+            let mut v4_mp_index = AttrGroupIndex::default();
             let mut v4_mp_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override) in &v4_routes {
                 let cached_attrs = export
@@ -372,19 +414,12 @@ impl PeerSession {
                     .clone();
                 match export.finish_unicast_candidate(route, *nh_override, cached_attrs) {
                     Ok(PreparedUnicastCandidate::Ipv4Body { attrs, entry }) => {
-                        let key = AttrGroupKey {
-                            attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                            next_hop: None,
-                            link_local_next_hop: None,
-                        };
-                        if let Some(&idx) = v4_body_index.get(&key) {
-                            v4_body_groups[idx].prefixes.push(entry);
-                        } else {
-                            v4_body_index.insert(key, v4_body_groups.len());
-                            v4_body_groups.push(V4BodyGroup {
+                        match v4_body_index.group(&attrs, None, None, v4_body_groups.len()) {
+                            Ok(idx) => v4_body_groups[idx].prefixes.push(entry),
+                            Err(_) => v4_body_groups.push(V4BodyGroup {
                                 attrs,
                                 prefixes: vec![entry],
-                            });
+                            }),
                         }
                     }
                     Ok(PreparedUnicastCandidate::Mp {
@@ -394,21 +429,19 @@ impl PeerSession {
                         entry,
                         ..
                     }) => {
-                        let key = AttrGroupKey {
-                            attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                            next_hop: Some(next_hop),
+                        match v4_mp_index.group(
+                            &attrs,
+                            Some(next_hop),
                             link_local_next_hop,
-                        };
-                        if let Some(&idx) = v4_mp_index.get(&key) {
-                            v4_mp_groups[idx].prefixes.push(entry);
-                        } else {
-                            v4_mp_index.insert(key, v4_mp_groups.len());
-                            v4_mp_groups.push(MpGroup {
+                            v4_mp_groups.len(),
+                        ) {
+                            Ok(idx) => v4_mp_groups[idx].prefixes.push(entry),
+                            Err(_) => v4_mp_groups.push(MpGroup {
                                 attrs,
                                 next_hop,
                                 link_local_next_hop,
                                 prefixes: vec![entry],
-                            });
+                            }),
                         }
                     }
                     Err(error) if use_extended_nexthop_ipv4 => {
@@ -469,7 +502,7 @@ impl PeerSession {
         // The is_family_negotiated filter above is retained as a safety net.
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
-        let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::default();
+        let mut v6_group_index = AttrGroupIndex::default();
         let mut v6_groups: Vec<MpGroup> = Vec::new();
         for (route, nh_override_ref) in &v6_routes {
             let nh_override = *nh_override_ref;
@@ -514,21 +547,14 @@ impl PeerSession {
                 }
             };
             let (attrs, nh, link_local_next_hop, nlri_entry) = prepared;
-            let key = AttrGroupKey {
-                attrs_ptr: Arc::as_ptr(&attrs) as usize,
-                next_hop: Some(nh),
-                link_local_next_hop,
-            };
-            if let Some(&idx) = v6_group_index.get(&key) {
-                v6_groups[idx].prefixes.push(nlri_entry);
-            } else {
-                v6_group_index.insert(key, v6_groups.len());
-                v6_groups.push(MpGroup {
+            match v6_group_index.group(&attrs, Some(nh), link_local_next_hop, v6_groups.len()) {
+                Ok(idx) => v6_groups[idx].prefixes.push(nlri_entry),
+                Err(_) => v6_groups.push(MpGroup {
                     attrs,
                     next_hop: nh,
                     link_local_next_hop,
                     prefixes: vec![nlri_entry],
-                });
+                }),
             }
         }
         let max_len = export.max_message_len();
