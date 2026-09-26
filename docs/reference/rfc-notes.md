@@ -350,17 +350,24 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   collide with (RFC 4271 §6.8), so the inbound connection replaces it
   without a Cease; its outbound connect attempt and reconnect timer stop.
   Two exceptions keep the configured session and close the inbound
-  connection with Cease 6/7 instead: the neighbor is administratively
-  disabled, or BFD is holding BGP down for it. While the neighbor waits
-  out an escalated NOTIFICATION reconnect backoff, the inbound connection
-  is closed without a NOTIFICATION.
+  connection with Cease 6/7 instead, when they already hold as the OPEN is
+  resolved: the neighbor is administratively disabled, or BFD is holding
+  BGP down for it. While the neighbor waits out an escalated NOTIFICATION
+  reconnect backoff, the inbound connection is closed without a
+  NOTIFICATION.
 - A configured session that is already Established keeps its connection;
   the inbound one is closed with Cease 6/7.
 - If the configured session's state cannot be read within the peer-query
   deadline when the inbound connection's OPEN arrives, it is treated as
   possibly Established: it keeps its connection and the inbound one is
   closed with Cease 6/7. A timeout at TCP accept is handled differently;
-  see the next item.
+  see the last item.
+- Every Cease 6/7 above is sent when collision resolution runs on the
+  candidate's OPEN. Disabling the neighbor, or a BFD down that holds BGP,
+  also tears down a pending inbound candidate at that moment, independently
+  of any OPEN. That teardown is an ordinary stop: a candidate in OpenSent,
+  OpenConfirm or Established sends Cease 6/2 (Administrative Shutdown), and
+  one that has not reached OpenSent closes without a NOTIFICATION.
 - The Cease 6/7 outcomes above apply to an inbound candidate session, which
   exists only after the TCP connection is accepted. At accept, before any
   candidate exists, the raw TCP connection is closed without a NOTIFICATION,
