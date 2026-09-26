@@ -492,6 +492,17 @@ pub struct PeerManager {
     /// Nesting depth of [`Self::handle_session_notification`]. Handling one
     /// notification can drain the queue again (collision promotion and
     /// session retirement both do).
+    ///
+    /// Invariant: no future that can reach `handle_session_notification` is
+    /// dropped before it completes, so the increment and decrement always pair.
+    /// Reaching it needs `&mut PeerManager`, which rules out `&self` futures,
+    /// spawned tasks and the inner future of `await_with_readiness{,_budget}`.
+    /// The only `&mut self` futures raced in a `select!` or wrapped in a
+    /// `timeout` are `plan_config_transaction`, `await_with_readiness` (whose
+    /// arms serve only readiness and operator reads) and
+    /// `query_warm_checkpoint_capture`, and none of them drains session
+    /// notifications. Keep it that way, or reset the depth where a drop can
+    /// happen; the run loop `debug_assert!`s the depth is zero between steps.
     session_notification_depth: usize,
     /// Notifications a nested drain left for the outermost handler because
     /// they belong to a different peer. Empty whenever the depth is zero.
