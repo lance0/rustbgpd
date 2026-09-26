@@ -25,7 +25,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd_policy::{RouteModifications, apply_modifications};
-use rustbgpd_transport::{RouteAttrBundle, materialize_attrs};
+use rustbgpd_transport::{ImportAttrMemo, RouteAttrBundle, materialize_attrs};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
 };
@@ -77,6 +77,35 @@ fn run_new(canonical: &Arc<Vec<PathAttribute>>, mods: &RouteModifications, count
     }
 }
 
+fn two_mods() -> RouteModifications {
+    RouteModifications {
+        set_local_pref: Some(100),
+        ..RouteModifications::default()
+    }
+}
+
+/// New path with alternating modifications per route (the RPKI-preference
+/// chain's valid / not-found split).
+fn run_new_alternating(
+    canonical: &Arc<Vec<PathAttribute>>,
+    mods: &[RouteModifications; 2],
+    count: usize,
+) {
+    for i in 0..count {
+        let (attrs, nh) = materialize_attrs(canonical, &mods[i % 2]);
+        black_box((&attrs, &nh));
+    }
+}
+
+/// Per-UPDATE memo: a fresh memo per UPDATE of `count` routes.
+fn run_memo(canonical: &Arc<Vec<PathAttribute>>, mods: &[RouteModifications], count: usize) {
+    let mut memo = ImportAttrMemo::default();
+    for i in 0..count {
+        let (attrs, nh) = memo.materialize(canonical, &mods[i % mods.len()]);
+        black_box((&attrs, &nh));
+    }
+}
+
 /// Legacy path: deep-clone the canonical `Vec` and apply unconditionally.
 fn run_legacy(canonical: &Arc<Vec<PathAttribute>>, mods: &RouteModifications, count: usize) {
     for _ in 0..count {
@@ -103,12 +132,31 @@ fn bench_materialize(c: &mut Criterion) {
                     &count,
                     |b, &count| b.iter(|| run_new(&canonical, &mods, count)),
                 );
+                let memo_mods = [mods.clone()];
+                group.bench_with_input(
+                    BenchmarkId::new(format!("memo/{richness}/{mods_name}"), count),
+                    &count,
+                    |b, &count| b.iter(|| run_memo(&canonical, &memo_mods, count)),
+                );
                 group.bench_with_input(
                     BenchmarkId::new(format!("legacy/{richness}/{mods_name}"), count),
                     &count,
                     |b, &count| b.iter(|| run_legacy(&canonical, &mods, count)),
                 );
             }
+        }
+        let alternating = [one_mod(), two_mods()];
+        for &count in &[100usize, 1000] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("new/{richness}/two_mods_alternating"), count),
+                &count,
+                |b, &count| b.iter(|| run_new_alternating(&canonical, &alternating, count)),
+            );
+            group.bench_with_input(
+                BenchmarkId::new(format!("memo/{richness}/two_mods_alternating"), count),
+                &count,
+                |b, &count| b.iter(|| run_memo(&canonical, &alternating, count)),
+            );
         }
     }
     group.finish();

@@ -656,3 +656,39 @@ fn merge_prepend_slot_shared_between_literal_and_computed() {
     mods.merge_from(RouteModifications::default());
     assert_eq!(mods.as_path_prepend_computed, Some((PrependAs::LocalAs, 2)));
 }
+
+#[test]
+fn same_as_matches_derived_equality() {
+    let lp = |v| RouteModifications {
+        set_local_pref: Some(v),
+        ..RouteModifications::default()
+    };
+    let comm = |add: Vec<u32>, remove: Vec<u32>| RouteModifications {
+        communities_add: add,
+        communities_remove: remove,
+        ..RouteModifications::default()
+    };
+    let variants = [
+        RouteModifications::default(),
+        lp(100),
+        lp(200),
+        comm(vec![], vec![]),
+        comm(vec![1], vec![]),
+        comm(vec![2], vec![]),
+        comm(vec![], vec![1]),
+        comm(vec![1, 2], vec![]),
+        RouteModifications {
+            large_communities_add: vec![LargeCommunity::new(1, 2, 3)],
+            ..RouteModifications::default()
+        },
+        RouteModifications {
+            as_path_prepend: Some((65_000, 2)),
+            ..RouteModifications::default()
+        },
+    ];
+    for a in &variants {
+        for b in &variants {
+            assert_eq!(a.same_as(b), a == b, "{a:?} vs {b:?}");
+        }
+    }
+}
