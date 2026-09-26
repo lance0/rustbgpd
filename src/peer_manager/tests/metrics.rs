@@ -1502,7 +1502,8 @@ fn policy_route_retirement_actor_fences_are_definitive_and_staged() {
     assert_eq!(catalog.matches("reap_retired_policy_routes").count(), 1);
 
     let reconcile = arm(
-        "PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {",
+        // The fields wrap outside select!, but the variant still bounds this arm.
+        "PeerManagerCommand::ReconcilePeers {",
         "PeerManagerCommand::HotUpdatePeer",
     );
     assert!(reconcile.contains("result.authority == PeerReconcileAuthority::Known"));
