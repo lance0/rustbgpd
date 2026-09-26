@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustbgpd_api::proto;
 use rustbgpd_api::proto::rib_service_server::RibService as RibServiceTrait;
 use rustbgpd_api::rib_service::{RibService, VpnQueryServiceReceipt};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{RibManager, RibUpdate, RouteOrigin, VpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -231,7 +232,7 @@ fn semantic_hash(rd: &[u8], prefix: &str, peer: &str, label: u32) -> u64 {
     mix(hash, &label.to_be_bytes())
 }
 
-fn route(index: usize, attributes: &Arc<Vec<PathAttribute>>) -> VpnRibRoute {
+fn route(index: usize, attributes: &Arc<AttrSet>) -> VpnRibRoute {
     let peer_octet = u8::try_from(index % PEERS + 1).unwrap();
     let peer = Ipv4Addr::new(10, 0, 0, peer_octet);
     let prefix = Ipv4Addr::from(0x0b00_0000_u32 + u32::try_from(index).unwrap());
@@ -366,7 +367,7 @@ async fn run(
     let manager = RibManager::new(primary_rx, query_rx, None, None, BgpMetrics::new())
         .with_vpn_query_bench_receipts(actor_tx);
     let manager_task = tokio::spawn(manager.run());
-    let attributes = Arc::new(vec![
+    let attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512, 64513])],

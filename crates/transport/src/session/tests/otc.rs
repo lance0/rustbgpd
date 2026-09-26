@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 fn otc(asn: u32) -> PathAttribute {
     PathAttribute::OnlyToCustomer(asn)
@@ -1255,7 +1256,7 @@ fn otc_egress_does_not_add_otc_to_vpn() {
         );
 
         let mut tagged = make_vpn_rib_route(100);
-        Arc::make_mut(&mut tagged.attributes).push(otc(64512));
+        AttrSet::edit(&mut tagged.attributes, |attrs| attrs.push(otc(64512)));
         let attrs = session.prepare_outbound_attributes_vpn(&tagged, true);
         let otcs: Vec<u32> = attrs
             .iter()

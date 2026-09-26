@@ -1124,9 +1124,14 @@ The final 48 bytes of `AdjRibIn` are two inline, allocation-free
 exact RPKI post-policy BMP counters on the route mutation path instead of
 requiring a periodic route-table scan.
 
-`Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
+`Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
-reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
+reference counting. `AttrSet::edit` performs copy-on-write mutation and rebuilds
+the cached unicast selection inputs, including when an edit unwinds. The summary
+adds 24 requested bytes per unique attribute set; it does not enlarge `Route`.
+Other families share the container and cached LLGR tier, while their remaining
+selection accessors still scan attributes. The dated measurements below retain
+their original representation and version scope.
 
 Path attribute interning deduplicates identical attribute sets across routes
 from ALL peers: a single RIB-manager-owned `AttrInternTable` (the

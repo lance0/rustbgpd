@@ -11,6 +11,7 @@ use rustbgpd_policy::{
     AsPathRegex, CommunityMatch, NeighborSetMatch, Policy, PolicyAction, PolicyChain,
     PolicyStatement, RouteModifications,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_wire::{
     AddressPrefixOrf, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LlgrFamily, Message, MplsLabelEntry,
@@ -696,7 +697,7 @@ fn make_bgpls_route(payload_tag: u8) -> rustbgpd_rib::BgpLsRibRoute {
         nlri,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -790,7 +791,7 @@ fn make_route(local_pref: u32) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -811,7 +812,7 @@ fn make_route(local_pref: u32) -> Route {
 }
 fn replace_route_attrs(route: &Route, attrs: Vec<PathAttribute>) -> Route {
     Route {
-        attributes: Arc::new(attrs),
+        attributes: AttrSet::new(attrs),
         ..route.clone()
     }
 }
@@ -822,7 +823,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -986,7 +987,7 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
     route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
     route.peer = source;
     route.next_hop = source;
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -1226,7 +1227,7 @@ fn make_sourced_route(source: Ipv4Addr, prefix: Ipv4Prefix, asn: u32) -> Route {
         prefix: Prefix::V4(prefix),
         peer: IpAddr::V4(source),
         next_hop: IpAddr::V4(source),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![asn])],
@@ -1286,7 +1287,7 @@ fn make_vpn_rib_route(label: u32) -> rustbgpd_rib::VpnRibRoute {
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -1312,7 +1313,7 @@ fn make_labeled_rib_route(label: u32) -> rustbgpd_rib::LabeledRibRoute {
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -1337,7 +1338,7 @@ fn make_rtc_rib_route(local_admin: u16) -> rustbgpd_rib::RtcRibRoute {
         .unwrap(),
         next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],

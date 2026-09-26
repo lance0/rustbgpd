@@ -1,9 +1,12 @@
 use super::*;
+use crate::attr_set::AttrSet;
 
 fn with_bgpls_no_advertise(mut route: crate::route::BgpLsRibRoute) -> crate::route::BgpLsRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![
-        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-    ]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ]));
+    });
     route
 }
 

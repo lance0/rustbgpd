@@ -25,6 +25,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use rustbgpd_policy::{RouteModifications, apply_modifications};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_transport::{ImportAttrMemo, RouteAttrBundle, materialize_attrs};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
@@ -70,7 +71,7 @@ fn one_mod() -> RouteModifications {
 }
 
 /// New path: share the canonical `Arc` when no mods; clone + apply otherwise.
-fn run_new(canonical: &Arc<Vec<PathAttribute>>, mods: &RouteModifications, count: usize) {
+fn run_new(canonical: &Arc<AttrSet>, mods: &RouteModifications, count: usize) {
     for _ in 0..count {
         let (attrs, nh) = materialize_attrs(canonical, mods);
         black_box((&attrs, &nh));
@@ -86,11 +87,7 @@ fn two_mods() -> RouteModifications {
 
 /// New path with alternating modifications per route (the RPKI-preference
 /// chain's valid / not-found split).
-fn run_new_alternating(
-    canonical: &Arc<Vec<PathAttribute>>,
-    mods: &[RouteModifications; 2],
-    count: usize,
-) {
+fn run_new_alternating(canonical: &Arc<AttrSet>, mods: &[RouteModifications; 2], count: usize) {
     for i in 0..count {
         let (attrs, nh) = materialize_attrs(canonical, &mods[i % 2]);
         black_box((&attrs, &nh));
@@ -98,7 +95,7 @@ fn run_new_alternating(
 }
 
 /// Per-UPDATE memo: a fresh memo per UPDATE of `count` routes.
-fn run_memo(canonical: &Arc<Vec<PathAttribute>>, mods: &[RouteModifications], count: usize) {
+fn run_memo(canonical: &Arc<AttrSet>, mods: &[RouteModifications], count: usize) {
     let mut memo = ImportAttrMemo::default();
     for i in 0..count {
         let (attrs, nh) = memo.materialize(canonical, &mods[i % mods.len()]);
@@ -107,11 +104,11 @@ fn run_memo(canonical: &Arc<Vec<PathAttribute>>, mods: &[RouteModifications], co
 }
 
 /// Legacy path: deep-clone the canonical `Vec` and apply unconditionally.
-fn run_legacy(canonical: &Arc<Vec<PathAttribute>>, mods: &RouteModifications, count: usize) {
+fn run_legacy(canonical: &Arc<AttrSet>, mods: &RouteModifications, count: usize) {
     for _ in 0..count {
-        let mut attrs = (**canonical).clone();
+        let mut attrs = canonical.to_vec();
         let nh = apply_modifications(&mut attrs, mods);
-        let attrs = Arc::new(attrs);
+        let attrs = AttrSet::new(attrs);
         black_box((&attrs, &nh));
     }
 }

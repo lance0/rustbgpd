@@ -169,6 +169,7 @@ These types define the contracts between crates. They are the key interfaces to 
 |------|-----------|-----------------|
 | `Prefix` | `wire::nlri` | Everything. AFI-agnostic route identity (`V4`/`V6` enum). `Copy`. |
 | `Route` | `rib::route` | Transport → RIB → distribution. Carries prefix, next-hop (`IpAddr`), attributes, origin, validation state, staleness. |
+| `AttrSet` | `rib::attr_set` | Shared route attributes with cached unicast best-path inputs. Construction and copy-on-write edits keep the inputs consistent; interning shares both across routes. Other families use the cached LLGR tier but retain their other selection accessors. |
 | `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutesPage`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
 | `OutboundRouteUpdate` | `rib::update` | RIB → Transport. Announces + withdrawals + FlowSpec changes for a single peer, after export policy. |
 | `PeerKey` | `api::peer_types` | API ↔ PeerManager. Stable peer identity: `address` plus an optional `interface` for scoped IPv6 link-local peers (RFC 4007 — a `fe80::/10` address is not globally unique). Numbered peers carry `interface: None`; renders as `fe80::x%ifname` (ADR-0069). |

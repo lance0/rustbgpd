@@ -759,7 +759,6 @@ impl AdjRibOut {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{
@@ -767,6 +766,7 @@ mod tests {
         VpnNlri, VpnPrefix,
     };
 
+    use crate::attr_set::AttrSet;
     use crate::route::BgpLsFamily;
     use crate::test_support::make_route_with_path_id as make_route;
 
@@ -797,7 +797,7 @@ mod tests {
             nlri,
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -822,7 +822,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -870,7 +870,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -939,7 +939,7 @@ mod tests {
             nlri: RtcNlri::new(65001, rt, 96).unwrap(),
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),

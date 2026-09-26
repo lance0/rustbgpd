@@ -453,6 +453,7 @@ mod tests {
     use super::*;
     use prometheus::Encoder as _;
     use rustbgpd_event_history::{EventHistoryConfig, EventHistoryManager, SynchronousMode};
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::{EvpnRibRoute, RouteEventType, RouteOrigin};
     use rustbgpd_wire::{
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, Ipv4Prefix, MacAddress,
@@ -501,7 +502,7 @@ mod tests {
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
             peer: IpAddr::V4(peer),
-            attributes: Arc::new(Vec::new()),
+            attributes: AttrSet::new(Vec::new()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: peer,
@@ -645,7 +646,7 @@ mod tests {
     fn evpn_snapshot_payload_retains_prefix_sid_in_current_and_previous_routes() {
         let mut event = sample_evpn_event();
         let best = event.best.as_mut().unwrap();
-        best.attributes = Arc::new(vec![rustbgpd_wire::PathAttribute::Unknown(
+        best.attributes = AttrSet::new(vec![rustbgpd_wire::PathAttribute::Unknown(
             rustbgpd_wire::RawAttribute {
                 flags: 0xe0,
                 type_code: 40,

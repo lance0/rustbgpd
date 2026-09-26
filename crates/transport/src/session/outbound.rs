@@ -2326,6 +2326,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_wire::{
         AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, Ipv6Prefix,
         MacAddress, MplsLabel, Origin, RouteDistinguisher, notification::NotificationCode,
@@ -2396,7 +2397,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],

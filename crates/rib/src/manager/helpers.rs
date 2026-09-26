@@ -58,7 +58,7 @@ pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> 
 }
 
 /// EVPN counterpart of [`routes_equal`]. Skip the deep attribute compare
-/// when the underlying `Arc<Vec<PathAttribute>>` is the same allocation.
+/// when the underlying `Arc<AttrSet>` is the same allocation.
 pub(super) fn evpn_routes_equal(
     a: &crate::route::EvpnRibRoute,
     b: &crate::route::EvpnRibRoute,

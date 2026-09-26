@@ -15,6 +15,7 @@ use super::{
     RibManager,
 };
 use crate::adj_rib_out::AdjRibOut;
+use crate::attr_set::AttrSet;
 use crate::update::OutboundRouteUpdate;
 
 /// How a session-down event (`PeerDown` / `PeerGracefulRestart`) relates
@@ -1266,7 +1267,7 @@ impl RibManager {
             // origination over iBGP): RFC 7606 peers treat-as-withdraw an
             // UPDATE without it, which starves the RR of VPN routes (M75
             // finding). Matches every other local originator.
-            attributes: std::sync::Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath { segments: vec![] }),
             ]),

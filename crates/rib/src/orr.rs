@@ -1062,7 +1062,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 pub(crate) mod fixtures {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::Arc;
     use std::time::Instant;
 
     use bytes::Bytes;
@@ -1076,6 +1075,7 @@ pub(crate) mod fixtures {
     };
 
     use super::{BGP_LS_TLV_MULTI_TOPOLOGY_ID, PROTOCOL_ISIS_LEVEL_2};
+    use crate::attr_set::AttrSet;
     use crate::route::{BgpLsFamily, BgpLsRibRoute, RouteOrigin};
 
     fn sub_tlvs(tlvs: &[BgpLsTlv]) -> Bytes {
@@ -1195,7 +1195,7 @@ pub(crate) mod fixtures {
             nlri,
             next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
-            attributes: Arc::new(attributes),
+            attributes: AttrSet::new(attributes),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: peer,

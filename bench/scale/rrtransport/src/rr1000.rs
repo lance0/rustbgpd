@@ -9,6 +9,7 @@ use anyhow::{bail, ensure, Context, Result};
 use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig};
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::RibUpdate;
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::PeerHandle;
@@ -21,7 +22,6 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -143,7 +143,7 @@ fn route(prefix: Ipv4Prefix, peer: Ipv4Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
             PathAttribute::NextHop(peer),
@@ -493,6 +493,7 @@ mod tests {
     use rustbgpd_transport::{fanout_bench_export_encoder, fanout_bench_export_snapshot_evidence};
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {

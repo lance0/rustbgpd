@@ -1,7 +1,7 @@
 //! Pass-scoped memo for the unicast export tail.
 //!
 //! A policy-modified export fanout used to deep-clone the route's
-//! `Arc<Vec<PathAttribute>>` once per (route, peer) — 76% of live heap in
+//! `Arc<AttrSet>` once per (route, peer) — 76% of live heap in
 //! a modifying-chain RR fanout (2026-07-03 dhat profile, indictment #1) —
 //! even though the post-modification attribute set is identical for every
 //! peer whose chain evaluation produced the same `RouteModifications`.
@@ -26,9 +26,9 @@
 use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, RouteModifications};
-use rustbgpd_wire::PathAttribute;
 use rustc_hash::FxHashMap;
 
+use crate::attr_set::AttrSet;
 use crate::route::Route;
 
 /// Memoized export-tail results for one distribution pass.
@@ -40,18 +40,14 @@ pub(in crate::manager) struct ExportMemo {
 struct MemoEntry {
     /// Pins the source allocation so the pointer key stays unique for
     /// the memo's lifetime.
-    _source: Arc<Vec<PathAttribute>>,
+    _source: Arc<AttrSet>,
     /// Rendered `AS_PATH` match string (built at most once per source
     /// attribute set).
     aspath: Option<Arc<str>>,
     /// Distinct post-modification outcomes for this source attribute
     /// set. Expected tiny: one slot per distinct `RouteModifications`
     /// produced by the export chains in this pass.
-    modified: Vec<(
-        RouteModifications,
-        Arc<Vec<PathAttribute>>,
-        Option<NextHopAction>,
-    )>,
+    modified: Vec<(RouteModifications, Arc<AttrSet>, Option<NextHopAction>)>,
 }
 
 impl ExportMemo {
@@ -85,7 +81,7 @@ impl ExportMemo {
         crate::adj_rib_out::release_hash_map(&mut self.entries, checkpoint);
     }
 
-    fn entry(&mut self, attrs: &Arc<Vec<PathAttribute>>) -> &mut MemoEntry {
+    fn entry(&mut self, attrs: &Arc<AttrSet>) -> &mut MemoEntry {
         self.entries
             .entry(Arc::as_ptr(attrs) as usize)
             .or_insert_with(|| MemoEntry {
@@ -127,9 +123,9 @@ impl ExportMemo {
             if let Some((_, attrs, nh)) = entry.modified.iter().find(|(m, _, _)| m == mods) {
                 (Arc::clone(attrs), nh.clone())
             } else {
-                let mut new_attrs = (*route.attributes).clone();
+                let mut new_attrs = route.attributes.to_vec();
                 let nh = rustbgpd_policy::apply_modifications(&mut new_attrs, mods);
-                let attrs = Arc::new(new_attrs);
+                let attrs = AttrSet::new(new_attrs);
                 entry
                     .modified
                     .push((mods.clone(), Arc::clone(&attrs), nh.clone()));
@@ -149,7 +145,8 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, LargeCommunity, Origin, Prefix,
+        AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, LargeCommunity, Origin,
+        PathAttribute, Prefix,
     };
 
     use super::*;
@@ -168,7 +165,7 @@ mod tests {
         ]
     }
 
-    fn route(attributes: Arc<Vec<PathAttribute>>) -> Route {
+    fn route(attributes: Arc<AttrSet>) -> Route {
         Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
             next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -195,8 +192,9 @@ mod tests {
         let nh = if mods.is_empty() {
             None
         } else {
-            let nh =
-                rustbgpd_policy::apply_modifications(Arc::make_mut(&mut modified.attributes), mods);
+            let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                rustbgpd_policy::apply_modifications(attrs, mods)
+            });
             if let Some(NextHopAction::Specific(addr)) = &nh {
                 modified.next_hop = *addr;
             }
@@ -262,7 +260,7 @@ mod tests {
             attrs(50),
             vec![PathAttribute::Origin(Origin::Igp)],
         ] {
-            let r = route(Arc::new(source));
+            let r = route(AttrSet::new(source));
             for mods in mods_matrix() {
                 let mut memo = ExportMemo::default();
                 let (expect_route, expect_nh) = bypass(&r, &mods);
@@ -292,10 +290,10 @@ mod tests {
     #[test]
     fn memo_keys_by_source_identity_and_modifications_value() {
         let mut memo = ExportMemo::default();
-        let r1 = route(Arc::new(attrs(100)));
+        let r1 = route(AttrSet::new(attrs(100)));
         // Same content, different allocation: correctness must hold
         // (no sharing expected — identity is the Arc pointer).
-        let r2 = route(Arc::new(attrs(100)));
+        let r2 = route(AttrSet::new(attrs(100)));
         let med100 = RouteModifications {
             set_med: Some(100),
             ..Default::default()
@@ -321,13 +319,13 @@ mod tests {
     #[test]
     fn aspath_str_memoized_per_source_attr_set() {
         let mut memo = ExportMemo::default();
-        let r = route(Arc::new(attrs(100)));
+        let r = route(AttrSet::new(attrs(100)));
         let s1 = memo.aspath_str(&r);
         let s2 = memo.aspath_str(&r);
         assert_eq!(&*s1, "65000 65100 65200");
         assert!(Arc::ptr_eq(&s1, &s2));
 
-        let no_aspath = route(Arc::new(vec![PathAttribute::Origin(Origin::Igp)]));
+        let no_aspath = route(AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]));
         assert_eq!(&*memo.aspath_str(&no_aspath), "");
     }
 }

@@ -223,11 +223,11 @@ fn covers(cover: Prefix, destination: Prefix) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use rustbgpd_wire::{Afi, Ipv6PrefixOffset, PathAttribute};
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::test_support::{make_flowspec_route, make_route, set_peer};
 
     const LOCAL_AS: u32 = 64512;
@@ -248,7 +248,7 @@ mod tests {
         let mut flow = make_flowspec_route(peer);
         flow.attributes.push(path(&[SOURCE_AS]));
         let mut cover = make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 0, 0), 16), peer);
-        cover.attributes = Arc::new(vec![path(&[SOURCE_AS])]);
+        cover.attributes = AttrSet::new(vec![path(&[SOURCE_AS])]);
         (flow, cover)
     }
 
@@ -289,7 +289,9 @@ mod tests {
 
         let id = Ipv4Addr::new(203, 0, 113, 1);
         flow.attributes.push(PathAttribute::OriginatorId(id));
-        Arc::make_mut(&mut cover.attributes).push(PathAttribute::OriginatorId(id));
+        AttrSet::edit(&mut cover.attributes, |attrs| {
+            attrs.push(PathAttribute::OriginatorId(id));
+        });
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
 
         // Attribute identity and the same direct peer address denote the same
@@ -303,9 +305,9 @@ mod tests {
     fn ebgp_compares_actual_leftmost_sequence_as() {
         let (mut flow, mut cover) = fixture();
         flow.attributes = vec![path(&[SOURCE_AS, 64498])];
-        cover.attributes = Arc::new(vec![path(&[SOURCE_AS, 64499])]);
+        cover.attributes = AttrSet::new(vec![path(&[SOURCE_AS, 64499])]);
         assert_eq!(evaluate(&flow, Some(&cover), &[]), Feasibility::Feasible);
-        cover.attributes = Arc::new(vec![path(&[64497, SOURCE_AS])]);
+        cover.attributes = AttrSet::new(vec![path(&[64497, SOURCE_AS])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::LeftmostAsMismatch)
@@ -326,7 +328,7 @@ mod tests {
 
         let mut conflict = cover.clone();
         conflict.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
-        conflict.attributes = Arc::new(vec![path(&[64497])]);
+        conflict.attributes = AttrSet::new(vec![path(&[64497])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[conflict]),
             invalid(InfeasibleReason::ConflictingMoreSpecific)
@@ -343,7 +345,7 @@ mod tests {
     fn ebgp_rule_covered_by_local_injection_names_the_local_cover() {
         let (flow, mut cover) = fixture();
         cover.origin_type = RouteOrigin::Local;
-        cover.attributes = Arc::new(vec![]);
+        cover.attributes = AttrSet::new(vec![]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::LocalCoveringUnicast)
@@ -354,14 +356,14 @@ mod tests {
     fn absent_and_empty_ebgp_paths_never_compare_equal() {
         let (mut flow, mut cover) = fixture();
         flow.attributes.clear();
-        cover.attributes = Arc::new(vec![]);
+        cover.attributes = AttrSet::new(vec![]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::MissingAsPath)
         );
 
         flow.attributes = vec![path(&[])];
-        cover.attributes = Arc::new(vec![path(&[])]);
+        cover.attributes = AttrSet::new(vec![path(&[])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[]),
             invalid(InfeasibleReason::UnknownNeighborAs)
@@ -408,7 +410,7 @@ mod tests {
         let (flow, cover) = fixture();
         let mut candidate = cover.clone();
         candidate.path_id = 7;
-        candidate.attributes = Arc::new(vec![path(&[64497]), PathAttribute::LocalPref(0)]);
+        candidate.attributes = AttrSet::new(vec![path(&[64497]), PathAttribute::LocalPref(0)]);
         for prefix in [
             // More specific than the cover is insufficient: it must be more
             // specific than the FlowSpec destination (192.0.2.0/24).
@@ -437,7 +439,7 @@ mod tests {
         flow.origin_type = RouteOrigin::Ibgp;
         flow.attributes = vec![path(&[])];
         cover.origin_type = RouteOrigin::Ibgp;
-        cover.attributes = Arc::new(vec![path(&[])]);
+        cover.attributes = AttrSet::new(vec![path(&[])]);
         let mut child = cover.clone();
         child.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
         set_peer(&mut child, "198.51.100.2".parse().unwrap());
@@ -445,7 +447,7 @@ mod tests {
             evaluate(&flow, Some(&cover), std::slice::from_ref(&child)),
             Feasibility::Feasible
         );
-        child.attributes = Arc::new(vec![path(&[SOURCE_AS])]);
+        child.attributes = AttrSet::new(vec![path(&[SOURCE_AS])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[child]),
             invalid(InfeasibleReason::ConflictingMoreSpecific)
@@ -457,7 +459,7 @@ mod tests {
         let (flow, cover) = fixture();
         let mut child = cover.clone();
         child.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
-        child.attributes = Arc::new(vec![]);
+        child.attributes = AttrSet::new(vec![]);
         assert_eq!(
             evaluate(&flow, Some(&cover), std::slice::from_ref(&child)),
             invalid(InfeasibleReason::UnknownNeighborAs)
@@ -500,7 +502,7 @@ mod tests {
         ))];
         let mut child = cover.clone();
         child.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:1:8000::".parse().unwrap(), 49));
-        child.attributes = Arc::new(vec![path(&[64497])]);
+        child.attributes = AttrSet::new(vec![path(&[64497])]);
         assert_eq!(
             evaluate(&flow, Some(&cover), &[child]),
             invalid(InfeasibleReason::ConflictingMoreSpecific)
@@ -525,7 +527,7 @@ mod tests {
         let mut child = cover.clone();
         child.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 25));
         assert!(check.visit(&child).is_continue());
-        child.attributes = Arc::new(vec![path(&[64497])]);
+        child.attributes = AttrSet::new(vec![path(&[64497])]);
         assert_eq!(
             check.visit(&child),
             ControlFlow::Break(InfeasibleReason::ConflictingMoreSpecific)

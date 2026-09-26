@@ -765,11 +765,11 @@ pub fn decompress_if_gzip(data: &[u8]) -> Result<Cow<'_, [u8]>, ReadError> {
 mod tests {
     use super::*;
     use crate::codec::{RibEntry, encode_rib_entries, encode_snapshot};
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::route::{EvpnRibRoute, Route, RouteOrigin};
     use rustbgpd_wire::{
         AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, RpkiValidation, decode_evpn_nlri,
     };
-    use std::sync::Arc;
     use std::time::Instant;
 
     const COLLECTOR: Ipv4Addr = Ipv4Addr::new(1, 2, 3, 4);
@@ -804,7 +804,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer,
-            attributes: Arc::new(base_attrs()),
+            attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -836,7 +836,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(base_attrs()),
+            attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
@@ -866,7 +866,7 @@ mod tests {
             next_hop,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(base_attrs()),
+            attributes: AttrSet::new(base_attrs()),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),

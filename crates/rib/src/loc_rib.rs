@@ -796,7 +796,9 @@ impl LocRib {
 /// via [`crate::best_path::stale_tier`] (a received `LLGR_STALE` ranks 2).
 /// Lower value = more preferred.
 fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
 }
 
 /// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
@@ -989,7 +991,9 @@ fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
 /// unicast `best_path::stale_rank` — separate `is_stale` / `is_llgr_stale`
 /// comparisons would invert because LLGR promotion clears `is_stale`.
 fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        crate::best_path::carries_llgr_stale(route.communities())
+    })
 }
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
@@ -1112,7 +1116,9 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
 }
 
 fn bgpls_stale_rank(route: &BgpLsRibRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
 }
 
 fn bgpls_origin(route: &BgpLsRibRoute) -> Origin {
@@ -1244,7 +1250,9 @@ fn vpn_cmp_chain(
 }
 
 fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
 }
 
 fn vpn_origin(route: &VpnRibRoute) -> Origin {
@@ -1377,7 +1385,9 @@ fn labeled_cmp_chain(
 }
 
 fn labeled_stale_rank(route: &LabeledRibRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
 }
 
 fn labeled_origin(route: &LabeledRibRoute) -> Origin {
@@ -1461,7 +1471,9 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
 }
 
 fn rtc_stale_rank(route: &RtcRibRoute) -> u8 {
-    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || route.communities())
+    crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
+        route.attributes.summary().llgr_stale
+    })
 }
 
 fn rtc_origin(route: &RtcRibRoute) -> Origin {
@@ -1522,6 +1534,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::attr_set::AttrSet;
     use crate::route::{BgpLsFamily, RouteOrigin};
 
     /// The BENCHMARKS.md type-size table quotes `size_of` for `AdjRibIn`
@@ -1653,7 +1666,7 @@ mod tests {
             nlri,
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -1678,7 +1691,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::LocalPref(local_pref),
             ]),
@@ -1762,14 +1775,18 @@ mod tests {
         let mut stale = make_vpn_route(nlri.clone(), 3, 100);
         stale.is_stale = true;
         let mut longer_path = make_vpn_route(nlri.clone(), 4, 100);
-        Arc::make_mut(&mut longer_path.attributes).push(PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
-        }));
+        AttrSet::edit(&mut longer_path.attributes, |attrs| {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+            }));
+        });
         let mut clustered = make_vpn_route(nlri.clone(), 5, 100);
-        Arc::make_mut(&mut clustered.attributes).push(PathAttribute::ClusterList(vec![
-            Ipv4Addr::new(10, 255, 0, 1),
-            Ipv4Addr::new(10, 255, 0, 2),
-        ]));
+        AttrSet::edit(&mut clustered.attributes, |attrs| {
+            attrs.push(PathAttribute::ClusterList(vec![
+                Ipv4Addr::new(10, 255, 0, 1),
+                Ipv4Addr::new(10, 255, 0, 2),
+            ]));
+        });
         let peer_tiebreak = make_vpn_route(nlri, 6, 100);
         let routes = [
             base,
@@ -1859,7 +1876,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::LocalPref(local_pref),
             ]),
@@ -1966,14 +1983,18 @@ mod tests {
         let mut llgr_stale = make_labeled_route(nlri.clone(), 4, 100);
         llgr_stale.is_llgr_stale = true;
         let mut longer_path = make_labeled_route(nlri.clone(), 5, 100);
-        Arc::make_mut(&mut longer_path.attributes).push(PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
-        }));
+        AttrSet::edit(&mut longer_path.attributes, |attrs| {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+            }));
+        });
         let mut clustered = make_labeled_route(nlri.clone(), 6, 100);
-        Arc::make_mut(&mut clustered.attributes).push(PathAttribute::ClusterList(vec![
-            Ipv4Addr::new(10, 255, 0, 1),
-            Ipv4Addr::new(10, 255, 0, 2),
-        ]));
+        AttrSet::edit(&mut clustered.attributes, |attrs| {
+            attrs.push(PathAttribute::ClusterList(vec![
+                Ipv4Addr::new(10, 255, 0, 1),
+                Ipv4Addr::new(10, 255, 0, 2),
+            ]));
+        });
         let peer_tiebreak = make_labeled_route(nlri, 7, 100);
         let routes = [
             base,
@@ -2335,7 +2356,7 @@ mod tests {
             nlri,
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::LocalPref(local_pref),
             ]),
@@ -2426,8 +2447,9 @@ mod tests {
         let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
         let read = |communities| {
             let mut route = make_route(1, v4, 100);
-            Arc::make_mut(&mut route.attributes)
-                .push(PathAttribute::ExtendedCommunities(communities));
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::ExtendedCommunities(communities));
+            });
             route.link_bandwidth()
         };
         let lb = |type_byte: u8, asn: u16, bw: f32| {
@@ -2653,13 +2675,13 @@ mod tests {
     /// ordering flips only if the defaulted value alone decides.
     #[test]
     fn family_tiebreaks_default_missing_local_pref_and_med() {
-        type Attrs = Arc<Vec<PathAttribute>>;
+        type Attrs = Arc<AttrSet>;
         type Chain = fn(Attrs, Attrs) -> Ordering;
         fn attrs(local_pref: Option<u32>, med: Option<u32>) -> Attrs {
             let mut v = vec![PathAttribute::Origin(Origin::Igp)];
             v.extend(local_pref.map(PathAttribute::LocalPref));
             v.extend(med.map(PathAttribute::Med));
-            Arc::new(v)
+            AttrSet::new(v)
         }
         let chains: [(&str, Chain); 4] = [
             ("bgpls", |a, b| {
@@ -3016,7 +3038,7 @@ mod tests {
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
             peer: IpAddr::V4(peer),
-            attributes: Arc::new(attrs),
+            attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ibgp,
             peer_router_id: peer,
@@ -3043,20 +3065,22 @@ mod tests {
             let mut other = make_evpn_type2(2, vec![]);
             // Keep the identifier step tied unless it is the intended discriminator.
             other.peer_router_id = winner.peer_router_id;
-            let attributes = Arc::make_mut(&mut other.attributes);
-            match reason {
+            AttrSet::edit(&mut other.attributes, |attributes| match reason {
                 R::HigherLocalPref => attributes[0] = PathAttribute::LocalPref(50),
                 R::ShorterAsPath => attributes.push(PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65001])],
                 })),
                 R::LowerOrigin => {
-                    Arc::make_mut(&mut winner.attributes).push(PathAttribute::Origin(Origin::Igp));
+                    AttrSet::edit(&mut winner.attributes, |attrs| {
+                        attrs.push(PathAttribute::Origin(Origin::Igp));
+                    });
                 }
                 R::LowerMed => attributes.push(PathAttribute::Med(100)),
                 R::EbgpOverIbgp => winner.origin_type = RouteOrigin::Ebgp,
                 R::LowerOriginatorId => {
-                    Arc::make_mut(&mut winner.attributes)
-                        .push(PathAttribute::OriginatorId(Ipv4Addr::new(1, 1, 1, 1)));
+                    AttrSet::edit(&mut winner.attributes, |attrs| {
+                        attrs.push(PathAttribute::OriginatorId(Ipv4Addr::new(1, 1, 1, 1)));
+                    });
                     attributes.push(PathAttribute::OriginatorId(Ipv4Addr::new(2, 2, 2, 2)));
                 }
                 R::LowerBgpIdentifier => other.peer_router_id = Ipv4Addr::new(10, 0, 0, 2),
@@ -3065,7 +3089,7 @@ mod tests {
                 }
                 R::LowerPeerAddress => {}
                 _ => unreachable!(),
-            }
+            });
             assert_eq!(
                 evpn_cmp_with_reason(&winner, &other),
                 (Ordering::Less, reason)
@@ -3166,16 +3190,19 @@ mod tests {
         v6.attributes = Arc::clone(&r_nh.attributes);
         for baseline in [r_nh, v6] {
             let mut community = baseline.clone();
-            Arc::make_mut(&mut community.attributes)
-                .push(PathAttribute::Communities(vec![0x0001_0001]));
+            AttrSet::edit(&mut community.attributes, |attrs| {
+                attrs.push(PathAttribute::Communities(vec![0x0001_0001]));
+            });
             let mut as_path = baseline.clone();
-            for attr in Arc::make_mut(&mut as_path.attributes) {
-                if let PathAttribute::AsPath(path) = attr {
-                    *path = AsPath {
-                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
-                    };
+            AttrSet::edit(&mut as_path.attributes, |attrs| {
+                for attr in attrs {
+                    if let PathAttribute::AsPath(path) = attr {
+                        *path = AsPath {
+                            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                        };
+                    }
                 }
-            }
+            });
             for replacement in [community, as_path] {
                 assert_ne!(baseline.attributes, replacement.attributes);
                 assert_eq!(baseline.next_hop, replacement.next_hop);
@@ -3361,8 +3388,8 @@ mod tests {
         PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE])
     }
 
-    fn tag_llgr_stale(attributes: &mut Arc<Vec<PathAttribute>>) {
-        Arc::make_mut(attributes).push(llgr_stale_community());
+    fn tag_llgr_stale(attributes: &mut Arc<AttrSet>) {
+        AttrSet::edit(attributes, |attrs| attrs.push(llgr_stale_community()));
     }
 
     #[test]
@@ -3430,10 +3457,14 @@ mod tests {
         results.push(("rtc", rtc_tiebreak(&fresh, &tagged)));
 
         let mut tagged = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 1);
-        Arc::make_mut(&mut tagged.attributes).push(PathAttribute::LocalPref(200));
+        AttrSet::edit(&mut tagged.attributes, |attrs| {
+            attrs.push(PathAttribute::LocalPref(200));
+        });
         tag_llgr_stale(&mut tagged.attributes);
         let mut fresh = make_bgpls_route(BgpLsFamily::LinkState, bgpls_nlri(1), 2);
-        Arc::make_mut(&mut fresh.attributes).push(PathAttribute::LocalPref(100));
+        AttrSet::edit(&mut fresh.attributes, |attrs| {
+            attrs.push(PathAttribute::LocalPref(100));
+        });
         results.push(("bgp-ls", bgpls_tiebreak(&fresh, &tagged)));
 
         let tagged = make_flowspec_route(
@@ -3448,9 +3479,10 @@ mod tests {
 
         // `make_evpn_type2` seeds LOCAL_PREF 100; raise the tagged one.
         let mut tagged = make_evpn_type2(1, vec![llgr_stale_community()]);
-        let attributes = Arc::make_mut(&mut tagged.attributes);
-        attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
-        attributes.push(PathAttribute::LocalPref(200));
+        AttrSet::edit(&mut tagged.attributes, |attributes| {
+            attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
+            attributes.push(PathAttribute::LocalPref(200));
+        });
         let fresh = make_evpn_type2(2, vec![]);
         results.push(("evpn", evpn_tiebreak_simple(&fresh, &tagged)));
         let losers: Vec<_> = results
@@ -3658,7 +3690,7 @@ mod tests {
                 next_hop: IpAddr::V4(peer),
                 link_local_next_hop: None,
                 peer: IpAddr::V4(peer),
-                attributes: Arc::new(vec![PathAttribute::LocalPref(100)]),
+                attributes: AttrSet::new(vec![PathAttribute::LocalPref(100)]),
                 received_at: Instant::now(),
                 origin_type: RouteOrigin::Ibgp,
                 peer_router_id: peer,

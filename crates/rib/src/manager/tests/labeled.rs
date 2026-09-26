@@ -3,19 +3,20 @@ use super::*;
 fn with_labeled_no_advertise(
     mut route: crate::route::LabeledRibRoute,
 ) -> crate::route::LabeledRibRoute {
-    let attributes = Arc::make_mut(&mut route.attributes);
-    if let Some(PathAttribute::Communities(communities)) = attributes
-        .iter_mut()
-        .find(|attribute| matches!(attribute, PathAttribute::Communities(_)))
-    {
-        if !communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE) {
-            communities.push(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+    AttrSet::edit(&mut route.attributes, |attributes| {
+        if let Some(PathAttribute::Communities(communities)) = attributes
+            .iter_mut()
+            .find(|attribute| matches!(attribute, PathAttribute::Communities(_)))
+        {
+            if !communities.contains(&rustbgpd_wire::COMMUNITY_NO_ADVERTISE) {
+                communities.push(rustbgpd_wire::COMMUNITY_NO_ADVERTISE);
+            }
+        } else {
+            attributes.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+            ]));
         }
-    } else {
-        attributes.push(PathAttribute::Communities(vec![
-            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
-        ]));
-    }
+    });
     route
 }
 
@@ -1739,7 +1740,7 @@ async fn labeled_llgr_no_llgr_community_drops_route_on_promotion() {
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let mut route = make_labeled_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 100);
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_NO_LLGR]),
     ]);

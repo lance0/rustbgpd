@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{Route, RouteOrigin};
 use rustbgpd_transport::OutboundEncodeBench;
 use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
@@ -38,7 +39,7 @@ fn attrs(med: Option<u32>) -> Vec<PathAttribute> {
 }
 
 fn routes(count: u32, shape: &str) -> Arc<[Route]> {
-    let shared = Arc::new(attrs(None));
+    let shared = AttrSet::new(attrs(None));
     (0..count)
         .map(|i| Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | (i << 8)), 24)),
@@ -48,8 +49,8 @@ fn routes(count: u32, shape: &str) -> Arc<[Route]> {
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: match shape {
                 "shared_arc" => Arc::clone(&shared),
-                "equal_values" => Arc::new(attrs(None)),
-                _ => Arc::new(attrs(Some(i))),
+                "equal_values" => AttrSet::new(attrs(None)),
+                _ => AttrSet::new(attrs(Some(i))),
             },
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,

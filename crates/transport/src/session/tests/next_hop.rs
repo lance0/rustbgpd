@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 #[tokio::test]
 async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() {
@@ -284,7 +285,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -555,7 +556,9 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
 async fn ipv4_route_with_ipv6_next_hop_gates_reflection_on_extended_nexthop() {
     let mut route = make_route(100);
     route.next_hop = "2001:db8::1".parse().unwrap();
-    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
 
     for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
         for extended_nexthop in [true, false] {
@@ -591,7 +594,9 @@ async fn ipv4_route_with_ipv6_next_hop_allows_ipv4_rewrite_without_extended_next
 
     let mut route = make_route(100);
     route.next_hop = "2001:db8::1".parse().unwrap();
-    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
     let local_ipv4 = Ipv4Addr::new(10, 0, 0, 1);
     let specific_ipv4 = Ipv4Addr::new(192, 0, 2, 99);
 
@@ -647,7 +652,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -1330,7 +1335,9 @@ async fn extended_nexthop_ipv4_withdrawal_uses_body_withdrawn_routes() {
 async fn extended_nexthop_ipv6_next_hop_still_uses_mp_reach() {
     let mut route = make_route(100);
     route.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
-    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
     let msg = send_extended_nexthop_update(true, false, vec![route], vec![]).await;
     assert!(msg.nlri.is_empty(), "IPv4 NLRI must stay in MP_REACH_NLRI");
     let parsed = msg.parse(true, false, &[]).unwrap();
@@ -1401,7 +1408,9 @@ async fn extended_nexthop_mixed_batch_splits_ipv4_body_and_mp_exactly_once() {
     let mut v6_nh = make_route(100); // 10.1.0.0/24 via 2001:db8::2
     v6_nh.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24));
     v6_nh.next_hop = IpAddr::V6("2001:db8::2".parse().unwrap());
-    Arc::make_mut(&mut v6_nh.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    AttrSet::edit(&mut v6_nh.attributes, |attrs| {
+        attrs.retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    });
     let mut v6_route = v6_nh.clone(); // 2001:db8:5::/48 via 2001:db8::3
     v6_route.prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:5::".parse().unwrap(), 48));
     v6_route.next_hop = IpAddr::V6("2001:db8::3".parse().unwrap());

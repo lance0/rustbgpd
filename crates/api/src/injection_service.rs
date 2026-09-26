@@ -7,6 +7,7 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, RibCommandError, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
@@ -275,7 +276,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: LOCAL_PEER,
-            attributes: std::sync::Arc::new(attributes),
+            attributes: AttrSet::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
@@ -487,7 +488,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             next_hop,
             link_local_next_hop: None,
             peer: LOCAL_PEER,
-            attributes: std::sync::Arc::new(attributes),
+            attributes: AttrSet::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
             peer_router_id: router_id,
