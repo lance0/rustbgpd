@@ -3015,10 +3015,24 @@ fn write_panic_report(
     location: &str,
     thread: &str,
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(crash_dir)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
+    write_panic_report_at(crash_dir, now, message, location, thread)
+}
+
+/// [`write_panic_report`] with the clock read by the caller.
+fn write_panic_report_at(
+    crash_dir: &Path,
+    now: Duration,
+    message: &str,
+    location: &str,
+    thread: &str,
+) -> std::io::Result<()> {
+    /// Distinguishes reports written by this process in one millisecond.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    std::fs::create_dir_all(crash_dir)?;
     let report = PanicReport {
         message,
         location,
@@ -3027,15 +3041,21 @@ fn write_panic_report(
         timestamp_unix_seconds: now.as_secs(),
     };
     let body = toml::to_string(&report).map_err(std::io::Error::other)?;
-    // Zero-padded seconds + millisecond suffix: lexicographic order is
-    // chronological, and near-simultaneous panicking threads rarely
-    // clobber each other (last write wins if they do).
+    // Zero-padded seconds + millisecond: lexicographic order is
+    // chronological. The pid and a per-process sequence make the name
+    // unique when threads, or processes sharing the directory, panic in the
+    // same millisecond.
     let path = crash_dir.join(format!(
-        "panic-{:010}-{:03}.toml",
+        "panic-{:010}-{:03}-{}-{}.toml",
         now.as_secs(),
-        now.subsec_millis()
+        now.subsec_millis(),
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
-    std::fs::write(path, body)?;
+    // Staged under `<name>.toml.tmp` and renamed into place, so a process
+    // that dies mid-write leaves no empty or truncated report; the prune
+    // below and `rbgp doctor` only read `*.toml`.
+    confirm_journal::write_atomic(&path, body.as_bytes()).map_err(std::io::Error::other)?;
     prune_panic_reports(crash_dir);
     Ok(())
 }
@@ -8121,6 +8141,109 @@ mod tests {
         // Human-panic pattern: never environment or argv material.
         assert!(value.get("env").is_none());
         assert!(value.get("args").is_none());
+    }
+
+    /// Every `panic-*.toml` report in `dir`, parsed.
+    fn read_panic_reports(dir: &Path) -> Vec<(String, toml::Value)> {
+        let mut reports: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| {
+                name.starts_with("panic-")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+            })
+            .map(|name| {
+                let body = std::fs::read_to_string(dir.join(&name)).unwrap();
+                let value = toml::from_str(&body)
+                    .unwrap_or_else(|e| panic!("{name} is not a complete report: {e}"));
+                (name, value)
+            })
+            .collect();
+        reports.sort_by(|a, b| a.0.cmp(&b.0));
+        reports
+    }
+
+    #[test]
+    fn panic_reports_in_the_same_millisecond_both_survive() {
+        // Load-bearing break: the name carried only the millisecond, so the
+        // second report replaced the first, or a truncating open raced the
+        // other writer's content.
+        let dir = tempfile::tempdir().unwrap();
+        let now = Duration::from_millis(1_700_000_000_123);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|message| {
+                let dir = dir.path().to_path_buf();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_panic_report_at(&dir, now, message, "src/main.rs:1:1", message)
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+
+        let mut messages: Vec<_> = read_panic_reports(dir.path())
+            .into_iter()
+            .map(|(_, report)| report["message"].as_str().unwrap().to_string())
+            .collect();
+        messages.sort();
+        assert_eq!(messages, ["first", "second"]);
+    }
+
+    /// Set in the child process of
+    /// [`interrupted_panic_report_leaves_no_partial_report`].
+    const PANIC_REPORT_CHILD_DIR: &str = "RUSTBGPD_TEST_PANIC_REPORT_CHILD_DIR";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interrupted_panic_report_leaves_no_partial_report() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        // The child writes one report under a file-size limit smaller than
+        // the report, so the kernel kills it (SIGXFSZ) mid-write.
+        if let Some(dir) = std::env::var_os(PANIC_REPORT_CHILD_DIR) {
+            let message = "x".repeat(64 * 1024);
+            let _ = write_panic_report(Path::new(&dir), &message, "src/main.rs:1:1", "main");
+            return;
+        }
+        // Load-bearing break: the report was written in place, so the
+        // interrupted write left a truncated `panic-*.toml`.
+        if std::process::Command::new("prlimit")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: prlimit is not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("prlimit")
+            .args(["--fsize=4096", "--core=0", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::interrupted_panic_report_leaves_no_partial_report",
+                "--nocapture",
+            ])
+            .env(PANIC_REPORT_CHILD_DIR, dir.path())
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGXFSZ),
+            "the child must die mid-write, got {status}"
+        );
+        assert!(
+            read_panic_reports(dir.path()).is_empty(),
+            "an interrupted write must not publish a report"
+        );
     }
 
     #[test]
