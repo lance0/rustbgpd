@@ -370,6 +370,11 @@ impl PeerSession {
             }
             let blocked = pending.capacity_blocked;
             self.pending_outbound = Some(pending);
+            // Filtering can advance a slice without admitting a frame. The
+            // deadline belongs only to a continuous wait for writer capacity.
+            if !blocked {
+                self.outbound_admission_timer = None;
+            }
             if blocked
                 && self
                     .writer_bulk_tx

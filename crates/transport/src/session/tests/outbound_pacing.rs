@@ -278,6 +278,98 @@ async fn outbound_pacing_exact_capacity_finishes_without_waiting_for_drain() {
     assert!(session.outbound_admission_timer.is_none());
 }
 
+#[tokio::test(start_paused = true)]
+async fn outbound_pacing_releases_deadline_after_filtered_slice() {
+    use super::super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+
+    for shared_fallback in [false, true] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _wire) = connected_stream_pair().await;
+        session.config.route_server_client = true;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        session.writer_join.take().unwrap().abort();
+        session.config.peer.send_hold_time = 1;
+        let (bulk, mut receiver) = mpsc::channel(1);
+        bulk.try_send(Bytes::from_static(b"held")).unwrap();
+        session.writer_bulk_tx = Some(bulk);
+
+        let excluded = Ipv4Addr::new(10, 0, 0, 2);
+        let mut routes = pacing_routes(3, true);
+        for route in &mut routes[1..] {
+            route.peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        }
+        let update = if shared_fallback {
+            let encode =
+                ProgressiveUnicastEncode::test_new((*session.publish_export_profile()).clone());
+            encode.test_finish(StreamTerminal::Failed);
+            let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+            assert!(
+                shared
+                    .cell
+                    .set(Arc::new(encode) as Arc<dyn std::any::Any + Send + Sync>)
+                    .is_ok()
+            );
+            shared_group_envelope(&session, &shared, excluded, &routes)
+        } else {
+            let mut update = pacing_update(&session, routes);
+            update.end_of_rib.clear();
+            update.announce_source_exclusion = Some(IpAddr::V4(excluded));
+            update
+        };
+        session.handle_outbound_route_update(update);
+        let original_deadline = session
+            .outbound_admission_timer
+            .as_ref()
+            .unwrap()
+            .deadline();
+
+        receiver.try_recv().unwrap();
+        let admitted = session.writer_bulk_admitted;
+        session.advance_pending_outbound();
+        assert!(session.pending_outbound.is_some());
+        assert_eq!(
+            session.writer_bulk_admitted, admitted,
+            "excluded slice admits no frame"
+        );
+        assert_eq!(session.writer_bulk_tx.as_ref().unwrap().capacity(), 1);
+        assert!(
+            session.outbound_admission_timer.is_none(),
+            "available capacity ends the admission stall even without a frame"
+        );
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+        session.advance_pending_outbound();
+        let renewed_deadline = session
+            .outbound_admission_timer
+            .as_ref()
+            .unwrap()
+            .deadline();
+        assert!(renewed_deadline > original_deadline);
+        assert_eq!(
+            renewed_deadline - tokio::time::Instant::now(),
+            Duration::from_secs(1)
+        );
+        assert!(session.pending_outbound.is_some());
+        session.advance_pending_outbound();
+        assert_eq!(
+            session
+                .outbound_admission_timer
+                .as_ref()
+                .unwrap()
+                .deadline(),
+            renewed_deadline
+        );
+
+        receiver.try_recv().unwrap();
+        session.advance_pending_outbound();
+        assert!(session.pending_outbound.is_none());
+        assert!(session.outbound_admission_timer.is_none());
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert_eq!(session.notifications_sent, 0);
+    }
+}
+
 #[tokio::test]
 async fn outbound_pacing_shared_encoder_full_does_not_truncate_group() {
     use super::super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
