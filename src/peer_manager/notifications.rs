@@ -128,6 +128,7 @@ impl PeerManager {
                 })
                 .and_then(|peer| self.take_deferred_session_notification(peer));
             let notification = if deferred.is_some() {
+                self.drain_ready_session_lifecycle_notifications();
                 deferred
             } else if let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
@@ -191,6 +192,7 @@ impl PeerManager {
         self.handle_one_session_notification(notification).await;
         if self.session_notification_depth == 1 {
             while let Some(deferred) = self.release_deferred_session_notification(0) {
+                self.drain_ready_session_lifecycle_notifications();
                 self.handle_one_session_notification(deferred).await;
             }
         }

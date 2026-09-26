@@ -2213,34 +2213,9 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
     let addr: IpAddr = "fe80::2".parse().unwrap();
     let (eth0, eth1) = (scoped_key(addr, "eth0"), scoped_key(addr, "eth1"));
     for (peer_key, candidate) in [(&eth0, 11), (&eth1, 12)] {
-        let counters = Arc::new(FakePeerCounters::default());
-        insert_test_managed_peer_for_key(
-            &mut mgr,
-            peer_key,
-            65002,
-            fake_peer_handle(addr, SessionState::Active, None, counters.clone()),
-            false,
-        );
-        mgr.peers.get_mut(peer_key).unwrap().pending_inbound = Some(PendingInbound {
-            handle: fake_peer_handle(
-                addr,
-                SessionState::OpenConfirm,
-                Some(Ipv4Addr::new(10, 0, 0, 2)),
-                counters,
-            ),
-            session_id: candidate,
-        });
-        mgr.register_session(candidate, peer_key);
+        insert_active_peer_with_candidate(&mut mgr, peer_key, candidate);
     }
-    mgr.session_notify_tx
-        .send(SessionNotification::OpenReceived {
-            session_id: 12,
-            role: rustbgpd_transport::SessionRole::InboundCandidate,
-            peer_addr: addr,
-            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
-            peer_asn: 65002,
-        })
-        .unwrap();
+    queue_candidate_open(&mgr, 12, addr);
 
     // Inside a handler, fencing eth0.
     mgr.session_notification_depth = 1;
@@ -2255,8 +2230,14 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
         Some(&1)
     );
 
-    // The fence for eth1 takes its deferred notice back.
+    // The fence for eth1 takes its deferred notice back, after the lifecycle
+    // events queued before it, as a notice taken from the channel would be.
+    queue_state_changed(&mgr, 11, addr);
     mgr.drain_ready_session_notifications(Some(&eth1)).await;
+    assert!(
+        mgr.session_lifecycle_rx.is_empty(),
+        "a deferred notice is handled after the ready lifecycle events"
+    );
     assert!(mgr.deferred_session_notifications.is_empty());
     assert!(mgr.deferred_session_notification_counts.is_empty());
     assert!(
@@ -2264,4 +2245,86 @@ async fn nested_drain_defers_same_address_peer_on_another_interface() {
         "eth1's own fence handles its notification"
     );
     mgr.session_notification_depth = 0;
+
+    // The outermost handler drains ready lifecycle events before each
+    // deferred notice too. MaxPrefixWarning from an unknown session returns
+    // without draining anything itself.
+    let (eth2, eth3) = (scoped_key(addr, "eth2"), scoped_key(addr, "eth3"));
+    for (peer_key, candidate) in [(&eth2, 21), (&eth3, 22)] {
+        insert_active_peer_with_candidate(&mut mgr, peer_key, candidate);
+    }
+    mgr.session_notification_depth = 1;
+    queue_candidate_open(&mgr, 22, addr);
+    mgr.drain_ready_session_notifications(Some(&eth2)).await;
+    assert_eq!(mgr.deferred_session_notifications.len(), 1);
+    mgr.session_notification_depth = 0;
+    queue_state_changed(&mgr, 21, addr);
+    mgr.handle_session_notification(SessionNotification::MaxPrefixWarning {
+        session_id: 999,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        scope: "aggregate",
+        usage: 1,
+        bound: 2,
+        percent: 50,
+    })
+    .await;
+    assert!(mgr.deferred_session_notifications.is_empty());
+    assert!(
+        mgr.peers[&eth3].pending_inbound.is_none() && mgr.peers[&eth3].session_id() == 22,
+        "the outermost handler handles the deferred notice"
+    );
+    assert!(
+        mgr.session_lifecycle_rx.is_empty(),
+        "the outermost handler drains lifecycle events before a deferred notice"
+    );
+}
+
+fn queue_state_changed(mgr: &PeerManager, session_id: u64, peer_addr: IpAddr) {
+    mgr.session_lifecycle_tx
+        .try_send(
+            rustbgpd_transport::SessionLifecycleNotification::StateChanged {
+                session_id,
+                role: rustbgpd_transport::SessionRole::Primary,
+                peer_addr,
+                peer_asn: None,
+                old: SessionState::Idle,
+                new: SessionState::Connect,
+            },
+        )
+        .unwrap();
+}
+
+fn insert_active_peer_with_candidate(mgr: &mut PeerManager, peer_key: &PeerKey, candidate: u64) {
+    let addr = peer_key.address;
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_for_key(
+        mgr,
+        peer_key,
+        65002,
+        fake_peer_handle(addr, SessionState::Active, None, counters.clone()),
+        false,
+    );
+    mgr.peers.get_mut(peer_key).unwrap().pending_inbound = Some(PendingInbound {
+        handle: fake_peer_handle(
+            addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            counters,
+        ),
+        session_id: candidate,
+    });
+    mgr.register_session(candidate, peer_key);
+}
+
+fn queue_candidate_open(mgr: &PeerManager, session_id: u64, peer_addr: IpAddr) {
+    mgr.session_notify_tx
+        .send(SessionNotification::OpenReceived {
+            session_id,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            peer_asn: 65002,
+        })
+        .unwrap();
 }
