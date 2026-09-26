@@ -513,10 +513,11 @@ async fn ebgp_local_pref_is_ignored_for_ipv6_mp_reach() {
 }
 
 #[tokio::test]
-async fn modified_policy_update_owns_distinct_arc_per_nlri() {
+async fn modified_policy_update_shares_one_mutated_arc() {
     // Two IPv4 NLRI in one UPDATE, import policy adds a community → both
-    // routes are modified, so each must own a distinct (mutated) Arc
-    // rather than sharing the canonical one, and the mutation must land.
+    // routes are modified, so they must not share the unmodified canonical
+    // Arc and the mutation must land on each. Equal modifications share
+    // one mutated Arc per UPDATE.
     const ADDED_COMMUNITY: u32 = 0xFDE9_0064; // 65001:100
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
@@ -577,8 +578,8 @@ async fn modified_policy_update_owns_distinct_arc_per_nlri() {
     };
     assert_eq!(announced.len(), 2);
     assert!(
-        !Arc::ptr_eq(&announced[0].attributes, &announced[1].attributes),
-        "policy-modified routes must each own a distinct attribute Arc"
+        Arc::ptr_eq(&announced[0].attributes, &announced[1].attributes),
+        "equal modifications in one UPDATE share one mutated attribute Arc"
     );
     for route in &announced {
         assert!(
@@ -1080,4 +1081,64 @@ async fn external_neighbor_rr_attributes_are_discarded_for_every_family() {
         "families that kept (left) or did not count (right) an external neighbor's \
          ORIGINATOR_ID / CLUSTER_LIST"
     );
+}
+
+/// A modifying import policy materializes one attribute set per distinct
+/// modification per UPDATE, not one deep clone per accepted NLRI: the RIB
+/// otherwise hashes, compares, and frees every duplicate on its actor.
+/// Routes with different modifications keep distinct sets.
+#[tokio::test]
+async fn modifying_import_shares_one_attribute_set_per_distinct_modification() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let prefix = |octet: u8| Ipv4Prefix::new(Ipv4Addr::new(203, 0, octet, 0), 24);
+    let mut low = retention_statement(Some(Prefix::V4(prefix(3))), PolicyAction::Permit);
+    low.modifications.set_local_pref = Some(100);
+    let mut high = retention_statement(None, PolicyAction::Permit);
+    high.modifications.set_local_pref = Some(200);
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![low, high],
+        default_action: PolicyAction::Deny,
+    }])));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let entries: Vec<Ipv4NlriEntry> = (1..=3)
+        .map(|octet| Ipv4NlriEntry {
+            path_id: 0,
+            prefix: prefix(octet),
+        })
+        .collect();
+    let update = UpdateMessage::build(
+        &entries,
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected accepted routes");
+    };
+    let by_prefix = |octet: u8| {
+        announced
+            .iter()
+            .find(|route| route.prefix == Prefix::V4(prefix(octet)))
+            .unwrap()
+    };
+    assert_eq!(by_prefix(1).local_pref_attr(), Some(200));
+    assert_eq!(by_prefix(3).local_pref_attr(), Some(100));
+    assert!(
+        Arc::ptr_eq(&by_prefix(1).attributes, &by_prefix(2).attributes),
+        "equal modifications in one UPDATE must share one attribute set"
+    );
+    assert!(!Arc::ptr_eq(
+        &by_prefix(1).attributes,
+        &by_prefix(3).attributes
+    ));
 }

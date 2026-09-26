@@ -585,6 +585,62 @@ pub fn materialize_attrs(
         (Arc::new(owned), nh)
     }
 }
+/// Distinct modified attribute sets one UPDATE may memoize. The shipped
+/// RPKI-preference chain produces at most two; a chain that yields more
+/// distinct modifications per UPDATE falls back to per-route clones.
+const IMPORT_ATTR_MEMO_SLOTS: usize = 8;
+
+/// Per-UPDATE memo for [`materialize_attrs`]: every accepted NLRI of one
+/// UPDATE shares one canonical attribute `Arc` per variant, and
+/// `apply_modifications` is pure in `(canonical, modifications)`, so routes
+/// with equal modifications can share one modified `Arc` instead of each
+/// deep-cloning. Keys on canonical `Arc` identity plus modification
+/// equality; entries pin the canonical `Arc` so the identity stays unique.
+#[derive(Default)]
+pub struct ImportAttrMemo {
+    entries: Vec<ImportAttrMemoEntry>,
+}
+
+/// Canonical source, modifications, and the resulting attributes and
+/// next-hop action.
+type ImportAttrMemoEntry = (
+    Arc<Vec<PathAttribute>>,
+    RouteModifications,
+    Arc<Vec<PathAttribute>>,
+    Option<NextHopAction>,
+);
+
+impl ImportAttrMemo {
+    /// [`materialize_attrs`], sharing the result across equal modifications
+    /// of the same canonical variant.
+    pub fn materialize(
+        &mut self,
+        canonical: &Arc<Vec<PathAttribute>>,
+        mods: &RouteModifications,
+    ) -> (Arc<Vec<PathAttribute>>, Option<NextHopAction>) {
+        if mods.is_empty() {
+            return (Arc::clone(canonical), None);
+        }
+        if let Some((_, _, attrs, nh)) = self
+            .entries
+            .iter()
+            .find(|(source, memo_mods, _, _)| Arc::ptr_eq(source, canonical) && memo_mods == mods)
+        {
+            return (Arc::clone(attrs), nh.clone());
+        }
+        let (attrs, nh) = materialize_attrs(canonical, mods);
+        if self.entries.len() < IMPORT_ATTR_MEMO_SLOTS {
+            self.entries.push((
+                Arc::clone(canonical),
+                mods.clone(),
+                Arc::clone(&attrs),
+                nh.clone(),
+            ));
+        }
+        (attrs, nh)
+    }
+}
+
 impl PeerSession {
     /// Keep every discard observable without warning on every UPDATE.
     pub(super) fn record_evpn_discard(&mut self, route_type: u8, discarded: u32) {
@@ -1999,6 +2055,7 @@ impl PeerSession {
             _ => None,
         };
         let attr_bundle = RouteAttrBundle::new(&route_attrs, otc_add);
+        let mut import_attr_memo = ImportAttrMemo::default();
         // Single pass over the (MP-filtered) attribute vector pulls every
         // policy-context field the RouteContext sites read — replacing
         // what used to be eight independent attribute scans. Built from
@@ -2200,7 +2257,7 @@ impl PeerSession {
                         return None;
                     }
                     let (attrs, nh_action) =
-                        materialize_attrs(&attr_bundle.unicast, &result.modifications);
+                        import_attr_memo.materialize(&attr_bundle.unicast, &result.modifications);
                     let next_hop = resolve_import_nexthop(
                         nh_action.as_ref(),
                         body_next_hop,
@@ -2417,8 +2474,8 @@ impl PeerSession {
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 // EVPN uses mp.next_hop, not the policy nh_action.
-                                let (attrs, _) =
-                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 evpn_announced.push(EvpnRibRoute {
                                     route: route.clone(),
                                     next_hop: mp.next_hop,
@@ -2481,8 +2538,8 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let (attrs, _) =
-                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 bgpls_announced.push(BgpLsRibRoute {
                                     family: bgpls_family,
                                     nlri: nlri.clone(),
@@ -2549,8 +2606,8 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let (attrs, _) =
-                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 vpn_announced.push(VpnRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
@@ -2620,8 +2677,8 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let (attrs, _) =
-                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 labeled_announced.push(LabeledRibRoute {
                                     nlri: entry.nlri.clone(),
                                     next_hop: mp.next_hop,
@@ -2690,8 +2747,8 @@ impl PeerSession {
                                 &mut import_policy_routes_denied,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
-                                let (attrs, _) =
-                                    materialize_attrs(&attr_bundle.mp, &result.modifications);
+                                let (attrs, _) = import_attr_memo
+                                    .materialize(&attr_bundle.mp, &result.modifications);
                                 rtc_announced.push(RtcRibRoute {
                                     nlri: *nlri,
                                     next_hop: mp.next_hop,
@@ -2796,8 +2853,8 @@ impl PeerSession {
                             );
                         }
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
-                            let (attrs, nh_action) =
-                                materialize_attrs(&attr_bundle.mp_unicast, &result.modifications);
+                            let (attrs, nh_action) = import_attr_memo
+                                .materialize(&attr_bundle.mp_unicast, &result.modifications);
                             let next_hop = resolve_import_nexthop(
                                 nh_action.as_ref(),
                                 mp.next_hop,

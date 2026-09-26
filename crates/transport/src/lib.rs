@@ -32,7 +32,7 @@ pub use session::export::{
     fanout_bench_route_server_export_encoder,
 };
 #[cfg(feature = "bench-internals")]
-pub use session::inbound::{RouteAttrBundle, materialize_attrs};
+pub use session::inbound::{ImportAttrMemo, RouteAttrBundle, materialize_attrs};
 #[cfg(feature = "bench-internals")]
 pub struct ExplainSnapshotBenchCache(session::import_decision_cache::ImportDecisionCache);
 
