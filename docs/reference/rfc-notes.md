@@ -337,15 +337,32 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   initiated by the speaker with the larger AS number, including a
   four-octet AS number.
 - The comparison applies only while the configured session is in
-  OpenConfirm or OpenSent. The configured session's state is read when the
-  inbound connection's OPEN arrives, not when the connection was accepted.
+  OpenConfirm or OpenSent. Its state is read when the collision is resolved.
+  A valid OPEN on either connection can trigger resolution while an inbound
+  candidate is pending; an identity already known at accept can also be used.
 - The OpenSent case is optional in the RFC: "A BGP speaker MAY also examine
   connections in an OpenSent state if it knows the BGP Identifier of the
   peer by means outside of the protocol." rustbgpd deliberately counts the
-  identifier in the inbound connection's OPEN as that knowledge, as FRR's
-  `bgp_collision_detect` does. This is for interoperability: in a
-  simultaneous open, two speakers that follow the same rule cannot both
-  close their connections.
+  identifier in the inbound connection's OPEN as that knowledge, as
+  [`bgp_collision_detect` in FRR 10.7.1](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_packet.c#L1555-L1630)
+  does.
+- The inbound candidate withholds its KEEPALIVE and cannot reach Established
+  before the manager's verdict. This hold applies only to the candidate;
+  the configured primary sends its KEEPALIVE after a valid OPEN normally.
+  It does not guarantee that simultaneous active opens keep one connection
+  without a retry.
+- The speakers can observe different states on the same connection. If
+  rustbgpd still sees OpenConfirm when the remote identifier wins, it closes
+  its primary. The remote speaker may already have received that primary's
+  KEEPALIVE and reached Established, causing it to retain that connection
+  and close the other one. Both connections can therefore close, followed by
+  a reconnect attempt. This follows from the state-dependent rules in
+  [RFC 4271 §6.8](https://www.rfc-editor.org/rfc/rfc4271.html#section-6.8)
+  and the OPEN/KEEPALIVE transitions in
+  [§8.2.2](https://www.rfc-editor.org/rfc/rfc4271.html#section-8.2.2).
+  Configuring the other speaker as passive, where supported, avoids
+  simultaneous active opens; FRR provides
+  [`neighbor PEER passive`](https://github.com/FRRouting/frr/blob/frr-10.7.1/bgpd/bgp_vty.c#L6285-L6295).
 - A configured session in Idle, Connect or Active has no connection to
   collide with (RFC 4271 §6.8), so the inbound connection replaces it
   without a Cease; its outbound connect attempt and reconnect timer stop.
@@ -362,8 +379,8 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   possibly Established: it keeps its connection and the inbound one is
   closed with Cease 6/7. A timeout at TCP accept is handled differently;
   see the last item.
-- Every Cease 6/7 above is sent when collision resolution runs on the
-  candidate's OPEN. Disabling the neighbor, or a BFD down that holds BGP,
+- Every Cease 6/7 above is sent when collision resolution runs using a
+  known peer identity. Disabling the neighbor, or a BFD down that holds BGP,
   also tears down a pending inbound candidate at that moment, independently
   of any OPEN. That teardown is an ordinary stop: a candidate that has
   reached Established sends Cease 6/2 (Administrative Shutdown), and one in
