@@ -2508,12 +2508,7 @@ impl PeerSession {
                     tokio::task::yield_now().await;
                 },
 
-                () = poll_timer(outbound_admission_timer) => {
-                    warn!(peer = %self.peer_label, "outbound writer capacity admission deadline expired — sending Cease/Out-of-Resources and tearing down");
-                    self.trigger_outbound_out_of_resources_teardown(
-                        crate::handle::SessionFailureCause::OutboundSaturation,
-                    );
-                }
+                () = poll_timer(outbound_admission_timer) => self.expire_outbound_admission(),
 
                 // Timer fires
                 () = poll_timer(&mut timers.connect_retry) => {

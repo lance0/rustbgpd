@@ -467,3 +467,32 @@ async fn outbound_pacing_mixed_family_markers_and_overrides_fit_one_slot() {
     );
     assert!(session.writer_bulk_tx.is_some());
 }
+
+#[tokio::test]
+async fn outbound_pacing_closed_writer_retires_admission_deadline() {
+    for expiry_first in [false, true] {
+        let (mut session, _wire) = shared_group_member(65001).await;
+        session.writer_join.take().unwrap().abort();
+        let (bulk, held) = mpsc::channel(1);
+        bulk.try_send(Bytes::from_static(b"held")).unwrap();
+        session.writer_bulk_tx = Some(bulk);
+        let update = pacing_update(&session, pacing_routes(2, true));
+        session.handle_outbound_route_update(update);
+        assert!(session.outbound_admission_timer.is_some());
+        drop(held);
+        if expiry_first {
+            session.expire_outbound_admission();
+        } else {
+            session.advance_pending_outbound();
+        }
+        assert!(
+            session.writer_bulk_tx.is_some(),
+            "resource expiry must leave the writer-exit path to report its own cause"
+        );
+        assert!(session.pending_outbound.is_none());
+        assert!(
+            session.outbound_admission_timer.is_none(),
+            "writer exit must retain its own failure cause"
+        );
+    }
+}

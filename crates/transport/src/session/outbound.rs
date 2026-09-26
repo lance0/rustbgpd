@@ -247,6 +247,24 @@ impl PeerSession {
         self.advance_pending_outbound();
     }
 
+    pub(super) fn expire_outbound_admission(&mut self) {
+        self.outbound_admission_timer = None;
+        if self
+            .writer_bulk_tx
+            .as_ref()
+            .is_none_or(tokio::sync::mpsc::Sender::is_closed)
+        {
+            // Writer closure and resource expiry can be ready in the same
+            // select turn. The writer-exit arm must retain its actual cause.
+            self.pending_outbound = None;
+            return;
+        }
+        warn!(peer = %self.peer_label, "outbound writer capacity admission deadline expired — sending Cease/Out-of-Resources and tearing down");
+        self.trigger_outbound_out_of_resources_teardown(
+            crate::handle::SessionFailureCause::OutboundSaturation,
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one bounded admission step keeps shared, ordinary, and terminal cursor ownership together"
@@ -256,8 +274,15 @@ impl PeerSession {
             return;
         };
         let Some(writer) = &self.writer_bulk_tx else {
+            self.outbound_admission_timer = None;
             return;
         };
+        if writer.is_closed() {
+            // The writer-exit arm owns its actual failure cause. A stale
+            // admission deadline must not relabel it as resource saturation.
+            self.outbound_admission_timer = None;
+            return;
+        }
         // Every valid payload entry contributes at most one UPDATE frame;
         // grouping can only reduce that count. Requests and terminal markers
         // consume their own exact frame budget in separate phases.
@@ -280,6 +305,7 @@ impl PeerSession {
                         break;
                     }
                     if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
+                        self.outbound_admission_timer = None;
                         return;
                     }
                     available -= 1;
@@ -306,6 +332,7 @@ impl PeerSession {
                     .enqueue_bulk(&Message::RouteRefresh(RouteRefreshMessage::new(afi, safi)))
                     .is_err()
                 {
+                    self.outbound_admission_timer = None;
                     return;
                 }
                 self.metrics
@@ -329,7 +356,12 @@ impl PeerSession {
         if self.writer_bulk_admitted != before {
             self.outbound_admission_timer = None;
         }
-        if !finished && self.writer_bulk_tx.is_some() {
+        if !finished
+            && self
+                .writer_bulk_tx
+                .as_ref()
+                .is_some_and(|tx| !tx.is_closed())
+        {
             if pending.shared.is_none() {
                 pending.capacity_blocked = self
                     .writer_bulk_tx
