@@ -1470,7 +1470,7 @@ async fn dynamic_purge_primary_admission_failure_retires_purged_pending_generati
     assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
     assert!(outcome.failures[0].contains("primary session"));
     wait_counter(&pending.purge_reset, 1).await;
-    mgr.drain_ready_session_notifications(addr).await;
+    mgr.drain_ready_session_notifications(None).await;
     let managed = mgr
         .peers
         .get(&key(addr))

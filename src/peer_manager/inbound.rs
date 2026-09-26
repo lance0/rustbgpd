@@ -187,7 +187,7 @@ impl PeerManager {
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
         tcp_ao_generation: Option<TcpAoRotationGeneration>,
     ) {
-        self.drain_ready_session_notifications(peer_addr.ip()).await;
+        self.drain_ready_session_notifications(None).await;
         self.handle_inbound(stream, peer_addr, tcp_ao_info, tcp_ao_generation)
             .await;
     }
@@ -710,7 +710,8 @@ impl PeerManager {
                 // state query, then re-check both ownership and admin state:
                 // otherwise an inbound reconnect can replace the breached
                 // generation in the narrow query/notification race.
-                self.drain_ready_session_notifications(peer_addr).await;
+                self.drain_ready_session_notifications(Some(&peer_key))
+                    .await;
                 if !self.peers.get(&peer_key).is_some_and(|managed| {
                     managed.enabled && managed.session_id() == queried_session_id
                 }) {
@@ -1061,7 +1062,7 @@ impl PeerManager {
     /// ownership, so a dead candidate is dropped rather than installed as
     /// primary in place of a retired live one.
     async fn drain_before_candidate_promotion(&mut self, peer_key: &PeerKey) {
-        Box::pin(self.drain_ready_session_notifications(peer_key.address)).await;
+        Box::pin(self.drain_ready_session_notifications(Some(peer_key))).await;
     }
 
     pub(super) async fn promote_pending_inbound(

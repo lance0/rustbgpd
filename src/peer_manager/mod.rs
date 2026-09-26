@@ -505,8 +505,12 @@ pub struct PeerManager {
     /// happen; the run loop `debug_assert!`s the depth is zero between steps.
     session_notification_depth: usize,
     /// Notifications a nested drain left for the outermost handler because
-    /// they belong to a different peer. Empty whenever the depth is zero.
-    deferred_session_notifications: VecDeque<SessionNotification>,
+    /// they belong to a different peer, with the peer their session resolved
+    /// to. Empty whenever the depth is zero.
+    deferred_session_notifications: VecDeque<(Option<PeerKey>, SessionNotification)>,
+    /// Per-peer count of `deferred_session_notifications`, so a fence scans
+    /// the queue only when its own peer has an entry there.
+    deferred_session_notification_counts: HashMap<PeerKey, usize>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -1112,6 +1116,7 @@ impl PeerManager {
             session_notify_rx,
             session_notification_depth: 0,
             deferred_session_notifications: VecDeque::new(),
+            deferred_session_notification_counts: HashMap::new(),
             session_lifecycle_tx,
             session_lifecycle_rx,
             session_notification_event_tx,
@@ -1379,6 +1384,7 @@ impl PeerManager {
             debug_assert!(
                 self.session_notification_depth == 0
                     && self.deferred_session_notifications.is_empty()
+                    && self.deferred_session_notification_counts.is_empty()
             );
             let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;

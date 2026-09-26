@@ -2172,7 +2172,8 @@ fn collision_promotion_burst_does_not_nest_one_level_per_peer() {
                             .expect("notification queued");
                     }
 
-                    mgr.drain_ready_session_notifications(addrs[0]).await;
+                    mgr.drain_ready_session_notifications(Some(&key(addrs[0])))
+                        .await;
 
                     for (peer_addr, candidate) in addrs.iter().zip(1001_u64..) {
                         assert!(
@@ -2188,4 +2189,79 @@ fn collision_promotion_burst_does_not_nest_one_level_per_peer() {
         .expect("spawn burst thread")
         .join()
         .expect("burst thread");
+}
+
+/// Link-local neighbors on different interfaces share an address. A fence
+/// for one must not handle the other's notification: the owner is resolved
+/// through the session, not the address.
+/// Mutation-red: matching nested drains on `peer_addr` promotes eth1's
+/// candidate inside eth0's fence.
+#[tokio::test]
+async fn nested_drain_defers_same_address_peer_on_another_interface() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let addr: IpAddr = "fe80::2".parse().unwrap();
+    let (eth0, eth1) = (scoped_key(addr, "eth0"), scoped_key(addr, "eth1"));
+    for (peer_key, candidate) in [(&eth0, 11), (&eth1, 12)] {
+        let counters = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_for_key(
+            &mut mgr,
+            peer_key,
+            65002,
+            fake_peer_handle(addr, SessionState::Active, None, counters.clone()),
+            false,
+        );
+        mgr.peers.get_mut(peer_key).unwrap().pending_inbound = Some(PendingInbound {
+            handle: fake_peer_handle(
+                addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                counters,
+            ),
+            session_id: candidate,
+        });
+        mgr.register_session(candidate, peer_key);
+    }
+    mgr.session_notify_tx
+        .send(SessionNotification::OpenReceived {
+            session_id: 12,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr: addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            peer_asn: 65002,
+        })
+        .unwrap();
+
+    // Inside a handler, fencing eth0.
+    mgr.session_notification_depth = 1;
+    mgr.drain_ready_session_notifications(Some(&eth0)).await;
+    assert!(
+        mgr.peers[&eth1].pending_inbound.is_some(),
+        "eth0's fence must not resolve eth1's collision"
+    );
+    assert_eq!(mgr.deferred_session_notifications.len(), 1);
+    assert_eq!(
+        mgr.deferred_session_notification_counts.get(&eth1),
+        Some(&1)
+    );
+
+    // The fence for eth1 takes its deferred notice back.
+    mgr.drain_ready_session_notifications(Some(&eth1)).await;
+    assert!(mgr.deferred_session_notifications.is_empty());
+    assert!(mgr.deferred_session_notification_counts.is_empty());
+    assert!(
+        mgr.peers[&eth1].pending_inbound.is_none() && mgr.peers[&eth1].session_id() == 12,
+        "eth1's own fence handles its notification"
+    );
+    mgr.session_notification_depth = 0;
 }

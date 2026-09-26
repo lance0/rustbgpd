@@ -442,7 +442,7 @@ impl PeerManager {
         let outcome = self
             .shutdown_handle_bounded(peer.address, context, handle)
             .await;
-        Box::pin(self.drain_ready_session_notifications(peer.address)).await;
+        Box::pin(self.drain_ready_session_notifications(Some(peer))).await;
         self.retiring_sessions.remove(&session_id);
         self.unregister_session(session_id);
         outcome
@@ -1773,7 +1773,7 @@ impl PeerManager {
         // fence both collision generations before enqueueing a purge. This
         // prevents a fast BackToIdle from being handled as a live restart
         // while reconfiguration still owns the generation.
-        self.drain_ready_session_notifications(peer.address).await;
+        self.drain_ready_session_notifications(Some(&peer)).await;
         let purge_reset = next_discard_path_attributes.is_some_and(|next| {
             self.peers.get(&peer).is_some_and(|managed| {
                 managed.transport_config.discard_path_attributes.as_ref() != next

@@ -108,8 +108,10 @@ impl PeerManager {
     /// Inside one (a promotion or retirement fence for `peer`) it handles
     /// `peer`'s notifications in order and defers the rest to the outermost
     /// handler, so nesting is bounded by one peer's notices instead of growing
-    /// with every queued collision until the worker stack overflows.
-    pub(super) async fn drain_ready_session_notifications(&mut self, peer: IpAddr) {
+    /// with every queued collision until the worker stack overflows. A
+    /// notification is `peer`'s when its session resolves to `peer`; one that
+    /// does not resolve, or a fence with no `peer`, handles nothing.
+    pub(super) async fn drain_ready_session_notifications(&mut self, peer: Option<&PeerKey>) {
         if self.session_notification_depth == 0 {
             while let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
@@ -119,18 +121,28 @@ impl PeerManager {
         }
         loop {
             // `peer`'s deferred notices are older than anything still queued.
-            let notification = if let Some(index) = self
-                .deferred_session_notifications
-                .iter()
-                .position(|deferred| session_notification_peer(deferred) == peer)
-            {
-                self.deferred_session_notifications.remove(index)
+            let deferred = peer
+                .filter(|peer| {
+                    self.deferred_session_notification_counts
+                        .contains_key(*peer)
+                })
+                .and_then(|peer| self.take_deferred_session_notification(peer));
+            let notification = if deferred.is_some() {
+                deferred
             } else if let Ok(notification) = self.session_notify_rx.try_recv() {
                 self.drain_ready_session_lifecycle_notifications();
-                if session_notification_peer(&notification) == peer {
+                let owner = self.peer_key_for_session(session_notification_id(&notification));
+                if owner.is_some() && owner.as_ref() == peer {
                     Some(notification)
                 } else {
-                    self.deferred_session_notifications.push_back(notification);
+                    if let Some(owner) = &owner {
+                        *self
+                            .deferred_session_notification_counts
+                            .entry(owner.clone())
+                            .or_default() += 1;
+                    }
+                    self.deferred_session_notifications
+                        .push_back((owner, notification));
                     None
                 }
             } else {
@@ -142,13 +154,43 @@ impl PeerManager {
         }
     }
 
+    /// Remove `peer`'s oldest deferred notification. The scan is O(deferred)
+    /// and runs only while `peer` has one, so a fence costs O(deferred) per
+    /// own notice rather than per drained notification.
+    fn take_deferred_session_notification(
+        &mut self,
+        peer: &PeerKey,
+    ) -> Option<SessionNotification> {
+        let index = self
+            .deferred_session_notifications
+            .iter()
+            .position(|(owner, _)| owner.as_ref() == Some(peer))?;
+        self.release_deferred_session_notification(index)
+    }
+
+    fn release_deferred_session_notification(
+        &mut self,
+        index: usize,
+    ) -> Option<SessionNotification> {
+        let (owner, notification) = self.deferred_session_notifications.remove(index)?;
+        if let Some(owner) = owner
+            && let Some(count) = self.deferred_session_notification_counts.get_mut(&owner)
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.deferred_session_notification_counts.remove(&owner);
+            }
+        }
+        Some(notification)
+    }
+
     /// Handle one notification; the outermost call then handles whatever
     /// nested drains deferred, oldest first.
     pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
         self.session_notification_depth += 1;
         self.handle_one_session_notification(notification).await;
         if self.session_notification_depth == 1 {
-            while let Some(deferred) = self.deferred_session_notifications.pop_front() {
+            while let Some(deferred) = self.release_deferred_session_notification(0) {
                 self.handle_one_session_notification(deferred).await;
             }
         }
@@ -604,11 +646,11 @@ impl PeerManager {
     }
 }
 
-fn session_notification_peer(notification: &SessionNotification) -> IpAddr {
+fn session_notification_id(notification: &SessionNotification) -> u64 {
     match notification {
-        SessionNotification::OpenReceived { peer_addr, .. }
-        | SessionNotification::BackToIdle { peer_addr, .. }
-        | SessionNotification::MaxPrefixExceeded { peer_addr, .. }
-        | SessionNotification::MaxPrefixWarning { peer_addr, .. } => *peer_addr,
+        SessionNotification::OpenReceived { session_id, .. }
+        | SessionNotification::BackToIdle { session_id, .. }
+        | SessionNotification::MaxPrefixExceeded { session_id, .. }
+        | SessionNotification::MaxPrefixWarning { session_id, .. } => *session_id,
     }
 }
