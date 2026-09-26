@@ -3151,6 +3151,10 @@ const TEST_BGP_INGRESS_EXIT_ENV: &str = "RUSTBGPD_TEST_BGP_INGRESS_EXIT";
 /// without echoing the raw environment value.
 const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJECTION_AT";
 
+/// Test-only Unix socket handshake: byte 1 reports gRPC bind, one received
+/// byte releases configured-peer registration, and byte 2 reports completion.
+const TEST_INITIAL_ROSTER_HOLD_ENV: &str = "RUSTBGPD_TEST_INITIAL_ROSTER_HOLD";
+
 /// Test-only fault injection; never set this in production. The only accepted
 /// value is `1`; all others are ignored with a sanitized warning.
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
@@ -5348,6 +5352,7 @@ async fn run<T>(
     // The gate and watchdog are process singletons shared by every watched
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();
+    daemon_gate.arm_initial_roster();
     let runtime_config_settlement = RuntimeConfigSettlementWatchdog::new();
     runtime_config_settlement.register_metrics(metrics.registry());
     let config_transaction_controller =
@@ -5651,6 +5656,19 @@ async fn run<T>(
         }
     };
     let grpc_listener_boot_failed = initial_peer_boot_failed;
+    let mut initial_roster_hold = None;
+    if !initial_peer_boot_failed && let Ok(path) = std::env::var(TEST_INITIAL_ROSTER_HOLD_ENV) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::UnixStream::connect(path)
+            .await
+            .expect("connect initial-roster test hold");
+        stream.write_all(&[1]).await.expect("report gRPC bind");
+        stream
+            .read_exact(&mut [0])
+            .await
+            .expect("await roster release");
+        initial_roster_hold = Some(stream);
+    }
 
     // ADR-0113: install the configured outbound prefix maxima before the
     // first session can register, so a limited peer admits its initial feed
@@ -5794,6 +5812,17 @@ async fn run<T>(
             info!(
                 "initiating shortened coordinated shutdown after configured-peer startup failure"
             );
+        }
+    }
+
+    if !initial_peer_boot_failed {
+        daemon_gate.complete_initial_roster();
+        if let Some(mut stream) = initial_roster_hold {
+            use tokio::io::AsyncWriteExt as _;
+            stream
+                .write_all(&[2])
+                .await
+                .expect("report roster completion");
         }
     }
 

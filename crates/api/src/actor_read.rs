@@ -7,6 +7,7 @@ use rustbgpd_rib::{RibSummaryQuery, RibUpdate};
 use tokio::sync::{mpsc, oneshot};
 use tonic::Status;
 
+use crate::health_probe::DaemonGate;
 use crate::peer_types::{EnqueuedOperatorQuery, PeerManagerCommand, PeerManagerOperatorQuery};
 
 /// Server-side deadline for every peer-manager read. All peer-manager reads
@@ -62,6 +63,7 @@ pub(crate) struct KnownPeerQueries {
     pub(crate) peer_manager: mpsc::Sender<PeerManagerCommand>,
     pub(crate) operator_lane: Option<mpsc::Sender<EnqueuedOperatorQuery>>,
     pub(crate) rib: mpsc::Sender<RibUpdate>,
+    pub(crate) daemon_gate: DaemonGate,
 }
 
 impl KnownPeerQueries {
@@ -80,6 +82,8 @@ impl KnownPeerQueries {
         if address == crate::injection_service::LOCAL_PEER {
             return Ok(());
         }
+        // Snapshot before either actor read: completion may race their replies.
+        let initial_roster_pending = self.daemon_gate.initial_roster_pending();
         let known = tokio::time::timeout(PEER_MANAGER_READ_TIMEOUT, async {
             let managed = peer_manager_operator_read(
                 &self.peer_manager,
@@ -101,6 +105,10 @@ impl KnownPeerQueries {
         .map_err(|_| Status::deadline_exceeded("known-peer check timed out"))??;
         if known {
             Ok(())
+        } else if initial_roster_pending {
+            Err(Status::unavailable(
+                "initial configured-peer roster not installed",
+            ))
         } else {
             Err(Status::not_found(format!("neighbor {address} not found")))
         }
@@ -175,6 +183,7 @@ pub(crate) fn mock_known_peer_queries(managed: IpAddr, retained: IpAddr) -> Know
         peer_manager: peer_mgr_tx,
         operator_lane: Some(operator_tx),
         rib: rib_tx,
+        daemon_gate: DaemonGate::new(),
     }
 }
 
@@ -200,6 +209,26 @@ mod tests {
         assert_eq!(error.message(), "neighbor 192.0.2.99 not found");
     }
 
+    #[tokio::test]
+    async fn unknown_peer_is_unavailable_only_while_initial_roster_is_pending() {
+        let managed: IpAddr = "192.0.2.1".parse().unwrap();
+        let retained: IpAddr = "192.0.2.2".parse().unwrap();
+        let known = mock_known_peer_queries(managed, retained);
+        known.daemon_gate.arm_initial_roster();
+        known.require_known(managed).await.unwrap();
+        known.require_known(retained).await.unwrap();
+        let unknown: IpAddr = "192.0.2.99".parse().unwrap();
+        assert_eq!(
+            known.require_known(unknown).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        known.daemon_gate.complete_initial_roster();
+        assert_eq!(
+            known.require_known(unknown).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+    }
+
     /// Load-bearing: the whole existence check shares one
     /// `PEER_MANAGER_READ_TIMEOUT` deadline. A managed read that spends most
     /// of the budget followed by a wedged RIB read must fail at that single
@@ -222,6 +251,7 @@ mod tests {
             peer_manager: peer_mgr_tx,
             operator_lane: None,
             rib: rib_tx,
+            daemon_gate: DaemonGate::new(),
         };
         let started = tokio::time::Instant::now();
         let error = tokio::time::timeout(

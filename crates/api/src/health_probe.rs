@@ -34,6 +34,7 @@ pub struct DaemonGate {
 struct DaemonGateInner {
     not_ready: OnceLock<&'static str>,
     shutting_down: AtomicBool,
+    initial_roster_pending: AtomicBool,
 }
 
 impl DaemonGate {
@@ -41,6 +42,26 @@ impl DaemonGate {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Arm the startup roster boundary before gRPC listeners begin serving.
+    pub fn arm_initial_roster(&self) {
+        self.inner
+            .initial_roster_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Publish completion only after the configured-peer batch is acknowledged.
+    pub fn complete_initial_roster(&self) {
+        self.inner
+            .initial_roster_pending
+            .store(false, Ordering::Release);
+    }
+
+    /// Whether an unknown-peer read could still name a configured neighbor.
+    #[must_use]
+    pub fn initial_roster_pending(&self) -> bool {
+        self.inner.initial_roster_pending.load(Ordering::Acquire)
     }
 
     /// Record a fatal availability fault. First reason wins; later calls

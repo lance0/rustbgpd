@@ -19,10 +19,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use rustbgpd_api::proto;
 use rustbgpd_wire::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::open::OpenMessage;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tonic::{Code, Request, transport::Endpoint};
 
 fn private_tempdir() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("create temp dir");
@@ -470,6 +473,217 @@ fn initial_peer_rejection_uses_shortened_coordinated_teardown() {
         !warm_bundle.exists() || std::fs::read_dir(warm_bundle).unwrap().next().is_none(),
         "incomplete boot must not publish a warm checkpoint"
     );
+}
+
+fn observer_request<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request.metadata_mut().insert(
+        "authorization",
+        "Bearer exit-code-test-token".parse().unwrap(),
+    );
+    request
+}
+
+/// The Unix handshake holds main after gRPC bind and releases it only after
+/// every pre-install RPC has answered. Byte 2 acknowledges the completed
+/// registration, including the zero-peer path.
+#[tokio::test]
+async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
+    for configured in [true, false] {
+        let temp = private_tempdir();
+        let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+        if configured {
+            let mut config = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&config_path)
+                .unwrap();
+            writeln!(
+                config,
+                "\n[[neighbors]]\naddress = \"127.0.0.2\"\nremote_asn = 65020"
+            )
+            .unwrap();
+        }
+        let hold_path = temp.path().join("roster-hold.sock");
+        let hold = tokio::net::UnixListener::bind(&hold_path).unwrap();
+        let mut daemon = spawn_daemon_with_env(
+            temp.path(),
+            &config_path,
+            Some((
+                "RUSTBGPD_TEST_INITIAL_ROSTER_HOLD",
+                hold_path.to_str().unwrap(),
+            )),
+        );
+        let (mut handshake, _) = tokio::time::timeout(Duration::from_secs(30), hold.accept())
+            .await
+            .expect("daemon must reach post-bind hold")
+            .unwrap();
+        let mut marker = [0];
+        tokio::time::timeout(Duration::from_secs(10), handshake.read_exact(&mut marker))
+            .await
+            .expect("post-bind hold marker")
+            .unwrap();
+        assert_eq!(marker, [1]);
+
+        let port = wait_for_bound_grpc_port(&mut daemon);
+        let channel = Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .unwrap()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .connect()
+            .await
+            .unwrap();
+        let mut neighbor =
+            proto::neighbor_service_client::NeighborServiceClient::new(channel.clone());
+        let mut policy = proto::policy_service_client::PolicyServiceClient::new(channel.clone());
+        let mut rib = proto::rib_service_client::RibServiceClient::new(channel.clone());
+        let mut bfd = proto::bfd_service_client::BfdServiceClient::new(channel);
+        let peer = "127.0.0.2";
+        let unknown = "127.0.0.99";
+        let neighbor_read = || {
+            observer_request(proto::GetNeighborStateRequest {
+                address: peer.into(),
+                ..Default::default()
+            })
+        };
+        let policy_read = || {
+            observer_request(proto::GetPolicyStatsRequest {
+                peer_address: peer.into(),
+                direction: "import".into(),
+            })
+        };
+        let policy_chain_read = || {
+            observer_request(proto::GetNeighborPolicyChainsRequest {
+                address: peer.into(),
+            })
+        };
+        let rib_read = || {
+            observer_request(proto::ListRoutesRequest {
+                neighbor_address: peer.into(),
+                ..Default::default()
+            })
+        };
+        let bfd_read = || {
+            observer_request(proto::GetBfdSessionsRequest {
+                peer_address: peer.into(),
+            })
+        };
+        assert_eq!(
+            neighbor
+                .get_neighbor_state(neighbor_read())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        assert_eq!(
+            policy
+                .get_policy_stats(policy_read())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        assert_eq!(
+            policy
+                .get_neighbor_policy_chains(observer_request(
+                    proto::GetNeighborPolicyChainsRequest {
+                        address: unknown.into(),
+                    },
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        if configured {
+            // Configured chain data can be published before the peer roster.
+            policy
+                .get_neighbor_policy_chains(policy_chain_read())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rib.list_received_routes(rib_read())
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        assert_eq!(
+            bfd.get_bfd_sessions(bfd_read()).await.unwrap_err().code(),
+            Code::Unavailable
+        );
+
+        handshake.write_all(&[1]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), handshake.read_exact(&mut marker))
+            .await
+            .expect("initial roster completion marker")
+            .unwrap();
+        assert_eq!(marker, [2]);
+        if configured {
+            neighbor.get_neighbor_state(neighbor_read()).await.unwrap();
+            policy.get_policy_stats(policy_read()).await.unwrap();
+            policy
+                .get_neighbor_policy_chains(policy_chain_read())
+                .await
+                .unwrap();
+            rib.list_received_routes(rib_read()).await.unwrap();
+            bfd.get_bfd_sessions(bfd_read()).await.unwrap();
+        }
+        assert_eq!(
+            neighbor
+                .get_neighbor_state(observer_request(proto::GetNeighborStateRequest {
+                    address: unknown.into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            policy
+                .get_policy_stats(observer_request(proto::GetPolicyStatsRequest {
+                    peer_address: unknown.into(),
+                    direction: "import".into(),
+                }))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            policy
+                .get_neighbor_policy_chains(observer_request(
+                    proto::GetNeighborPolicyChainsRequest {
+                        address: unknown.into(),
+                    }
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            rib.list_received_routes(observer_request(proto::ListRoutesRequest {
+                neighbor_address: unknown.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            bfd.get_bfd_sessions(observer_request(proto::GetBfdSessionsRequest {
+                peer_address: unknown.into(),
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+            Code::NotFound
+        );
+    }
 }
 
 #[test]

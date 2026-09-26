@@ -1322,6 +1322,18 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             validate_update_group_comparison_scope(peer.address, compare_peer.address)?;
             Some(compare_peer)
         };
+        // Snapshot before the lookup: completion may race an absent reply.
+        let initial_roster_pending = self
+            .settlement
+            .as_ref()
+            .is_some_and(|(_, gate)| gate.initial_roster_pending());
+        let missing_peer = |peer: &PeerKey| {
+            if initial_roster_pending {
+                Status::unavailable("initial configured-peer roster not installed")
+            } else {
+                Status::not_found(format!("peer {peer} not found"))
+            }
+        };
 
         let info =
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
@@ -1331,7 +1343,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 }
             })
             .await?
-            .ok_or_else(|| Status::not_found(format!("peer {peer} not found")))?;
+            .ok_or_else(|| missing_peer(&peer))?;
 
         if let Some(compare_peer) = &compare_peer {
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
@@ -1341,7 +1353,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 }
             })
             .await?
-            .ok_or_else(|| Status::not_found(format!("peer {compare_peer} not found")))?;
+            .ok_or_else(|| missing_peer(compare_peer))?;
         }
 
         let comparison_pair = compare_peer
