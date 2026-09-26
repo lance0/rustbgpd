@@ -58,7 +58,9 @@
 #    gauges 0, routes return. Neither trigger overrides the other.
 # 6. Foreign state: the pre-loaded foreign FDB row and the static
 #    all-zero flood entries survive the whole cycle. The script is
-#    re-runnable against a live topology (end state == start state).
+#    re-runnable against a live topology with M67_RERUN=1 (manual only).
+#    Fresh runs always assert both baseline pins; metric presence never
+#    selects reuse mode. CI rejects the manual opt-in.
 #
 # Single-active whole-port AC gate (the close of the M66-era
 # "BUM-flood-only enforcement" limit for bound single-active
@@ -78,6 +80,18 @@
 #   containerlab destroy -t tests/interop/m67-evpn-link-drain-failover.clab.yml
 
 set -eu
+
+# Explicit manual reuse only; startup carrier transitions can create drain
+# metrics even in a fresh topology, so metrics cannot identify a prior run.
+RERUN="${M67_RERUN-0}"
+case "$RERUN" in
+    0|1) ;;
+    *) echo "M67_RERUN must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "$RERUN" = 1 ] && { [ "${CI:-false}" = true ] || [ "${GITHUB_ACTIONS:-false}" = true ]; }; then
+    echo "M67_RERUN=1 is for manual topology reuse and is not allowed in CI" >&2
+    exit 2
+fi
 
 TOPO="m67-evpn-link-drain-failover"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -231,18 +245,10 @@ wait_pe_grpc "$PE2" "pe2 (operator listener)" || print_summary
 wait_vtep_established "$PE1_IP" "vtep<->pe1 EVPN" || print_summary
 wait_vtep_established "$PE2_IP" "vtep<->pe2 EVPN" || print_summary
 
-# Re-run detection: the evpn_es_drained series is only instantiated on
-# the first drain transition and persists at 0 afterwards, so its
-# presence on pe1 means a prior drain cycle already ran against this
-# topology. After a full cycle BOTH PEs may legitimately advertise the
-# CE MAC on the shared ESI (RFC 7432 aliasing — the CE has spoken on
-# both legs), so the fresh-bring-up "Type 2 from the DF only" pin is
-# downgraded to informational on a re-run; everything else stays
-# strict.
-RERUN=0
-if prom_scrape "$PE1" | grep -q '^evpn_es_drained'; then
-    RERUN=1
-    log "  INFO: prior drain cycle detected (evpn_es_drained series present) — re-run mode"
+# A completed manual cycle can leave both PEs advertising the CE MAC.
+# Only an explicit manual opt-in makes the two fresh-topology pins informational.
+if [ "$RERUN" = 1 ]; then
+    log "  INFO: explicit M67_RERUN=1 — manual topology reuse; two baseline pins are informational"
 fi
 
 log "[phase 1] ADR-0085 carrier monitor must be armed on pe1 (the binding's eventing path)"
