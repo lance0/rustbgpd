@@ -91,6 +91,26 @@ fn canonical_persistence_omits_default_optional_sections_and_reaches_a_fixpoint(
 }
 
 #[test]
+fn effective_config_api_body_retains_default_optional_sections() {
+    let mut config = parse_schema_only(valid_toml()).unwrap();
+    let persisted = persisted_config_document_bounded(&mut config).unwrap();
+    let effective = config.effective_redacted_toml().unwrap();
+    let persisted: toml::Value = toml::from_str(&persisted).unwrap();
+    let effective: toml::Value = toml::from_str(&effective).unwrap();
+
+    for section in DEFAULT_OPTIONAL_SECTIONS {
+        assert!(
+            !persisted.as_table().unwrap().contains_key(section),
+            "default [{section}] must stay out of durable persistence"
+        );
+        assert!(
+            effective.as_table().unwrap().contains_key(section),
+            "GetEffectiveConfig must retain resolved default [{section}]"
+        );
+    }
+}
+
+#[test]
 fn canonical_persistence_retains_each_configured_optional_section() {
     let mut config = parse(valid_toml()).unwrap();
     config
@@ -317,7 +337,7 @@ fn bounded_effective_matches_legacy_for_every_lane_boundary_key_and_posture() {
                 .unwrap()
                 .md5_password = Some("group-7ab98100de32".into());
             let original = config.clone();
-            let legacy = super::canonical::render(&config.effective_redacted()).unwrap();
+            let legacy = super::canonical::render_effective(&config.effective_redacted()).unwrap();
             let (bounded, stats) = super::canonical::render_effective_bounded(&mut config).unwrap();
             assert_eq!(config, original);
             assert_eq!(
@@ -801,17 +821,20 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
 fn canonical_projection_borrows_every_large_config_field() {
     let source = include_str!("../canonical.rs");
     for field in [
-        "security: &'a SecurityConfig",
+        "security: Option<&'a SecurityConfig>",
         "neighbors: &'a [Neighbor]",
         "peer_groups: &'a std::collections::HashMap",
-        "policy: &'a PolicyConfig",
+        "policy: Option<&'a PolicyConfig>",
         "dynamic_neighbors: &'a [DynamicNeighborConfig]",
         "evpn_instances: &'a [EvpnInstanceConfig]",
         "ethernet_segments: &'a [EthernetSegmentConfig]",
         "evpn_ip_vrfs: &'a [EvpnIpVrfConfig]",
         "fib_tables: &'a [FibTableConfig]",
-        "managed_netdevs: &'a ManagedNetdevsConfig",
+        "flowspec: Option<&'a FlowSpecConfig>",
+        "managed_netdevs: Option<&'a ManagedNetdevsConfig>",
         "bfd_profiles: &'a [BfdProfileConfig]",
+        "event_history: Option<&'a EventHistoryConfig>",
+        "inbound_admission: Option<&'a InboundAdmissionConfig>",
     ] {
         assert!(source.contains(field), "canonical projection lost {field}");
     }
@@ -819,7 +842,9 @@ fn canonical_projection_borrows_every_large_config_field() {
     assert_eq!(source.matches(".clone()").count(), 4, "{source}");
     assert!(source.contains("let mut canonical_global = global.clone()"));
     assert!(!source.contains("toml::Value::try_from"), "{source}");
-    assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::from(config))"));
+    assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::new("));
+    assert!(source.contains("OptionalSections::IncludeDefaults"));
+    assert!(source.contains("OptionalSections::OmitDefaults"));
 }
 
 #[cfg(target_os = "linux")]
