@@ -6,7 +6,7 @@
 //! fallback instance. The RIB rebuilds and publishes it whole at its single
 //! publication point, after a completed unit of work and never between the
 //! `CommitMembers` batches of a grouped transition; nothing edits a published
-//! roster. `GetPolicyStats` takes one [`ExportRosterReader::load`] per request
+//! roster. `GetPolicyStats` takes one [`ExportRosterReader::load`](crate::export_roster::ExportRosterReader::load) per request
 //! and reads the live counters the roster designates without messaging the
 //! RIB manager.
 //!
@@ -178,7 +178,7 @@ const DEADLINE_CHECK_ROWS: usize = 1024;
 /// fallback. Each counter is read once when the request runs. The pass
 /// yields only while an instance's error lock is busy, and checks the
 /// deadline without yielding at each instance and every
-/// [`DEADLINE_CHECK_ROWS`] term rows.
+/// 1,024 term rows.
 ///
 /// # Errors
 ///
