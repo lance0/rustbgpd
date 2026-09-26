@@ -506,10 +506,7 @@ impl RibManager {
                         continue;
                     }
                     if let Some(pdu) = bmp_sync::synthesize_unicast_announce(route) {
-                        let status = bmp_sync::loc_rib_path_status(
-                            route.is_stale || route.is_llgr_stale,
-                            None,
-                        );
+                        let status = bmp_sync::unicast_path_status(route, None);
                         messages.push((pdu, installed_at, Some(status)));
                     }
                 }
@@ -535,10 +532,7 @@ impl RibManager {
                         continue;
                     }
                     if let Some(pdu) = bmp_sync::synthesize_vpn_announce(route) {
-                        let status = bmp_sync::loc_rib_path_status(
-                            route.is_stale || route.is_llgr_stale,
-                            None,
-                        );
+                        let status = bmp_sync::vpn_path_status(route);
                         messages.push((pdu, installed_at, Some(status)));
                     }
                 }
