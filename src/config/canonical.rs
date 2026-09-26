@@ -7,7 +7,8 @@ use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
     EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
     Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
-    PeerGroupConfig, PolicyConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
+    PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
+    PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
 const STATEMENT_CHUNK_LEN: usize = 256;
@@ -357,6 +358,49 @@ fn serialization_error(message: &str) -> toml::ser::Error {
     <toml::ser::Error as serde::ser::Error>::custom(message)
 }
 
+#[derive(Clone, Copy)]
+enum OptionalSections {
+    IncludeDefaults,
+    OmitDefaults,
+}
+
+fn optional_section<T: Default + PartialEq>(value: &T, sections: OptionalSections) -> Option<&T> {
+    if matches!(sections, OptionalSections::OmitDefaults) && *value == T::default() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn policy_is_default(value: &PolicyConfig) -> bool {
+    let PolicyConfig {
+        definitions,
+        neighbor_sets,
+        import_chain,
+        export_chain,
+        explain,
+        reject_retention,
+        rpol_files,
+        rpol_roots,
+        rpol_max_graph_bytes,
+        rpol: _,
+        datasets,
+        dataset_bindings: _,
+        dataset_events: _,
+        external_sources_digest: _,
+    } = value;
+    definitions.is_empty()
+        && neighbor_sets.is_empty()
+        && import_chain.is_empty()
+        && export_chain.is_empty()
+        && *explain == PolicyExplainConfig::default()
+        && *reject_retention == PolicyRejectRetentionConfig::default()
+        && rpol_files.is_empty()
+        && rpol_roots.is_empty()
+        && *rpol_max_graph_bytes == rustbgpd_policy::rpol::DEFAULT_MAX_GRAPH_BYTES
+        && datasets.is_empty()
+}
+
 /// Borrowed canonical projection used only by durable/effective sinks.
 ///
 /// The large policy and map state remains borrowed. Only `Global` is cloned so
@@ -366,14 +410,17 @@ fn serialization_error(message: &str) -> toml::ser::Error {
 struct CanonicalConfig<'a> {
     config_epoch: ConfigEpoch,
     global: Global,
-    security: &'a SecurityConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security: Option<&'a SecurityConfig>,
     neighbors: &'a [Neighbor],
     #[serde(serialize_with = "super::schema::serialize_sorted_hash_map")]
     peer_groups: &'a std::collections::HashMap<String, PeerGroupConfig>,
-    policy: &'a PolicyConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy: Option<&'a PolicyConfig>,
     dynamic_neighbors: &'a [DynamicNeighborConfig],
     rpki: &'a Option<RpkiConfig>,
-    flowspec: &'a FlowSpecConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flowspec: Option<&'a FlowSpecConfig>,
     bmp: &'a Option<BmpConfig>,
     gnmi_dialout: &'a Option<GnmiDialoutConfig>,
     mrt: &'a Option<MrtConfig>,
@@ -381,15 +428,18 @@ struct CanonicalConfig<'a> {
     ethernet_segments: &'a [EthernetSegmentConfig],
     evpn_ip_vrfs: &'a [EvpnIpVrfConfig],
     fib_tables: &'a [FibTableConfig],
-    managed_netdevs: &'a ManagedNetdevsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    managed_netdevs: Option<&'a ManagedNetdevsConfig>,
     bfd_profiles: &'a [BfdProfileConfig],
     apply_bum_enforcement: bool,
-    event_history: &'a EventHistoryConfig,
-    inbound_admission: &'a InboundAdmissionConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_history: Option<&'a EventHistoryConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inbound_admission: Option<&'a InboundAdmissionConfig>,
 }
 
-impl<'a> From<&'a Config> for CanonicalConfig<'a> {
-    fn from(config: &'a Config) -> Self {
+impl<'a> CanonicalConfig<'a> {
+    fn new(config: &'a Config, optional_sections: OptionalSections) -> Self {
         let Config {
             config_epoch: _,
             global,
@@ -420,13 +470,19 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
         Self {
             config_epoch: posture.config_epoch_effective,
             global: canonical_global,
-            security,
+            security: optional_section(security, optional_sections),
             neighbors,
             peer_groups,
-            policy,
+            policy: if matches!(optional_sections, OptionalSections::OmitDefaults)
+                && policy_is_default(policy)
+            {
+                None
+            } else {
+                Some(policy)
+            },
             dynamic_neighbors,
             rpki,
-            flowspec,
+            flowspec: optional_section(flowspec, optional_sections),
             bmp,
             gnmi_dialout,
             mrt,
@@ -434,18 +490,29 @@ impl<'a> From<&'a Config> for CanonicalConfig<'a> {
             ethernet_segments,
             evpn_ip_vrfs,
             fib_tables,
-            managed_netdevs,
+            managed_netdevs: optional_section(managed_netdevs, optional_sections),
             bfd_profiles,
             apply_bum_enforcement: *apply_bum_enforcement,
-            event_history,
-            inbound_admission,
+            event_history: optional_section(event_history, optional_sections),
+            inbound_admission: optional_section(inbound_admission, optional_sections),
         }
     }
 }
 
 #[cfg(test)]
 pub(super) fn render(config: &Config) -> Result<String, toml::ser::Error> {
-    toml::to_string_pretty(&CanonicalConfig::from(config))
+    toml::to_string_pretty(&CanonicalConfig::new(
+        config,
+        OptionalSections::OmitDefaults,
+    ))
+}
+
+#[cfg(test)]
+pub(super) fn render_effective(config: &Config) -> Result<String, toml::ser::Error> {
+    toml::to_string_pretty(&CanonicalConfig::new(
+        config,
+        OptionalSections::IncludeDefaults,
+    ))
 }
 
 /// Render the one header-bearing document retained by durable config sinks.
@@ -507,9 +574,14 @@ fn render_extraction_bounded(
 ) -> Result<(String, BoundedRenderStats), toml::ser::Error> {
     let skeleton = match shape {
         DocumentShape::Raw => toml::to_string_pretty(skeleton_config)?,
-        DocumentShape::CanonicalBody | DocumentShape::CanonicalPersisted => {
-            toml::to_string_pretty(&CanonicalConfig::from(skeleton_config))?
-        }
+        DocumentShape::CanonicalBody => toml::to_string_pretty(&CanonicalConfig::new(
+            skeleton_config,
+            OptionalSections::IncludeDefaults,
+        ))?,
+        DocumentShape::CanonicalPersisted => toml::to_string_pretty(&CanonicalConfig::new(
+            skeleton_config,
+            OptionalSections::OmitDefaults,
+        ))?,
     };
     let mut templates = extraction
         .lanes
@@ -599,7 +671,7 @@ pub(super) fn render_with_phase_observer(
     config: &Config,
     mut observe: impl FnMut(&'static str),
 ) -> Result<String, toml::ser::Error> {
-    let canonical = CanonicalConfig::from(config);
+    let canonical = CanonicalConfig::new(config, OptionalSections::OmitDefaults);
     let mut graph = toml::ser::Buffer::new();
     canonical.serialize(toml::ser::Serializer::pretty(&mut graph))?;
     observe("graph-built");

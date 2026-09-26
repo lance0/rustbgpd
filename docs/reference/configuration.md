@@ -1927,7 +1927,7 @@ remote_asn = 65002
 receive = true    # accept multiple paths per prefix from this peer
 send = true       # advertise multiple paths per prefix to this peer
 send_max = 4      # limit to top 4 candidates (omit for unlimited)
-receive_max = 3   # experimental Paths-Limit preference sent to this peer
+receive_max = 3   # advertise and locally cap received unicast paths per prefix
 ```
 
 | Field      | Type    | Required | Default | Description                                |
@@ -1935,7 +1935,7 @@ receive_max = 3   # experimental Paths-Limit preference sent to this peer
 | `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
 | `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
 | `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
-| `receive_max` | integer | no    | —       | Experimental preferred maximum received paths per family (1..=65535); omit or set 0 to disable |
+| `receive_max` | integer | no    | —       | Experimental Paths-Limit preference and local IPv4/IPv6-unicast Add-Path cap per prefix (1..=65535); omit or set 0 for unlimited |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
 OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
@@ -1945,8 +1945,17 @@ If both are enabled, `Both` is advertised.
 draft-abraitis-idr-addpath-paths-limit-04). rustbgpd advertises the value only
 for families where Add-Path receive is enabled. A remote Paths-Limit tuple caps
 the corresponding outbound Add-Path family at the smaller of `send_max` and
-the peer's value; it does not affect other families and never rejects excess
-inbound paths. Zero tuples and tuples without matching Add-Path negotiation are
+the peer's value; it does not affect other families. For negotiated IPv4/IPv6
+unicast Add-Path receive, rustbgpd also applies `receive_max` locally to each
+prefix's retained path IDs. Accepted IDs count; rejected IDs count only when
+`max_prefixes_received_ipv4` or `max_prefixes_received_ipv6` enables received
+identity tracking for that family. `max_prefix_action = "block"` withholds a
+net-new ID beyond the cap, `"shutdown"` sends Cease/1 and latches the peer,
+and `"warning"` reports the over-limit attempt but keeps accepting. A
+replacement of an existing ID needs no new slot, and a withdrawal releases
+one. The cap does not locally police other AFI/SAFI families. Changing
+`receive_max` rebuilds the session to renegotiate OPEN; the replacement starts
+with fresh accounting. Zero tuples and tuples without matching Add-Path negotiation are
 ignored. Because the draft expired without IETF adoption, deploy this only
 after confirming peer support. `rbgp neighbor <address>` reports configured,
 advertised, received, and effective values per family in stable numeric
