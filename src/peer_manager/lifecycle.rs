@@ -529,6 +529,24 @@ impl PeerManager {
         }
     }
 
+    /// Startup registration as one operation: one import-roster publication
+    /// however many peers it adds (ADR-0136).
+    pub(super) async fn add_configured_peers(
+        &mut self,
+        configs: Vec<PeerManagerNeighborConfig>,
+    ) -> Result<(), (usize, PeerLifecycleError)> {
+        let batch = self.peers.begin_batch();
+        let mut result = Ok(());
+        for (index, config) in configs.into_iter().enumerate() {
+            if let Err(error) = self.add_peer(config, false).await {
+                result = Err((index, error));
+                break;
+            }
+        }
+        self.peers.end_batch(batch);
+        result
+    }
+
     pub(super) async fn add_peer(
         &mut self,
         config: PeerManagerNeighborConfig,

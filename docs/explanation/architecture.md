@@ -279,9 +279,10 @@ of taking its default process action. The ordering is a contract, asserted by
 5. It starts the remaining pre-gRPC runtime actors, then the gRPC API server.
    BFD uses its prepared sockets, or waits without sockets until SIGHUP enables
    the first member.
-6. For each configured neighbor, it sends `AddPeer` to PeerManager and waits
-   for the result, so the complete configured-peer roster is installed before
-   inbound BGP can be admitted.
+6. It sends every configured neighbor to PeerManager in one
+   `AddConfiguredPeers` command and waits for the result, so the complete
+   configured-peer roster is installed, and the import roster published once,
+   before inbound BGP can be admitted.
 7. It activates BGP ingress by starting the accept loop and its PeerManager
    forwarder, then starts the optional metrics/readiness server. A configured-
    peer failure suppresses both activations and enters coordinated teardown.

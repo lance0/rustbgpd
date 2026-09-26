@@ -449,3 +449,76 @@ async fn policy_stats_fail_when_the_peer_manager_stops_mid_capture() {
     assert_eq!(error.code(), tonic::Code::Unavailable);
     assert_eq!(error.message(), "peer manager stopped");
 }
+
+/// Startup registration is one operation: registering the configured peers
+/// publishes the import roster once, however many there are. A failure
+/// part-way reports its index, and the peers before it are added and
+/// published in that same single publication.
+#[tokio::test]
+async fn configured_peer_registration_publishes_the_roster_once() {
+    const PEERS: u8 = 16;
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let roster = mgr.import_roster();
+    let handle = tokio::spawn(mgr.run());
+    let register = |configs: Vec<PeerManagerNeighborConfig>| {
+        let tx = tx.clone();
+        async move {
+            let (reply, reply_rx) = oneshot::channel();
+            tx.send(PeerManagerCommand::AddConfiguredPeers { configs, reply })
+                .await
+                .unwrap();
+            reply_rx.await.unwrap()
+        }
+    };
+    let peer = |subnet: u8, host: u8| IpAddr::V4(Ipv4Addr::new(10, 0, subnet, host));
+
+    let before = roster.load().version();
+    register((0..PEERS).map(|i| make_config(peer(1, i), 65002)).collect())
+        .await
+        .expect("configured peers register");
+    let published = roster.load();
+    assert_eq!(
+        published.version() - before,
+        1,
+        "{PEERS} configured peers publish the roster once"
+    );
+    assert_eq!(published.peers().len(), usize::from(PEERS));
+
+    // The second entry duplicates an existing peer: registration stops
+    // there, keeping the first and never reaching the third.
+    let before = published.version();
+    let (index, error) = register(vec![
+        make_config(peer(2, 0), 65002),
+        make_config(peer(1, 0), 65002),
+        make_config(peer(2, 1), 65002),
+    ])
+    .await
+    .expect_err("a duplicate stops registration");
+    assert_eq!(index, 1);
+    assert!(
+        matches!(
+            error,
+            rustbgpd_api::peer_types::PeerLifecycleError::AlreadyExists(_)
+        ),
+        "{error}"
+    );
+    let published = roster.load();
+    assert_eq!(published.version() - before, 1);
+    assert_eq!(published.peers().len(), usize::from(PEERS) + 1);
+    assert!(published.unique_peer(peer(2, 0)).is_some());
+    assert!(published.unique_peer(peer(2, 1)).is_none());
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}

@@ -1559,8 +1559,11 @@ by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
 At startup the gRPC listeners serve before the configured-peer roster is
 installed, so for that brief window a configured neighbor is not yet known and
 these views, like `GetNeighborState` and `GetPolicyStats`, return `NOT_FOUND`
-for it. `/readyz` and systemd `READY=1` are reported only after the roster is
-installed.
+for it. The peer manager registers the whole configured set in one operation:
+a view that reaches it while registration runs waits for the complete roster,
+within its read deadline, and `GetPolicyStats` sees every configured neighbor
+at once when registration ends. `/readyz` and systemd `READY=1` are reported
+only after the roster is installed.
 
 A continuation token does not outlive its peer. Removing a peer mutates the
 route table, so the next continuation returns `ABORTED`. Restarting from an
