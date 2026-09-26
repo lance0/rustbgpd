@@ -3574,6 +3574,11 @@ fn resolved_session_change(
     }
     let next = &new.transport_config;
     let mut probe = old.transport_config.clone();
+    // Forwarding responsibility is read when the next OPEN is emitted. Its
+    // snapshot/source identity is not a reason to reconfigure a session.
+    probe
+        .local_forwarding_state
+        .clone_from(&next.local_forwarding_state);
     probe.explain_enabled = next.explain_enabled;
     probe.explain_cache_size = next.explain_cache_size;
     probe.reject_retention_enabled = next.reject_retention_enabled;
@@ -5612,7 +5617,11 @@ fn compute_effective_neighbor_impact(
         // the neighbor's raw record. Either means the impact is not a pure
         // policy-chain move the live-impact executor can re-apply in place; it
         // must route through a session reconfigure instead.
-        let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
+        let mut prior_transport = old_resolved.transport_config.clone();
+        prior_transport
+            .local_forwarding_state
+            .clone_from(&new_resolved.transport_config.local_forwarding_state);
+        let transport_changed = prior_transport != new_resolved.transport_config;
         let peer_group_reassigned = old_resolved.peer_group != new_resolved.peer_group;
 
         let mut reasons: Vec<String> = Vec::new();
@@ -5832,7 +5841,11 @@ fn dynamic_range_effective_impact(
         // refresh; it needs a session reconfigure. Mirror the static-neighbor
         // classifier so a combined transport + policy edit is not mistaken for a
         // pure policy-chain move and silently committed without the reconfigure.
-        let transport_changed = old_resolved.transport_config != new_resolved.transport_config;
+        let mut prior_transport = old_resolved.transport_config.clone();
+        prior_transport
+            .local_forwarding_state
+            .clone_from(&new_resolved.transport_config.local_forwarding_state);
+        let transport_changed = prior_transport != new_resolved.transport_config;
 
         let mut reasons: Vec<String> = Vec::new();
         if import_moved {

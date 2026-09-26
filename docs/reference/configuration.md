@@ -1794,9 +1794,12 @@ Graceful Restart is enabled by default. rustbgpd implements:
   rustbgpd can temporarily advertise `restart_state = true` to static peers
   restored from config, using a marker file under `runtime_state_dir`.
   This helps peers retain our routes while we reconnect, but
-  `forwarding_preserved` remains false because rustbgpd does not restore routing
-  state or verify that forwarding state survived. The optional shutdown warm
-  checkpoint is publication-only and does not change that claim.
+  `forwarding_preserved` remains false for families with configured kernel
+  installers. Control-plane-only families advertise F=1, independently of R,
+  under the [per-family role rules](rfc-notes.md#3--graceful-restart-capability).
+  rustbgpd does not restore routing state or verify kernel-state survival.
+  The optional shutdown warm checkpoint is publication-only and does not
+  change that claim.
   ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
   as foreign rather than adopted.
 
@@ -1829,8 +1832,8 @@ graceful_restart = false
 ```
 
 **Implementation note:** restarting-speaker mode is deliberately honest. The
-daemon may advertise `R=1` after a planned restart, but it does not claim
-forwarding-state preservation (`forwarding_preserved = false`) and never
+daemon may advertise `R=1` after a planned restart, but configured kernel
+installers still advertise `forwarding_preserved = false`. The daemon never
 restores route state from the optional shutdown checkpoint. During that
 marker-backed startup it
 freezes the effective static GR peer/family roster and defers each family's

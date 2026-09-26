@@ -24,7 +24,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 | eBGP default policy | RFC 8212 | Opt-in `ebgp_requires_policy`: an eBGP direction with no explicit operator policy runs a reserved internal deny |
 | Route reflection | RFC 4456, RFC 9107 (ORR, ADR-0095) | Per-client best paths via BGP-LS-sourced SPF |
 | Route server (IXP) | RFC 7947 (ADR-0039/0101), RFC 8195 | Transparent redistribution, §2.3.2 per-client best-path, member-set control communities (per-target announce/prepend steering, scrubbed on egress) |
-| Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; no forwarding-state preservation |
+| Graceful restart | RFC 4724 (GR helper), RFC 9494 (LLGR) | Stale retention across all RR families; role-derived forwarding-state bits |
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks; RFC 9721 §5.1/§6.2 local-move cascade (partial) |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
@@ -949,8 +949,19 @@ restarting-speaker behavior is described in §4.1 and ADR-0040.
   have preserved forwarding state. 12-bit `restart_time` field.
 - Per-family: AFI (2) + SAFI (1) + flags (1). Bit 0x80 =
   `forwarding_preserved`.
-- Receiving speaker advertises `restart_state: false` and
-  `forwarding_preserved: false` for all configured families.
+- The daemon sets the GR Forwarding State bit and LLGR F bit independently of
+  Restart State, using one committed local-role snapshot per OPEN. Both bits
+  are set for families with no configured kernel installer, following the
+  control-plane-only guidance in [RFC 9494 §5](https://www.rfc-editor.org/rfc/rfc9494.html#section-5).
+  They remain clear for each unicast family selected by `fib_tables`, for both
+  unicast families when `honor_blackhole` and `install_blackhole_discard` are
+  enabled, and for EVPN when an L2 instance or IP-VRF is configured. This does
+  not claim kernel-state preservation or restore.
+- Committed role changes and rollback affect the next OPEN, including an
+  already-running session's reconnect. Staged candidates do not change these
+  bits or restart unchanged peers. Restart-required blackhole settings stay
+  pinned to the running process. The standalone FSM retains its conservative
+  default of advertising both bits clear.
 - If a peer sends multiple GR capabilities (malformed OPEN), only the
   first is used. A warning is logged.
 - Capability decode is bounded to the enclosing optional-parameter slice
@@ -961,8 +972,8 @@ restarting-speaker behavior is described in §4.1 and ADR-0040.
 Restarting-speaker mode is implemented (ADR-0040). After a coordinated
 shutdown, a marker file is written to `runtime_state_dir`. On startup, if the
 marker is present and not expired, static peers from config are offered R=1 in
-OPEN. `forwarding_preserved` remains false because rustbgpd does not own or
-verify the FIB. Dynamic gRPC-added peers always get R=0. Before sessions start,
+OPEN. The per-family forwarding bits follow the role rules above, independently
+of R. Dynamic gRPC-added peers always get R=0. Before sessions start,
 the RIB freezes the resolved static GR peer/family roster. Per-family Loc-RIB
 selection and outbound initial table/EoR are held until current-session EoRs
 arrive from every eligible waiter or the marker-bounded selection timer
@@ -975,7 +986,8 @@ checkpoint publication binds its generation into the restart marker
 namespace `CLOCK_BOOTTIME` domain; wall-only v1/v2 remain compatibility
 fallbacks when that domain is unavailable. Checkpoint failure retains a
 generationless marker. This does not extend RFC 4724 semantics: startup never
-restores or advertises cached routes, and `forwarding_preserved` remains false.
+restores or advertises cached routes. Configured kernel installers still
+advertise forwarding-state bits clear.
 
 ### §4.2 — Procedures for the Receiving Speaker
 
@@ -1103,9 +1115,8 @@ The same applies on re-establishment. RFC 4724 §4.2 and RFC 9494 §4.2 also
 require removing a family's stale routes when the Forwarding State bit (GR) or
 F bit (LLGR) is clear in the newly received capability. rustbgpd does not
 check either bit and keeps the stale routes until End-of-RIB or the timer.
-rustbgpd itself advertises both bits clear because it does not own the
-forwarding plane, so honoring them would flush every retained route whenever
-two rustbgpd speakers reconnect. Removal on reconnect is limited to families
+This receiving-side deviation is independent of the role-derived bits in
+rustbgpd's own outgoing OPEN. Removal on reconnect is limited to families
 the new OPEN does not list at all.
 
 ### RFC 9494 §4.2 — LLGR Families Outside the GR Capability
@@ -1160,12 +1171,13 @@ requirement.
 implementation safety limit, not an RFC constraint. A misconfigured value
 should not keep stale routes for days.
 
-### Receiving Speaker Only
+### Kernel Forwarding-State Preservation
 
-Full restarting speaker mode with forwarding-state preservation requires a
-verified restore/adoption design. Minimal honest mode (R=1 without forwarding
-claims) is implemented per ADR-0040; ADR-0104's publication-only checkpoint
-does not change that boundary.
+Restarting-speaker support does not preserve or adopt kernel forwarding state.
+Configured kernel installers continue to advertise F=0; a verified
+restore/adoption design would be needed to change that claim. The R-bit marker
+behavior from ADR-0040 and ADR-0104's publication-only checkpoint remain
+separate from control-plane-only families advertising F=1.
 
 ---
 

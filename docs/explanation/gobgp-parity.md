@@ -55,7 +55,7 @@ releases rather than carried forward from older measurements.
 | 4-byte ASN (RFC 6793) | Yes | Yes | AS_TRANS mapping |
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
-| Graceful Restart (RFC 4724) | Yes | Yes | Helper mode + restarting-speaker `R=1`; `forwarding_preserved=false` (no FIB ownership — same as GoBGP default) |
+| Graceful Restart (RFC 4724) | Yes | Yes | Helper mode + restarting-speaker `R=1`; per-family F=1 for control-plane-only roles, F=0 for configured kernel installers |
 | Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |

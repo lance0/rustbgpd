@@ -231,6 +231,7 @@ gRPC request
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
 | Route distribution | `crates/rib/src/manager/distribution/` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
+| Outgoing GR/LLGR forwarding-state bits | `src/forwarding_state.rs` (committed per-family dataplane responsibility), `crates/transport/src/session/mod.rs` (one snapshot per OPEN) |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
 | FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/queries.rs` — `handle_query_fib_install_candidates` |
 | Unicast Linux FIB install and control (ECMP, weighted multipath, scoped link-local `dev`, runtime FIB table CRUD) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence), `src/fib_table_control.rs` (gRPC FIB table CRUD), `src/fib_common.rs` (shared family-membership helpers), `src/kernel_route_notify.rs` (kernel route drift notifications) — ADR-0061 / 0066 / 0068 / 0069 |

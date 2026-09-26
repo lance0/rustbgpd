@@ -510,6 +510,10 @@ impl PeerManager {
                 // ManagedPeer. This makes fresh-start selection authoritative
                 // without falling back to the accepted socket's owner union.
                 transport.tcp_ao = accepted_tcp_ao_keyring;
+                transport.local_forwarding_state =
+                    Some(rustbgpd_transport::ForwardingStateSource::Live(
+                        self.local_forwarding_state.clone(),
+                    ));
 
                 let session_id = self.allocate_session_id();
                 let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(

@@ -1037,8 +1037,10 @@ what each action writes.
 
 When Graceful Restart is enabled (the default), a coordinated stop writes a GR
 restart marker. On the next start, the daemon advertises `R=1` to static peers,
-asking them to retain eligible routes while sessions rebuild. rustbgpd still
-advertises `forwarding_preserved = false`; this is not a continuity guarantee.
+asking them to retain eligible routes while sessions rebuild. Configured kernel
+installers still advertise `forwarding_preserved = false`; control-plane-only
+families advertise F=1 under the [role rules](rfc-notes.md#3--graceful-restart-capability).
+This is not a forwarding-continuity guarantee.
 Use a drained route-server pair or another traffic-shift procedure when
 forwarding continuity matters.
 

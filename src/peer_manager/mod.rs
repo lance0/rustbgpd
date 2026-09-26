@@ -521,6 +521,7 @@ pub struct PeerManager {
     policy_events_tx: broadcast::Sender<Arc<PolicyEvent>>,
     policy_event_history: VecDeque<Arc<PolicyEvent>>,
     current_config: Config,
+    local_forwarding_state: Arc<crate::forwarding_state::ForwardingState>,
     /// True between typed transaction staging and the controller's
     /// persist/rollback completion signal. Dynamic inbound accepts are refused
     /// in this window so candidate-only ranges cannot create live peers before
@@ -700,6 +701,14 @@ impl PeerManager {
                 inbound_admission: crate::config::InboundAdmissionConfig::default(),
             },
         )
+    }
+
+    pub(crate) fn with_local_forwarding_state(
+        mut self,
+        state: Arc<crate::forwarding_state::ForwardingState>,
+    ) -> Self {
+        self.local_forwarding_state = state;
+        self
     }
 
     /// Install the accepted-config authority used to verify a transaction
@@ -1141,6 +1150,9 @@ impl PeerManager {
             tcp_ao_generation: rustbgpd_transport::TcpAoRotationGeneration::STARTUP,
             tcp_ao_rotation: rustbgpd_transport::TcpAoRotationStatus::default(),
             tcp_ao_desired_inventory: None,
+            local_forwarding_state: Arc::new(crate::forwarding_state::ForwardingState::new(
+                &current_config,
+            )),
             current_config,
             bfd_coupling: None,
             event_history: None,
@@ -1251,6 +1263,10 @@ impl PeerManager {
             _ => SocketAddr::new(config.address, BGP_PORT),
         };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.local_forwarding_state =
+            Some(rustbgpd_transport::ForwardingStateSource::Configured(
+                crate::forwarding_state::configured_kernel_families(&self.current_config),
+            ));
         transport.local_address = self.current_config.active_source_for(config.address);
         transport.peer_interface.clone_from(&config.interface);
         transport.peer_scope_id = scope_id;
@@ -1675,6 +1691,8 @@ impl PeerManager {
                 let _ = reply.send(result);
             }
             PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                self.local_forwarding_state
+                    .publish_fib(&self.current_config.fib_tables);
                 if let Some(prior) = self.staged_policy_routes_prior.take() {
                     self.reap_retired_policy_routes(&prior);
                 }
@@ -2382,6 +2400,7 @@ impl PeerManager {
                         }
                         Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
                             self.replace_current_config(*config);
+                            self.local_forwarding_state.publish_fib(&self.current_config.fib_tables);
                             self.config_snapshot_staged = false;
                             self.staged_policy_routes_prior = None;
                         // #338: rebuild the live dynamic-neighbor accept-matcher so

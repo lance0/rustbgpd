@@ -2333,6 +2333,7 @@ fn deps_value(
     startup_tables: Vec<FibTableConfig>,
 ) -> FibTableControlDeps {
     FibTableControlDeps {
+        local_forwarding_state: None,
         fib_cmd_tx,
         peer_mgr_tx,
         rib_tx: None,
@@ -2372,6 +2373,7 @@ async fn apply_times_out_before_coordinator_ownership_without_mutation() {
     let journal = runtime.path().join("commit-confirm-journal.json");
     let controller = ConfigTransactionController::new(
         FibTableControlDeps {
+            local_forwarding_state: None,
             lock: coordinator.clone(),
             rib_tx: Some(rib_tx),
             confirm_journal_path: Some(journal.clone()),
@@ -2994,6 +2996,7 @@ async fn apply_close_before_deadline_is_unavailable_without_mutation() {
     let journal = runtime.path().join("commit-confirm-journal.json");
     let controller = ConfigTransactionController::new(
         FibTableControlDeps {
+            local_forwarding_state: None,
             lock: coordinator.clone(),
             rib_tx: Some(rib_tx),
             confirm_journal_path: Some(journal.clone()),
@@ -4149,6 +4152,7 @@ families = ["ipv4_unicast"]
     let locator = launch.locator_path();
     let controller = ConfigTransactionController::new_accepted(
         FibTableControlDeps {
+            local_forwarding_state: None,
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
             rib_tx: None,

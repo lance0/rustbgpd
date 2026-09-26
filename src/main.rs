@@ -37,6 +37,7 @@ mod fib;
 mod fib_common;
 mod fib_runtime;
 mod fib_table_control;
+mod forwarding_state;
 mod gnmi_set_bridge;
 mod kernel_route_notify;
 mod metrics_server;
@@ -4562,6 +4563,8 @@ async fn run<T>(
             None
         };
 
+    let local_forwarding_state = Arc::new(forwarding_state::ForwardingState::new(&config));
+
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     // ADR-0067 step 4 — BFD/BGP coupling channels. Created here so PeerManager
     // (the desired-set owner) can take the sender + state-change receiver; the
@@ -4594,6 +4597,7 @@ async fn run<T>(
         Some(validation_watch_rx.clone()),
         config.clone(),
     )
+    .with_local_forwarding_state(local_forwarding_state.clone())
     .with_readiness_queries(peer_mgr_readiness_rx)
     .with_operator_queries(peer_mgr_operator_rx)
     .with_event_history(event_history_handle.clone())
@@ -5099,7 +5103,8 @@ async fn run<T>(
         config.clone(),
     )
     .with_metrics(metrics.clone())
-    .with_es_link_bindings_publisher(es_link_bindings_tx.clone());
+    .with_es_link_bindings_publisher(es_link_bindings_tx.clone())
+    .with_forwarding_state(local_forwarding_state.clone());
 
     // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
     // slice). Completely opt-in: `install_blackhole_discard = true`
@@ -5358,6 +5363,7 @@ async fn run<T>(
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
+                local_forwarding_state: Some(local_forwarding_state.clone()),
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
                 rib_tx: Some(rib_tx.clone()),
@@ -5586,6 +5592,7 @@ async fn run<T>(
         },
         fib_table_control: Some(fib_table_control::make_owned_fib_table_control_fn(
             fib_table_control::FibTableControlDeps {
+                local_forwarding_state: Some(local_forwarding_state.clone()),
                 fib_cmd_tx: fib_cmd_tx.clone(),
                 peer_mgr_tx: peer_mgr_tx.clone(),
                 rib_tx: Some(rib_tx.clone()),

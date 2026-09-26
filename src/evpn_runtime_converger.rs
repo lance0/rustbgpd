@@ -159,6 +159,7 @@ pub(crate) struct EvpnRuntimeReloadApply {
     apply_lock: Arc<tokio::sync::Mutex<()>>,
     converger: Arc<dyn DaemonEvpnRuntimeConverger>,
     committed_config: Arc<Mutex<Config>>,
+    forwarding_state: Option<Arc<crate::forwarding_state::ForwardingState>>,
     /// ADR-0085: where the resolved `[[ethernet_segments]]` interface
     /// bindings are republished whenever the committed config
     /// advances (SIGHUP and `ApplyEvpnRuntime` both commit through
@@ -184,9 +185,18 @@ impl EvpnRuntimeReloadApply {
             apply_lock,
             converger,
             committed_config: Arc::new(Mutex::new(committed_config)),
+            forwarding_state: None,
             es_link_bindings_tx: None,
             metrics: BgpMetrics::new(),
         }
+    }
+
+    pub(crate) fn with_forwarding_state(
+        mut self,
+        state: Arc<crate::forwarding_state::ForwardingState>,
+    ) -> Self {
+        self.forwarding_state = Some(state);
+        self
     }
 
     /// Wire the daemon metrics handle so a #268 decomposed-apply
@@ -388,6 +398,7 @@ impl EvpnRuntimeReloadApply {
             self.converger.as_ref(),
             &self.metrics,
             begin_mutation,
+            self.forwarding_state.as_deref(),
         )
         .await
     }
@@ -2456,6 +2467,7 @@ async fn apply_evpn_runtime_candidate_locked<M>(
     converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
     begin_mutation: M,
+    forwarding_state: Option<&crate::forwarding_state::ForwardingState>,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError>
 where
     M: FnOnce(),
@@ -2639,6 +2651,7 @@ where
                         coordinator,
                         converger,
                         metrics,
+                        forwarding_state,
                     )
                     .await;
                 }
@@ -2677,6 +2690,7 @@ where
                         coordinator,
                         converger,
                         metrics,
+                        forwarding_state,
                     )
                     .await;
                 }
@@ -2722,6 +2736,12 @@ where
     let report = coordinator
         .apply_candidate(candidate, Ok(()))
         .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?;
+    if let Some(state) = forwarding_state {
+        state.publish_evpn(
+            !coordinator.model().instances().is_empty()
+                || !coordinator.model().ip_vrfs().is_empty(),
+        );
+    }
     let snapshot = coordinator.snapshot();
     Ok(proto::ApplyEvpnRuntimeResponse {
         outcome: runtime_apply_outcome_to_proto(report.outcome),
@@ -2742,12 +2762,17 @@ where
 /// converge pins the coordinator exactly like the single-shot path, and
 /// the error + `ERROR` log name the completed generations, the failed
 /// step, and the re-SIGHUP recovery. The caller holds the apply lock.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential converge, commit publication, and partial-failure reporting share the step executor"
+)]
 async fn apply_decomposed_evpn_runtime_steps(
     steps: Vec<crate::evpn_plan_decomposer::DecomposedStep>,
     overall_plan: &rustbgpd_evpn::EvpnRuntimePlan,
     coordinator: &Mutex<rustbgpd_evpn::EvpnRuntimeCoordinator>,
     converger: &dyn DaemonEvpnRuntimeConverger,
     metrics: &BgpMetrics,
+    forwarding_state: Option<&crate::forwarding_state::ForwardingState>,
 ) -> Result<proto::ApplyEvpnRuntimeResponse, GrpcEvpnRuntimeApplyError> {
     let lock_coordinator = || {
         coordinator.lock().map_err(|_| {
@@ -2813,9 +2838,16 @@ async fn apply_decomposed_evpn_runtime_steps(
         }
         let report = {
             let mut coordinator = lock_coordinator()?;
-            coordinator
+            let report = coordinator
                 .apply_candidate(step.candidate, Ok(()))
-                .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?
+                .map_err(|err| GrpcEvpnRuntimeApplyError::FailedPrecondition(err.to_string()))?;
+            if let Some(state) = forwarding_state {
+                state.publish_evpn(
+                    !coordinator.model().instances().is_empty()
+                        || !coordinator.model().ip_vrfs().is_empty(),
+                );
+            }
+            report
         };
         tracing::info!(
             step = step_number,
