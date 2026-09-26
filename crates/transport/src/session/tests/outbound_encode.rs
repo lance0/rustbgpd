@@ -367,6 +367,50 @@ async fn value_grouping_keeps_ipv4_body_next_hops_apart() {
     );
 }
 
+/// IPv4 routes sent as `MP_REACH_NLRI` (scoped link-local Extended Next
+/// Hop peer) group by value too: equal attributes behind distinct
+/// allocations share one UPDATE, and every prefix is announced.
+#[tokio::test]
+async fn value_grouping_packs_ipv4_mp_reach_from_distinct_allocations() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    configure_scoped_link_local_peer(&mut session);
+    session.config.local_ipv6_nexthop = Some("fe80::1".parse().unwrap());
+    session.config.route_server_client = true;
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, true));
+    let routes: Vec<Route> = (1..=3u8)
+        .map(|octet| {
+            let mut route = v4_route_with(Arc::new(plain_attrs()), octet, Ipv4Addr::UNSPECIFIED);
+            route.next_hop = IpAddr::V6("fe80::2".parse().unwrap());
+            route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+            route.peer = IpAddr::V6("fe80::2".parse().unwrap());
+            route
+        })
+        .collect();
+    session.send_route_update(announce_only(&session, routes));
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp.clone()),
+            _ => None,
+        })
+        .expect("IPv4 announced as MP_REACH_NLRI");
+    assert_eq!(mp.afi, Afi::Ipv4);
+    let mut prefixes: Vec<Prefix> = mp.announced.iter().map(|entry| entry.prefix).collect();
+    prefixes.sort_unstable();
+    let mut expected: Vec<Prefix> = (1..=3u8)
+        .map(|octet| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(20, 0, octet, 0), 24)))
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(prefixes, expected, "one UPDATE carries all three prefixes");
+}
+
 /// Same guard for the MP key, whose next hop is outside the attributes.
 #[tokio::test]
 async fn value_grouping_keeps_ipv6_next_hops_apart() {
