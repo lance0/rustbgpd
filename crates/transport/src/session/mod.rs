@@ -265,6 +265,8 @@ pub(crate) struct PeerSession {
     writer_completed: Option<watch::Receiver<u64>>,
     writer_bulk_admitted: u64,
     pending_replay: Option<replay::PendingReplay>,
+    pending_outbound: Option<outbound::PendingOutbound>,
+    outbound_admission_timer: Option<Pin<Box<Sleep>>>,
     replay_eor_suppressed: bool,
     /// Unbounded priority channel handed to the writer task. Carries
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
@@ -1875,6 +1877,8 @@ impl PeerSession {
             writer_join,
             writer_bulk_admitted: 0,
             pending_replay: None,
+            pending_outbound: None,
+            outbound_admission_timer: None,
             replay_eor_suppressed: false,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
@@ -2445,6 +2449,9 @@ impl PeerSession {
                 .pending_replay
                 .as_ref()
                 .is_some_and(|pending| pending.target.is_some());
+            let receive_outbound = self.fsm.state() == SessionState::Established
+                && !replay_waiting
+                && self.pending_outbound.is_none();
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -2461,6 +2468,9 @@ impl PeerSession {
                 slow_peer_timer,
                 pending_replay,
                 writer_completed,
+                pending_outbound,
+                writer_bulk_tx,
+                outbound_admission_timer,
                 ..
             } = self;
 
@@ -2483,6 +2493,26 @@ impl PeerSession {
                             return Ok(());
                         }
                     }
+                }
+
+                () = async {
+                    match pending_outbound.as_ref() {
+                        Some(pending) => pending.ready(writer_bulk_tx.as_ref()).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.advance_pending_outbound();
+                    // Yield after bounded work, not inside the select future:
+                    // ready commands must not repeatedly cancel the yield and
+                    // starve a pending envelope under continuous polling.
+                    tokio::task::yield_now().await;
+                },
+
+                () = poll_timer(outbound_admission_timer) => {
+                    warn!(peer = %self.peer_label, "outbound writer capacity admission deadline expired — sending Cease/Out-of-Resources and tearing down");
+                    self.trigger_outbound_out_of_resources_teardown(
+                        crate::handle::SessionFailureCause::OutboundSaturation,
+                    );
                 }
 
                 // Timer fires
@@ -2609,8 +2639,9 @@ impl PeerSession {
 
                 // Outbound route updates from RIB manager
                 Some(update) = outbound_rx.recv(),
-                    if self.fsm.state() == SessionState::Established && !replay_waiting => {
-                    self.handle_outbound_route_update(update).await;
+                    if receive_outbound => {
+                    self.handle_outbound_route_update(update);
+                    tokio::task::yield_now().await;
                 }
             }
         }

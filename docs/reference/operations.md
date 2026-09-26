@@ -1971,8 +1971,14 @@ What to do when it fires:
    it is off by default.
 4. A peer that stops draining *entirely* is handled by the existing
    guards, not this feature: the RFC 9687 send-hold timer tears down a
-   wedged socket, and outbound-buffer saturation tears the session
-   down with `Cease/Out of Resources`.
+   wedged socket with local error `8/0`, without a NOTIFICATION. Large
+   outbound envelopes pause at the bounded writer queue while the session
+   continues serving timers, input, and operator snapshots. If no writer
+   capacity becomes available before the resource-admission deadline, the
+   session sends `Cease/Out of Resources` (`6/8`). Admission progress resets
+   this deadline. Its interval is the configured nonzero `send_hold_time`,
+   or `max(480, 2 × hold_time)` seconds when `send_hold_time = 0`; disabling
+   the RFC timer does not disable the resource bound.
 
 ## Native gRPC certificate expiry
 

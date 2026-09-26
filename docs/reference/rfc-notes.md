@@ -563,7 +563,8 @@ recognized types carry the received bit through rather than OR one in.
 
 rustbgpd sends NOTIFICATION Cease with subcode 8 (Out of Resources, RFC 4486
 §3) when one session's outbound path cannot continue: the bounded outbound
-writer queue saturates, or a committed outbound update cannot be sent exactly
+writer queue cannot admit pending output before its resource deadline, or a
+committed outbound update cannot be sent exactly
 (a missing, incompatible, or foreign export snapshot, or structurally
 unsendable output). The session is torn down; the maximum-prefix limit uses
 Cease subcode 1 instead. There is no fallback to another subcode.

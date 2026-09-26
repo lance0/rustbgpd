@@ -1,5 +1,17 @@
 use super::*;
 
+impl PeerSession {
+    /// Direct encoder fixtures explicitly drive the same bounded cursor used
+    /// by `run()`; control responsiveness is tested through the real actor.
+    async fn test_drain_outbound(&mut self, update: OutboundRouteUpdate) {
+        self.handle_outbound_route_update(update);
+        while let Some(pending) = self.pending_outbound.as_ref() {
+            pending.ready(self.writer_bulk_tx.as_ref()).await;
+            self.advance_pending_outbound();
+        }
+    }
+}
+
 fn shared_query_update(
     member: &PeerSession,
     announce: &[Route],
@@ -177,7 +189,7 @@ async fn shared_group_consumer_answers_import_query_before_stream_terminal() {
 async fn assert_shared_group_canceled_read_releases_snapshots<T>(
     command: PeerCommand,
     response: oneshot::Receiver<T>,
-    cancel_after_deferral: bool,
+    cancel_after_dispatch: bool,
 ) {
     use crate::{PeerHandle, SessionQueryOutcome};
     use std::future::{Future, poll_fn};
@@ -208,39 +220,27 @@ async fn assert_shared_group_canceled_read_releases_snapshots<T>(
         assert_eq!(typed.test_snapshot(), (0, None));
 
         let mut response = Some(response);
-        if !cancel_after_deferral {
+        if !cancel_after_dispatch {
             drop(response.take());
         }
         commands.try_send(command).unwrap();
-        let (reply, mut state) = oneshot::channel();
+        let (reply, state) = oneshot::channel();
         commands
             .try_send(PeerCommand::QueryState { reply })
             .unwrap();
-        let (reply, mut counters) = oneshot::channel();
+        let (reply, counters) = oneshot::channel();
         commands
             .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
             .unwrap();
 
-        if cancel_after_deferral {
+        if cancel_after_dispatch {
             assert!(
                 poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
                     .await
                     .is_pending()
             );
-            assert_eq!(
-                commands.capacity(),
-                commands.max_capacity() - 2,
-                "live diagnostic is deferred and later snapshots stay queued"
-            );
-            assert!(matches!(
-                state.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            assert!(matches!(
-                counters.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            // No stream progress follows this drop: cancellation must wake the wait.
+            // A diagnostic may already have completed; abandoning its reply
+            // must not obstruct later snapshots or output progress.
             drop(response.take());
         }
 
@@ -284,7 +284,7 @@ async fn assert_shared_group_canceled_read_releases_snapshots<T>(
 
 #[tokio::test(start_paused = true)]
 async fn shared_group_canceled_explain_releases_snapshots() {
-    for cancel_after_deferral in [false, true] {
+    for cancel_after_dispatch in [false, true] {
         let (reply, response) = oneshot::channel();
         assert_shared_group_canceled_read_releases_snapshots(
             PeerCommand::ExplainImportPolicy {
@@ -295,7 +295,7 @@ async fn shared_group_canceled_explain_releases_snapshots() {
                 reply,
             },
             response,
-            cancel_after_deferral,
+            cancel_after_dispatch,
         )
         .await;
     }
@@ -303,12 +303,12 @@ async fn shared_group_canceled_explain_releases_snapshots() {
 
 #[tokio::test(start_paused = true)]
 async fn shared_group_canceled_rejected_routes_releases_snapshots() {
-    for cancel_after_deferral in [false, true] {
+    for cancel_after_dispatch in [false, true] {
         let (reply, response) = oneshot::channel();
         assert_shared_group_canceled_read_releases_snapshots(
             PeerCommand::ListRejectedRoutes { reply },
             response,
-            cancel_after_deferral,
+            cancel_after_dispatch,
         )
         .await;
     }
@@ -316,59 +316,57 @@ async fn shared_group_canceled_rejected_routes_releases_snapshots() {
 
 #[tokio::test(start_paused = true)]
 async fn shared_group_canceled_warm_checkpoint_releases_snapshots() {
-    for cancel_after_deferral in [false, true] {
+    for cancel_after_dispatch in [false, true] {
         let (reply, response) = oneshot::channel();
         assert_shared_group_canceled_read_releases_snapshots(
             PeerCommand::QueryWarmCheckpointState { reply },
             response,
-            cancel_after_deferral,
+            cancel_after_dispatch,
         )
         .await;
     }
 }
 
 #[tokio::test]
-async fn shared_group_closed_command_channel_waits_without_self_waking() {
+async fn shared_group_pending_stream_waits_without_self_waking() {
     use std::future::Future;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Wake, Waker};
-
     struct WakeCount(AtomicUsize);
     impl Wake for WakeCount {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
-
-    // This fixture drops its command sender, so recv() immediately yields None.
     let (mut member, _wire) = shared_group_member(65001).await;
-    assert!(member.commands.is_closed());
     let (typed, update, chunks) = shared_query_update(&member, &[make_route(100)]);
+    member.handle_outbound_route_update(update);
     {
-        let consumer = member.handle_outbound_route_update(update);
-        tokio::pin!(consumer);
+        let pending = member.pending_outbound.as_ref().unwrap();
+        let ready = pending.ready(member.writer_bulk_tx.as_ref());
+        tokio::pin!(ready);
         let notifications = Arc::new(WakeCount(AtomicUsize::new(0)));
         let waker = Waker::from(Arc::clone(&notifications));
-        assert!(
-            consumer
-                .as_mut()
-                .poll(&mut Context::from_waker(&waker))
-                .is_pending()
-        );
+        let mut cx = Context::from_waker(&waker);
+        assert!(ready.as_mut().poll(&mut cx).is_pending());
+        let yields = notifications.0.load(Ordering::SeqCst);
+        assert!(ready.as_mut().poll(&mut cx).is_pending());
         assert_eq!(
             notifications.0.load(Ordering::SeqCst),
-            0,
-            "closed recv must not cause a cooperative busy loop"
+            yields,
+            "waiting for publication must not self-wake"
         );
-        assert_eq!(typed.test_snapshot(), (0, None));
         typed.test_publish(chunks);
         typed.test_finish(super::shared_group::StreamTerminal::Complete);
-        consumer.await;
+        ready.await;
     }
+    member.advance_pending_outbound();
     assert_eq!(member.updates_sent, 1);
-    let writer = member.writer_join.take().unwrap();
-    writer.abort();
-    let _ = writer.await;
+    assert!(member.pending_outbound.is_none());
+    member.writer_join.take().unwrap().abort();
 }
 
 #[expect(
@@ -436,24 +434,6 @@ async fn assert_shared_group_failed_stream_keeps_mutation_before_later_query(can
                 .await
                 .is_pending()
         );
-        assert_eq!(
-            commands.capacity(),
-            commands.max_capacity() - 1,
-            "only the barrier is taken; its successor stays queued"
-        );
-        if let Some(mutation) = mutation.as_mut() {
-            assert!(matches!(
-                mutation.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-        }
-        assert!(
-            poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-
-        typed.test_finish(super::shared_group::StreamTerminal::Failed);
         let result = tokio::select! {
             result = &mut query => result,
             stopped = &mut actor => panic!("session stopped before mutation/query: {stopped:?}"),
@@ -473,6 +453,16 @@ async fn assert_shared_group_failed_stream_keeps_mutation_before_later_query(can
             "query cannot bypass the policy mutation"
         );
         assert_eq!(snapshot.evals, 0);
+        assert_eq!(
+            typed.test_snapshot().1,
+            None,
+            "FIFO mutation and query do not wait for output publication"
+        );
+        typed.test_finish(super::shared_group::StreamTerminal::Failed);
+    }
+    while let Some(pending) = member.pending_outbound.as_ref() {
+        pending.ready(member.writer_bulk_tx.as_ref()).await;
+        member.advance_pending_outbound();
     }
     assert!(member.deferred_command.is_none());
     let mut expected = vec![
@@ -507,11 +497,11 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
         let (mut member, _wire) = shared_group_member(65001).await;
         let (commands, receiver) = mpsc::channel(8);
         member.commands = receiver;
-        let (reply, mut state) = oneshot::channel();
+        let (reply, state) = oneshot::channel();
         commands
             .try_send(PeerCommand::QueryState { reply })
             .unwrap();
-        let (reply, mut counters) = oneshot::channel();
+        let (reply, counters) = oneshot::channel();
         commands
             .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
             .unwrap();
@@ -542,23 +532,22 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
             typed.test_finish(super::shared_group::StreamTerminal::Complete);
             update
         };
-        // No outer command loop runs here: both replies must come from shared work.
-        member.handle_outbound_route_update(update).await;
-        assert_eq!(
-            state
-                .try_recv()
-                .expect("state answered inside shared work")
-                .updates_sent,
-            0
-        );
-        assert!(
-            counters
-                .try_recv()
-                .expect("stats answered inside shared work")
-                .is_none()
-        );
-        assert_eq!(commands.capacity(), commands.max_capacity());
-        assert_eq!(member.updates_sent, 2100);
+        member.handle_outbound_route_update(update);
+        {
+            let actor = member.run();
+            tokio::pin!(actor);
+            let (snapshot, counters_reply) = tokio::select! {
+                replies = async { (state.await.unwrap(), counters.await.unwrap()) } => replies,
+                stopped = &mut actor => panic!("actor stopped before snapshots: {stopped:?}"),
+            };
+            assert!(snapshot.updates_sent < 2100);
+            assert!(counters_reply.is_none());
+        }
+        while let Some(pending) = member.pending_outbound.as_ref() {
+            pending.ready(member.writer_bulk_tx.as_ref()).await;
+            member.advance_pending_outbound();
+        }
+        assert!(member.deferred_command.is_none());
         let writer = member.writer_join.take().unwrap();
         writer.abort();
         let _ = writer.await;
@@ -567,18 +556,17 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
 
 #[tokio::test]
 async fn shared_group_buffered_consumer_yields_for_new_reads() {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
-
-    let (mut member, _wire) = shared_group_member(65001).await;
-    let (commands, receiver) = mpsc::channel(8);
-    member.commands = receiver;
+    let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _wire) = connected_stream_pair().await;
+    member.test_install_stream(client);
+    member.config.route_server_client = true;
+    establish_test_session(&mut member, 65002).await;
     member.install_import_policy(Some(PolicyChain::new(vec![Policy {
         entries: vec![],
         default_action: PolicyAction::Permit,
     }])));
     let generation = member.import_policy_generation;
-    let announce: Vec<_> = (0..129_u32)
+    let announce: Vec<_> = (0..4097_u32)
         .map(|index| {
             make_sourced_route(
                 Ipv4Addr::new(10, 44, 0, 1),
@@ -588,51 +576,30 @@ async fn shared_group_buffered_consumer_yields_for_new_reads() {
         })
         .collect();
     let (typed, update, chunks) = shared_query_update(&member, &announce);
-    assert_eq!(chunks.len(), 129, "fixture spans three checkpoints");
+    assert_eq!(chunks.len(), 4097);
     typed.test_publish(chunks);
     typed.test_finish(super::shared_group::StreamTerminal::Complete);
-    {
-        let consumer = member.handle_outbound_route_update(update);
-        tokio::pin!(consumer);
-        assert!(
-            poll_fn(|cx| Poll::Ready(consumer.as_mut().poll(cx)))
-                .await
-                .is_pending(),
-            "completed shared stream must yield before draining every chunk"
-        );
-
-        // These reads do not exist until the consumer has handed back control.
-        // Await admission in another task without resuming the consumer, so the
-        // proof does not depend on Tokio's choice of which task to poll next.
-        let (mut state, mut counters) = tokio::spawn(async move {
-            let (reply, state) = oneshot::channel();
-            commands
-                .try_send(PeerCommand::QueryState { reply })
-                .unwrap();
-            let (reply, counters) = oneshot::channel();
-            commands
-                .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
-                .unwrap();
-            (state, counters)
-        })
-        .await
+    member.writer_join.take().unwrap().abort();
+    let (bulk, _held) = mpsc::channel(2048);
+    member.writer_bulk_tx = Some(bulk);
+    member.handle_outbound_route_update(update);
+    assert_eq!(member.updates_sent, 2048);
+    let (reply, state) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::QueryState { reply })
         .unwrap();
-        consumer.await;
-
-        // No outer actor loop runs: both replies must come from shared work.
-        let state = state.try_recv().expect("state answered inside shared work");
-        assert!(state.updates_sent > 0 && state.updates_sent < 129);
-        let counters = counters
-            .try_recv()
-            .expect("stats answered inside shared work")
-            .expect("installed import chain");
-        assert_eq!(counters.generation, generation);
-        assert_eq!(counters.evals, 0);
-    }
-    assert_eq!(member.updates_sent, 129);
-    let writer = member.writer_join.take().unwrap();
-    writer.abort();
-    let _ = writer.await;
+    let (reply, counters) = oneshot::channel();
+    commands
+        .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+        .unwrap();
+    let actor = tokio::spawn(async move { member.run().await });
+    let state = state.await.unwrap();
+    assert!(state.updates_sent >= 2048 && state.updates_sent < 4097);
+    let counters = counters.await.unwrap().unwrap();
+    assert_eq!(counters.generation, generation);
+    assert_eq!(counters.evals, 0);
+    commands.send(PeerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -687,7 +654,7 @@ async fn shared_group_encode_first_member_encodes_and_second_reuses() {
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
-    member_a.handle_outbound_route_update(update).await;
+    member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("first member publishes the cell");
     let (chunk_count, terminal) = published
         .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
@@ -711,7 +678,7 @@ async fn shared_group_encode_first_member_encodes_and_second_reuses() {
 
     let (mut member_b, mut wire_b) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
-    member_b.handle_outbound_route_update(update).await;
+    member_b.test_drain_outbound(update).await;
     assert!(
         Arc::ptr_eq(shared.cell.get().unwrap(), published),
         "second member reuses the published encode"
@@ -744,7 +711,7 @@ async fn shared_group_encode_profile_mismatch_falls_back_to_local_encode() {
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
-    member_a.handle_outbound_route_update(update).await;
+    member_a.test_drain_outbound(update).await;
     assert!(shared.cell.get().is_some());
     assert_eq!(
         read_announced_prefixes(&mut wire_a, 1).await,
@@ -755,7 +722,7 @@ async fn shared_group_encode_profile_mismatch_falls_back_to_local_encode() {
     // equality proof must reject the published encode.
     let (mut member_b, mut wire_b) = shared_group_member(64_999).await;
     let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
-    member_b.handle_outbound_route_update(update).await;
+    member_b.test_drain_outbound(update).await;
     assert_eq!(
         read_announced_prefixes(&mut wire_b, 1).await,
         vec![Prefix::V4(prefix_a)],
@@ -785,7 +752,7 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
     // wire stream must skip the IPv6 chunk it still encoded for the group.
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
-    member_a.handle_outbound_route_update(update).await;
+    member_a.test_drain_outbound(update).await;
     let published = shared.cell.get().expect("cell published");
     let (chunk_count, terminal) = published
         .downcast_ref::<super::shared_group::ProgressiveUnicastEncode>()
@@ -808,7 +775,7 @@ async fn shared_group_encode_skips_chunks_of_unnegotiated_families() {
     let sentinel_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 128), 25);
     sentinel.announce = vec![make_sourced_route(source_b, sentinel_prefix, 64_602)].into();
     sentinel.next_hop_override = vec![None].into();
-    member_a.handle_outbound_route_update(sentinel).await;
+    member_a.test_drain_outbound(sentinel).await;
     assert_eq!(
         read_announced_prefixes(&mut wire_a, 1).await,
         vec![Prefix::V4(sentinel_prefix)],
@@ -861,7 +828,7 @@ async fn shared_group_encode_midstream_failure_falls_back_without_skips() {
     // Exclusion targets an uninvolved source, so this member wants both
     // routes.
     let update = shared_group_envelope(&member, &shared, source_x, &announce);
-    member.handle_outbound_route_update(update).await;
+    member.test_drain_outbound(update).await;
 
     // Wire: the shared head chunk (prefix A), then the full local fallback
     // stream (prefix A and prefix B in distinct-attr UPDATEs).
@@ -938,7 +905,7 @@ async fn shared_group_encode_streams_multiple_slices() {
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_a, &shared, sources[0], &announce);
-    member_a.handle_outbound_route_update(update).await;
+    member_a.test_drain_outbound(update).await;
     let (chunk_count, terminal) = shared
         .cell
         .get()
@@ -969,7 +936,7 @@ async fn shared_group_encode_streams_multiple_slices() {
 
     let (mut member_b, mut wire_b) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_b, &shared, sources[1], &announce);
-    member_b.handle_outbound_route_update(update).await;
+    member_b.test_drain_outbound(update).await;
     let expected_b: Vec<Prefix> = {
         let mut v: Vec<Prefix> = announce
             .iter()
@@ -1023,7 +990,7 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
 
     let (mut member_a, mut wire_a) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_a, &shared, source_a, &announce);
-    member_a.handle_outbound_route_update(update).await;
+    member_a.test_drain_outbound(update).await;
     let (chunk_count, terminal) = shared
         .cell
         .get()
@@ -1051,7 +1018,7 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
 
     let (mut member_b, mut wire_b) = shared_group_member(65001).await;
     let update = shared_group_envelope(&member_b, &shared, source_b, &announce);
-    member_b.handle_outbound_route_update(update).await;
+    member_b.test_drain_outbound(update).await;
     let map_b = shared_group_read_prefix_attr_map(&mut wire_b, 2).await;
     assert_eq!(
         map_b
@@ -1067,7 +1034,7 @@ async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
     let (mut member_r, mut wire_r) = shared_group_member(65001).await;
     let mut reference = shared_group_envelope(&member_r, &shared, source_b, &announce);
     reference.shared_group_encode = None;
-    member_r.handle_outbound_route_update(reference).await;
+    member_r.test_drain_outbound(reference).await;
     let map_r = shared_group_read_prefix_attr_map(&mut wire_r, 2).await;
     assert_eq!(
         map_b, map_r,
@@ -1099,7 +1066,7 @@ async fn shared_group_nh_override_alignment_survives_source_sort() {
     let (mut member, mut wire) = shared_group_member(65001).await;
     let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
     update.next_hop_override = overrides.clone().into();
-    member.handle_outbound_route_update(update).await;
+    member.test_drain_outbound(update).await;
     let map_shared = shared_group_read_prefix_attr_map(&mut wire, 3).await;
 
     let self_hop = format!("{:?}", PathAttribute::NextHop(Ipv4Addr::LOCALHOST));
@@ -1129,7 +1096,7 @@ async fn shared_group_nh_override_alignment_survives_source_sort() {
     let mut reference = shared_group_envelope(&member_r, &shared, excluded, &announce);
     reference.next_hop_override = overrides.into();
     reference.shared_group_encode = None;
-    member_r.handle_outbound_route_update(reference).await;
+    member_r.test_drain_outbound(reference).await;
     let map_r = shared_group_read_prefix_attr_map(&mut wire_r, 3).await;
     assert_eq!(map_shared, map_r);
 }
@@ -1179,7 +1146,7 @@ async fn shared_group_consumer_streams_concurrently_with_live_encoder() {
     let update = shared_group_envelope(&member, &shared, Ipv4Addr::new(10, 42, 0, 9), &announce);
     let mut member = member;
     let consumer = tokio::spawn(async move {
-        member.handle_outbound_route_update(update).await;
+        member.test_drain_outbound(update).await;
     });
     // Publish while the consumer is (very likely) parked on the notify.
     tokio::time::sleep(Duration::from_millis(50)).await;
