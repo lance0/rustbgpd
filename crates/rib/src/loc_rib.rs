@@ -1249,7 +1249,7 @@ fn vpn_cmp_chain(
     cmp_ipaddr(&a.peer, &b.peer).then_with(|| a.path_id.cmp(&b.path_id))
 }
 
-fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
+pub(crate) fn vpn_stale_rank(route: &VpnRibRoute) -> u8 {
     crate::best_path::stale_tier(route.is_stale, route.is_llgr_stale, || {
         route.attributes.summary().llgr_stale
     })

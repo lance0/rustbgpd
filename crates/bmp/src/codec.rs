@@ -793,7 +793,7 @@ mod tests {
         let pdu = [0xAB; 23];
 
         let ps = crate::types::BmpPathStatus {
-            status: 0x0000_0002,
+            status: crate::tlv::PATH_STATUS_BEST | crate::tlv::PATH_STATUS_STALE,
             reason: Some(0x0003),
         };
         let msg = encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V4);
