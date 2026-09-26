@@ -13,9 +13,12 @@ differences sit within run-to-run spread, with three exceptions:
   and just under 0.2 s. The daemon's own log narrows it: the span from the first
   to the 700th "session established" record is 0.758–0.779 s (median 0.775) on
   main and 0.665–0.686 s (median 0.668) on v0.72.0, about +0.1 s. This is
-  unattributed. The single-command startup roster registration (#2723) landed
-  between the two builds and changes the startup path, so it is the candidate
-  cause, but no measurement here isolates it.
+  unattributed. Several changes to the startup and session-establishment path
+  landed between the two builds and are candidate causes: the single-command
+  startup roster registration (#2723), holding a collision candidate's
+  KEEPALIVE until the collision verdict (#2701; the harness stubs connect
+  inbound and are promoted as collision candidates), and bounded nested
+  notification drains (#2718). No measurement here isolates any of them.
 - **RR1000 staged convergence** is +4.7% at the median.
 - **RR1000 wire-point RSS** is about +3% at the median.
 
