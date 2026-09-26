@@ -192,6 +192,17 @@ assert_pe1_routes_withdraw() {
 resolve_grpc_addr
 log "vtep (DUT/RR): $VTEP — pe1 (preferred DF, bound AC $AC_IF): $PE1 — pe2 (backup): $PE2"
 
+# Fail closed if pre-link IPv6 setup did not take effect.
+# Containerlab logs hook failures without aborting deployment. Check every
+# existing interface too: disabling only future-interface defaults is too late.
+for node in "$VTEP" "$PE1" "$PE2" "$CE" "$HR"; do
+    docker exec "$node" sh -ec '
+        for setting in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+            [ "$(cat "$setting")" = 1 ] || exit 1
+        done
+    ' || { fail "pre-link IPv6 setup missing on $node"; exit 1; }
+done
+
 log "[phase 1] kernel topology present in each rustbgpd netns"
 docker exec "$VTEP" ip -d link show "$BRIDGE" >/dev/null \
     || { fail "bridge $BRIDGE missing in vtep netns"; exit 1; }
