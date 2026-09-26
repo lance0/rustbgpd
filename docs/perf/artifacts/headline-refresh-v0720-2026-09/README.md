@@ -16,6 +16,13 @@ These files retain the evidence behind the
 run from a local commit whose only purpose was to satisfy the IRR runner's
 source gate. `cand` is main at `33f8e7142c4a984812de0ba927b65a842a4db62c`.
 
+The IRR `provenance.json` files record hashes for every binary the runner
+builds. Only `target/release/rustbgpd` is the measured identity:
+`149f07de…` for v0.72.0 and `0bf3866a…` for main. `rbgp` differs between the
+arms because its source differs, and it is not used by a `rustbgpd-sighup`
+root. `rs-config-render` is identical in both arms. `reloadstall` differs only
+through the `crates/wire` capability change disclosed in the receipt.
+
 Local paths are replaced with `<run-root>`, `<control-tree>`, and
 `<candidate-tree>`. Full daemon logs, scenario configurations, and metrics
 scrapes remain outside the repository.

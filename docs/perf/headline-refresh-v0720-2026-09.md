@@ -135,6 +135,16 @@ established shapes.
   every cell. Building the three packages together changes the daemon's
   unified feature set. A build of the daemon binary alone produces a different
   hash, so the build command is part of the identity.
+- **Other recorded binaries.** Each IRR root's `provenance.json` also records
+  hashes for `rbgp`, `rs-config-render`, and `reloadstall`. They are not part of
+  the measured daemon identity:
+  - `rbgp` differs between the arms because the CLI source differs between
+    them (for example #2722). The IRR runner uses `rbgp` only in its
+    transaction cells, which this `rustbgpd-sighup` campaign did not run, so it
+    is not on any timed path.
+  - `rs-config-render` is identical in both arms, so both arms rendered the
+    same scenario configuration.
+  - `reloadstall` is covered in the next item.
 - **Harnesses.** Each build ran its own tree's harnesses. The harness sources
   are identical between the trees. The only difference in the harness binaries
   is that `reloadstall` links `crates/wire`, which carries a small
@@ -144,10 +154,36 @@ established shapes.
 
 - One AMD Ryzen Threadripper 7970X host, 125 GiB RAM, Linux 7.0, rustc 1.98.1.
   All CPU governors were set to `performance`.
-- Background load: no other builds, test gates, or pushes to main ran during the
-  window, but a shared local inference service kept one core busy throughout.
-  The runners' own quiet gates (one-minute load below 2.0 before every matrix
-  and IRR cell, two accepted samples) passed each time.
+- Background load: a shared local inference service kept one core busy
+  throughout. Another development lane ran three `bench/scale` `cargo check`
+  builds from about 06:04 to 06:09 on cores 40–63, detailed below. Otherwise no
+  builds, test gates, or pushes to main ran during the window. The runners' own quiet gates (one-minute
+  load below 2.0 before every matrix and IRR cell, two accepted samples) passed
+  each time.
+- **Overlap at the start of the window.** From about 06:04 to 06:09 local time,
+  another development lane ran three `cargo check` builds of the `bench/scale`
+  workspace on cores 40–63, before it saw the window marker; one of them
+  failed early. The benchmark cores were 16–23 for the daemon and 24–39 for
+  the harness, so the builds used separate cores.
+  - **Which run.** The builds overlapped the first matrix run, v0.72.0 run 1
+    S2, whose runner was active 06:04:19–06:17:03.
+  - **Load at the time.** The campaign logged a one-minute/five-minute/
+    fifteen-minute load average of 2.64/3.54/3.24 when that run began.
+  - **The quiet gate.** The runner's gate rejected its samples until 06:09:19
+    and 06:09:50 (one-minute load 1.84 and 1.59). The daemon started at
+    06:09:50 and the first reload came at 06:10:30. The builds therefore
+    overlapped the gate wait and ended around the cell start; an overlap with
+    the first seconds of that run's cold convergence cannot be ruled out.
+  - **Effect of excluding that run** (the other v0.72.0 runs are unchanged):
+    - S1: sessions established stays at 0.7 s; cold convergence stays at
+      3.6–4.0 s with a median of 3.6 s.
+    - S2 completion p50: the range stays 1.37–1.63 s; the median moves from
+      1.50 to 1.52 s.
+    - S2 changed-observer stall p50: the range stays 457–646 ms; the median
+      moves from 499 to 485 ms.
+    - S2 peak process-tree RSS: the range narrows from 488–567 MiB to
+      488–497 MiB.
+    - No main-against-v0.72.0 reading in the results changes.
 - Order: strictly sequential, alternating the two builds within every cell type,
   with the runners' 300-second cool-downs. The sequence was matrix S2 then S3
   for each run, then IRR at 0%, then RR1000.
