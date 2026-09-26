@@ -38,6 +38,7 @@ use rustbgpd_policy::{
 use rustbgpd_wire::RtcNlri;
 
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::route::{RouteOrigin, RtcRibRoute, VpnRibRouteKey};
 
 pub(super) const SESSION: u64 = 1;
@@ -64,7 +65,7 @@ pub(super) fn ibgp_route(
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(src),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: crate::test_support::session_router_id(IpAddr::V4(src)),
@@ -125,7 +126,7 @@ pub(super) fn vpn_route(
         next_hop: IpAddr::V4(src),
         link_local_next_hop: None,
         peer: IpAddr::V4(src),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: src,
@@ -142,7 +143,7 @@ pub(super) fn rtc_default(src: Ipv4Addr) -> RtcRibRoute {
         nlri: RtcNlri::DEFAULT,
         next_hop: IpAddr::V4(src),
         peer: IpAddr::V4(src),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
         ]),
@@ -298,7 +299,7 @@ fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
                 r.path_id,
                 r.next_hop,
                 r.peer,
-                (*r.attributes).clone(),
+                r.attributes.to_vec(),
                 update.next_hop_override.get(i).cloned().flatten(),
             )
         })
@@ -319,7 +320,7 @@ fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
                 format!("{:?}", r.nlri),
                 r.next_hop,
                 r.peer,
-                (*r.attributes).clone(),
+                r.attributes.to_vec(),
             )
         })
         .collect();
@@ -3022,7 +3023,7 @@ fn rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, asns: Vec<u32>, communities: Vec<
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(src),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: crate::test_support::session_router_id(IpAddr::V4(src)),
@@ -3216,7 +3217,9 @@ async fn oracle_pcb_lane_only_churn_reaches_only_the_best_source() {
         o.routes(C, vec![ranked(pfx(1, 0), C, 3)], vec![]).await;
         // Runner-up attribute churn at the same rank: the winner stands.
         let mut tweaked = ranked(pfx(1, 0), B, 2);
-        Arc::make_mut(&mut tweaked.attributes).push(PathAttribute::Med(50));
+        AttrSet::edit(&mut tweaked.attributes, |attrs| {
+            attrs.push(PathAttribute::Med(50));
+        });
         o.routes(B, vec![tweaked], vec![]).await;
         // Runner-up withdraws: the substitution refills from the third
         // candidate; the winner still stands.

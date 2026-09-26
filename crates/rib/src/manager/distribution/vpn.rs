@@ -2,6 +2,7 @@ use super::{
     Afi, HashSet, IpAddr, OutboundCommitBatch, PolicyChain, RibManager, RouteContext, Safi,
     gauge_val, route_type, should_suppress_ibgp_inner, vpn_route_family, vpn_routes_equal, warn,
 };
+use crate::attr_set::AttrSet;
 use crate::loc_rib::vpn_tiebreak_orr;
 use crate::route::{VpnRibRoute, VpnRibRouteKey};
 use rustbgpd_wire::{VpnAddressFamily, VpnRouteKey};
@@ -17,7 +18,7 @@ fn vpn_suppression_probe(route: &crate::route::VpnRibRoute) -> crate::route::Rou
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: route.peer,
-        attributes: std::sync::Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: route.received_at,
         origin_type: route.origin_type,
         peer_router_id: route.peer_router_id,
@@ -324,10 +325,9 @@ impl RibManager {
                     let mut modified = (*candidate).clone();
                     if !result.modifications.is_empty() {
                         checkpoint.borrow_mut()();
-                        let nh = rustbgpd_policy::apply_modifications(
-                            std::sync::Arc::make_mut(&mut modified.attributes),
-                            &result.modifications,
-                        );
+                        let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                            rustbgpd_policy::apply_modifications(attrs, &result.modifications)
+                        });
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
@@ -705,10 +705,9 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint.borrow_mut()();
-                let nh = rustbgpd_policy::apply_modifications(
-                    std::sync::Arc::make_mut(&mut modified.attributes),
-                    &result.modifications,
-                );
+                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
+                });
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }

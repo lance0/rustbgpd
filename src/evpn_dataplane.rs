@@ -1837,6 +1837,7 @@ mod tests {
     use rustbgpd_evpn_linux::{
         InMemoryDataplane, InstanceProbe, KernelLinkInfo, snapshot::KernelVxlanInfo,
     };
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_rib::route::EvpnRibRoute;
     use rustbgpd_wire::{
         EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnIpPrefixRoute,
@@ -1973,7 +1974,7 @@ mod tests {
             next_hop: ipa(dst),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(attrs),
+            attributes: AttrSet::new(attrs),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
@@ -2005,7 +2006,7 @@ mod tests {
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+            attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 RouteTarget::TwoOctetAs {
                     asn: 65001,
                     value: l3vni,
@@ -2041,7 +2042,7 @@ mod tests {
             .extended_communities()
             .expect("helper carries route target")
             .to_vec();
-        partial.attributes = Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(
+        partial.attributes = AttrSet::new(vec![PathAttribute::ExtendedCommunitiesPartial(
             extended_communities,
         )]);
 
@@ -2063,7 +2064,7 @@ mod tests {
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+            attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 ExtendedCommunity::esi_label(single_active, 123),
             ])]),
             received_at: std::time::Instant::now(),
@@ -2098,7 +2099,7 @@ mod tests {
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+            attributes: AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
                 RouteTarget::TwoOctetAs {
                     asn: 65001,
                     value: label,
@@ -2127,7 +2128,7 @@ mod tests {
         };
         ip_prefix.esi = esi;
         ip_prefix.ethernet_tag = EthernetTagId(ethernet_tag);
-        route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+        route.attributes = AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
             RouteTarget::TwoOctetAs {
                 asn: 65001,
                 value: l3vni,
@@ -2381,7 +2382,7 @@ mod tests {
             next_hop: ipa("10.0.0.2"),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
@@ -2783,7 +2784,7 @@ mod tests {
             .extended_communities()
             .expect("helper carries ESI label")
             .to_vec();
-        partial.attributes = Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(
+        partial.attributes = AttrSet::new(vec![PathAttribute::ExtendedCommunitiesPartial(
             extended_communities,
         )]);
 
@@ -2923,7 +2924,7 @@ mod tests {
         let mut wrong_rt = valid.clone();
         wrong_rt.attributes = foreign.attributes.clone();
         let mut missing_rt = valid.clone();
-        missing_rt.attributes = Arc::new(vec![]);
+        missing_rt.attributes = AttrSet::new(vec![]);
         let unsupported_tag = evpn_ead_per_evi_route(esi, 42, "10.0.0.3");
         for (name, candidate, eligible) in [
             (
@@ -3037,7 +3038,7 @@ mod tests {
         let mut wrong_rt = valid.clone();
         wrong_rt.attributes = foreign.attributes.clone();
         let mut missing_rt = valid.clone();
-        missing_rt.attributes = Arc::new(vec![]);
+        missing_rt.attributes = AttrSet::new(vec![]);
         for (name, ead, tag, accepted) in [
             (
                 "NVGRE only",
@@ -3512,7 +3513,7 @@ mod tests {
             match case {
                 "partial" => {
                     route.attributes =
-                        Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(vec![
+                        AttrSet::new(vec![PathAttribute::ExtendedCommunitiesPartial(vec![
                             RouteTarget::TwoOctetAs {
                                 asn: 65001,
                                 value: 999,
@@ -3525,15 +3526,16 @@ mod tests {
                             .to_extended_community(),
                         ])]);
                 }
-                "missing" => route.attributes = Arc::new(vec![]),
+                "missing" => route.attributes = AttrSet::new(vec![]),
                 "mismatched" => {
-                    route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
-                        RouteTarget::TwoOctetAs {
-                            asn: 65001,
-                            value: 999,
-                        }
-                        .to_extended_community(),
-                    ])]);
+                    route.attributes =
+                        AttrSet::new(vec![PathAttribute::ExtendedCommunities(vec![
+                            RouteTarget::TwoOctetAs {
+                                asn: 65001,
+                                value: 999,
+                            }
+                            .to_extended_community(),
+                        ])]);
                 }
                 "tag" | "vni" => {
                     let EvpnRoute::MacIp(macip) = &mut route.route else {
@@ -3578,24 +3580,25 @@ mod tests {
     }
 
     fn with_encapsulations(mut route: EvpnRibRoute, types: &[u16], partial: bool) -> EvpnRibRoute {
-        let attrs = Arc::make_mut(&mut route.attributes);
-        let ecs = attrs
-            .iter_mut()
-            .find_map(PathAttribute::extended_communities_mut)
-            .unwrap();
-        ecs.extend(
-            types
-                .iter()
-                .copied()
-                .map(ExtendedCommunity::bgp_encapsulation),
-        );
-        if partial {
-            for attr in attrs {
-                if let PathAttribute::ExtendedCommunities(ecs) = attr {
-                    *attr = PathAttribute::ExtendedCommunitiesPartial(std::mem::take(ecs));
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            let ecs = attrs
+                .iter_mut()
+                .find_map(PathAttribute::extended_communities_mut)
+                .unwrap();
+            ecs.extend(
+                types
+                    .iter()
+                    .copied()
+                    .map(ExtendedCommunity::bgp_encapsulation),
+            );
+            if partial {
+                for attr in attrs {
+                    if let PathAttribute::ExtendedCommunities(ecs) = attr {
+                        *attr = PathAttribute::ExtendedCommunitiesPartial(std::mem::take(ecs));
+                    }
                 }
             }
-        }
+        });
         route
     }
 

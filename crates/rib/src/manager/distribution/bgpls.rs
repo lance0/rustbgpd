@@ -4,6 +4,7 @@ use super::{
     bgpls_routes_equal, gauge_val, record_export_policy_eval, route_type,
     should_suppress_ibgp_inner, warn,
 };
+use crate::attr_set::AttrSet;
 
 impl RibManager {
     /// Stage BGP-LS announces and withdrawals for a set of affected opaque keys.
@@ -111,7 +112,7 @@ impl RibManager {
                 link_local_next_hop: None,
                 next_hop_scope: None,
                 peer: best.peer,
-                attributes: std::sync::Arc::new(vec![]),
+                attributes: AttrSet::new(vec![]),
                 received_at: best.received_at,
                 origin_type: best.origin_type,
                 peer_router_id: best.peer_router_id,
@@ -179,10 +180,9 @@ impl RibManager {
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
                 checkpoint();
-                let nh = rustbgpd_policy::apply_modifications(
-                    std::sync::Arc::make_mut(&mut modified.attributes),
-                    &result.modifications,
-                );
+                let nh = AttrSet::edit(&mut modified.attributes, |attrs| {
+                    rustbgpd_policy::apply_modifications(attrs, &result.modifications)
+                });
                 checkpoint();
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;

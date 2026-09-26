@@ -203,7 +203,7 @@ fn aspa_delta_revalidates_only_intersecting_paths_across_segments() {
         Ipv4Addr::new(192, 0, 2, 1),
         vec![],
     );
-    as_set.attributes = Arc::new(vec![
+    as_set.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSet(vec![65010, 65300])],
@@ -356,7 +356,7 @@ fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
                     vec![65008, 65009, 65010],
                 ),
             ];
-            routes[2].attributes = Arc::new(vec![
+            routes[2].attributes = AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![
@@ -365,7 +365,7 @@ fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
                     ],
                 }),
             ]);
-            routes[3].attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+            routes[3].attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]);
             routes[4].origin_type = crate::route::RouteOrigin::Ibgp;
             manager.handle_update(RibUpdate::RoutesReceived {
                 session_id: 0,
@@ -570,7 +570,7 @@ fn validate_route_rpki_empty_as_path() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
             PathAttribute::LocalPref(100),

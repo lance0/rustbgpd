@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustbgpd_policy::{NamedPolicy, PolicyChain, rpol::RpolFile, sets::SetStore};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportResult,
     ExactExportSnapshot, PeerExportPolicyReplacement, RibManager, RibSummaryQuery, RibUpdate,
@@ -127,7 +128,7 @@ fn route(index: u8) -> Route {
         next_hop: source.into(),
         link_local_next_hop: None,
         next_hop_scope: None,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: source,

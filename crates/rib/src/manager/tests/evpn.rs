@@ -1,4 +1,5 @@
 use super::*;
+use crate::attr_set::AttrSet;
 
 #[test]
 #[expect(
@@ -40,7 +41,7 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
         false,
     );
     fallback.next_hop = "2001:db8::10".parse().unwrap();
-    Arc::make_mut(&mut fallback.attributes).push(valid.clone());
+    AttrSet::edit(&mut fallback.attributes, |attrs| attrs.push(valid.clone()));
     let mut invalid = make_evpn_macip(
         Ipv4Addr::new(192, 0, 2, 11),
         [0, 1, 2, 3, 4, 5],
@@ -48,12 +49,9 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
         true,
     );
     invalid.next_hop = "2001:db8::11".parse().unwrap();
-    Arc::make_mut(&mut invalid.attributes).push(service_attribute(
-        6,
-        sid,
-        23,
-        Some([100, 24, 16, 0, 0, 0]),
-    ));
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        attrs.push(service_attribute(6, sid, 23, Some([100, 24, 16, 0, 0, 0])));
+    });
     let announce = |manager: &mut RibManager, route: &EvpnRibRoute| {
         manager.enqueue_routes_received(
             route.peer,
@@ -140,7 +138,9 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
             .iter()
             .any(|gate| gate.code == "srv6_sid_invalid")
     );
-    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() = valid;
+    AttrSet::edit(&mut invalid.attributes, |attrs| {
+        *attrs.last_mut().unwrap() = valid;
+    });
     announce(&mut manager, &invalid);
     query(&mut manager, Some(invalid.peer));
     let mut announced = Vec::new();
@@ -152,7 +152,9 @@ fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
 }
 
 fn with_evpn_community(mut route: EvpnRibRoute, community: u32) -> EvpnRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![community]));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(vec![community]));
+    });
     route
 }
 
@@ -1127,7 +1129,7 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-        attributes: Arc::new(vec![PathAttribute::Communities(vec![
+        attributes: AttrSet::new(vec![PathAttribute::Communities(vec![
             rustbgpd_wire::COMMUNITY_NO_LLGR,
         ])]),
         received_at: Instant::now(),
@@ -1272,7 +1274,9 @@ async fn inject_evpn_reflects_to_peer() {
 }
 
 fn with_evpn_cluster_list(mut route: EvpnRibRoute, ids: &[Ipv4Addr]) -> EvpnRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::ClusterList(ids.to_vec()));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::ClusterList(ids.to_vec()));
+    });
     route
 }
 
@@ -1823,7 +1827,9 @@ async fn evpn_source_no_advertise_cannot_be_removed_by_export_policy() {
     for attempt in 0..2 {
         let mut scoped = first_seen.clone();
         if attempt > 0 {
-            Arc::make_mut(&mut scoped.attributes).push(PathAttribute::Med(attempt));
+            AttrSet::edit(&mut scoped.attributes, |attrs| {
+                attrs.push(PathAttribute::Med(attempt));
+            });
         }
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
@@ -1995,7 +2001,9 @@ async fn evpn_policy_added_no_advertise_withdraws_exact_prior() {
     assert!(first_seen.evpn_withdraw.is_empty());
 
     let mut repeated = primary.clone();
-    Arc::make_mut(&mut repeated.attributes).push(PathAttribute::Med(50));
+    AttrSet::edit(&mut repeated.attributes, |attrs| {
+        attrs.push(PathAttribute::Med(50));
+    });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: source_ip,
@@ -2274,7 +2282,7 @@ async fn partial_pmsi_survives_type3_imet_distribution_and_wire_encoding() {
     drain_eor(&mut source_rx).await;
 
     let mut imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    imet.attributes = Arc::new(vec![PathAttribute::PmsiTunnelPartial(
+    imet.attributes = AttrSet::new(vec![PathAttribute::PmsiTunnelPartial(
         rustbgpd_wire::PmsiTunnel::for_evpn_ingress_replication(100, source),
     )]);
     let imet_key = imet.key();
@@ -2440,7 +2448,7 @@ pub(super) fn make_evpn_macip(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(attrs),
+        attributes: AttrSet::new(attrs),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: peer,

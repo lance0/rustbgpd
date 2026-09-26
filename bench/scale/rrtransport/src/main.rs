@@ -12,6 +12,7 @@ use rustbgpd_evpn_load::{establish_on, PeerConfig as StubConfig};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::RibUpdate;
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
@@ -113,7 +114,7 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(source),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: Vec::new(),

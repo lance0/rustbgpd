@@ -13,6 +13,7 @@ use rustbgpd_wire::{
 use tokio::sync::oneshot;
 
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::event::RouteEventType;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecRoute, NextHopScope, Route,
@@ -161,7 +162,7 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: peer,
@@ -180,7 +181,7 @@ fn make_bgpls_route(peer: Ipv4Addr, payload_suffix: u8, local_pref: u32) -> BgpL
         nlri,
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
         ]),
@@ -219,7 +220,7 @@ fn make_labeled_rib_route(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
         ]),
@@ -250,7 +251,7 @@ fn make_rtc_rib_route(
         nlri,
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
         ]),
@@ -282,7 +283,7 @@ fn make_vpn_rib_route(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(local_pref),
         ]),
@@ -1124,7 +1125,7 @@ fn make_vpn6_rib_route_with_rts(
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::LocalPref(100),
             PathAttribute::ExtendedCommunities(rts),
@@ -1145,7 +1146,9 @@ fn make_vpn_rib_route_with_rts(
     rts: Vec<ExtendedCommunity>,
 ) -> VpnRibRoute {
     let mut route = make_vpn_rib_route(peer, prefix_octet, 100, 100);
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(rts));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::ExtendedCommunities(rts));
+    });
     route
 }
 
@@ -1247,7 +1250,7 @@ fn make_multipath_route(
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],
@@ -1273,7 +1276,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],

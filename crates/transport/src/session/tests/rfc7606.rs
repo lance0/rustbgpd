@@ -789,7 +789,7 @@ async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
                 nlri: route.nlri,
             });
         }
-        let mut attributes = route.attributes.as_ref().clone();
+        let mut attributes = route.attributes.to_vec();
         attributes.extend([domain_path.clone(), PathAttribute::MpReachNlri(mp)]);
         session
             .process_update(UpdateMessage::build(
@@ -1909,7 +1909,7 @@ async fn srv6_service_malformed_vpn_replacement_withdraws_and_recovers() {
             route.next_hop = "2001:db8::2".parse().unwrap();
         }
         let key = route.key();
-        let mut attrs = route.attributes.as_ref().clone();
+        let mut attrs = route.attributes.to_vec();
         attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
             afi,
             safi: Safi::MplsVpn,

@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use prometheus::Encoder;
 use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, RouteTarget};
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::route::{NextHopScope, Route, RouteOrigin};
 use rustbgpd_rib::{RouteEvent, RouteEventType};
 use rustbgpd_telemetry::BgpMetrics;
@@ -209,7 +210,7 @@ pub(crate) fn route_from_peer(
         link_local_next_hop: None,
         next_hop_scope: None,
         peer,
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
         ]),

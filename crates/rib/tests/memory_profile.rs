@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
 use rustbgpd_rib::attr_intern::AttrInternTable;
@@ -137,7 +138,7 @@ impl MemoryRow {
 
     fn arc_slice_pointer_growth_bytes(&self) -> usize {
         let per_route = std::mem::size_of::<Arc<[PathAttribute]>>()
-            .saturating_sub(std::mem::size_of::<Arc<Vec<PathAttribute>>>());
+            .saturating_sub(std::mem::size_of::<Arc<AttrSet>>());
         self.route_copies.saturating_mul(per_route)
     }
 
@@ -232,7 +233,7 @@ impl MemoryRow {
             std::mem::size_of::<MpUnreachNlri>(),
             std::mem::size_of::<Box<MpReachNlri>>(),
             std::mem::size_of::<Box<MpUnreachNlri>>(),
-            std::mem::size_of::<Arc<Vec<PathAttribute>>>(),
+            std::mem::size_of::<Arc<AttrSet>>(),
             std::mem::size_of::<Arc<[PathAttribute]>>(),
             std::mem::size_of::<Vec<PathAttribute>>(),
             self.stats.adj_in_attr_intern_entries,
@@ -324,7 +325,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
-        attributes: Arc::new(attrs.to_vec()),
+        attributes: AttrSet::new(attrs.to_vec()),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, peer_idx as u8, 1),
@@ -867,7 +868,7 @@ fn memory_profile_schema_quick() {
     assert!(adj.peak_bytes >= adj.live_bytes);
     assert!(adj.to_json().starts_with("{\"kind\":\"rib_memory\""));
     assert_eq!(
-        std::mem::size_of::<Arc<Vec<PathAttribute>>>(),
+        std::mem::size_of::<Arc<AttrSet>>(),
         std::mem::size_of::<usize>()
     );
     assert_eq!(

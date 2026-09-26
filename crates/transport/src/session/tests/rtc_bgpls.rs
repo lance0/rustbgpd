@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 #[tokio::test]
 async fn send_route_update_emits_bgpls_reach_and_unreach() {
@@ -563,7 +564,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         nlri: rustbgpd_wire::RtcNlri::DEFAULT,
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -686,7 +687,7 @@ fn prepare_outbound_attributes_rtc_adds_rr_attrs_for_ibgp_reflection() {
     let mut route = make_rtc_rib_route(100);
     route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
     route.peer_router_id = source_id;
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),

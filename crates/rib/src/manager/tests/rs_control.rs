@@ -37,13 +37,14 @@ fn tagged(
     communities: Vec<u32>,
     large_communities: Vec<LargeCommunity>,
 ) -> Route {
-    let attrs = Arc::make_mut(&mut route.attributes);
-    if !communities.is_empty() {
-        attrs.push(PathAttribute::Communities(communities));
-    }
-    if !large_communities.is_empty() {
-        attrs.push(PathAttribute::LargeCommunities(large_communities));
-    }
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        if !communities.is_empty() {
+            attrs.push(PathAttribute::Communities(communities));
+        }
+        if !large_communities.is_empty() {
+            attrs.push(PathAttribute::LargeCommunities(large_communities));
+        }
+    });
     route
 }
 

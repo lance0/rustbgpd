@@ -13,6 +13,7 @@ use rustbgpd_policy::{
 };
 
 use super::*;
+use crate::attr_set::AttrSet;
 use crate::update::{ExportGateStep, ExportGateVerdict};
 
 fn statement(prefix: Ipv4Prefix, action: PolicyAction) -> PolicyStatement {
@@ -369,7 +370,9 @@ async fn add_path_source_explain_retains_attempted_rank_on_post_rank_otc_denial(
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 122, 0), 24);
     let mut route = make_route_with_lp(prefix, source_peer, 200);
     route.path_id = 9;
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::OnlyToCustomer(64512));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::OnlyToCustomer(64512));
+    });
     feed_routes(&tx, IpAddr::V4(source_peer), vec![route]).await;
 
     let explain = query_explain_advertised_source(
@@ -456,7 +459,7 @@ async fn add_path_source_explain_fails_closed_for_mode_and_identity_mismatch() {
 
     let controlled_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 124, 0), 24);
     let mut controlled = make_route(controlled_prefix, source_peer);
-    controlled.attributes = Arc::new(vec![PathAttribute::Communities(vec![65000])]);
+    controlled.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![65000])]);
     feed_routes(&tx, IpAddr::V4(source_peer), vec![controlled]).await;
     let controlled =
         query_explain_advertised_source(&tx, add_path, Prefix::V4(controlled_prefix), source)
@@ -671,7 +674,7 @@ async fn llgr_gate_stops_stale_route_toward_non_llgr_ebgp_peer() {
     // Route carrying the LLGR_STALE community (an upstream helper's tag).
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Communities(vec![
+    route.attributes = AttrSet::new(vec![PathAttribute::Communities(vec![
         rustbgpd_wire::COMMUNITY_LLGR_STALE,
     ])]);
     feed_routes(&tx, source, vec![route]).await;
@@ -1348,7 +1351,9 @@ fn labeled_with_communities(
     mut route: crate::route::LabeledRibRoute,
     communities: Vec<u32>,
 ) -> crate::route::LabeledRibRoute {
-    Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(communities));
+    AttrSet::edit(&mut route.attributes, |attrs| {
+        attrs.push(PathAttribute::Communities(communities));
+    });
     route
 }
 

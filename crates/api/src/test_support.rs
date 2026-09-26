@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use prometheus::Encoder;
 use rustbgpd_fsm::SessionState;
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, RouteEvent, RouteEventType};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::RemovePrivateAs;
@@ -133,7 +134,7 @@ fn evpn_route(peer: IpAddr, mac_byte: u8) -> rustbgpd_rib::route::EvpnRibRoute {
         next_hop: peer,
         link_local_next_hop: None,
         peer,
-        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+        attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: std::time::Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
         peer_router_id: std::net::Ipv4Addr::new(192, 0, 2, mac_byte),

@@ -23,7 +23,7 @@ fn evpn_withdraw_gcs_attr_intern_under_mac_mobility() {
         // Same key, distinct attribute set per "move" — `Med(seq)` stands in
         // for the incrementing MAC Mobility sequence so each set interns anew.
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         let key = route.key();
         manager.process_evpn_announce_chunk(peer, vec![route]);
         manager.process_evpn_withdraw_chunk(peer, vec![key]);
@@ -58,7 +58,7 @@ fn evpn_announce_replace_reclaims_attr_intern() {
     let moves = u32::try_from(EVPN_ROUTE_EVENT_HISTORY_CAPACITY).unwrap() + 2000;
     for seq in 0..moves {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         manager.process_evpn_announce_chunk(peer, vec![route]);
     }
 
@@ -90,7 +90,7 @@ fn handle_withdraw_evpn_gcs_attr_intern_for_injected_routes() {
 
     for seq in 0..64u32 {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         let key = route.key();
         manager.attr_intern.intern(&mut route.attributes);
         manager
@@ -121,7 +121,7 @@ fn unicast_withdraw_reclaims_selected_attr_intern_after_loc_rib_recompute() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
     manager.process_announce_chunk(peer, vec![route]);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
@@ -170,7 +170,7 @@ fn unicast_inject_replace_reclaims_attr_intern_after_loc_rib_recompute() {
     let moves = 5000u32;
     for seq in 0..moves {
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         let (reply_tx, _reply_rx) = oneshot::channel();
         manager.handle_inject_route(route, reply_tx);
     }
@@ -196,7 +196,7 @@ fn unicast_withdraw_injected_reclaims_attr_intern_after_loc_rib_recompute() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
     let (reply_tx, _reply_rx) = oneshot::channel();
     manager.handle_inject_route(route, reply_tx);
     assert_eq!(manager.attr_intern.len(), 1);
@@ -229,7 +229,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
     manager.process_announce_chunk(peer, vec![route]);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
@@ -272,7 +272,7 @@ fn llgr_eor_reclaims_stale_clear_attr_intern_after_loc_rib_recompute() {
     // only a re-advertised route exercises the retained-route stale-clear
     // path this test pins.
     let mut readvertised = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    readvertised.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    readvertised.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
     manager.process_announce_chunk(peer, vec![readvertised]);
 
     manager.handle_update(RibUpdate::EndOfRib {
@@ -313,7 +313,7 @@ fn llgr_promotion_preserves_global_attribute_sharing() {
         .into_iter()
         .map(|prefix| {
             let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-            route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+            route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
             route
         })
         .collect();
@@ -365,7 +365,7 @@ fn gr_expiry_reclaims_stale_attr_intern_after_loc_rib_recompute() {
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Med(100)]);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(100)]);
     manager.process_announce_chunk(peer, vec![route]);
     assert_eq!(
         manager.loc_rib.get(&Prefix::V4(prefix)).map(|r| r.peer),
@@ -416,7 +416,7 @@ fn unicast_announce_replace_reclaims_attr_intern() {
     let moves = 5000u32;
     for seq in 0..moves {
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         manager.process_announce_chunk(peer, vec![route]);
     }
 
@@ -519,7 +519,7 @@ fn graceful_restart_entry_gcs_attr_intern_after_family_prune() {
 
     for seq in 0..64u32 {
         let mut route = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100 + seq);
-        route.attributes = Arc::new(vec![PathAttribute::Med(seq)]);
+        route.attributes = AttrSet::new(vec![PathAttribute::Med(seq)]);
         manager.attr_intern.intern(&mut route.attributes);
         rib.insert_evpn(route);
     }
@@ -716,9 +716,9 @@ fn cross_peer_identical_attrs_share_one_global_intern_entry() {
     let attrs = vec![PathAttribute::Med(100), PathAttribute::LocalPref(200)];
 
     let mut r1 = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    r1.attributes = Arc::new(attrs.clone());
+    r1.attributes = AttrSet::new(attrs.clone());
     let mut r2 = make_route(prefix, Ipv4Addr::new(10, 0, 0, 2));
-    r2.attributes = Arc::new(attrs);
+    r2.attributes = AttrSet::new(attrs);
     assert!(!Arc::ptr_eq(&r1.attributes, &r2.attributes));
 
     manager.process_announce_chunk(peer1, vec![r1]);
@@ -774,7 +774,7 @@ fn cross_peer_churn_keeps_global_intern_table_flat_and_teardown_reclaims() {
                     let mut route = make_route(prefix, nh);
                     // Per-prefix-unique, cross-peer-identical, rotated
                     // every cycle so each cycle replaces every set.
-                    route.attributes = Arc::new(vec![
+                    route.attributes = AttrSet::new(vec![
                         PathAttribute::Med(u32::from(i)),
                         PathAttribute::LocalPref(cycle),
                     ]);
@@ -825,7 +825,7 @@ fn diverse_unicast_route(index: usize, med: u32) -> Route {
         32,
     );
     let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-    route.attributes = Arc::new(vec![PathAttribute::Med(med)]);
+    route.attributes = AttrSet::new(vec![PathAttribute::Med(med)]);
     route
 }
 

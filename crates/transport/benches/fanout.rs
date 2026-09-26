@@ -84,6 +84,7 @@ use bytes::Bytes;
 use rustbgpd_policy::{
     NeighborSetMatch, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::manager::{AdjRibOutFanoutBenchReceipt, PolicyTransitionBenchReceipt};
 use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -155,7 +156,7 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         // eBGP-learned so it reflects freely to the iBGP / RR clients (no
         // iBGP-to-iBGP split-horizon suppression in the way).
@@ -181,7 +182,7 @@ fn mp_prefix(index: usize, prefix_len: u8) -> Prefix {
     ))
 }
 
-fn mp_route(index: usize, prefix_len: u8, attributes: Arc<Vec<PathAttribute>>) -> Route {
+fn mp_route(index: usize, prefix_len: u8, attributes: Arc<AttrSet>) -> Route {
     let mut route = make_route(mp_prefix(index, prefix_len));
     route.prefix = mp_prefix(index, prefix_len);
     route.next_hop = IpAddr::V6(Ipv6Addr::from(
@@ -191,8 +192,8 @@ fn mp_route(index: usize, prefix_len: u8, attributes: Arc<Vec<PathAttribute>>) -
     route
 }
 
-fn rich_mp_attributes(index: usize) -> Arc<Vec<PathAttribute>> {
-    Arc::new(vec![
+fn rich_mp_attributes(index: usize) -> Arc<AttrSet> {
+    AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![
@@ -337,7 +338,7 @@ fn add_path_route(index: usize, candidates: usize, med: u32) -> Route {
         .iter_mut()
         .find(|attribute| matches!(attribute, PathAttribute::Med(_)))
         .expect("benchmark attributes include MED") = PathAttribute::Med(med);
-    route.attributes = Arc::new(attributes);
+    route.attributes = AttrSet::new(attributes);
     route
 }
 
@@ -2270,12 +2271,12 @@ fn assert_exact_probe_results(
 fn bench_mp_exact_export_probe(c: &mut Criterion) {
     let encoder = fanout_bench_export_encoder();
     let snapshot = encoder.snapshot();
-    let shared_attributes = Arc::new(typical_attributes());
+    let shared_attributes = AttrSet::new(typical_attributes());
     let same_shape_routes = (0..64)
         .map(|index| mp_route(index, 64, Arc::clone(&shared_attributes)))
         .collect::<Vec<_>>();
     let distinct_shape_routes = (0..64)
-        .map(|index| mp_route(index, 64, Arc::new(typical_attributes())))
+        .map(|index| mp_route(index, 64, AttrSet::new(typical_attributes())))
         .collect::<Vec<_>>();
     let rich_routes = (0..50)
         .map(|index| mp_route(index, 64, rich_mp_attributes(index)))

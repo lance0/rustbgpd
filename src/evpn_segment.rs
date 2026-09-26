@@ -52,6 +52,7 @@ use rustbgpd_evpn::{
     LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction, RedundancyMode,
     SameEsiBiasTable,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{EvpnRouteEvent, RibRowFilter, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
@@ -1805,7 +1806,7 @@ fn build_es_route(
         next_hop: instance.local_vtep_ip,
         link_local_next_hop: None,
         peer: LOCAL_PEER,
-        attributes: Arc::new(attributes),
+        attributes: AttrSet::new(attributes),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::route::RouteOrigin::Local,
         peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
@@ -1911,7 +1912,7 @@ mod tests {
             next_hop: ipa(originator_ip),
             link_local_next_hop: None,
             peer: ipa(originator_ip),
-            attributes: Arc::new(attrs),
+            attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ibgp,
             peer_router_id: "192.0.2.1".parse().unwrap(),

@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 fn shared_query_update(
     member: &PeerSession,
@@ -903,11 +904,11 @@ async fn shared_group_encode_streams_multiple_slices() {
     ];
     // One attribute Arc per source so same-source routes group into shared
     // chunks (mirroring interned route-server tables).
-    let attrs: Vec<Arc<Vec<PathAttribute>>> = sources
+    let attrs: Vec<Arc<AttrSet>> = sources
         .iter()
         .enumerate()
         .map(|(i, source)| {
-            Arc::new(vec![
+            AttrSet::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![
@@ -990,7 +991,7 @@ async fn shared_group_encode_streams_multiple_slices() {
 /// receive its own route back (leak).
 #[tokio::test]
 async fn shared_group_interned_attrs_across_sources_never_merge_chunks() {
-    let shared_attrs = Arc::new(vec![
+    let shared_attrs = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64_601])],

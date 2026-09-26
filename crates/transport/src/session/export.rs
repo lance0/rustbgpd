@@ -2392,6 +2392,7 @@ mod tests {
     use super::*;
     use crate::config::{TcpAoAlgorithm, TcpAoConfig};
     use rustbgpd_fsm::{NegotiatedSession, PeerConfig};
+    use rustbgpd_rib::AttrSet;
     use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, encode_message};
     use tokio::sync::mpsc;
@@ -2547,7 +2548,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -2613,7 +2614,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![
+            attributes: AttrSet::new(vec![
                 PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![64_520])],
@@ -2859,7 +2860,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -2880,7 +2881,7 @@ mod tests {
     fn same_snapshot_batch_memoizes_only_complete_attr_keys() {
         let config = config_with_auth_secret("not-retained");
         let profile = SessionExportProfile::initial(&config, None, false);
-        let shared_attributes = Arc::new(vec![
+        let shared_attributes = AttrSet::new(vec![
             PathAttribute::Origin(rustbgpd_wire::Origin::Igp),
             PathAttribute::LocalPref(100),
         ]);
@@ -3049,7 +3050,7 @@ mod tests {
             link_local_next_hop: None,
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
-            attributes: Arc::new(attributes),
+            attributes: AttrSet::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
@@ -3149,14 +3150,14 @@ mod tests {
             Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 1), 32)),
             IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
         );
-        let mut attrs = route.attributes.as_ref().clone();
+        let mut attrs = route.attributes.to_vec();
         attrs.push(PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
             flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
                 | rustbgpd_wire::constants::attr_flags::TRANSITIVE,
             type_code: 99,
             data: bytes::Bytes::from(vec![0; 4_040]),
         }));
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
         let candidate = ExactExportCandidate::Unicast {
             route: &route,
             next_hop_override: None,

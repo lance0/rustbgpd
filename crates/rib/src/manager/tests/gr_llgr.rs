@@ -595,7 +595,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         link_local_next_hop: None,
         next_hop_scope: None,
         peer: source,
-        attributes: Arc::new(vec![]),
+        attributes: AttrSet::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),

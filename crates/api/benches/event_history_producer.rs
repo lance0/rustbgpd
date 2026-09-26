@@ -24,6 +24,7 @@ use rustbgpd_event_history::{
     Category, EhmState, EnvelopePeers, EventEnvelope, EventHistoryConfig, EventHistoryHandle,
     EventHistoryManager, EventHistorySender, PayloadCodec, Severity, SynchronousMode,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{
     EvpnRibRoute, EvpnRouteEvent, RibManager, RouteEvent, RouteEventType, RouteOrigin,
 };
@@ -239,7 +240,7 @@ fn evpn_route(peer: Ipv4Addr, index: usize) -> EvpnRibRoute {
         next_hop: IpAddr::V4(peer),
         link_local_next_hop: None,
         peer: IpAddr::V4(peer),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![64_512, 64_513])],

@@ -23,6 +23,7 @@ use std::time::Instant;
 use rustbgpd_policy::{
     AsPathRegex, Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::RibManager;
 use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::{
@@ -141,7 +142,7 @@ fn tagging_chain() -> PolicyChain {
     }])
 }
 
-fn route(prefix: Prefix, peer: IpAddr, attributes: Arc<Vec<PathAttribute>>) -> Route {
+fn route(prefix: Prefix, peer: IpAddr, attributes: Arc<AttrSet>) -> Route {
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -235,7 +236,7 @@ fn run_fanout(n_peers: usize, n_prefixes: u32, with_policy: bool) -> (usize, usi
         // (the profile harness shape: attrs maximally Arc-shared at
         // ingest; per-peer structural fanout is what is measured).
         let src = IpAddr::V4(Ipv4Addr::new(172, 20, 0, 10));
-        let shared: Arc<Vec<PathAttribute>> = Arc::new(vec![
+        let shared: Arc<AttrSet> = AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65000, 65100, 65200])],

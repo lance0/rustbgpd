@@ -11,6 +11,7 @@ use rustbgpd_policy::{
     NextHopAction, PolicyAction, PolicyEvaluation, RouteContext, RouteFamily, RouteModifications,
     RouteType,
 };
+use rustbgpd_rib::AttrSet;
 use rustbgpd_telemetry::reason_labels::{
     ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
     NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
@@ -525,9 +526,9 @@ fn external_neighbor_discard(is_ebgp: bool, type_code: u8) -> bool {
 /// feature can exercise the type; the enclosing `session` module is
 /// `pub(crate)`, so nothing here is reachable in a normal build.
 pub struct RouteAttrBundle {
-    pub unicast: Arc<Vec<PathAttribute>>,
-    pub mp: Arc<Vec<PathAttribute>>,
-    pub mp_unicast: Arc<Vec<PathAttribute>>,
+    pub unicast: Arc<AttrSet>,
+    pub mp: Arc<AttrSet>,
+    pub mp_unicast: Arc<AttrSet>,
 }
 impl RouteAttrBundle {
     /// Build the three variants from the MP-filtered base attributes.
@@ -554,9 +555,9 @@ impl RouteAttrBundle {
         }
         let mp_unicast = strip_next_hop(&unicast);
         Self {
-            unicast: Arc::new(unicast),
-            mp: Arc::new(mp),
-            mp_unicast: Arc::new(mp_unicast),
+            unicast: AttrSet::new(unicast),
+            mp: AttrSet::new(mp),
+            mp_unicast: AttrSet::new(mp_unicast),
         }
     }
 }
@@ -574,15 +575,15 @@ impl RouteAttrBundle {
 #[inline]
 #[must_use]
 pub fn materialize_attrs(
-    canonical: &Arc<Vec<PathAttribute>>,
+    canonical: &Arc<AttrSet>,
     mods: &RouteModifications,
-) -> (Arc<Vec<PathAttribute>>, Option<NextHopAction>) {
+) -> (Arc<AttrSet>, Option<NextHopAction>) {
     if mods.is_empty() {
         (Arc::clone(canonical), None)
     } else {
-        let mut owned = (**canonical).clone();
+        let mut owned = canonical.to_vec();
         let nh = rustbgpd_policy::apply_modifications(&mut owned, mods);
-        (Arc::new(owned), nh)
+        (AttrSet::new(owned), nh)
     }
 }
 /// Distinct modified attribute sets one UPDATE may memoize. The shipped
@@ -604,9 +605,9 @@ pub struct ImportAttrMemo {
 /// Canonical source, modifications, and the resulting attributes and
 /// next-hop action.
 type ImportAttrMemoEntry = (
-    Arc<Vec<PathAttribute>>,
+    Arc<AttrSet>,
     RouteModifications,
-    Arc<Vec<PathAttribute>>,
+    Arc<AttrSet>,
     Option<NextHopAction>,
 );
 
@@ -615,9 +616,9 @@ impl ImportAttrMemo {
     /// of the same canonical variant.
     pub fn materialize(
         &mut self,
-        canonical: &Arc<Vec<PathAttribute>>,
+        canonical: &Arc<AttrSet>,
         mods: &RouteModifications,
-    ) -> (Arc<Vec<PathAttribute>>, Option<NextHopAction>) {
+    ) -> (Arc<AttrSet>, Option<NextHopAction>) {
         if mods.is_empty() {
             return (Arc::clone(canonical), None);
         }
@@ -2394,7 +2395,7 @@ impl PeerSession {
                                 // FlowSpec stores an owned `Vec` (not `Arc`),
                                 // so it can't share — but still skip the no-op
                                 // apply when policy made no modifications.
-                                let mut attrs = (*attr_bundle.mp).clone();
+                                let mut attrs = attr_bundle.mp.to_vec();
                                 if !result.modifications.is_empty() {
                                     let _ = rustbgpd_policy::apply_modifications(
                                         &mut attrs,

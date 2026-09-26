@@ -3,7 +3,6 @@
 //! `(Prefix, path_id)` for Add-Path, and LLGR stale tagging is tracked here.
 
 use std::net::IpAddr;
-use std::sync::Arc;
 
 // Route-bearing maps use FxHash (rustc-hash) rather than the default SipHash
 // for a pure insert/lookup speedup on the convergence + churn hot path.
@@ -31,6 +30,7 @@ use rustbgpd_wire::{
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
+use crate::attr_set::AttrSet;
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -50,7 +50,7 @@ use crate::update::{RouteQueryKey, route_query_key};
 /// enabling O(candidates) `iter_prefix()` lookups instead of O(N) full scans.
 ///
 /// Path attribute interning happens *before* routes reach this table: the
-/// RIB manager deduplicates identical `Arc<Vec<PathAttribute>>` allocations
+/// RIB manager deduplicates identical `Arc<AttrSet>` allocations
 /// across ALL peers through its global [`crate::attr_intern::AttrInternTable`]
 /// (LAN-336), so this struct only stores whatever `Arc`s it is handed.
 #[derive(Debug)]
@@ -706,8 +706,7 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 // Add LLGR_STALE community
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.llgr_stale_local_tags
                         .insert((route.prefix, route.path_id));
                 }
@@ -864,8 +863,8 @@ impl AdjRibIn {
     // --- EVPN GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the unicast pattern (not FlowSpec): EvpnRibRoute attributes
-    // are Arc<Vec<PathAttribute>>, so community injection goes through
-    // Arc::make_mut to preserve the intern-table sharing invariant.
+    // are Arc<AttrSet>, so community injection goes through
+    // copy-on-write `AttrSet::edit` to preserve the intern-table sharing invariant.
     //
     // EVPN has a single family tuple (Afi::L2Vpn, Safi::Evpn), so family
     // match checks reduce to direct equality.
@@ -947,7 +946,7 @@ impl AdjRibIn {
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
     /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
-    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///   `LLGR_STALE` community added via `AttrSet::edit`.
     ///
     /// Returns keys affected (for best-path recalc).
     pub fn promote_to_llgr_stale_evpn(
@@ -979,8 +978,7 @@ impl AdjRibIn {
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.evpn_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1101,8 +1099,8 @@ impl AdjRibIn {
     // --- BGP-LS GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the EVPN pattern: BgpLsRibRoute attributes are
-    // Arc<Vec<PathAttribute>>, so community injection goes through
-    // Arc::make_mut to preserve the intern-table sharing invariant.
+    // Arc<AttrSet>, so community injection goes through
+    // copy-on-write `AttrSet::edit` to preserve the intern-table sharing invariant.
     //
     // Unlike EVPN, BGP-LS spans two family tuples — (BgpLs, BgpLs) and
     // (BgpLs, BgpLsVpn) — which the GR capability lists separately, so every
@@ -1203,7 +1201,7 @@ impl AdjRibIn {
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
     /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
-    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///   `LLGR_STALE` community added via `AttrSet::edit`.
     ///
     /// Returns keys affected (for best-path recalc).
     pub fn promote_to_llgr_stale_bgpls(
@@ -1237,8 +1235,7 @@ impl AdjRibIn {
             if route.is_stale && route.family == fam {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.bgpls_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1409,8 +1406,8 @@ impl AdjRibIn {
     // --- VPN GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the EVPN pattern: VpnRibRoute attributes are
-    // Arc<Vec<PathAttribute>>, so community injection goes through
-    // Arc::make_mut to preserve the intern-table sharing invariant.
+    // Arc<AttrSet>, so community injection goes through
+    // copy-on-write `AttrSet::edit` to preserve the intern-table sharing invariant.
     //
     // Unlike EVPN, VPN spans two family tuples — (Ipv4, MplsVpn) and
     // (Ipv6, MplsVpn) — which the GR capability lists separately, so every
@@ -1508,7 +1505,7 @@ impl AdjRibIn {
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
     /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
-    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///   `LLGR_STALE` community added via `AttrSet::edit`.
     ///
     /// Returns keys affected (for best-path recalc).
     pub fn promote_to_llgr_stale_vpn(
@@ -1541,8 +1538,7 @@ impl AdjRibIn {
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.vpn_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1702,8 +1698,8 @@ impl AdjRibIn {
     // --- Labeled-unicast GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the VPN pattern: LabeledRibRoute attributes are
-    // Arc<Vec<PathAttribute>>, so community injection goes through
-    // Arc::make_mut to preserve the intern-table sharing invariant.
+    // Arc<AttrSet>, so community injection goes through
+    // copy-on-write `AttrSet::edit` to preserve the intern-table sharing invariant.
     //
     // Like VPN, labeled-unicast spans two family tuples — (Ipv4,
     // LabeledUnicast) and (Ipv6, LabeledUnicast) — which the GR capability
@@ -1802,7 +1798,7 @@ impl AdjRibIn {
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
     /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
-    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///   `LLGR_STALE` community added via `AttrSet::edit`.
     ///
     /// Returns keys affected (for best-path recalc).
     pub fn promote_to_llgr_stale_labeled(
@@ -1835,8 +1831,7 @@ impl AdjRibIn {
             if route.is_stale && route.afi_safi() == family {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.labeled_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -1971,8 +1966,8 @@ impl AdjRibIn {
     // --- RTC GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
     //
     // Follows the EVPN pattern: RtcRibRoute attributes are
-    // Arc<Vec<PathAttribute>>, so community injection goes through
-    // Arc::make_mut to preserve the intern-table sharing invariant.
+    // Arc<AttrSet>, so community injection goes through
+    // copy-on-write `AttrSet::edit` to preserve the intern-table sharing invariant.
     //
     // Like EVPN, RTC has a single family tuple (Ipv4, RtConstrain), so family
     // match checks reduce to direct equality.
@@ -2058,7 +2053,7 @@ impl AdjRibIn {
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
     /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
-    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///   `LLGR_STALE` community added via `AttrSet::edit`.
     ///
     /// Returns keys affected (for best-path recalc).
     pub fn promote_to_llgr_stale_rtc(
@@ -2090,8 +2085,7 @@ impl AdjRibIn {
             if route.is_stale {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
-                let attrs = Arc::make_mut(&mut route.attributes);
-                if add_llgr_stale_community(attrs) {
+                if AttrSet::edit(&mut route.attributes, add_llgr_stale_community) {
                     self.rtc_llgr_stale_local_tags.insert(route.key());
                 }
                 attr_intern.intern(&mut route.attributes);
@@ -2398,7 +2392,7 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_evpn_community(&mut self, keys: &[EvpnRouteKey]) {
         for key in keys {
             if let Some(route) = self.evpn_routes.get_mut(key) {
-                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             }
             self.evpn_llgr_stale_local_tags.remove(key);
         }
@@ -2407,7 +2401,7 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_bgpls_community(&mut self, keys: &[BgpLsRouteKey]) {
         for key in keys {
             if let Some(route) = self.bgpls_routes.get_mut(key) {
-                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             }
             self.bgpls_llgr_stale_local_tags.remove(key);
         }
@@ -2416,7 +2410,7 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_vpn_community(&mut self, keys: &[VpnRibRouteKey]) {
         for key in keys {
             if let Some(route) = self.vpn_routes.get_mut(key) {
-                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             }
             self.vpn_llgr_stale_local_tags.remove(key);
         }
@@ -2425,7 +2419,7 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_labeled_community(&mut self, keys: &[LabeledRibRouteKey]) {
         for key in keys {
             if let Some(route) = self.labeled_routes.get_mut(key) {
-                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             }
             self.labeled_llgr_stale_local_tags.remove(key);
         }
@@ -2434,7 +2428,7 @@ impl AdjRibIn {
     fn clear_local_llgr_stale_rtc_community(&mut self, keys: &[RtcRibRouteKey]) {
         for key in keys {
             if let Some(route) = self.rtc_routes.get_mut(key) {
-                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+                AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
             }
             self.rtc_llgr_stale_local_tags.remove(key);
         }
@@ -2460,8 +2454,7 @@ fn add_llgr_stale_community(attrs: &mut Vec<PathAttribute>) -> bool {
 
 /// Remove the `LLGR_STALE` community from a route's attributes, if present.
 fn remove_llgr_stale_community(route: &mut Route) {
-    use std::sync::Arc;
-    remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+    AttrSet::edit(&mut route.attributes, remove_llgr_stale_community_attrs);
 }
 
 fn remove_llgr_stale_community_attrs(attrs: &mut Vec<PathAttribute>) {
@@ -2568,7 +2561,7 @@ mod tests {
             nlri,
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -2593,7 +2586,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -2803,7 +2796,7 @@ mod tests {
         assert_eq!(intern.len(), 1);
 
         let mut replacement = make_vpn_route(nlri, 2);
-        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        replacement.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
         intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_vpn(replacement));
@@ -2843,7 +2836,7 @@ mod tests {
             nlri,
             next_hop: peer,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -2922,7 +2915,7 @@ mod tests {
         assert_eq!(intern.len(), 1);
 
         let mut replacement = make_rtc_route(nlri, 2);
-        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        replacement.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
         intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_rtc(replacement));
@@ -3060,7 +3053,7 @@ mod tests {
         assert_eq!(intern.len(), 1);
 
         let mut replacement = make_bgpls_route(BgpLsFamily::LinkState, nlri, 2);
-        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        replacement.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
         intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_bgpls(replacement));
@@ -3386,8 +3379,9 @@ mod tests {
 
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
         route.is_llgr_stale = true;
-        Arc::make_mut(&mut route.attributes)
-            .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+        AttrSet::edit(&mut route.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+        });
         rib.insert(route);
 
         rib.clear_llgr_stale((Afi::Ipv4, Safi::Unicast));
@@ -3555,7 +3549,7 @@ mod tests {
             (p3, attrs.clone()),
         ] {
             let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
-            route.attributes = Arc::new(set);
+            route.attributes = AttrSet::new(set);
             intern.intern(&mut route.attributes);
             rib.insert(route);
         }
@@ -3585,10 +3579,10 @@ mod tests {
         let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
 
         let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
-        r1.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+        r1.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]);
         intern.intern(&mut r1.attributes);
         let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
-        r2.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        r2.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
         intern.intern(&mut r2.attributes);
 
         rib.insert(r1);
@@ -3622,7 +3616,7 @@ mod tests {
             next_hop: peer_ip,
             link_local_next_hop: None,
             peer: peer_ip,
-            attributes: Arc::new(vec![]),
+            attributes: AttrSet::new(vec![]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -3667,7 +3661,7 @@ mod tests {
             next_hop: IpAddr::V4(peer),
             link_local_next_hop: None,
             peer: IpAddr::V4(peer),
-            attributes: Arc::new(attrs),
+            attributes: AttrSet::new(attrs),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: peer,
@@ -3946,7 +3940,7 @@ mod tests {
 
     #[test]
     fn promote_to_llgr_stale_evpn_arc_make_mut_preserves_other_routes() {
-        // Two routes share an Arc<Vec<PathAttribute>> — in production the
+        // Two routes share an Arc<AttrSet> — in production the
         // manager's global intern table produces this sharing (LAN-336).
         // Promoting one must only mutate that route's copy, not the shared
         // Arc — otherwise both routes would gain LLGR_STALE when only one
@@ -4030,7 +4024,7 @@ mod tests {
         attrs: Vec<PathAttribute>,
     ) -> VpnRibRouteKey {
         let mut route = make_vpn_route(nlri, 1);
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
         let key = route.key();
         rib.insert_vpn(route);
         key
@@ -4043,7 +4037,7 @@ mod tests {
         attrs: Vec<PathAttribute>,
     ) -> BgpLsRouteKey {
         let mut route = make_bgpls_route(family, nlri, 1);
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
         let key = route.key();
         rib.insert_bgpls(route);
         key
@@ -4055,7 +4049,7 @@ mod tests {
         attrs: Vec<PathAttribute>,
     ) -> RtcRibRouteKey {
         let mut route = make_rtc_route(nlri, 1);
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
         let key = route.key();
         rib.insert_rtc(route);
         key
@@ -4273,7 +4267,7 @@ mod tests {
             next_hop: peer,
             link_local_next_hop: None,
             peer,
-            attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
+            attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, peer_oct),
@@ -4289,7 +4283,7 @@ mod tests {
         attrs: Vec<PathAttribute>,
     ) -> LabeledRibRouteKey {
         let mut route = make_labeled_route(nlri, 1);
-        route.attributes = Arc::new(attrs);
+        route.attributes = AttrSet::new(attrs);
         let key = route.key();
         rib.insert_labeled(route);
         key
@@ -4412,7 +4406,7 @@ mod tests {
         assert_eq!(intern.len(), 1);
 
         let mut replacement = make_labeled_route(nlri, 2);
-        replacement.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+        replacement.attributes = AttrSet::new(vec![PathAttribute::Origin(Origin::Egp)]);
         intern.intern(&mut replacement.attributes);
 
         assert!(rib.insert_labeled(replacement));

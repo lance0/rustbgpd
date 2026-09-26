@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_rib::AttrSet;
 
 /// LAN-217: a `VPNv6` route carrying an RFC 4659 §3.2.1.1 48-byte two-address
 /// next-hop (global + link-local) reflects the link-local half — the emitted
@@ -25,7 +26,7 @@ async fn send_route_update_reflects_vpnv6_link_local_next_hop() {
         next_hop: IpAddr::V6(global),
         link_local_next_hop: Some(link_local),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: Arc::new(vec![
+        attributes: AttrSet::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -578,7 +579,7 @@ fn prepare_outbound_attributes_vpn_adds_rr_attrs_for_ibgp_reflection() {
     let mut route = make_vpn_rib_route(100);
     route.origin_type = rustbgpd_rib::RouteOrigin::Ibgp;
     route.peer_router_id = source_id;
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),
@@ -618,7 +619,7 @@ fn prepare_outbound_attributes_vpn_adds_rr_attrs_for_ibgp_reflection() {
 fn prepare_outbound_attributes_vpn_strips_rr_attrs_for_ebgp() {
     let session = make_test_session(65001, 65002);
     let mut route = make_vpn_rib_route(100);
-    route.attributes = Arc::new(vec![
+    route.attributes = AttrSet::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
@@ -806,7 +807,7 @@ async fn vpnv4_ipv6_next_hop_receive_does_not_require_peer_receive_capability() 
         install_test_negotiated_session(&mut session, negotiated);
         let route = make_vpn_rib_route(4093);
         let next_hop = "2001:db8::7".parse().unwrap();
-        let mut attrs = route.attributes.as_ref().clone();
+        let mut attrs = route.attributes.to_vec();
         attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
             afi: family.0,
             safi: family.1,
