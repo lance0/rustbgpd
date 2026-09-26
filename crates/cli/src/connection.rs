@@ -1,8 +1,8 @@
 //! gRPC connection handling for `rbgp`.
 //!
 //! Supports both Unix domain socket (`unix:///path`) and TCP (`host:port` or
-//! `http://host:port`) endpoints, with optional bearer-token authentication
-//! loaded from a file.
+//! `http://host:port`) endpoints, HTTPS with explicit CA trust and optional
+//! client identity, and orthogonal bearer-token authentication loaded from a file.
 
 use std::fs;
 use std::future::Future;
@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Uri};
 use tonic::{Request, Status};
 use tower::service_fn;
 
@@ -86,6 +86,99 @@ pub(crate) struct Connection {
     channel: Channel,
     token: Option<AsciiMetadataValue>,
     local_process: Arc<Mutex<Option<LocalProcess>>>,
+    pub(crate) tls_client_identity: bool,
+}
+
+/// File paths only; certificate and private-key contents are never retained here.
+#[derive(clap::Args, Default)]
+pub(crate) struct TlsOptions {
+    /// PEM CA bundle used to verify an HTTPS server (required for HTTPS)
+    #[arg(long, env = "RUSTBGPD_TLS_CA", global = true, value_name = "FILE")]
+    pub(crate) tls_ca: Option<PathBuf>,
+
+    /// PEM client certificate chain for mTLS (requires --tls-key)
+    #[arg(
+        long,
+        env = "RUSTBGPD_TLS_CERT",
+        global = true,
+        value_name = "FILE",
+        requires = "tls_key"
+    )]
+    pub(crate) tls_cert: Option<PathBuf>,
+
+    /// PEM client private key for mTLS (requires --tls-cert)
+    #[arg(
+        long,
+        env = "RUSTBGPD_TLS_KEY",
+        global = true,
+        value_name = "FILE",
+        requires = "tls_cert"
+    )]
+    pub(crate) tls_key: Option<PathBuf>,
+
+    /// Server certificate name to verify instead of the HTTPS address host
+    #[arg(
+        long,
+        env = "RUSTBGPD_TLS_SERVER_NAME",
+        global = true,
+        value_name = "NAME"
+    )]
+    pub(crate) tls_server_name: Option<String>,
+}
+
+impl TlsOptions {
+    fn validate(&self, addr: &str) -> Result<(), CliError> {
+        if self.tls_cert.is_some() != self.tls_key.is_some() {
+            return Err(CliError::Argument(
+                "--tls-cert and --tls-key must be supplied together".into(),
+            ));
+        }
+        let configured = self.tls_ca.is_some()
+            || self.tls_cert.is_some()
+            || self.tls_key.is_some()
+            || self.tls_server_name.is_some();
+        if !addr.starts_with("https://") {
+            if configured {
+                return Err(CliError::Argument("TLS options require an https:// endpoint; plaintext TCP and Unix sockets do not use TLS".into()));
+            }
+        } else if self.tls_ca.is_none() {
+            return Err(CliError::Argument("HTTPS requires --tls-ca FILE or RUSTBGPD_TLS_CA; system trust roots are not loaded".into()));
+        }
+        Ok(())
+    }
+
+    fn config(&self) -> Result<ClientTlsConfig, CliError> {
+        let mut config = ClientTlsConfig::new().timeout(CONNECT_TIMEOUT);
+        if let Some(ca) = &self.tls_ca {
+            config = config.ca_certificate(Certificate::from_pem(read_tls_file(ca, "CA bundle")?));
+        }
+        if let (Some(cert), Some(key)) = (&self.tls_cert, &self.tls_key) {
+            config = config.identity(Identity::from_pem(
+                read_tls_file(cert, "client certificate")?,
+                read_tls_file(key, "client private key")?,
+            ));
+        }
+        if let Some(name) = &self.tls_server_name {
+            config = config.domain_name(name);
+        }
+        Ok(config)
+    }
+}
+
+fn read_tls_file(path: &Path, kind: &str) -> Result<Vec<u8>, CliError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CliError::Argument(format!(
+            "failed to read TLS {kind} {}: {error}",
+            path.display()
+        ))
+    })?;
+    if bytes.is_empty() {
+        return Err(CliError::Argument(format!(
+            "TLS {kind} file is empty: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Identity observed on the actual UDS transport, including Linux PID reuse evidence.
@@ -207,17 +300,28 @@ enum EndpointTarget {
     Uds(PathBuf),
 }
 
+#[cfg(test)]
 pub(crate) async fn connect(addr: &str, token_file: Option<&str>) -> Result<Connection, CliError> {
+    connect_with_tls(addr, token_file, &TlsOptions::default()).await
+}
+
+pub(crate) async fn connect_with_tls(
+    addr: &str,
+    token_file: Option<&str>,
+    tls: &TlsOptions,
+) -> Result<Connection, CliError> {
+    tls.validate(addr)?;
     let token = load_bearer_token(token_file)?;
     let local_process = Arc::default();
     let channel = match parse_endpoint_target(addr)? {
-        EndpointTarget::Tcp(uri) => connect_tcp(&uri, addr).await?,
+        EndpointTarget::Tcp(uri) => connect_tcp(&uri, addr, tls).await?,
         EndpointTarget::Uds(path) => connect_uds(&path, addr, Arc::clone(&local_process)).await?,
     };
     Ok(Connection {
         channel,
         token,
         local_process,
+        tls_client_identity: tls.tls_cert.is_some(),
     })
 }
 
@@ -248,10 +352,75 @@ fn connect_failure_class(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 fn connect_error(addr: &str, error: &tonic::transport::Error) -> CliError {
+    if let Some((detail, hint)) = tls_failure_class(error) {
+        return CliError::Tls {
+            detail: format!("{addr}: {detail}"),
+            hint,
+        };
+    }
     CliError::Connect {
         addr: addr.to_string(),
         detail: connect_failure_class(error),
     }
+}
+
+/// Follow typed transport causes; do not infer TLS failures from peer text.
+pub(crate) fn tls_failure_class(
+    error: &(dyn std::error::Error + 'static),
+) -> Option<(&'static str, &'static str)> {
+    use tokio_rustls::rustls::{AlertDescription, CertificateError, Error};
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<Error>() {
+            return Some(match error {
+                Error::InvalidCertificate(CertificateError::UnknownIssuer) => (
+                    "server certificate is not trusted",
+                    "set --tls-ca to the CA bundle that signed the server certificate",
+                ),
+                Error::InvalidCertificate(
+                    CertificateError::NotValidForName
+                    | CertificateError::NotValidForNameContext { .. },
+                ) => (
+                    "server certificate name does not match",
+                    "use the certificate's DNS name in the endpoint or set --tls-server-name to its verified name",
+                ),
+                Error::AlertReceived(AlertDescription::CertificateRequired) => (
+                    "server requires a client certificate",
+                    "supply --tls-cert and --tls-key for a client trusted by the daemon's tls_client_ca_file",
+                ),
+                Error::AlertReceived(
+                    AlertDescription::UnknownCA
+                    | AlertDescription::BadCertificate
+                    | AlertDescription::CertificateExpired
+                    | AlertDescription::CertificateRevoked
+                    | AlertDescription::CertificateUnknown
+                    | AlertDescription::UnsupportedCertificate,
+                ) => (
+                    "server rejected the client certificate",
+                    "check the client certificate chain, validity and the daemon's tls_client_ca_file",
+                ),
+                Error::InconsistentKeys(_) => (
+                    "client certificate and private key do not match",
+                    "supply a matching --tls-cert and --tls-key pair",
+                ),
+                Error::InvalidCertificate(_) => (
+                    "server certificate validation failed",
+                    "check the server certificate's validity, usage, chain and the --tls-ca bundle",
+                ),
+                _ => (
+                    "TLS handshake or protocol failure",
+                    "check TLS configuration and the daemon's TLS logs",
+                ),
+            });
+        }
+        // io::Error::source can skip its immediate boxed cause; inspect it too.
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .map(|error| error as &(dyn std::error::Error + 'static))
+            .or_else(|| error.source());
+    }
+    None
 }
 
 fn parse_endpoint_target(addr: &str) -> Result<EndpointTarget, CliError> {
@@ -307,10 +476,16 @@ fn load_bearer_token(token_file: Option<&str>) -> Result<Option<AsciiMetadataVal
     Ok(Some(value))
 }
 
-async fn connect_tcp(uri: &str, display_addr: &str) -> Result<Channel, CliError> {
-    let endpoint = Endpoint::from_shared(uri.to_string())
+async fn connect_tcp(uri: &str, display_addr: &str, tls: &TlsOptions) -> Result<Channel, CliError> {
+    let mut endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|e| CliError::Argument(format!("invalid address: {e}")))?
         .connect_timeout(CONNECT_TIMEOUT);
+    if uri.starts_with("https://") {
+        endpoint = endpoint.tls_config(tls.config()?).map_err(|error| CliError::Tls {
+            detail: format!("invalid TLS configuration: {}", connect_failure_class(&error)),
+            hint: "check the CA bundle, client certificate/key pair and server name; files must contain valid PEM material",
+        })?;
+    }
     endpoint
         .connect()
         .await
@@ -365,6 +540,93 @@ mod tests {
     use tonic::metadata::MetadataValue;
 
     use super::*;
+
+    #[tokio::test]
+    async fn tls_argument_validation_precedes_file_reads_and_dialing() {
+        for (addr, tls, expected) in [
+            (
+                "https://127.0.0.1:1",
+                TlsOptions {
+                    tls_cert: Some("missing-cert".into()),
+                    ..TlsOptions::default()
+                },
+                "must be supplied together",
+            ),
+            (
+                "https://127.0.0.1:1",
+                TlsOptions::default(),
+                "HTTPS requires --tls-ca",
+            ),
+            (
+                "http://127.0.0.1:1",
+                TlsOptions {
+                    tls_ca: Some("missing-ca".into()),
+                    ..TlsOptions::default()
+                },
+                "require an https:// endpoint",
+            ),
+            (
+                "unix:///missing.sock",
+                TlsOptions {
+                    tls_server_name: Some("router.example".into()),
+                    ..TlsOptions::default()
+                },
+                "require an https:// endpoint",
+            ),
+        ] {
+            let error = connect_with_tls(addr, Some("missing-token"), &tls)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(!error.to_string().contains("missing-token"));
+        }
+    }
+
+    #[test]
+    fn tls_errors_keep_typed_causes_through_io_and_status_wrappers() {
+        use tokio_rustls::rustls::{AlertDescription, CertificateError, Error};
+        for (cause, expected) in [
+            (
+                Error::InvalidCertificate(CertificateError::UnknownIssuer),
+                "not trusted",
+            ),
+            (
+                Error::InvalidCertificate(CertificateError::NotValidForName),
+                "name does not match",
+            ),
+            (
+                Error::AlertReceived(AlertDescription::CertificateRequired),
+                "requires a client certificate",
+            ),
+            (
+                Error::AlertReceived(AlertDescription::UnknownCA),
+                "rejected the client certificate",
+            ),
+        ] {
+            let error = std::io::Error::new(std::io::ErrorKind::InvalidData, cause);
+            assert!(tls_failure_class(&error).unwrap().0.contains(expected));
+            let mut status = Status::unavailable("transport error");
+            status.set_source(Arc::new(error));
+            let display = CliError::from(status).to_string();
+            assert!(display.contains(expected), "{display}");
+            assert!(!display.contains("is the daemon running"));
+        }
+        for error in [
+            std::io::Error::from(std::io::ErrorKind::ConnectionReset),
+            std::io::Error::other("CertificateRequired"),
+        ] {
+            assert!(tls_failure_class(&error).is_none());
+        }
+        assert!(matches!(
+            CliError::from(Status::permission_denied("principal unmapped")),
+            CliError::Rpc(_)
+        ));
+        assert!(matches!(
+            CliError::from(Status::unauthenticated("token rejected")),
+            CliError::Rpc(_)
+        ));
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]

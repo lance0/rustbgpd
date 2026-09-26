@@ -18,7 +18,7 @@ pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
 }
 
-use crate::connection::connect;
+use crate::connection::{TlsOptions, connect_with_tls};
 use crate::error::CliError;
 use crate::output::parse_family;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -198,6 +198,9 @@ struct Cli {
     /// Bearer token file for authenticated gRPC endpoints
     #[arg(long, env = "RUSTBGPD_TOKEN_FILE", global = true)]
     token_file: Option<String>,
+
+    #[command(flatten)]
+    tls: TlsOptions,
 
     /// Output in JSON format
     #[arg(long, short = 'j', global = true, conflicts_with = "json_lines")]
@@ -3445,7 +3448,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             deadline_seconds: *deadline,
             json: cli.json,
         };
-        let code = match connect(&cli.addr, cli.token_file.as_deref()).await {
+        let code = match connect_with_tls(&cli.addr, cli.token_file.as_deref(), &cli.tls).await {
             Ok(connection) => commands::diff::advertised(connection, &opts).await,
             Err(e) => {
                 eprintln!("Error: {e}");
@@ -3515,7 +3518,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         pre_upgrade,
     } = &cli.command
     {
-        let connection = connect(&cli.addr, cli.token_file.as_deref()).await;
+        let connection = connect_with_tls(&cli.addr, cli.token_file.as_deref(), &cli.tls).await;
         let result = commands::doctor::run(
             connection,
             &commands::doctor::DoctorOptions {
@@ -3575,7 +3578,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         commands::watch::validate_events_watch_filter(categories, event_types, *from_event_id)?;
     }
     confirm_daemon_wide(&cli.command, &cli.addr)?;
-    let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
+    let connection = connect_with_tls(&cli.addr, cli.token_file.as_deref(), &cli.tls).await?;
     let json = cli.json;
 
     match cli.command {
@@ -8052,6 +8055,45 @@ printf '%s\n' "${COMPREPLY[@]}"
         let cli =
             Cli::try_parse_from(["rbgp", "--token-file", "/run/rustbgpd/token", "health"]).unwrap();
         assert_eq!(cli.token_file.as_deref(), Some("/run/rustbgpd/token"));
+    }
+
+    #[test]
+    fn tls_global_flags_parse_and_require_a_complete_client_identity() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "health",
+            "--tls-ca",
+            "ca.pem",
+            "--tls-cert",
+            "client.pem",
+            "--tls-key",
+            "client.key",
+            "--tls-server-name",
+            "router.example",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.tls.tls_ca.as_deref(),
+            Some(std::path::Path::new("ca.pem"))
+        );
+        assert_eq!(
+            cli.tls.tls_cert.as_deref(),
+            Some(std::path::Path::new("client.pem"))
+        );
+        assert_eq!(
+            cli.tls.tls_key.as_deref(),
+            Some(std::path::Path::new("client.key"))
+        );
+        assert_eq!(cli.tls.tls_server_name.as_deref(), Some("router.example"));
+        for flag in ["--tls-cert", "--tls-key"] {
+            let error = Cli::try_parse_from(["rbgp", flag, "missing.pem", "health"])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
     }
 
     #[test]

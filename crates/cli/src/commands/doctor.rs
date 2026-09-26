@@ -2059,9 +2059,20 @@ fn authz_reachable_check(health_error: Option<&tonic::Status>) -> Option<Check> 
 /// over any RPC, so the check reports the transport and credential shape
 /// it can prove locally and says so honestly; the daemon's `grpc_authz`
 /// log records the authoritative per-request mapping.
-fn authz_identity_check(daemon_address: &str, token_file_configured: bool) -> Check {
+fn authz_identity_check(
+    daemon_address: &str,
+    token_file_configured: bool,
+    tls_client_identity: bool,
+) -> Check {
     let transport = if daemon_address.starts_with("unix://") {
         "a unix socket"
+    } else if daemon_address.starts_with("https://") {
+        match (tls_client_identity, token_file_configured) {
+            (true, true) => "TLS with a client certificate and a bearer token",
+            (true, false) => "TLS with a client certificate",
+            (false, true) => "TLS with a bearer token and no client certificate",
+            (false, false) => "TLS without a client certificate or bearer token",
+        }
     } else if token_file_configured {
         "TCP with a bearer token"
     } else {
@@ -2613,7 +2624,11 @@ async fn run_with_deadlines(
             if let Some(check) = authz_reachable_check(health_result.as_ref().err()) {
                 reporter.record(check.name, check.status, check.detail)?;
             }
-            let identity = authz_identity_check(opts.daemon_address, opts.token_file_configured);
+            let identity = authz_identity_check(
+                opts.daemon_address,
+                opts.token_file_configured,
+                connection.tls_client_identity,
+            );
             reporter.record(identity.name, identity.status, identity.detail)?;
             match health_result {
                 Ok(resp) => {
@@ -4590,7 +4605,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
     #[test]
     fn authz_identity_reports_transport_and_names_the_limitation() {
-        let uds = authz_identity_check("unix:///run/rustbgpd/grpc.sock", false);
+        let uds = authz_identity_check("unix:///run/rustbgpd/grpc.sock", false, false);
         assert_eq!(uds.name, "daemon.authz.identity");
         assert_eq!(uds.status, CheckStatus::Ok);
         assert!(uds.detail.contains("unix socket"));
@@ -4599,11 +4614,38 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 .contains("not expose the resolved principal/role")
         );
 
-        let tcp_token = authz_identity_check("127.0.0.1:50051", true);
+        let tcp_token = authz_identity_check("127.0.0.1:50051", true, false);
         assert!(tcp_token.detail.contains("TCP with a bearer token"));
 
-        let tcp_plain = authz_identity_check("127.0.0.1:50051", false);
+        let tcp_plain = authz_identity_check("127.0.0.1:50051", false, false);
         assert!(tcp_plain.detail.contains("TCP without a bearer token"));
+
+        for (certificate, token, expected) in [
+            (true, false, "TLS with a client certificate;"),
+            (
+                true,
+                true,
+                "TLS with a client certificate and a bearer token;",
+            ),
+            (
+                false,
+                true,
+                "TLS with a bearer token and no client certificate;",
+            ),
+            (
+                false,
+                false,
+                "TLS without a client certificate or bearer token;",
+            ),
+        ] {
+            let identity = authz_identity_check("https://router.example:50051", token, certificate);
+            assert!(identity.detail.contains(expected), "{}", identity.detail);
+            assert!(
+                identity
+                    .detail
+                    .contains("not expose the resolved principal/role")
+            );
+        }
     }
 
     #[test]

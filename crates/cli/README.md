@@ -21,6 +21,35 @@ These commands require an explicit scope: `--global` or `--all` for the
 daemon-wide scope, or `--neighbor` for one peer. Omitting both is a usage error
 (exit code `2`) and nothing is sent to the daemon.
 
+## Connection and authentication
+
+The default endpoint is `unix:///var/lib/rustbgpd/grpc.sock`. Use `-s`/`--addr`
+or `RUSTBGPD_ADDR` for another Unix socket, plaintext `http://host:port`, or
+`https://host:port`. HTTPS requires an explicit PEM CA bundle; the CLI does
+not load system trust roots or provide an insecure verification bypass.
+
+```bash
+rbgp -s https://router.example:50051 \
+  --tls-ca ca.pem --tls-cert operator.pem --tls-key operator.key health
+# Connect by IP while verifying the certificate's DNS name:
+rbgp -s https://192.0.2.1:50051 --tls-server-name router.example \
+  --tls-ca ca.pem --tls-cert operator.pem --tls-key operator.key neighbor
+```
+
+The matching environment variables are `RUSTBGPD_TLS_CA`, `RUSTBGPD_TLS_CERT`,
+`RUSTBGPD_TLS_KEY`, and `RUSTBGPD_TLS_SERVER_NAME`. Certificate and key must
+be supplied together. TLS options require an HTTPS endpoint and are rejected
+for Unix sockets and plaintext TCP before files are read or a connection is
+attempted. The daemon's native TLS listener requires a client certificate;
+its `[security.grpc.roles]` map must authorize that certificate's principal.
+
+`--token-file`/`RUSTBGPD_TOKEN_FILE` remains independent and can accompany TLS
+when the endpoint also requires a bearer token. Doctor reports TLS and the
+supplied credential kinds; the daemon's `grpc_authz` logs remain authoritative
+for the resolved principal and role. Trust, certificate-name, client-certificate
+and application authorization failures are different: a certificate trusted
+by the TLS listener can still be denied by the role map.
+
 ## Commands
 
 Root help groups commands by task: Inspect, Routes, Policy, Configuration,

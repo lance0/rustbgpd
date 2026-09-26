@@ -3079,6 +3079,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tonic",

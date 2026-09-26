@@ -25,6 +25,7 @@ path = "src/main.rs"
 
 [dependencies]
 tonic.workspace = true
+tokio-rustls.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
