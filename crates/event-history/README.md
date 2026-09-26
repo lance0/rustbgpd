@@ -79,7 +79,10 @@ one SQLite transaction, and serves cursor-based replay through the
   producer admission, records a loss, refuses new cursor subscriptions with
   `StorageUnavailable`, and stops the actor.
 - **Allocator recovery ladder.** Primary DB (a failed open is retried
-  once before quarantine) → quarantine fallback.
+  once; only a content error — corrupt or non-SQLite file, malformed
+  metadata — then quarantines, while a host error such as a full or
+  read-only filesystem or denied permissions leaves the store in place
+  and fails the open) → quarantine fallback.
   `events.last_id` is a diagnostic hint only in v1 because it can lag
   committed events. If both authoritative sources fail AND prior
   allocation evidence exists (`events.db.stale` or `events.last_id`),

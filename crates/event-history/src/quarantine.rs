@@ -2,8 +2,10 @@
 //!
 //! Two surfaces:
 //!
-//! 1. **Quarantine.** When `events.db` fails to open cleanly (corrupted
-//!    file, schema corruption, header garbage), rename the SQLite file
+//! 1. **Quarantine.** When `events.db` fails to open because of its
+//!    content (corrupted file, schema corruption, header garbage; not a
+//!    host error such as a full or read-only filesystem, which leaves the
+//!    store in place), rename the SQLite file
 //!    set to `events.db.stale`, `events.db.stale-wal`, and
 //!    `events.db.stale-shm` so a fresh DB can take its place. The main
 //!    file naming matches the `*.json.stale` convention in

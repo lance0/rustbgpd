@@ -485,11 +485,13 @@ impl StoreHandle {
 
 /// Spawn the blocking storage thread on the current tokio runtime.
 ///
-/// `path` is the events DB. If opening fails (corruption, permission
-/// denied), quarantines and reopens fresh — caller learns which path
-/// was taken via [`StorageInit::had_quarantine`]. A newer on-disk
-/// schema is returned as [`EventHistoryError::SchemaDowngrade`] with
-/// the store left in place.
+/// `path` is the events DB. If opening fails because of the store's
+/// content (corrupt or non-SQLite file, malformed metadata, or an
+/// unclassified error), quarantines it and reopens fresh — caller learns
+/// which path was taken via [`StorageInit::had_quarantine`]. A host error
+/// (full or read-only filesystem, denied permissions, I/O failure, locks)
+/// is returned with the store left in place, as is a newer on-disk schema
+/// ([`EventHistoryError::SchemaDowngrade`]).
 ///
 /// The returned `JoinHandle` resolves when the storage thread exits
 /// (after a `StoreOp::Shutdown` or unrecoverable error).
