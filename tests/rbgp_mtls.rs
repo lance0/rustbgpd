@@ -178,12 +178,7 @@ remote_asn = 65002
 
     let mut command = cli(&addr, &certs, None);
     command.arg("health");
-    // With the pinned h2 stack, TLS 1.3 can deliver CertificateRequired on
-    // the first RPC after tonic has built the channel, then discard the
-    // rustls cause while converting the close to a Status. Keep the failure
-    // honest instead of inferring a missing certificate from transport text;
-    // connection unit tests cover the typed cause when it is retained.
-    assert_failure(&output(command).await, "daemon error: transport error");
+    assert_failure(&output(command).await, "client identity is not configured");
 
     let mut command = cli(&addr, &certs, Some("intruder"));
     command.arg("health");

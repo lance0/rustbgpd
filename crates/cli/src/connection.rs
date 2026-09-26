@@ -143,6 +143,11 @@ impl TlsOptions {
             }
         } else if self.tls_ca.is_none() {
             return Err(CliError::Argument("HTTPS requires --tls-ca FILE or RUSTBGPD_TLS_CA; system trust roots are not loaded".into()));
+        } else if self.tls_cert.is_none() {
+            return Err(CliError::Argument(
+                "HTTPS client identity is not configured; the native mTLS listener requires --tls-cert FILE and --tls-key FILE"
+                    .into(),
+            ));
         }
         Ok(())
     }
@@ -556,6 +561,14 @@ mod tests {
                 "https://127.0.0.1:1",
                 TlsOptions::default(),
                 "HTTPS requires --tls-ca",
+            ),
+            (
+                "https://127.0.0.1:1",
+                TlsOptions {
+                    tls_ca: Some("missing-ca".into()),
+                    ..TlsOptions::default()
+                },
+                "HTTPS client identity is not configured",
             ),
             (
                 "http://127.0.0.1:1",

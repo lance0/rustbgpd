@@ -106,8 +106,9 @@ Preferred posture:
     192.0.2.1:50051 rustbgpd.v1.ControlService/GetHealth
   ```
 
-  `rbgp` requires `--tls-ca` for HTTPS and does not load system trust roots.
-  The client certificate's principal must also be authorized by
+  `rbgp` requires `--tls-ca`, `--tls-cert`, and `--tls-key` for HTTPS and does
+  not load system trust roots. The client certificate's principal must also
+  be authorized by
   `[security.grpc.roles]`. See the [CLI connection guide](../../crates/cli/README.md#connection-and-authentication)
   for the matching environment variables and optional bearer authentication.
 - For multi-host fan-out, off-host TLS termination, or richer

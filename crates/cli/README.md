@@ -37,11 +37,11 @@ rbgp -s https://192.0.2.1:50051 --tls-server-name router.example \
 ```
 
 The matching environment variables are `RUSTBGPD_TLS_CA`, `RUSTBGPD_TLS_CERT`,
-`RUSTBGPD_TLS_KEY`, and `RUSTBGPD_TLS_SERVER_NAME`. Certificate and key must
-be supplied together. TLS options require an HTTPS endpoint and are rejected
-for Unix sockets and plaintext TCP before files are read or a connection is
-attempted. The daemon's native TLS listener requires a client certificate;
-its `[security.grpc.roles]` map must authorize that certificate's principal.
+`RUSTBGPD_TLS_KEY`, and `RUSTBGPD_TLS_SERVER_NAME`. HTTPS is the native mTLS
+client mode, so the CA, client certificate and client key are required. TLS
+options are rejected for Unix sockets and plaintext TCP before files are read
+or a connection is attempted. The daemon's `[security.grpc.roles]` map must
+authorize the client certificate's principal.
 
 `--token-file`/`RUSTBGPD_TOKEN_FILE` remains independent and can accompany TLS
 when the endpoint also requires a bearer token. Doctor reports TLS and the
