@@ -2747,6 +2747,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
@@ -3064,6 +3065,7 @@ async fn local_route_sent_to_ibgp_peer() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3107,6 +3109,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3247,6 +3250,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
@@ -3325,6 +3329,7 @@ async fn withdraw_injected_removes_and_distributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
@@ -3414,6 +3419,7 @@ async fn distribute_changes_filters_unsendable_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
@@ -3474,6 +3480,7 @@ async fn send_initial_table_filters_unsendable_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
@@ -3559,6 +3566,7 @@ async fn dual_stack_peer_receives_both_families() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
 
@@ -4012,6 +4020,7 @@ async fn rr_local_route_to_all_ibgp() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let (reply_tx, _) = oneshot::channel();

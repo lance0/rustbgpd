@@ -545,3 +545,285 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         })
     );
 }
+
+async fn received_validation_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryRoutesPage {
+        scope: rustbgpd_rib::RouteQueryScope::Received { peer: Some(peer) },
+        filter: None,
+        after: None,
+        expected_version: None,
+        page_size: 10,
+        reply,
+    })
+    .await
+    .unwrap();
+    let page = response.await.unwrap().unwrap();
+    assert!(!page.has_more);
+    page.routes
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "end-to-end import and cache transitions share one session and RIB actor"
+)]
+async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot};
+    use rustbgpd_wire::AspaValidation;
+
+    let valid_table = Arc::new(AspaTable::new(vec![AspaRecord {
+        customer_asn: 65003,
+        provider_asns: vec![65002],
+    }]));
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .negotiated_families
+        .push((Afi::Ipv6, Safi::Unicast));
+    install_test_negotiated_session(&mut session, negotiated);
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(ValidationSnapshot {
+        vrp_table: None,
+        aspa_table: Some(Arc::clone(&valid_table)),
+    });
+    session.validation_rx = Some(snapshot_rx);
+    let file = rustbgpd_policy::rpol::RpolFile::parse(
+        "policy ingress { term valid { if route.aspa == valid { prepend as self 1; accept } else { reject } } }",
+    ).unwrap();
+    let mut compiled = file
+        .compile_policy("ingress", &[], &mut rustbgpd_policy::sets::SetStore::new())
+        .unwrap();
+    compiled.local_asn = Some(65001);
+    session.import_policy = Some(PolicyChain::from_named(vec![
+        rustbgpd_policy::NamedPolicy::from_rpol("ingress".into(), Arc::new(compiled)),
+    ]));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    session
+        .process_update(UpdateMessage::build(
+            &[
+                Ipv4NlriEntry { path_id: 0, prefix },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+                },
+            ],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    next_hop: "2001:db8::1".parse().unwrap(),
+                    link_local_next_hop: None,
+                    announced: vec![rustbgpd_wire::NlriEntry {
+                        path_id: 0,
+                        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+                    }],
+                    flowspec_announced: vec![],
+                    evpn_announced: vec![],
+                    bgpls_announced: vec![],
+                    labeled_announced: vec![],
+                    vpn_announced: vec![],
+                    rtc_announced: vec![],
+                }),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let update = rib_rx.try_recv().unwrap();
+    let RibUpdate::RoutesReceived { announced, .. } = &update else {
+        panic!("route update")
+    };
+    assert_eq!(
+        announced.len(),
+        3,
+        "only the received Valid path matches policy"
+    );
+    assert!(
+        announced
+            .iter()
+            .all(|route| route.aspa_state == AspaValidation::Valid)
+    );
+    let received = announced[0].received_as_path.as_ref().unwrap();
+    assert!(
+        announced
+            .iter()
+            .all(|route| Arc::ptr_eq(received, route.received_as_path.as_ref().unwrap()))
+    );
+    assert_eq!(
+        received
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .asns()
+            .collect::<Vec<_>>(),
+        vec![65002, 65003]
+    );
+    assert_eq!(
+        announced[0].as_path().unwrap().asns().collect::<Vec<_>>(),
+        vec![65001, 65002, 65003]
+    );
+
+    let (tx, rx) = mpsc::channel(16);
+    let (_, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let actor = tokio::spawn(manager.run());
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: Arc::clone(&valid_table),
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
+    tx.send(update).await.unwrap();
+    let inserted = received_validation_routes(&tx, session.peer_ip).await;
+    assert_eq!(
+        inserted
+            .iter()
+            .map(|route| route.aspa_state)
+            .collect::<Vec<_>>(),
+        vec![AspaValidation::Valid; 3],
+        "RIB insertion must validate the received path"
+    );
+
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: valid_table,
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        received_validation_routes(&tx, session.peer_ip)
+            .await
+            .iter()
+            .map(|route| route.aspa_state)
+            .collect::<Vec<_>>(),
+        vec![AspaValidation::Valid; 3]
+    );
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: Arc::new(AspaTable::new(vec![AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![65099],
+        }])),
+        changed_customer_asns: Some([65003].into_iter().collect()),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        received_validation_routes(&tx, session.peer_ip)
+            .await
+            .iter()
+            .map(|route| route.aspa_state)
+            .collect::<Vec<_>>(),
+        vec![AspaValidation::Invalid; 3]
+    );
+    tx.send(RibUpdate::AspaTableUpdate {
+        table: Arc::new(AspaTable::new(vec![AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![65002],
+        }])),
+        changed_customer_asns: Some([65003].into_iter().collect()),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        received_validation_routes(&tx, session.peer_ip)
+            .await
+            .iter()
+            .map(|route| route.aspa_state)
+            .collect::<Vec<_>>(),
+        vec![AspaValidation::Valid; 3]
+    );
+    drop(tx);
+    actor.await.unwrap();
+}
+
+#[tokio::test]
+async fn received_empty_path_keeps_rpki_not_found_after_import_and_cache_updates() {
+    use rustbgpd_rpki::{ValidationSnapshot, VrpEntry, VrpTable};
+    use rustbgpd_wire::RpkiValidation;
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    let vrp = VrpEntry {
+        prefix: "192.0.2.0".parse().unwrap(),
+        prefix_len: 24,
+        max_len: 24,
+        origin_asn: 65003,
+    };
+    let table = Arc::new(VrpTable::new(vec![vrp.clone()]));
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.negotiated = Some(Arc::new(negotiated_session(65001, false)));
+    let (_snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(ValidationSnapshot {
+        vrp_table: Some(Arc::clone(&table)),
+        aspa_table: None,
+    });
+    session.validation_rx = Some(snapshot_rx);
+    let mut statement = retention_statement(None, PolicyAction::Permit);
+    statement.match_rpki_validation = Some(RpkiValidation::NotFound);
+    statement.modifications.as_path_prepend = Some((65003, 1));
+    session.import_policy = Some(PolicyChain::new(vec![Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Deny,
+    }]));
+    session
+        .process_update(UpdateMessage::build(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        ))
+        .await;
+    let update = rib_rx.try_recv().unwrap();
+    let RibUpdate::RoutesReceived { announced, .. } = &update else {
+        panic!("route update")
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].validation_state, RpkiValidation::NotFound);
+    assert_eq!(announced[0].as_path().unwrap().origin_asn(), Some(65003));
+    assert!(
+        announced[0]
+            .validation_as_path()
+            .unwrap()
+            .segments
+            .is_empty()
+    );
+    let (tx, rx) = mpsc::channel(16);
+    let (_, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let actor = tokio::spawn(manager.run());
+    tx.send(RibUpdate::RpkiCacheUpdate {
+        table: Arc::clone(&table),
+        delta: None,
+    })
+    .await
+    .unwrap();
+    tx.send(update).await.unwrap();
+    assert_eq!(
+        received_validation_routes(&tx, session.peer_ip).await[0].validation_state,
+        RpkiValidation::NotFound
+    );
+    for delta in [None, Some(vec![vrp])] {
+        tx.send(RibUpdate::RpkiCacheUpdate {
+            table: Arc::clone(&table),
+            delta,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            received_validation_routes(&tx, session.peer_ip).await[0].validation_state,
+            RpkiValidation::NotFound
+        );
+    }
+    drop(tx);
+    actor.await.unwrap();
+}

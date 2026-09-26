@@ -583,6 +583,7 @@ fn validate_route_rpki_empty_as_path() {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     assert_eq!(
@@ -1574,5 +1575,75 @@ fn rpki_delta_timing_receipt() {
     eprintln!(
         "rpki revalidation receipt (100 peers x 10k routes, 1-entry delta): \
          full={full_elapsed:?} delta={delta_elapsed:?}"
+    );
+}
+
+#[test]
+fn received_validation_path_does_not_split_export_attribute_identity() {
+    use crate::attr_intern::AttrInternTable;
+    let mut original = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 2),
+        vec![65001, 65002, 65003],
+    );
+    let mut modified = original.clone();
+    modified.attributes = AttrSet::new(original.attributes.to_vec());
+    modified.received_as_path = Some(Arc::new(Some(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+    })));
+    let mut intern = AttrInternTable::new();
+    intern.intern(&mut original.attributes);
+    intern.intern(&mut modified.attributes);
+    assert!(Arc::ptr_eq(&original.attributes, &modified.attributes));
+    assert!(crate::manager::helpers::routes_equal(&original, &modified));
+    assert_eq!(
+        modified.as_path().unwrap().asns().collect::<Vec<_>>(),
+        vec![65001, 65002, 65003]
+    );
+    assert_eq!(
+        modified
+            .validation_as_path()
+            .unwrap()
+            .asns()
+            .collect::<Vec<_>>(),
+        vec![65002, 65003]
+    );
+    assert_eq!(original.validation_as_path(), original.as_path());
+    let cloned = modified.clone();
+    assert!(Arc::ptr_eq(
+        cloned.received_as_path.as_ref().unwrap(),
+        modified.received_as_path.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn received_validation_path_preserves_absent_and_empty_origins() {
+    use rustbgpd_rpki::{VrpEntry, VrpTable};
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 2),
+        vec![65001],
+    );
+    let table = VrpTable::new(vec![VrpEntry {
+        prefix: "192.0.2.0".parse().unwrap(),
+        prefix_len: 24,
+        max_len: 24,
+        origin_asn: 65001,
+    }]);
+    assert_eq!(
+        super::validate_route_rpki(&route, &table),
+        RpkiValidation::Valid
+    );
+    route.received_as_path = Some(Arc::new(None));
+    assert!(route.validation_as_path().is_none());
+    assert_eq!(
+        super::validate_route_rpki(&route, &table),
+        RpkiValidation::NotFound
+    );
+    route.received_as_path = Some(Arc::new(Some(AsPath { segments: vec![] })));
+    assert!(route.validation_as_path().unwrap().segments.is_empty());
+    assert_eq!(
+        super::validate_route_rpki(&route, &table),
+        RpkiValidation::NotFound
     );
 }

@@ -222,6 +222,7 @@ pub(crate) fn route_from_peer(
         path_id,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }

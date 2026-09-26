@@ -74,6 +74,7 @@ pub(super) fn ibgp_route(
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
@@ -3032,6 +3033,7 @@ fn rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, asns: Vec<u32>, communities: Vec<
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
