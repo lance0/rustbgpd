@@ -933,6 +933,82 @@ log_format = "json"
         assert_eq!(envelope.normalized_toml.as_bytes(), exact);
     }
 
+    /// A history row from a newer rustbgpd makes this build skip recording
+    /// with a warning, leaving the history directory byte-for-byte unchanged.
+    #[test]
+    fn newer_history_row_skips_recording_with_a_warning() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let history = crate::config_history::history_dir(&state_dir);
+        std::fs::create_dir(&state_dir).unwrap();
+        let boot = AcceptedConfigSnapshot::from_config_for_test(minimal_config());
+        crate::config_history::record_accepted(&history, &boot).unwrap();
+        let newer = history.join(format!("v4-{:020}-5-{}.json", 9, "4".repeat(64)));
+        std::fs::write(&newer, b"future format").unwrap();
+        let contents = || {
+            let mut entries = std::fs::read_dir(&history)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let before = contents();
+
+        let mut changed = minimal_config();
+        changed.neighbors.push(test_neighbor("10.0.0.2", 65002));
+        let changed = boot.derive_config(changed).unwrap();
+        let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+        let writer_sink = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer_sink.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let construct = || {
+                let (_tx, rx) = mpsc::channel(1);
+                drop(ConfigPersister::new_accepted(
+                    rx,
+                    dir.path().join("config.toml"),
+                    Arc::clone(&changed),
+                    Some(state_dir.clone()),
+                ));
+            };
+            // A sibling test can cache this callsite's interest as never;
+            // warm it, rebuild the cache, then observe a clean run.
+            construct();
+            tracing::callsite::rebuild_interest_cache();
+            sink.0.lock().unwrap().clear();
+            construct();
+        });
+
+        let output = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("failed to record applied config in the config history"))
+            .unwrap_or_else(|| panic!("expected a history warning; captured: {output}"));
+        assert!(warning.contains("WARN"), "{warning}");
+        assert!(warning.contains("written by a newer rustbgpd"), "{warning}");
+        assert_eq!(contents(), before, "history must be untouched");
+    }
+
     /// Red proof: propagating either the constructor-time or post-persist
     /// best-effort history failure rejects the acknowledgement; adopting any
     /// snapshot other than the exact accepted Arc breaks pointer or disk-byte

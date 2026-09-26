@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const VERSION: u32 = 2;
+/// Highest history format version this build decodes (v3 metadata rows).
+const NEWEST_VERSION: u32 = 3;
 pub(crate) const MAX_ENVELOPE: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_TOML: usize = 10 * 1024 * 1024;
 const MAX_MANIFEST: usize = 16 * 1024 * 1024;
@@ -133,12 +135,21 @@ fn record_with(
 
     let directory = open_or_create_writer_directory(dir)?;
     step(WriteStep::Pinned)?;
+    // A newer release owns this chronology: refuse before any cleanup,
+    // allocation, or eviction so its rows and sequences are never reused.
+    let mut rows = collect_names(&directory, dir, None)?;
+    if let Some(row) = rows.iter().find(|row| row.newer_version) {
+        return Err(invalid(format!(
+            "config history contains {} written by a newer rustbgpd; \
+             not recording until it is moved aside",
+            row.filename.to_string_lossy()
+        )));
+    }
     let cleanup_result = cleanup_stages(&directory);
     let cleanup_sync_result = step(WriteStep::CleanupSync).and_then(|()| directory.sync_all());
     cleanup_result?;
     cleanup_sync_result?;
 
-    let mut rows = collect_names(&directory, dir, None)?;
     let original_count = rows.len();
     let sequence = rows
         .iter()
@@ -382,7 +393,7 @@ fn metadata_at(directory: &File, name: &OsStr) -> io::Result<AtMetadata> {
 fn parse_stage_name(name: &OsStr) -> Option<ParsedName> {
     let text = name.to_str()?;
     let final_name = text.strip_prefix('.')?.strip_suffix(".tmp")?;
-    parse_final_name(OsStr::new(final_name))
+    parse_final_name(OsStr::new(final_name)).filter(|parsed| parsed.version <= NEWEST_VERSION)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +416,9 @@ pub(crate) struct StoredRow {
     pub(super) redacted_summary: Option<String>,
     pub(super) normalized_toml_bytes: Option<u64>,
     pub(super) metadata_only_reason: Option<String>,
+    /// Written by a newer release under a format version this build does not
+    /// know; listed as unreadable and never decoded, evicted, or reused.
+    newer_version: bool,
     identity: Option<EntryIdentity>,
 }
 
@@ -462,6 +476,7 @@ fn collect_names(
                 "config history exceeds twenty recognized final rows",
             ));
         }
+        let newer_version = parsed.version > NEWEST_VERSION;
         rows.push(StoredRow {
             index: 0,
             path: display_path.join(&filename),
@@ -471,9 +486,15 @@ fn collect_names(
             status: StoredStatus::Unreadable,
             verified_sha256: None,
             verified_source_sha256: None,
-            redacted_summary: None,
+            redacted_summary: newer_version.then(|| {
+                format!(
+                    "(history format v{} written by a newer rustbgpd)",
+                    parsed.version
+                )
+            }),
             normalized_toml_bytes: None,
             metadata_only_reason: None,
+            newer_version,
             identity: None,
         });
     }
@@ -493,7 +514,7 @@ fn decode_rows(directory: &File, rows: &mut [StoredRow]) {
     }
     for (index, row) in rows.iter_mut().enumerate() {
         row.index = index;
-        if counts[&row.sequence] > 1 {
+        if counts[&row.sequence] > 1 || row.newer_version {
             continue;
         }
         if let Ok((payload, identity)) = open_and_decode(directory, row, false) {
@@ -606,6 +627,7 @@ fn open_and_decode(
         len: metadata.len(),
     };
     let parsed = parse_final_name(&row.filename)
+        .filter(|parsed| parsed.version <= NEWEST_VERSION)
         .ok_or_else(|| invalid("config history filename changed"))?;
     let cap = if parsed.version == 3 {
         super::v3::MAX_ENVELOPE
@@ -685,13 +707,24 @@ fn read_bounded(
     Ok(bytes)
 }
 
+/// Parse `v{version}-{sequence:020}-{timestamp}-{digest}.json`. Versions 2
+/// and 3 are the current codecs; any higher version is a newer release's row,
+/// which still claims its sequence and a roster slot. Lower versions are not
+/// part of this chronology.
 fn parse_final_name(name: &OsStr) -> Option<ParsedName> {
     let name = name.to_str()?;
-    let (version, stem) = if let Some(stem) = name.strip_prefix("v2-") {
-        (2, stem)
-    } else {
-        (3, name.strip_prefix("v3-")?)
-    };
+    let (version_text, stem) = name.strip_prefix('v')?.split_once('-')?;
+    if version_text.is_empty()
+        || version_text.starts_with('0')
+        || !version_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    // Every digit string too long for u32 is still a newer version.
+    let version = version_text.parse().unwrap_or(u32::MAX);
+    if version < 2 {
+        return None;
+    }
     let stem = stem.strip_suffix(".json")?;
     let mut parts = stem.split('-');
     let sequence_text = parts.next()?;
@@ -2333,6 +2366,105 @@ mod tests {
             "sequence is exhausted",
         );
         assert_eq!(fs::read_dir(&overflow).unwrap().count(), 1);
+    }
+
+    /// LOAD-BEARING BREAK: a row from a newer history format must claim its
+    /// sequence and roster slot, list as unreadable, and stop this build's
+    /// writer before any cleanup, allocation, or eviction. Parsing only the
+    /// known `v2-`/`v3-` prefixes records a new row below the newer one.
+    #[test]
+    fn newer_version_row_blocks_recording_and_is_listed_unreadable() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        for toml in ["a = 1\n", "a = 2\n", "a = 3\n"] {
+            assert!(record_v2(&dir, toml, manifest_for(toml)).unwrap());
+        }
+        let digest = "4".repeat(64);
+        let newer = format!("v4-{:020}-5-{digest}.json", 7);
+        write_private(&dir.join(&newer), b"future format");
+        let stage = format!(".v4-{:020}-6-{digest}.json.tmp", 8);
+        write_private(&dir.join(&stage), b"future stage");
+        let contents = |dir: &Path| {
+            let mut entries = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), fs::read(entry.path()).unwrap())
+                })
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let before = contents(&dir);
+
+        assert_error(
+            record_v2(&dir, "a = 4\n", manifest_for("a = 4\n")),
+            &format!("config history contains {newer} written by a newer rustbgpd"),
+        );
+        assert_eq!(contents(&dir), before, "a refused write changes nothing");
+
+        let rows = scan_mixed(&dir).unwrap();
+        let listed = rows
+            .iter()
+            .map(|row| (row.sequence, row.status))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            [
+                (7, StoredStatus::Unreadable),
+                (3, StoredStatus::Recorded),
+                (2, StoredStatus::Recorded),
+                (1, StoredStatus::Recorded),
+            ]
+        );
+        assert_eq!(
+            rows[0].redacted_summary.as_deref(),
+            Some("(history format v4 written by a newer rustbgpd)")
+        );
+        assert_error(read_mixed(&dir, &rows[0]), "not readable");
+
+        // The newer row occupies a roster slot: with it, twenty current rows
+        // are over the cap.
+        for sequence in 100..117 {
+            let mut envelope = sample();
+            envelope.sequence = sequence;
+            write_v2(&dir, &envelope);
+        }
+        assert_error(scan_mixed(&dir), "exceeds twenty recognized final rows");
+    }
+
+    /// Without a newer-format row, recording is unchanged; moving the newer
+    /// row aside resumes recording from this build's own sequence.
+    #[test]
+    fn recording_proceeds_without_newer_version_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("history");
+        assert!(record_v2(&dir, "a = 1\n", manifest_for("a = 1\n")).unwrap());
+        let digest = "4".repeat(64);
+        // Not newer-format rows: leading zero, lower versions, bad grammar.
+        for name in [
+            format!("v04-{:020}-5-{digest}.json", 7),
+            format!("v1-{:020}-5-{digest}.json", 8),
+            format!("v0-{:020}-5-{digest}.json", 9),
+            format!("v-{:020}-5-{digest}.json", 10),
+            format!("v4x-{:020}-5-{digest}.json", 11),
+            format!("v4-{}-5-{digest}.json", 12),
+        ] {
+            write_private(&dir.join(name), b"ignored");
+        }
+        assert!(record_v2(&dir, "a = 2\n", manifest_for("a = 2\n")).unwrap());
+        assert_eq!(recorded_rows(&dir)[0].sequence, 2);
+
+        let newer = dir.join(format!("v5-{:020}-5-{digest}.json", 30));
+        write_private(&newer, b"future format");
+        assert_error(
+            record_v2(&dir, "a = 3\n", manifest_for("a = 3\n")),
+            "written by a newer rustbgpd",
+        );
+        fs::remove_file(&newer).unwrap();
+        assert!(record_v2(&dir, "a = 3\n", manifest_for("a = 3\n")).unwrap());
+        assert_eq!(recorded_rows(&dir)[0].sequence, 3);
+        assert_eq!(scan_mixed(&dir).unwrap().len(), 3);
     }
 
     /// LOAD-BEARING BREAK: removing the directory `fchmod(0700)` leaves an
