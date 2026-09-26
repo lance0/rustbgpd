@@ -10604,6 +10604,19 @@ async fn export_roster_follows_the_rib_through_every_owner_transition() {
         regrouped[&a], ids[&a],
         "the remaining member keeps its group"
     );
+    // A flap of the only member empties its group: it re-registers into a
+    // new group with a new instance.
+    let sole = retire_watch(&roster, b);
+    send_peer_down(&tx, b).await;
+    let mut spec = PeerUpSpec::ibgp(b);
+    spec.export_policy = Some(community_chain(0xFDE8_3602));
+    let _b_rx = peer_up(&tx, spec).await;
+    let (_, reformed) = published_ids(&tx, &roster).await;
+    assert!(reformed[&b].is_some() && reformed[&b] != regrouped[&b]);
+    assert!(
+        sole.upgrade().is_none(),
+        "the emptied group's instance is released"
+    );
     let moved = retire_watch(&roster, b);
     replace_one(&tx, b, community_chain(0xFDE8_3601)).await;
     let (_, back) = published_ids(&tx, &roster).await;

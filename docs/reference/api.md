@@ -1280,8 +1280,9 @@ policy transition switches its whole cohort once, at its final commit, so
 a read during a long RIB operation reports the live counters of the chains
 installed before it. `policy_generation` on an export row is the
 counter-instance id: nonzero, shared by update-group members that share
-counters, and new whenever the counters restart, including each session
-registration of an ungrouped peer; compare it only for equality. The export
+counters, and new whenever the counters restart, including at each session
+registration unless the peer rejoins an update group that other members
+kept; compare it only for equality. The export
 capture does not wait for the RIB; it yields only while a chain's error lock
 is being written.
 

@@ -1651,15 +1651,17 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   resets its counters to zero. A reload that re-resolves a peer to a
   **content-equal** chain skips the reinstall entirely — the installed
   instance and its counters survive; only peers whose resolved chain
-  content moved reset. A session flap does not reset the RIB-side
-  export counters (the chain instance survives).
+  content moved reset. Export counters also restart when a peer's session
+  registers again after a flap, unless the peer rejoins an update group
+  that other members kept (it then shares that group's instance); a flap
+  whose session task survives keeps the import counters.
 - TOML chain members count too; their unnamed statements report by
   `term_index` (`statement 0`, `statement 1`, ...).
 - `--direction` selects **export** (the default), **import**, or
   **both**. Export chains are read from the roster the RIB manager
   publishes; import chains are read from each session's published
   installed-counter state.
-  Chainless sessions contribute no row. Every backend wait shares one
+  Chainless sessions contribute no row. Every capture wait shares one
   absolute two-second deadline for the whole RPC; exhausting it fails the
   RPC as `DEADLINE_EXCEEDED`. A departed session, closed publication, or
   unavailable counter state fails the complete RPC as `UNAVAILABLE`, and a
@@ -1674,7 +1676,8 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   does. Export chains report their counter-instance id instead
   (`counter instance N` in text output): nonzero, shared by update-group
   members that share counters, and new whenever the counters restart,
-  including each session registration of an ungrouped peer. Compare it
+  including at each session registration unless the peer rejoins an update
+  group that other members kept. Compare it
   only for equality.
 - Explain queries and `policy test` dry runs never move these
   counters — only live route evaluation counts.

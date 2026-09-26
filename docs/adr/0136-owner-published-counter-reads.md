@@ -131,7 +131,7 @@ each bounded by the request deadline:
 
 - an import publication that is still Pending, awaited until the session
   publishes or closes;
-- a busy import error mutex (`try_lock`, yield, retry), as in ADR-0133;
+- a busy import or export counter error mutex (`try_lock`, yield, retry), as in ADR-0133;
 - a busy dataset `last_error` lock, which moves from a blocking `lock()` to the
   same `try_lock` shape.
 
@@ -166,7 +166,7 @@ chains (ADR-0105).
 
 | Transition | Roster effect |
 |---|---|
-| Session flap with task retained | Import publication persists. The RIB removes the export entry at peer down; at peer up an ungrouped peer installs a new instance and a grouped peer rejoins its group's instance. |
+| Session flap with task retained | Import publication persists. The RIB removes the export entry at peer down; at peer up an ungrouped peer installs a new instance and a grouped peer rejoins its group's instance, or a new one if the group emptied. |
 | Session task exit (shutdown, replacement, notification respawn) | The old receiver closes. Until the table replaces or removes it, a fleet read fails `UNAVAILABLE`, as today. |
 | Inbound collision or notification replacement | `replace_handle` republishes with the new handle in the same actor step. |
 | Peer deletion, dynamic accept or expiry | `remove` or `insert` republishes. |

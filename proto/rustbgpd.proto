@@ -1887,8 +1887,9 @@ message PolicyChainStats {
   // replacement rather than read as continuous history. Export chains
   // report the process-wide counter-instance id (ADR-0136): nonzero,
   // shared by update-group members that share counters, and new
-  // whenever the counters restart, including each session
-  // registration of an ungrouped peer. Compare it only for equality.
+  // whenever the counters restart, including at each session
+  // registration unless the peer rejoins an update group that other
+  // members kept. Compare it only for equality.
   uint64 policy_generation = 5;
   // Routes denied by an evaluation error since chain install
   // (ADR-0103 Decision 4 fail-closed rail: checked-arithmetic
