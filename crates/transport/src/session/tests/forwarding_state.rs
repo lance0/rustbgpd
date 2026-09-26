@@ -186,7 +186,11 @@ async fn forwarding_state_preconstructed_candidate_uses_latest_commit() {
     );
     *roles.kernel.write().unwrap() = vec![(Afi::Ipv4, Safi::Unicast)];
     candidate.drive_fsm(Event::ManualStart).await;
-    let Message::Open(open) = read_single_bgp_message(&mut remote).await else {
+    let Message::Open(open) =
+        tokio::time::timeout(Duration::from_secs(2), read_single_bgp_message(&mut remote))
+            .await
+            .expect("candidate must emit OPEN")
+    else {
         panic!("expected OPEN");
     };
     assert!(open.capabilities.iter().any(|cap| matches!(cap,
