@@ -301,6 +301,139 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
     assert_eq!(mp.announced.len(), 2);
 }
 
+fn v4_route_with(
+    attributes: Arc<Vec<PathAttribute>>,
+    third_octet: u8,
+    next_hop: Ipv4Addr,
+) -> Route {
+    Route {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(20, 0, third_octet, 0), 24)),
+        next_hop: IpAddr::V4(next_hop),
+        link_local_next_hop: None,
+        next_hop_scope: None,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes,
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+    }
+}
+
+fn plain_attrs() -> Vec<PathAttribute> {
+    vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]
+}
+
+/// Value grouping must not merge routes whose next hops differ: the
+/// route-server passthrough next hop lands in the IPv4 body `NEXT_HOP`, so
+/// equal source attributes behind distinct allocations still need one
+/// UPDATE per next hop.
+#[tokio::test]
+async fn value_grouping_keeps_ipv4_body_next_hops_apart() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.route_server_client = true;
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let first = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    let second = v4_route_with(Arc::new(plain_attrs()), 2, Ipv4Addr::new(10, 0, 0, 3));
+    session.send_route_update(announce_only(&session, vec![first, second]));
+    let mut next_hops = Vec::new();
+    for _ in 0..2 {
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.announced.len(), 1);
+        next_hops.extend(parsed.attributes.iter().filter_map(|a| match a {
+            PathAttribute::NextHop(nh) => Some(*nh),
+            _ => None,
+        }));
+    }
+    next_hops.sort_unstable();
+    assert_eq!(
+        next_hops,
+        [Ipv4Addr::new(10, 0, 0, 2), Ipv4Addr::new(10, 0, 0, 3)]
+    );
+}
+
+/// Same guard for the MP key, whose next hop is outside the attributes.
+#[tokio::test]
+async fn value_grouping_keeps_ipv6_next_hops_apart() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.config.route_server_client = true;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session.negotiated = Some(Arc::new(negotiated));
+    let mut routes = Vec::new();
+    for (i, nh) in ["2001:db8::1", "2001:db8::2"].into_iter().enumerate() {
+        let mut route = v4_route_with(Arc::new(plain_attrs()), 0, Ipv4Addr::UNSPECIFIED);
+        route.prefix = Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 1 + u16::try_from(i).unwrap(), 0, 0, 0, 0, 0),
+            64,
+        ));
+        route.next_hop = IpAddr::V6(nh.parse().unwrap());
+        routes.push(route);
+    }
+    session.send_route_update(announce_only(&session, routes));
+    let mut next_hops = Vec::new();
+    for _ in 0..2 {
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::MpReachNlri(mp) => Some(mp.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.announced.len(), 1);
+        next_hops.push(mp.next_hop);
+    }
+    assert_ne!(next_hops[0], next_hops[1]);
+}
+
+/// Under Add-Path send, two paths of one prefix with equal attribute values
+/// share an UPDATE but keep their own path identifiers.
+#[tokio::test]
+async fn value_grouping_keeps_add_path_identifiers() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Send);
+    session.negotiated = Some(Arc::new(negotiated));
+    let mut first = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    first.path_id = 7;
+    let mut second = v4_route_with(Arc::new(plain_attrs()), 1, Ipv4Addr::new(10, 0, 0, 2));
+    second.path_id = 9;
+    session.send_route_update(announce_only(&session, vec![first, second]));
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, true, &[]).unwrap();
+    let mut path_ids: Vec<u32> = parsed.announced.iter().map(|entry| entry.path_id).collect();
+    path_ids.sort_unstable();
+    assert_eq!(path_ids, [7, 9]);
+}
+
 #[tokio::test]
 async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
