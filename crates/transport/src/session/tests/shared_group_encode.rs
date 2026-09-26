@@ -506,7 +506,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
         commands
             .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
             .unwrap();
-        // Two producer slices and many consumer chunks, all within writer capacity.
+        // Two producer slices; hold consumer capacity until both reads reply.
         let announce: Vec<_> = (0..2100_u32)
             .map(|index| {
                 make_sourced_route(
@@ -516,6 +516,7 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
                 )
             })
             .collect();
+        let mut held_writer = None;
         let update = if elected_encoder {
             shared_group_envelope(
                 &member,
@@ -525,15 +526,23 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
             )
         } else {
             let (typed, update, chunks) = shared_query_update(&member, &announce);
-            assert!(
-                chunks.len() > 64,
-                "fixture spans multiple consumer checkpoints"
-            );
+            assert_eq!(chunks.len(), 2100);
+            let writer = member.writer_join.take().unwrap();
+            writer.abort();
+            let _ = writer.await;
+            let (bulk, held) = mpsc::channel(2048);
+            member.writer_bulk_tx = Some(bulk);
+            held_writer = Some(held);
             typed.test_publish(chunks);
             typed.test_finish(super::shared_group::StreamTerminal::Complete);
             update
         };
         member.handle_outbound_route_update(update);
+        if !elected_encoder {
+            assert_eq!(member.updates_sent, 2048);
+            assert!(member.pending_outbound.is_some());
+            assert_eq!(member.writer_bulk_tx.as_ref().unwrap().capacity(), 0);
+        }
         {
             let actor = member.run();
             tokio::pin!(actor);
@@ -544,14 +553,31 @@ async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
             assert!(snapshot.updates_sent < 2100);
             assert!(counters_reply.is_none());
         }
+        let mut drained = 0;
+        if let Some(held) = &mut held_writer {
+            // Capacity stays held until both queued reads have replied.
+            assert_eq!(member.updates_sent, 2048);
+            while held.try_recv().is_ok() {
+                drained += 1;
+            }
+            assert_eq!(drained, 2048);
+        }
         while let Some(pending) = member.pending_outbound.as_ref() {
             pending.ready(member.writer_bulk_tx.as_ref()).await;
             member.advance_pending_outbound();
         }
+        if let Some(held) = &mut held_writer {
+            while held.try_recv().is_ok() {
+                drained += 1;
+            }
+            assert_eq!(drained, 2100);
+            assert_eq!(member.updates_sent, 2100);
+        }
         assert!(member.deferred_command.is_none());
-        let writer = member.writer_join.take().unwrap();
-        writer.abort();
-        let _ = writer.await;
+        if let Some(writer) = member.writer_join.take() {
+            writer.abort();
+            let _ = writer.await;
+        }
     }
 }
 
