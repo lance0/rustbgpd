@@ -189,8 +189,11 @@ lists each file's version marker and reader behavior. What holds today:
   not understand refuses, quarantines, or ignores it; it does not decode it as
   its own. Commit-confirm authority refuses boot with the artifact untouched,
   the GR marker is rejected and the daemon cold-starts, FIB owned state is
-  quarantined, the event store and BLACKHOLE receipt stay in place with their
-  feature disabled, and config-history rows of an unknown version are ignored.
+  quarantined, and config-history rows of an unknown version are ignored.
+  The BLACKHOLE receipt stays in place and BLACKHOLE kernel mutations are
+  disabled. The event store stays in place untouched: with
+  `[event_history].required = true` the daemon exits at startup, and
+  otherwise it runs live-only without durable history.
 - **Binary rollback:** follow the
   [rollback procedure](../how-to/deployment.md#rollback). It settles pending
   commit-confirm transactions and moves `config-history/` aside when the
