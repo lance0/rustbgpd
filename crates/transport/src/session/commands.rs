@@ -1078,9 +1078,9 @@ impl PeerSession {
     pub(super) fn answer_state_query(
         &mut self,
         reply: tokio::sync::oneshot::Sender<PeerSessionState>,
-    ) {
+    ) -> bool {
         if reply.is_closed() {
-            return;
+            return false;
         }
         // TCP_AO_INFO is cumulative for this socket. Its in-actor
         // getsockopt is a bounded, nonblocking kernel-memory read, so
@@ -1234,7 +1234,7 @@ impl PeerSession {
                     .saturating_add(u64::from(remaining.subsec_nanos() > 0))
             }),
         };
-        let _ = reply.send(state);
+        reply.send(state).is_ok()
     }
 
     pub(super) fn answer_import_policy_term_hits(
@@ -1411,6 +1411,29 @@ impl PeerSession {
                 } else {
                     info!(peer = %self.peer_label, "administrative reset requested");
                     self.drive_fsm(Event::AdministrativeReset { reason }).await;
+                }
+                ControlFlow::Continue(())
+            }
+            PeerCommand::PrepareCollisionCandidate { reply, lease } => {
+                if !reply.is_closed() {
+                    // A previous candidate may have retired since the last select.
+                    // Settle it before a new attempt can install its own receiver.
+                    self.release_abandoned_collision_hold().await;
+                    let armed = self.primary_collision_lease.is_none()
+                        && matches!(self.collision_hold, super::fsm::CollisionHold::Released)
+                        && matches!(
+                            self.fsm.state(),
+                            SessionState::Connect | SessionState::Active | SessionState::OpenSent
+                        )
+                        && !reply.is_closed();
+                    if armed {
+                        self.primary_collision_lease = Some(lease);
+                        self.collision_hold = super::fsm::CollisionHold::Armed;
+                    }
+                    if !self.answer_state_query(reply) && armed {
+                        self.primary_collision_lease = None;
+                        self.release_collision_hold().await;
+                    }
                 }
                 ControlFlow::Continue(())
             }

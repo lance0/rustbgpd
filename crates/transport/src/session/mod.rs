@@ -341,6 +341,8 @@ pub(crate) struct PeerSession {
     /// KEEPALIVE and further input wait in `OpenConfirm` for `PeerManager`'s
     /// verdict, so a collision loser never reaches Established.
     collision_hold: fsm::CollisionHold,
+    /// A concrete candidate owns the sender; closure releases this primary.
+    primary_collision_lease: Option<tokio::sync::oneshot::Receiver<()>>,
     /// Bounds the `OpenConfirm` wait for a collision verdict that never comes.
     collision_verdict_timer: Option<Pin<Box<Sleep>>>,
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
@@ -1903,6 +1905,7 @@ impl PeerSession {
                 fsm::CollisionHold::Released
             },
             collision_verdict_timer: None,
+            primary_collision_lease: None,
             connect_task: None,
             connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,
@@ -2460,6 +2463,7 @@ impl PeerSession {
                 commands,
                 reconnect_timer,
                 collision_verdict_timer,
+                primary_collision_lease,
                 connect_task,
                 outbound_rx,
                 writer_join,
@@ -2530,6 +2534,16 @@ impl PeerSession {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
+                }
+
+                () = async {
+                    match primary_collision_lease.as_mut() {
+                        Some(lease) => { let _ = lease.await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.primary_collision_lease = None;
+                    self.release_collision_hold().await;
                 }
 
                 () = poll_timer(collision_verdict_timer) => {

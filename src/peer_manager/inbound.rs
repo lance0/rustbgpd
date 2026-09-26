@@ -4,8 +4,8 @@ use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_telemetry::reason_labels::InboundConnectionDropReason;
 use rustbgpd_transport::{
-    PeerHandle, PeerSessionState, SessionIdentity, StateQueryOutcome, TcpAoInfoSnapshot,
-    TcpAoRotationGeneration,
+    PeerHandle, PeerSessionState, SessionIdentity, SessionQueryOutcome, StateQueryOutcome,
+    TcpAoInfoSnapshot, TcpAoRotationGeneration,
 };
 use tokio::net::TcpStream;
 use tracing::{info, warn};
@@ -198,6 +198,7 @@ impl PeerManager {
         stream: TcpStream,
         tcp_ao_info: Option<TcpAoInfoSnapshot>,
         tcp_ao_generation: TcpAoRotationGeneration,
+        primary_lease: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> bool {
         let peer_addr = peer_key.address;
         if self
@@ -231,7 +232,7 @@ impl PeerManager {
             }
         }
         let session_id = self.allocate_session_id();
-        let handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
+        let mut handle = PeerHandle::spawn_inbound_at_tcp_ao_generation(
             transport_config,
             self.metrics.clone(),
             self.rib_tx.clone(),
@@ -250,6 +251,10 @@ impl PeerManager {
             tcp_ao_selected_owner,
             tcp_ao_generation,
         );
+
+        if let Some(lease) = primary_lease {
+            handle.hold_primary_for_collision(lease);
+        }
 
         if let Err(e) = handle.start_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT).await {
             warn!(peer = %peer_addr, error = %e, "failed to start inbound collision candidate");
@@ -662,6 +667,10 @@ impl PeerManager {
             info!(peer = %peer_addr, "inbound connection for disabled peer, dropping");
             return;
         }
+        if managed.pending_inbound.is_some() {
+            info!(peer = %peer_addr, "dropping extra inbound connection while collision candidate is pending");
+            return;
+        }
         let queried_session_id = managed.session_id();
 
         // Bounded so an inbound TCP arriving during a TCP-back-pressure
@@ -683,14 +692,14 @@ impl PeerManager {
         //   genuine `Idle` arm. Losing one inbound attempt is cheap;
         //   tearing down an Established session on a transient stall is
         //   not.
-        let current_state = match managed
+        let (current_state, primary_lease) = match managed
             .handle()
-            .query_state_outcome(PEER_QUERY_TIMEOUT)
+            .prepare_collision_candidate(PEER_QUERY_TIMEOUT)
             .await
         {
-            StateQueryOutcome::State(state) => Some(state),
-            StateQueryOutcome::SessionGone => None,
-            StateQueryOutcome::TimedOut => {
+            SessionQueryOutcome::Reply((state, lease)) => (Some(state), Some(lease)),
+            SessionQueryOutcome::SessionGone => (None, None),
+            SessionQueryOutcome::TimedOut => {
                 info!(
                     peer = %peer_addr,
                     "session state query timed out during inbound handling; keeping the existing session and dropping the inbound connection (remote will retry)"
@@ -755,6 +764,7 @@ impl PeerManager {
                     stream,
                     tcp_ao_info,
                     accepted_generation,
+                    primary_lease,
                 )
                 .await;
             }
@@ -770,6 +780,7 @@ impl PeerManager {
                         stream,
                         tcp_ao_info,
                         accepted_generation,
+                        primary_lease,
                     )
                     .await;
                 if let Some((router_id, peer_asn)) = remote_identity {

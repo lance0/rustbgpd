@@ -496,6 +496,13 @@ pub enum PeerCommand {
         /// Oneshot channel to receive the session state snapshot.
         reply: oneshot::Sender<PeerSessionState>,
     },
+    /// Snapshot the primary and hold its handshake while an inbound candidate exists.
+    PrepareCollisionCandidate {
+        /// State observed atomically with preparation.
+        reply: oneshot::Sender<PeerSessionState>,
+        /// Dropping the candidate's lease releases this primary's hold.
+        lease: oneshot::Receiver<()>,
+    },
     /// Query the negotiated identity needed by a coordinated warm checkpoint.
     /// This is separate from operator state so checkpoint-only fields do not
     /// silently become a public API contract.
@@ -1106,6 +1113,8 @@ pub struct PeerHandle {
     commands: mpsc::Sender<PeerCommand>,
     task: JoinHandle<Result<(), TransportError>>,
     import_policy_counters: watch::Receiver<Option<Arc<InstalledImportPolicy>>>,
+    /// Held through candidate retirement; promotion retains it until the old primary exits.
+    primary_collision_lease: Option<oneshot::Sender<()>>,
 }
 
 /// Channel buffer size for peer commands.
@@ -1199,6 +1208,7 @@ impl PeerHandle {
             commands,
             task,
             import_policy_counters: watch::channel(None).1,
+            primary_collision_lease: None,
         }
     }
 
@@ -1214,6 +1224,7 @@ impl PeerHandle {
             commands,
             task,
             import_policy_counters,
+            primary_collision_lease: None,
         }
     }
 
@@ -1499,6 +1510,7 @@ impl PeerHandle {
             commands: tx,
             task,
             import_policy_counters,
+            primary_collision_lease: None,
         }
     }
 
@@ -1731,6 +1743,7 @@ impl PeerHandle {
             commands: tx,
             task,
             import_policy_counters,
+            primary_collision_lease: None,
         }
     }
 
@@ -2111,6 +2124,41 @@ impl PeerHandle {
     ///   teardown). There is no live session behind this handle.
     pub async fn query_state_outcome(&self, deadline: Duration) -> StateQueryOutcome {
         Self::query_state_outcome_with(self.commands.clone(), deadline).await
+    }
+
+    /// Atomically inspect a primary and prepare its handshake for a candidate.
+    /// The returned lease must move into that candidate before it starts. Dropping
+    /// the future, an unconsumed reply, or the candidate releases the primary.
+    pub async fn prepare_collision_candidate(
+        &self,
+        deadline: Duration,
+    ) -> SessionQueryOutcome<(PeerSessionState, oneshot::Sender<()>)> {
+        let prepared = tokio::time::timeout(deadline, async {
+            let (reply, received) = oneshot::channel();
+            let (lease, released) = oneshot::channel();
+            self.commands
+                .send(PeerCommand::PrepareCollisionCandidate {
+                    reply,
+                    lease: released,
+                })
+                .await
+                .ok()?;
+            // Keep the lease in this future even after the actor sends its reply:
+            // successful send does not prove the caller consumed the snapshot.
+            received.await.ok().map(|state| (state, lease))
+        })
+        .await;
+        match prepared {
+            Err(_) => SessionQueryOutcome::TimedOut,
+            Ok(None) => SessionQueryOutcome::SessionGone,
+            Ok(Some(prepared)) => SessionQueryOutcome::Reply(prepared),
+        }
+    }
+
+    /// Keep a prepared primary held until this candidate is retired. A promoted
+    /// candidate retains the lease while its old primary is closed with Cease.
+    pub fn hold_primary_for_collision(&mut self, lease: oneshot::Sender<()>) {
+        self.primary_collision_lease = Some(lease);
     }
 
     /// Driver-side variant of [`Self::query_state_outcome`] that takes an
@@ -3497,5 +3545,72 @@ mod tests {
             elapsed, deadline,
             "shutdown_timeout must return exactly at its deadline"
         );
+    }
+    #[tokio::test(start_paused = true)]
+    async fn collision_preparation_bounds_admission_and_cancels_queued_reply() {
+        let (handle, _receiver) = handle_with_full_command_channel();
+        fill_command_channel(&handle).await;
+        let deadline = Duration::from_millis(50);
+        let (result, elapsed) = run_bounded(handle.prepare_collision_candidate(deadline)).await;
+        assert!(matches!(result, SessionQueryOutcome::TimedOut));
+        assert_eq!(elapsed, deadline);
+        handle.abort_for_transport_safety_and_wait().await;
+
+        let (commands, mut receiver) = mpsc::channel(8);
+        let (observed, observation) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let Some(PeerCommand::PrepareCollisionCandidate { reply, mut lease }) =
+                receiver.recv().await
+            else {
+                panic!("expected preparation");
+            };
+            // Keep the reply alive past the deadline, exactly like a delayed actor.
+            assert!(lease.try_recv().is_err());
+            assert!(lease.await.is_err(), "timeout must relinquish the lease");
+            assert!(reply.is_closed());
+            let _ = observed.send(());
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(commands, task);
+        let (result, elapsed) = run_bounded(handle.prepare_collision_candidate(deadline)).await;
+        assert!(matches!(result, SessionQueryOutcome::TimedOut));
+        assert_eq!(elapsed, deadline);
+        observation.await.unwrap();
+        handle.shutdown().await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collision_lease_is_retained_until_candidate_shutdown_joins() {
+        for forced_abort in [false, true] {
+            let (commands, mut receiver) = mpsc::channel(8);
+            let (stopping, stopped) = oneshot::channel();
+            let (finish, finished) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                assert!(matches!(receiver.recv().await, Some(PeerCommand::Shutdown)));
+                stopping.send(()).unwrap();
+                let _ = finished.await;
+                Ok(())
+            });
+            let mut handle = PeerHandle::from_parts(commands, task);
+            let (lease, mut released) = oneshot::channel();
+            handle.hold_primary_for_collision(lease);
+            let shutdown = tokio::spawn(handle.shutdown_timeout(Duration::from_secs(1)));
+            stopped.await.unwrap();
+            assert!(matches!(
+                released.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            if forced_abort {
+                tokio::time::advance(Duration::from_secs(1)).await;
+            } else {
+                finish.send(()).unwrap();
+            }
+            let result = shutdown.await.unwrap();
+            assert_eq!(result.is_err(), forced_abort);
+            assert!(
+                released.await.is_err(),
+                "candidate retirement releases the primary"
+            );
+        }
     }
 }

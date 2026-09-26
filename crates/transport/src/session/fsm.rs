@@ -58,7 +58,7 @@ pub(super) const MAX_NOTIFICATION_IDLE_BACKOFF_SECS: u32 = 300;
 /// peer that only ever survives until hold-timer expiry still backs off.
 pub(super) const HEALTHY_ESTABLISHED: Duration = Duration::from_secs(300);
 
-/// How long an unpromoted inbound collision candidate waits in `OpenConfirm`
+/// How long a connection involved in a collision waits in `OpenConfirm`
 /// for `PeerManager`'s verdict. The manager normally answers within one
 /// bounded state query; this only reclaims a candidate whose verdict was lost,
 /// which would otherwise block every later inbound connection from the peer.
@@ -71,11 +71,11 @@ pub(super) const COLLISION_VERDICT_TIMEOUT: Duration = Duration::from_secs(10);
 /// KEEPALIVE. A loser is then closed from `OpenConfirm` and never reports
 /// Established, registers with the RIB, or flaps toward the peer.
 pub(super) enum CollisionHold {
-    /// A primary, or a promoted candidate: the FSM runs unmodified.
+    /// No pending collision: the FSM runs unmodified.
     Released,
-    /// An unpromoted candidate that has not yet received the peer's OPEN.
+    /// A candidate or prepared primary that has not received the peer's OPEN.
     Armed,
-    /// An unpromoted candidate in `OpenConfirm` waiting for the verdict. Holds
+    /// A connection in `OpenConfirm` waiting for the verdict. Holds
     /// the deferred KEEPALIVE and keepalive-timer actions.
     Waiting(Vec<Action>),
 }
@@ -107,7 +107,7 @@ impl PeerSession {
                 Action::SendKeepalive | Action::StartTimer(rustbgpd_fsm::TimerType::Keepalive, _)
             )
         });
-        debug!(peer = %self.peer_label, "inbound collision candidate holding KEEPALIVE for verdict");
+        debug!(peer = %self.peer_label, "connection holding KEEPALIVE for collision verdict");
         self.collision_hold = CollisionHold::Waiting(deferred);
         self.collision_verdict_timer =
             Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
@@ -130,14 +130,33 @@ impl PeerSession {
         }
     }
 
+    /// Settle an abandoned attempt before another preparation or the verdict
+    /// deadline can win the run-loop select against its ready cancellation.
+    pub(super) async fn release_abandoned_collision_hold(&mut self) -> bool {
+        let released = self.primary_collision_lease.as_mut().is_some_and(|lease| {
+            !matches!(
+                lease.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        });
+        if released {
+            self.primary_collision_lease = None;
+            self.release_collision_hold().await;
+        }
+        released
+    }
+
     /// No verdict arrived: end the `OpenConfirm` wait as its hold timer would.
     /// The candidate falls to Idle and `PeerManager` drops it on `BackToIdle`.
     pub(super) async fn expire_collision_verdict_wait(&mut self) {
+        if self.release_abandoned_collision_hold().await {
+            return;
+        }
         self.collision_verdict_timer = None;
         warn!(
             peer = %self.peer_label,
             timeout_secs = COLLISION_VERDICT_TIMEOUT.as_secs(),
-            "inbound collision candidate received no verdict; closing it"
+            "connection received no collision verdict; closing it"
         );
         self.drive_fsm(Event::HoldTimerExpires).await;
     }

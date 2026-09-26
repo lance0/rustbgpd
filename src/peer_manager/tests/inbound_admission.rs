@@ -1038,7 +1038,8 @@ fn backoff_session_handle(
     let task = tokio::spawn(async move {
         while let Some(cmd) = rx.recv().await {
             match cmd {
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     let _ = reply.send(PeerSessionState {
                         notification_idle_failures,
                         reconnect_in_secs,

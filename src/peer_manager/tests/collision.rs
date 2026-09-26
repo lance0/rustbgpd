@@ -159,7 +159,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
     let fake_primary = tokio::spawn(async move {
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::OpenSent,
                         peer_ip: peer_addr,
@@ -373,7 +374,8 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     notify_tx
                         .send(SessionNotification::MaxPrefixExceeded {
                             session_id: 1,
@@ -500,7 +502,8 @@ async fn inbound_state_query_timeout_keeps_existing_session() {
         tokio::time::sleep(Duration::from_secs(2)).await;
         while let Some(cmd) = session_rx.recv().await {
             match cmd {
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     task_counters.query_state.fetch_add(1, Ordering::SeqCst);
                     // Stale answer — the manager's deadline has long expired.
                     drop(reply);
@@ -2327,4 +2330,156 @@ fn queue_candidate_open(mgr: &PeerManager, session_id: u64, peer_addr: IpAddr) {
             peer_asn: 65002,
         })
         .unwrap();
+}
+
+/// Primary OPEN arrives while the candidate is still `OpenSent`. Neither side
+/// may establish the losing connection before the manager applies the verdict.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the two real socket directions share one deterministic collision and ownership sequence"
+)]
+async fn primary_open_waits_for_pending_candidate_verdict() {
+    for local_wins in [false, true] {
+        let (_commands, commands_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(64);
+        let local_id = Ipv4Addr::new(10, 0, 0, if local_wins { 10 } else { 1 });
+        let remote_id = Ipv4Addr::new(10, 0, 0, 2);
+        let mut mgr = PeerManager::new(
+            commands_rx,
+            65001,
+            local_id,
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let peer = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let connection = TcpStream::connect(listener.local_addr().unwrap());
+        let (connected, accepted) = tokio::join!(connection, listener.accept());
+        let mut primary_remote = connected.unwrap();
+        let (primary_stream, _) = accepted.unwrap();
+        let primary_id = mgr.allocate_session_id();
+        let primary = PeerHandle::spawn_inbound_with_identity(
+            mgr.build_transport_config(&make_config(peer, 65002)),
+            mgr.metrics.clone(),
+            mgr.rib_tx.clone(),
+            None,
+            None,
+            primary_stream,
+            Some(mgr.session_notify_tx.clone()),
+            None,
+            None,
+            None,
+            false,
+            rustbgpd_transport::SessionIdentity::primary(primary_id),
+        );
+        primary.start().await.unwrap();
+        insert_test_managed_peer_with_asn(&mut mgr, peer, 65002, primary, false);
+        let mut primary_buf = BytesMut::new();
+        assert!(matches!(
+            read_bgp_message(&mut primary_remote, &mut primary_buf).await,
+            Message::Open(_)
+        ));
+
+        let mut candidate_remote = accept_real_candidate(&mut mgr, peer).await;
+        let candidate_id = mgr.peers[&key(peer)]
+            .pending_inbound
+            .as_ref()
+            .unwrap()
+            .session_id;
+        let mut candidate_buf = BytesMut::new();
+        assert!(matches!(
+            read_bgp_message(&mut candidate_remote, &mut candidate_buf).await,
+            Message::Open(_)
+        ));
+        let mut opening = encode_message(&Message::Open(mock_open(remote_id))).unwrap();
+        opening.extend(encode_message(&Message::Keepalive).unwrap());
+        primary_remote.write_all(&opening).await.unwrap();
+        let notification =
+            tokio::time::timeout(Duration::from_secs(2), mgr.session_notify_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            matches!(notification, SessionNotification::OpenReceived { session_id, .. } if session_id == primary_id)
+        );
+        assert_eq!(
+            mgr.peers[&key(peer)]
+                .handle()
+                .query_state()
+                .await
+                .unwrap()
+                .fsm_state,
+            SessionState::OpenConfirm
+        );
+        assert_eq!(
+            pending_candidate_state(&mgr, peer).await,
+            SessionState::OpenSent
+        );
+        mgr.handle_session_notification(notification).await;
+
+        let (loser, loser_buf) = if local_wins {
+            (&mut candidate_remote, &mut candidate_buf)
+        } else {
+            (&mut primary_remote, &mut primary_buf)
+        };
+        let message =
+            tokio::time::timeout(Duration::from_secs(2), read_bgp_message(loser, loser_buf))
+                .await
+                .unwrap();
+        let Message::Notification(notification) = message else {
+            panic!("losing connection sent {message:?} before Cease");
+        };
+        assert_eq!(
+            notification.code,
+            rustbgpd_wire::notification::NotificationCode::Cease
+        );
+        assert_eq!(
+            notification.subcode,
+            rustbgpd_wire::notification::cease_subcode::CONNECTION_COLLISION_RESOLUTION
+        );
+
+        let winner = if local_wins { primary_id } else { candidate_id };
+        assert_eq!(mgr.peers[&key(peer)].session_id(), winner);
+        assert!(mgr.peers[&key(peer)].pending_inbound.is_none());
+        let (winner_remote, winner_buf) = if local_wins {
+            (&mut primary_remote, &mut primary_buf)
+        } else {
+            candidate_remote.write_all(&opening).await.unwrap();
+            (&mut candidate_remote, &mut candidate_buf)
+        };
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                read_bgp_message(winner_remote, winner_buf)
+            )
+            .await
+            .unwrap(),
+            Message::Keepalive
+        ));
+        // The query fences the full establishment action batch and its RIB send.
+        let handle = mgr.peers[&key(peer)].handle();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if handle.query_state().await.unwrap().fsm_state == SessionState::Established {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("collision winner must reach Established");
+        let mut established = Vec::new();
+        while let Ok(update) = rib_rx.try_recv() {
+            if let rustbgpd_rib::RibUpdate::PeerUp { session_id, .. } = update {
+                established.push(session_id);
+            }
+        }
+        assert_eq!(established, vec![winner]);
+        let (handle, _, _) = mgr.peers.remove(&key(peer)).unwrap().into_parts();
+        handle.shutdown().await.unwrap().unwrap();
+    }
 }

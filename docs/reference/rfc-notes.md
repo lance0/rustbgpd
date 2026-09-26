@@ -338,7 +338,7 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   four-octet AS number.
 - The comparison applies only while the configured session is in
   OpenConfirm or OpenSent. The configured session's state is read when the
-  inbound connection's OPEN arrives, not when the connection was accepted.
+  OPEN arrives on either connection, not when the connection was accepted.
 - The OpenSent case is optional in the RFC: "A BGP speaker MAY also examine
   connections in an OpenSent state if it knows the BGP Identifier of the
   peer by means outside of the protocol." rustbgpd deliberately counts the
@@ -355,22 +355,31 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   BGP down for it. While the neighbor waits out an escalated NOTIFICATION
   reconnect backoff, the inbound connection is closed without a
   NOTIFICATION.
+- Introducing an inbound candidate while the primary is in Connect, Active,
+  or OpenSent holds the primary's first KEEPALIVE and subsequent input until
+  collision resolution. The candidate already holds its own handshake. This
+  prevents the peer from establishing the primary before a higher remote
+  identifier makes that connection lose. Canceling admission or retiring the
+  candidate releases the primary; normal sessions without a candidate are
+  unchanged. A primary already in OpenConfirm has sent its KEEPALIVE before
+  preparation, so this hold cannot eliminate that earlier simultaneous-open
+  race. Both held connections retain the existing 10-second verdict timeout.
 - A configured session that is already Established keeps its connection;
   the inbound one is closed with Cease 6/7.
 - If the configured session's state cannot be read within the peer-query
-  deadline when the inbound connection's OPEN arrives, it is treated as
+  deadline during collision resolution, it is treated as
   possibly Established: it keeps its connection and the inbound one is
   closed with Cease 6/7. A timeout at TCP accept is handled differently;
   see the last item.
 - Every Cease 6/7 above is sent when collision resolution runs on the
-  candidate's OPEN. Disabling the neighbor, or a BFD down that holds BGP,
+  OPEN from either connection. Disabling the neighbor, or a BFD down that holds BGP,
   also tears down a pending inbound candidate at that moment, independently
   of any OPEN. That teardown is an ordinary stop: a candidate that has
   reached Established sends Cease 6/2 (Administrative Shutdown), and one in
   any earlier state, OpenSent and OpenConfirm included, closes its TCP
   connection without a NOTIFICATION.
-- The Cease 6/7 outcomes above apply to an inbound candidate session, which
-  exists only after the TCP connection is accepted. At accept, before any
+- The collision outcomes above require a live inbound candidate, which exists
+  only after the TCP connection is accepted. At accept, before any
   candidate exists, the raw TCP connection is closed without a NOTIFICATION,
   and before any BGP message is exchanged, when any of these holds:
   - the neighbor is disabled or BFD-held;

@@ -441,7 +441,9 @@ impl PeerSession {
             return;
         }
         match command {
-            crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
+            crate::PeerCommand::QueryState { reply } => {
+                self.answer_state_query(reply);
+            }
             crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
                 self.answer_import_policy_term_hits(reply);
             }

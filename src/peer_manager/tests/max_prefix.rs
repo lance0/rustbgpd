@@ -479,7 +479,8 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
     let task = tokio::spawn(async move {
         while let Some(command) = session_rx.recv().await {
             match command {
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     let _ = reply.send(PeerSessionState {
                         fsm_state: SessionState::Idle,
                         peer_ip: addr,

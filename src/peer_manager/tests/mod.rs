@@ -1050,7 +1050,8 @@ fn fake_peer_handle_with_route_refresh_reply(
                 PeerCommand::Start => {
                     counters.start.fetch_add(1, Ordering::SeqCst);
                 }
-                PeerCommand::QueryState { reply } => {
+                PeerCommand::QueryState { reply }
+                | PeerCommand::PrepareCollisionCandidate { reply, .. } => {
                     counters.query_state.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(PeerSessionState {
                         fsm_state: state,
