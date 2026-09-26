@@ -5,11 +5,9 @@ fn pacing_routes(count: u32, distinct: bool) -> Vec<Route> {
         .map(|index| {
             let mut route = make_route(100);
             route.prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | index), 32));
-            Arc::make_mut(&mut route.attributes).push(PathAttribute::Med(if distinct {
-                index
-            } else {
-                0
-            }));
+            AttrSet::edit(&mut route.attributes, |attrs| {
+                attrs.push(PathAttribute::Med(if distinct { index } else { 0 }));
+            });
             route
         })
         .collect()
