@@ -702,7 +702,10 @@ _cleanup_on_exit() {
     return "$exit_code"
 }
 
-trap _cleanup_on_exit EXIT INT TERM HUP
+trap _cleanup_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # ---------------------------------------------------------------------------
 # Run pre-flight on source
