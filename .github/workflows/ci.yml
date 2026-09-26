@@ -154,6 +154,7 @@ jobs:
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
+          python3 tests/interop/scripts/test_m66_failure_diagnostics.py
           bash -n tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           python3 tests/interop/scripts/test_m111_capture_oracle.py
