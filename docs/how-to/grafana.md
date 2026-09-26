@@ -97,7 +97,8 @@ the query scan can grow even though the displayed result is aggregated.
 
 A ready-to-load Prometheus alert-rule pack (rules include daemon down and
 restarted, slow runtime-config settlement, session down/flapping,
-empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
+empty Adj-RIB-In, max-prefix near-limit, breach, shutdown latch and sustained
+inbound blocking, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 authoritative partial SIGHUP reloads and failed retained reload tasks,
@@ -121,6 +122,8 @@ with per-rule unit tests in
 the member identity for routing and notification templates. A peer with no
 identity row still fires through an `or ignoring(...)` fallback without those
 labels; the join can add labels but never suppress the alert.
+`BgpMaxPrefixLatched` uses the same join for a peer held off by a max-prefix
+shutdown latch, which `BgpSessionNotEstablished` deliberately skips.
 
 The loss alerts use a 10-minute counter-increase window and clear after
 the last increment ages out:

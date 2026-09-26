@@ -213,7 +213,8 @@ groups:
       - alert: BgpMaxPrefixLimitExceeded
         # Each increment is followed by a Cease NOTIFICATION and
         # session teardown (docs/reference/operations.md "Peer max-prefix
-        # exceeded").
+        # exceeded"). This is the event page: it resolves 10 minutes after
+        # the breach. BgpMaxPrefixLatched holds while the peer stays latched.
         expr: increase(bgp_max_prefix_exceeded_total[10m]) > 0
         for: 0m
         labels:
@@ -225,6 +226,51 @@ groups:
             a configured max-prefix ceiling in the last 10 minutes;
             the session was torn down with a Cease / Maximum Number of
             Prefixes Reached NOTIFICATION.
+
+      - alert: BgpMaxPrefixLatched
+        # Level alert for the shutdown latch: 1 from the breach until an
+        # explicit enable or a successful timed restart. The latched peer
+        # reads bgp_peer_admin_enabled == 0, so BgpSessionNotEstablished
+        # stays silent for it by design. The `bgp_peer_info` join names the
+        # member; the `or ignoring` fallback keeps a peer without an identity
+        # row firing.
+        expr: >-
+          (bgp_max_prefix_latched == 1)
+          * on (instance, peer, interface)
+            group_left(remote_asn, description, peer_group)
+            bgp_peer_info
+          or ignoring(remote_asn, description, peer_group)
+          (bgp_max_prefix_latched == 1)
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Peer {{ $labels.peer }} is latched off by max-prefix"
+          description: >-
+            Peer {{ $labels.peer }} on interface "{{ $labels.interface }}" at
+            {{ $labels.instance }} is held down after a max-prefix shutdown.
+            It stays down until `rbgp neighbor <addr> enable` or, when
+            max_prefix_restart_seconds is set, one successful timed restart.
+
+      - alert: BgpMaxPrefixBlocking
+        # Inbound sibling of BgpOutboundPrefixBlocking. Under
+        # max_prefix_action = "block" the session stays Established while
+        # net-new prefixes from the peer are withheld from every other peer.
+        # The gauge exists at 0 for every finite scope, so a nonblocking
+        # scope cannot fire.
+        expr: bgp_max_prefix_blocking == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: >-
+            Inbound max-prefix blocking for {{ $labels.peer }}
+            ({{ $labels.scope }})
+          description: >-
+            The inbound max-prefix blocking gauge for {{ $labels.peer }}
+            ({{ $labels.scope }}) on {{ $labels.instance }} has remained 1
+            for 5 minutes; net-new prefixes from this peer are withheld until
+            its usage falls back under the bound.
 
       - alert: BgpMaxPrefixNearLimit
         # Limit series exist only for finite configured bounds. Unlimited

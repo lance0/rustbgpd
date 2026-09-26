@@ -460,6 +460,7 @@ struct BgpMetricsInner {
     session_flaps: IntCounterVec,
     session_established: IntCounterVec,
     peer_admin_enabled: IntGaugeVec,
+    max_prefix_latched: IntGaugeVec,
     peer_session_established: IntGaugeVec,
     peer_session_state: IntGaugeVec,
     peer_info: IntGaugeVec,
@@ -811,7 +812,18 @@ impl BgpMetrics {
         let peer_admin_enabled = IntGaugeVec::new(
             Opts::new(
                 "bgp_peer_admin_enabled",
-                "Configured peer administrative intent (1 = enabled, 0 = disabled)",
+                "Effective peer administrative state (1 = enabled, 0 = disabled by \
+                 operator or latched off by a max-prefix shutdown)",
+            ),
+            &["peer", "interface"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_latched = IntGaugeVec::new(
+            Opts::new(
+                "bgp_max_prefix_latched",
+                "Peer latched off by a max-prefix shutdown (1 = latched until explicit \
+                 enable or a successful timed restart, 0 = not latched)",
             ),
             &["peer", "interface"],
         )
@@ -2642,6 +2654,9 @@ impl BgpMetrics {
             .register(Box::new(peer_admin_enabled.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(max_prefix_latched.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(peer_session_established.clone()))
             .expect("metric not already registered");
         registry
@@ -3260,6 +3275,7 @@ impl BgpMetrics {
             session_flaps,
             session_established,
             peer_admin_enabled,
+            max_prefix_latched,
             peer_session_established,
             peer_session_state,
             peer_info,
@@ -3545,6 +3561,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.session_flaps, peer);
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_latched, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_info, peer);
@@ -3679,6 +3696,7 @@ impl BgpMetrics {
     pub fn reap_peer_identity_series(&self, peer: &str, interface: &str) {
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
+        let _ = self.0.max_prefix_latched.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
         Self::reap_label_series_from_vec(
             &self.0.peer_info,
@@ -3783,12 +3801,21 @@ impl BgpMetrics {
         }
     }
 
-    /// Publish the authoritative configured administrative intent.
+    /// Publish the effective administrative state: 0 covers both an operator
+    /// disable and a max-prefix shutdown latch.
     pub fn set_peer_admin_enabled(&self, peer: &str, interface: &str, enabled: bool) {
         self.0
             .peer_admin_enabled
             .with_label_values(&[peer, interface])
             .set(i64::from(enabled));
+    }
+
+    /// Publish whether a max-prefix shutdown latch holds this exact peer off.
+    pub fn set_max_prefix_latched(&self, peer: &str, interface: &str, latched: bool) {
+        self.0
+            .max_prefix_latched
+            .with_label_values(&[peer, interface])
+            .set(i64::from(latched));
     }
 
     /// Publish the configured identity of one exact `(peer, interface)` peer
@@ -6725,9 +6752,11 @@ mod tests {
         m.set_peer_session_established("192.0.2.1", "", false);
         m.set_peer_session_state("192.0.2.1", "", "idle");
         m.set_peer_admin_enabled("fe80::1", "eth0", true);
+        m.set_max_prefix_latched("fe80::1", "eth0", false);
         m.set_peer_session_established("fe80::1", "eth0", true);
         m.set_peer_session_state("fe80::1", "eth0", "established");
         m.set_peer_admin_enabled("fe80::1", "eth1", false);
+        m.set_max_prefix_latched("fe80::1", "eth1", true);
         m.set_peer_session_established("fe80::1", "eth1", false);
         m.set_peer_session_state("fe80::1", "eth1", "idle");
 
@@ -6737,11 +6766,13 @@ mod tests {
         assert!(
             text.contains(r#"bgp_peer_session_established{interface="eth0",peer="fe80::1"} 1"#)
         );
+        assert!(text.contains(r#"bgp_max_prefix_latched{interface="eth1",peer="fe80::1"} 1"#));
 
         m.reap_peer_identity_series("fe80::1", "eth0");
         let text = gather_text(&m);
         assert!(!text.contains(r#"interface="eth0",peer="fe80::1""#));
         assert!(text.contains(r#"interface="eth1",peer="fe80::1""#));
+        assert!(text.contains(r#"bgp_max_prefix_latched{interface="eth1",peer="fe80::1"} 1"#));
         assert_eq!(
             text.matches(r#"interface="eth1",peer="fe80::1",state="#)
                 .count(),
@@ -8902,6 +8933,7 @@ mod tests {
         m.record_state_transition(peer, "open_confirm", "established");
         m.record_state_transition(peer, "established", "idle");
         m.set_peer_admin_enabled(peer, "", true);
+        m.set_max_prefix_latched(peer, "", false);
         m.set_peer_session_established(peer, "", false);
         m.set_peer_session_state(peer, "", "established");
         m.set_peer_info(peer, "", 64496, "Example Member", "members");
@@ -9003,10 +9035,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 72 peer-labeled series; state transitions and EVPN discard types
+        // 73 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 72);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 73);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -9016,7 +9048,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 72);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 73);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -9285,7 +9317,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 60] = [
+    const PEER_LABELED_FAMILIES: [&str; 61] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -9301,6 +9333,7 @@ mod tests {
         "bgp_inbound_rib_backpressure_total",
         "bgp_max_prefix_exceeded_total",
         "bgp_max_prefix_headroom",
+        "bgp_max_prefix_latched",
         "bgp_max_prefix_limit",
         "bgp_max_prefix_usage",
         "bgp_messages_received_total",
