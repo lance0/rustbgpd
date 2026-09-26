@@ -1,3 +1,5 @@
+#[cfg(feature = "bench-internals")]
+pub(crate) mod bench_outbound;
 mod commands;
 pub(crate) mod export;
 mod fsm;
