@@ -1464,7 +1464,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s j -l json -d 'Out
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address; this or --all is required' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l json-version -d 'Wrap supported JSON documents in a versioned envelope (requires --json)' -r -f -a "1\t''"

@@ -17,9 +17,9 @@ change every session at once. When stdin and stdout are both terminals, they
 name the target endpoint and scope and ask `[y/N]` first; any answer other than
 `y` or `yes` aborts with exit code `1` and changes nothing. `-y`/`--yes` skips
 the prompt. Non-interactive runs, such as scripts and pipelines, never prompt.
-Pass `--global` or `--all` to select the daemon-wide scope explicitly; omitting
-both it and `--neighbor` still selects that scope but prints a deprecation
-warning on stderr, and a future release will reject it as a usage error.
+These commands require an explicit scope: `--global` or `--all` for the
+daemon-wide scope, or `--neighbor` for one peer. Omitting both is a usage error
+(exit code `2`) and nothing is sent to the daemon.
 
 ## Commands
 
@@ -228,10 +228,10 @@ rbgp policy get <name>
 rbgp policy set <name> --from-file policy.json
 rbgp policy delete <name>
 rbgp policy chain show [--neighbor <addr>]
-rbgp policy chain set-import [--global | --neighbor <addr>] [--yes] <names...>
-rbgp policy chain set-export [--global | --neighbor <addr>] [--yes] <names...>
-rbgp policy chain clear-import [--global | --neighbor <addr>] [--yes]
-rbgp policy chain clear-export [--global | --neighbor <addr>] [--yes]
+rbgp policy chain set-import (--global | --neighbor <addr>) [--yes] <names...>
+rbgp policy chain set-export (--global | --neighbor <addr>) [--yes] <names...>
+rbgp policy chain clear-import (--global | --neighbor <addr>) [--yes]
+rbgp policy chain clear-export (--global | --neighbor <addr>) [--yes]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
@@ -494,7 +494,7 @@ rbgp watch              # legacy route-update stream
 
 rbgp topology nodes|links   # RFC 9107 ORR topology graph from BGP-LS
 rbgp orr                # RFC 9107 ORR per-vantage status
-rbgp gshut [--all | --neighbor <addr>] [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
+rbgp gshut (--all | --neighbor <addr>) [--clear] [--yes]   # RFC 8326 graceful-shutdown toggle
 rbgp mrt-dump
 rbgp shutdown [--reason <text>] [--yes]
 rbgp completions bash
