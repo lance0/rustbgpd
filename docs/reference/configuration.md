@@ -4834,7 +4834,11 @@ the steps that applied.
 ## Validation rules
 
 The following checks run at startup. Any failure prevents the daemon from
-starting:
+starting. Each quoted error is a literal fragment of the message that
+`rustbgpd --check` prints: `...` stands for the offending value or other
+variable text, `<value>` for the configured number, and `/` separates the
+messages of different cases. Unquoted text describes the error instead of
+quoting it:
 
 | Rule | Error |
 |------|-------|
@@ -4850,7 +4854,7 @@ starting:
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
 | `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
-| `grpc_*.access_mode` must be `read_only` or `read_write` | `invalid gRPC config` |
+| `grpc_*.access_mode` must be `read_only` or `read_write` | TOML parse error |
 | `grpc_*.max_tier` must be `read`, `sensitive_read`, `mutating`, or `operator_only` | TOML parse error |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | `grpc_*.principal` must not be empty when configured | `invalid gRPC config` |
@@ -4862,52 +4866,52 @@ starting:
 | `min_hold_time` must be 3..=65535 and no greater than a non-zero effective `hold_time` | `invalid min_hold_time` |
 | `send_hold_time` must be 0 (disabled) or greater than the effective `hold_time` (RFC 9687 §4.4) | `invalid send_hold_time` |
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, `"ipv6_flowspec"`, `"l2vpn_evpn"`, `"linkstate"`, `"linkstate_vpn"`, `"l3vpn_ipv4_unicast"`, `"l3vpn_ipv6_unicast"`, `"ipv4_labeled_unicast"`, `"ipv6_labeled_unicast"`, or `"rtc"` | `unknown address family` |
-| `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
+| `gr_restart_time` must be <= 4095 | `gr_restart_time <value> exceeds 4095 (12-bit max)` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_peer_restart_time_max` must be > 0 | `gr_peer_restart_time_max must be > 0` |
 | `gr_peer_restart_time_max` must be <= 4095 | `gr_peer_restart_time_max <value> exceeds 4095 (12-bit max)` |
-| `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
-| Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
+| `gr_stale_routes_time` must be > 0 and <= 3600 | `gr_stale_routes_time must be > 0` / `gr_stale_routes_time <value> exceeds 3600 (1 hour max)` |
+| Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `prefix length ... exceeds` |
 | Policy entry must have at least one match condition (see [Match conditions](#match-conditions)) | `must have at least one match condition` |
 | Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates trigger inbound Route Refresh for established peers whose import policy depends on validation state | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
 | `set_as_path_prepend.asn` must not be 0, and a chain whose `.rpol` prepend resolves to AS 0 is rejected when attached (RFC 7607) | `ASN cannot be 0 (RFC 7607)` / `AS 0 cannot be prepended (RFC 7607)` |
-| `match_as_path` must be a valid regex | `invalid regex` |
+| `match_as_path` must be a valid regex | `invalid AS_PATH regex` |
 | RT/RO local administrator must be <= 65535 for a 4-octet ASN or dotted IPv4 administrator; numeric ASNs <= 65535 carry a u32 local value | `local admin ... exceeds 65535 for ...` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
-| RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
+| RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval (...) must be >= refresh_interval` |
 | RPKI `max_expire_interval`, when set, must be <= 172800 and > both `refresh_interval` and `retry_interval` | `max_expire_interval ... must be <= 172800` / `must be > refresh_interval` / `must be > retry_interval` |
 | RPKI cache addresses must be unique numeric `IP:port` endpoints (bracketed for IPv6) | `invalid address` / `duplicate address` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
-| `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
-| `per_client_best` requires `route_server_client = true` | `invalid route_server_client` |
+| `route_server_client` is only valid on eBGP neighbors | `route_server_client requires eBGP` |
+| `per_client_best` requires `route_server_client = true` | `per_client_best on neighbor ... requires route_server_client = true` |
 | `disable_ipv4_unicast = true` requires at least one non-`ipv4_unicast` effective family | `invalid neighbor config` |
 | `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
 | Non-empty `discard_path_attributes` requires effective `route_server_client = true`; type 0 and protected types 1/2/3/6/7/14/15/17/18/33/35 are rejected | `invalid neighbor config ... discard_path_attributes` / `invalid route server config` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
 | MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
-| BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
+| BMP collector `address` must be a valid `ip:port` | `invalid BMP collector config: collectors[...]: invalid address` |
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
-| `cluster_id` must be a valid IPv4 address | `invalid cluster_id` |
-| `runtime_state_dir` must not be empty | `runtime_state_dir must not be empty` |
-| `[[fib_tables]].name` must be unique and match the identifier rule | `duplicate fib table name` / `invalid fib table name` |
-| `[[fib_tables]].table_id` must be unique and must not be `0`, `252`, `253`, `254`, or `255` | `duplicate fib table_id` / `reserved fib table_id` |
-| `[[fib_tables]].families` must be non-empty, contain no duplicates, and contain only `ipv4_unicast` / `ipv6_unicast` | `fib table families must not be empty` / `duplicate fib table family` / `unsupported fib table family` |
-| `[[fib_tables]].allowed_peer_groups` entries must reference existing peer groups and contain no duplicates | `undefined peer_group` / `duplicate allowed_peer_groups` |
-| `[[fib_tables]].allowed_neighbors` entries must parse as IP addresses and contain no duplicates | `invalid allowed_neighbors` / `duplicate allowed_neighbors` |
+| `cluster_id` must be a valid IPv4 address | `invalid route reflector config: invalid cluster_id` |
+| `runtime_state_dir` must not be empty | `invalid runtime_state_dir ...: must not be empty` |
+| `[[fib_tables]].name` must be unique and match the identifier rule | `invalid FIB table config: duplicate name` / `invalid FIB table config: name ...: must match` |
+| `[[fib_tables]].table_id` must be unique and must not be `0`, `252`, `253`, `254`, or `255` | `invalid FIB table config: duplicate table_id` / `table_id ... is reserved` |
+| `[[fib_tables]].families` must be non-empty, contain no duplicates, and contain only `ipv4_unicast` / `ipv6_unicast` | `families must not be empty` / `duplicate family` / `unsupported family` |
+| `[[fib_tables]].allowed_peer_groups` entries must reference existing peer groups and contain no duplicates | `allowed_peer_groups references undefined peer_group` / `duplicate allowed_peer_groups entry` |
+| `[[fib_tables]].allowed_neighbors` entries must parse as IP addresses and contain no duplicates | `invalid allowed_neighbors entry` / `duplicate allowed_neighbors entry` |
 | `[[fib_tables]].max_routes` must be omitted or greater than zero | `max_routes must be greater than zero` |
-| `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time exceeds maximum` |
+| `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time <value> exceeds 16777215 (24-bit max)` |
 | `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |
-| `ttl_security_hops` must be 1--255 and requires effective `ttl_security = true`; a peer-group value requires `ttl_security = true` on that same group | `ttl_security_hops` / `requires ... ttl_security = true` |
-| `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `invalid ge` |
-| `le` must be >= prefix length and <= AFI max | `invalid le` |
-| `ge` must be <= `le` when both are set | `ge must be <= le` |
-| Config file must be valid TOML | `failed to parse TOML` |
+| `ttl_security_hops` must be 1--255 and requires effective `ttl_security = true`; a peer-group value requires `ttl_security = true` on that same group | TOML parse error (outside 1--255) / `requires ... ttl_security = true` |
+| `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `ge value ... is less than prefix length` / `ge value ... exceeds` |
+| `le` must be >= prefix length and <= AFI max | `le value ... is less than prefix length` / `le value ... exceeds` |
+| `ge` must be <= `le` when both are set | `ge value ... exceeds le value` |
+| Config file must be valid TOML | `failed to parse config` (`failed to parse TOML` when the parser reports no source position) |
 
 ### Defaults applied at runtime
 
