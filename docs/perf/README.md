@@ -23,45 +23,61 @@ Each result below links to its published, reproducible receipt:
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
-  **1.21–1.35 s p50** for rustbgpd v0.68.0 source-equivalent runs. The dated
-  matrix retains BIRD and OpenBGPD context separately (historical matrix
-  measured 2026-08-08; current rustbgpd rows measured 2026-08-30),
-  [IXP receipt matrix](ixp-matrix-2026-07.md)
+  **1.37–1.63 s p50** for rustbgpd v0.72.0, measured 2026-09-26; current main
+  measured the same day read 1.42–1.75 s, within run-to-run spread — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md).
+  These rows are slower than the 1.21–1.35 s v0.68.0 rows measured 2026-08-30
+  on the same host; a same-day v0.68.0/v0.72.0 comparison is pending to tell
+  a regression from host drift. The dated matrix retains BIRD and OpenBGPD
+  context separately, [IXP receipt matrix](ixp-matrix-2026-07.md)
 - **IRR-scale filter reload** (320 route-server members × 183,040 generated
-  prefixes, same harness / same host): v0.68.0 source-equivalent completion p50
-  **0.85–1.09 s** across 0%, 10%, and 50% received-view overlap, with 320/320
-  sessions, zero parse errors, and the exact expected received-view delta in
-  all twelve roots. BIRD completed in 11.86–15.21 s and OpenBGPD in
-  42.94–61.96 s at this fixed shape — [current receipt](irr-reload-v0680-2026-08.md),
-  measured 2026-08-30
+  prefixes, same harness / same host): at 0% received-view overlap, v0.72.0
+  completion p50 was **1.22–1.44 s** and current main 1.21–1.32 s, measured
+  2026-09-26 with 320/320 sessions and zero parse errors — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). That is slower
+  than the 0.85–0.97 s v0.68.0 rows measured 2026-08-30 on the same host (same
+  pending comparison). The 10% and 50% overlap rows were not re-measured and
+  remain v0.68.0 source-equivalent observations of 0.88–1.09 s; BIRD completed
+  in 11.86–15.21 s and OpenBGPD in 42.94–61.96 s at this fixed shape —
+  [v0.68.0 receipt](irr-reload-v0680-2026-08.md), measured 2026-08-30
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
-  p50 **0.36–0.39 s** in the current v0.68.0 source-equivalent rows. The
-  dated matrix retains BIRD and OpenBGPD comparison rows separately — current
-  rustbgpd measured 2026-08-30,
+  p50 **0.48–0.55 s** for v0.72.0 and 0.50–0.53 s for current main, measured
+  2026-09-26 — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). The 2026-08-30 v0.68.0 rows read 0.36–0.39 s on the same
+  host (same pending comparison). The dated matrix retains BIRD and OpenBGPD
+  comparison rows separately,
   [same matrix](ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
-  **3.4 s** in the current v0.68.0 source-equivalent rows. The dated matrix
-  retains BIRD and OpenBGPD comparison rows — current rustbgpd measured
-  2026-08-30,
-  [same matrix](ixp-matrix-2026-07.md#s1--cold-convergence)
+  **3.6–4.0 s** for v0.72.0 and 3.7–3.9 s for current main, measured
+  2026-09-26; session establishment is consistently about 0.1 s slower on main,
+  unattributed — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). The 2026-08-30 v0.68.0 rows read 3.4 s on the same host
+  (same pending comparison). The dated matrix retains BIRD and OpenBGPD
+  comparison rows, [same matrix](ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
-  wire in **0.32–0.34 s** at **383,176–404,892 KiB** direct-process RSS in
-  three current source-equivalent v0.68.0 runs — historical receipt measured 2026-07-03;
-  current rows measured 2026-08-30,
+  wire in **332–351 ms** at **372,912–411,892 KiB** direct-process RSS in six
+  v0.72.0 runs, and in 343–349 ms at 388,516–420,564 KiB in six current-main
+  runs, measured 2026-09-26 — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). The v0.68.0 rows measured 2026-08-30
+  read 318–341 ms; the historical receipt was measured 2026-07-03,
   [1000-peer scale receipt](scale-receipt-2026-07.md)
 - **The losses, stated plainly**: OpenBGPD 9.2 holds a smaller reload stall
-  (p50 0.213–0.238 s vs current rustbgpd's 0.384–0.529 s), and BIRD keeps the
-  settled-RSS win under flap churn (337/328 MiB vs current rustbgpd's 440/449
-  MiB at S3). Current rustbgpd withdraw p50 is 0.30–0.43 s. At S2, current
-  rustbgpd settles at 373/372 MiB versus BIRD's dated 422/412 MiB — published in the
-  [same receipt](ixp-matrix-2026-07.md#memory), methodology and
-  fairness protocol included. Cross-daemon memory is not ranked in the current
-  IRR receipt because daemon and container defaults differ.
+  (p50 0.213–0.238 s vs rustbgpd v0.72.0's 0.457–0.646 s), and BIRD keeps the
+  settled-RSS win under flap churn (337/328 MiB vs rustbgpd v0.72.0's
+  401–426 MiB after each flap round, with noisier end-of-run samples of
+  521–607 MiB). rustbgpd v0.72.0 withdraw p50 is 0.26–0.48 s. At S2, rustbgpd
+  v0.72.0 settles at 384/385/384 MiB versus BIRD's dated 422/412 MiB. The
+  rustbgpd figures are from the [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md); the comparator rows and the fairness
+  protocol are in the [same matrix](ixp-matrix-2026-07.md#memory).
+  Cross-daemon memory is not ranked in the current IRR receipt because daemon
+  and container defaults differ.
 
-The rustbgpd figures above are current v0.68.0 source-equivalent rows measured
-2026-08-30. BIRD remains the v0.64.0 same-host refresh measured 2026-08-08;
-OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30.
-The mixed-date boundary and earlier bands are preserved in the receipt.
+The rustbgpd figures above are v0.72.0 release-tree rows measured 2026-09-26,
+with current main measured the same day as a regression check: main is
+within run-to-run spread except for consistently slower session establishment
+(about +0.1 s, unattributed) and small RR1000 shifts. The IRR 10%
+and 50% overlap rows remain v0.68.0 source-equivalent rows measured
+2026-08-30. On this host, the 2026-09-26 rows are slower than the 2026-08-30
+v0.68.0 rows in every re-measured cell; until a same-day v0.68.0/v0.72.0
+comparison runs, that gap is unattributed. BIRD remains the v0.64.0
+same-host refresh measured 2026-08-08; OpenBGPD 9.2 is a supplemental
+comparator amendment measured 2026-08-30. The mixed-date boundary and earlier
+bands are preserved in the receipts.
 
 ## Earlier route-reflector measurements
 
@@ -74,7 +90,7 @@ measured 2026-08-30).
 
 At route-reflector shapes, the
 [1000-peer scale receipt](scale-receipt-2026-07.md), measured 2026-07-03
-(its current rows, listed above, were measured 2026-08-30), records 1,000
+(its v0.68.0 source-equivalent rows were measured 2026-08-30), records 1,000
 uniform RR clients × 100k routes converging on the wire in 1.82 s at 419 MiB
 whole-process RSS, and 1,000 clients × 100k VPNv4 in 12.60 s / 625 MiB uniform
 and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
@@ -128,6 +144,7 @@ records.
 | [`grouped-private-adj-rib-out-late-join-2026-07.md`][grouped-private-adj-rib-out-late-join-2026-07.md] | Unstated | Late join after a preloaded Loc-RIB, measured across client counts | Fresh grouped-join virtual-allocation reduction | A retained-RSS headline |
 | [`grouped-withdrawal-fanout-2026-07.md`][grouped-withdrawal-fanout-2026-07.md] | July 2026 | Grouped withdrawal fanout across the disclosed member fleet | Absolute measurement-only baseline | Writer, socket, network, or end-to-end latency |
 | [`grouped-withdrawal-probe-skip-2026-07.md`][grouped-withdrawal-probe-skip-2026-07.md] | July 2026 | Fixed 64-route withdrawal at 64, 256, and 1,000 members | Exact-probe skip improved measured medians by 6.80–9.33% | A result outside the fixed withdrawal shape |
+| [`headline-refresh-v0720-2026-09.md`](headline-refresh-v0720-2026-09.md) | 2026-09-26 | IXP-700 S1/S2/S3, IRR reload at 0% overlap, and RR1000 on v0.72.0 and current main, alternating, three or more runs per build | Main within run-to-run spread of the same-day v0.72.0 control, except consistently slower session establishment (about +0.1 s, unattributed) and small RR1000 shifts | IRR 10%/50% overlap, comparator daemons, or attribution of the gap to the August v0.68.0 rows |
 | [`high-n-route-server-v0680-2026-08.md`][high-n-route-server-v0680-2026-08.md] | 2026-08-30 | Exact-source 2,500- and 5,000-peer route-server runs | Both high-N runs completed their session and route-count gates | A scaling law, interpolation, or extrapolation |
 | [`irr-reload-comparison-2026-08.md`][irr-reload-comparison-2026-08.md] | 2026-08 | 320 members, 183,040 routes, 3.2M filter entries, eight reload roots | Same-host rustbgpd, BIRD, and OpenBGPD reload observations | A cause for later-reload growth or exact allocator comparison |
 | [`irr-reload-grouped-per-client-best-2026-08.md`][irr-reload-grouped-per-client-best-2026-08.md] | 2026-08 | 320 members, 183,040 prefixes, four reloads per cell | Historical grouped per-client-best acceptance result | A speedup or the internal mechanism behind later-reload growth |
@@ -268,6 +285,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/grouped-private-adj-rib-out-late-join-2026-07/README.md`](artifacts/grouped-private-adj-rib-out-late-join-2026-07/README.md) | Unstated | Same-host A/B/B/A late-join campaign | The complete retained inputs for the linked receipt | Unstated |
 | [`artifacts/grouped-withdrawal-fanout-2026-07/README.md`](artifacts/grouped-withdrawal-fanout-2026-07/README.md) | Unstated | Exact-commit grouped-withdrawal baseline campaign | Retained estimates, workload, and claim boundary | Unstated |
 | [`artifacts/grouped-withdrawal-probe-skip-2026-07/README.md`](artifacts/grouped-withdrawal-probe-skip-2026-07/README.md) | Unstated | A/B/B/A grouped-withdrawal exact-probe campaign at 8, 64, 256, and 1,000 members | A manager-path improvement at 64, 256, and 1,000 members | An 8-member, full-daemon, convergence, or network-throughput result |
+| [`artifacts/headline-refresh-v0720-2026-09/README.md`](artifacts/headline-refresh-v0720-2026-09/README.md) | 2026-09-26 | Matrix, IRR 0%, and RR1000 runs for v0.72.0 and current main | Logs, status, provenance, RSS samples, and a per-value summary | Full daemon logs or scenario configurations |
 | [`artifacts/high-n-route-server-v0680-2026-08/README.md`](artifacts/high-n-route-server-v0680-2026-08/README.md) | Unstated | Exact-source 2,500- and 5,000-peer runs | Status, timing, settled RSS, and provenance rows | A replayable binary package |
 | [`artifacts/honor-policy-waits-2026-09-12/README.md`](artifacts/honor-policy-waits-2026-09-12/README.md) | 2026-09-12 | Two honor-only SIGHUP edits across 1,000 eBGP peers with timed CLI probes | Every call met the 2-second budget and both reloads completed at the candidate revision | Soak qualification or a general operator deadline |
 | [`artifacts/installed-import-counters-2026-09-13/README.md`](artifacts/installed-import-counters-2026-09-13/README.md) | Unstated | Installed import-counter descriptor construction, publication, and release at 1,000 peers | Allocation counts, requested bytes, and elapsed ranges for the disclosed label and cache shapes | A cold/warm speedup comparison or configuration limit |

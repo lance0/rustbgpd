@@ -309,3 +309,11 @@ The three machine-readable phase records are retained in the
 [`current-scale-v0680-2026-08`](artifacts/current-scale-v0680-2026-08/README.md)
 bundle. These values describe this fixed shape and do not imply larger-fleet
 scaling.
+
+## v0.72.0 headline refresh — 2026-09-26
+
+The rustbgpd rows were re-measured on 2026-09-26 for the v0.72.0 release tree
+and current main, alternating on the same host. Results, method, and the
+cross-date gap to the 2026-08-30 rows above are in the
+[v0.72.0 headline refresh receipt](headline-refresh-v0720-2026-09.md). The
+sections above are unchanged as history.
