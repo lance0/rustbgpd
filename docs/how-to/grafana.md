@@ -177,7 +177,8 @@ inside the bounded window does.
   legends distinguish scoped link-local siblings; unscoped peers carry an
   empty `interface`. The shipped session-down alert joins these exact labels,
   so enabled peers that never Established are visible while disabled peers do
-  not page.
+  not page. The admin series is the effective administrative state, so a
+  max-prefix latched peer also reads 0 there; `BgpMaxPrefixLatched` covers it.
 - **Exact session state** uses the one-hot vector directly; preserving
   `interface` keeps scoped siblings distinct and summing the six rows provides
   a built-in integrity check:

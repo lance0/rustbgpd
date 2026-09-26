@@ -1469,10 +1469,12 @@ one beside it, so `group_left` joins never match two identities for one peer.
 | `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
-The shipped `BgpSessionNotEstablished` alert requires administrative intent 1
-and Established state 0 for the same `(instance, peer, interface)` for two
-minutes. It therefore covers never-established and previously-down peers
-without paging on disabled peers. Flap-rate alerting remains based on
+The shipped `BgpSessionNotEstablished` alert requires effective administrative
+state 1 and Established state 0 for the same `(instance, peer, interface)` for
+two minutes. It therefore covers never-established and previously-down peers
+without paging on disabled peers. A max-prefix latched peer reads effective
+administrative state 0, so it is silent here and covered by
+`BgpMaxPrefixLatched` instead. Flap-rate alerting remains based on
 `bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
 the same 200 ms core-actor deadline as `/readyz`. `rbgp health --liveness`
