@@ -61,6 +61,28 @@ column names the receipt to re-check against the new text.
 | 12 | §8.4 | OTC-based procedures RECOMMENDED to complement ASPA | Implemented | RFC 9234 Only-to-Customer attribute handling ships alongside Roles. | [ADR-0071](../adr/0071-bgp-roles-otc.md) |
 | 13 | §4, §6.5 | ASPA registration and AS-migration guidance | Not applicable | Operator/CA-side process recommendations with no router implementation requirement. | — |
 
+### Received path and import policy
+
+ASPA verification judges the effective path received from the neighbor, after
+AS4 reconstruction and before import policy. Import prepends do not change that
+validation input or exempt the route from the neighbor-AS prerequisite. Initial
+RIB insertion and full or incremental cache revalidation use the same received
+path and session relationship context. The RIB still validates against its own
+current table; it does not assume the session used the same cache snapshot.
+
+Only accepted unicast routes whose import policy changes AS_PATH retain a shared
+copy of the original path. Selection and export use the modified attributes;
+attribute interning and outbound equality do not include validation provenance.
+RPKI origin validation follows the same received-path rule: an empty or absent
+received path remains NotFound even if an import prepend creates an origin ASN.
+Unmodified and locally injected routes use their stored path.
+
+The session/RIB regressions in `crates/transport/src/session/tests/rpki_aspa.rs`
+cover import `prepend as self`, mixed IPv4/IPv6 NLRI, initial validation, and full
+and incremental cache updates. These clarify the ingress contract described in
+[ADR-0049](../adr/0049-aspa-verification.md); they do not change the verification
+algorithm or the explicit mitigation policy below.
+
 ### What "Partial" means for §5.7
 
 Implemented:

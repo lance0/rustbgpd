@@ -345,6 +345,7 @@ fn build_route(peer: u8, prefix: u8, path_id: u8, variant: u8, received_at: Inst
         path_id: u32::from(path_id),
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }

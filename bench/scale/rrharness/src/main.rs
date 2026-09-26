@@ -62,6 +62,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: AspaValidationContext::default(),
     }
 }

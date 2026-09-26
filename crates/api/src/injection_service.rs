@@ -285,6 +285,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             path_id: req.path_id,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         };
 

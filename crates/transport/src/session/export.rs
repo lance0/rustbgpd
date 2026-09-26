@@ -2557,6 +2557,7 @@ mod tests {
             path_id: 7,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         };
         let candidate = ExactExportCandidate::Unicast {
@@ -2630,6 +2631,7 @@ mod tests {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         };
         let wire_bytes = |profile: &SessionExportProfile| {
@@ -2869,6 +2871,7 @@ mod tests {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
     }
@@ -2904,6 +2907,7 @@ mod tests {
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                received_as_path: None,
                 aspa_context: rustbgpd_wire::AspaValidationContext::default(),
             })
             .collect::<Vec<_>>();
@@ -3059,6 +3063,7 @@ mod tests {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }
     }

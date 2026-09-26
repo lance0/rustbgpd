@@ -184,6 +184,7 @@ fn make_route(prefix: Prefix, i: u32, a: &Arc<AttrSet>) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
@@ -207,6 +208,7 @@ fn make_client_route(prefix: Prefix, client: u32, idx: u32) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }

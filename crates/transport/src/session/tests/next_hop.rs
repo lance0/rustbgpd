@@ -299,6 +299,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }]
         .into(),
@@ -666,6 +667,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         }]
         .into(),

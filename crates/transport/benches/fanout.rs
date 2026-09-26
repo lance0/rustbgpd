@@ -167,6 +167,7 @@ fn make_route_with_med(prefix: Prefix, med: u32) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }

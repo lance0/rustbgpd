@@ -611,11 +611,11 @@ impl RibManager {
             rib.for_each_route_mut_accounting_rpki(|route| {
                 routes_scanned += 1;
                 // A table update can affect a verdict only when its customer
-                // ASN occurs in the route's AS_SEQUENCE or AS_SET. We still
+                // ASN occurs in the received AS_SEQUENCE or AS_SET. We still
                 // scan every route; the delta avoids only detailed validation.
                 if delta.as_ref().is_some_and(|changed| {
                     route
-                        .as_path()
+                        .validation_as_path()
                         .is_none_or(|path| path.asns().all(|asn| !changed.contains(&asn)))
                 }) {
                     return;
