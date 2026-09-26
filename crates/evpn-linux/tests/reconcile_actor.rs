@@ -4735,6 +4735,215 @@ async fn single_active_preinstall_programs_active_backup_group_and_nhid_row() {
     h.shutdown().await;
 }
 
+/// Resolve the actual forwarding destination, whether the row uses dst or nhid.
+fn single_active_kernel_destination(handle: &InMemoryHandle, mac: MacAddress) -> IpAddr {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    let snapshot = handle.kernel_snapshot();
+    let row = snapshot.find_fdb(vni(100), mac).expect("installed MAC");
+    if let Some(dst) = row.dst {
+        return dst;
+    }
+    let nhs = handle.nexthop_ops();
+    let group = &nhs[&row.nh_id.expect("dst or nhid")];
+    let KernelNexthopKind::Group { member_ids } = &group.kind else {
+        panic!("FDB must reference a group");
+    };
+    assert_eq!(member_ids.len(), 1, "single-active must have one egress");
+    let KernelNexthopKind::Member { gateway } = nhs[&member_ids[0]].kind else {
+        panic!("group must reference a member");
+    };
+    gateway
+}
+
+#[tokio::test]
+async fn single_active_foreign_mac_does_not_conflict_with_programmable_group() {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    for existing_group in [false, true] {
+        let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+        h.handle.set_probe(vni(100), InstanceProbe::Ready);
+        let original_group = if existing_group {
+            Some(install_and_settle_single_active(&mut h).await.0)
+        } else {
+            None
+        };
+        // A reflected Type 2 can name the local VXLAN interface's MAC.
+        // Its permanent kernel row is foreign and cannot join the group.
+        let mut foreign = foreign_fdb_entry(mac(2), "10.9.9.9");
+        foreign.dst = None;
+        h.handle.pre_load_fdb(vni(100), foreign.clone());
+        let mut macs = RemoteMacTable::builder();
+        macs.insert(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        )
+        .unwrap();
+        macs.insert(
+            vni(100),
+            mac(2),
+            entry_single_active("10.0.0.3", "10.0.0.2", 7),
+        )
+        .unwrap();
+        h.intent_tx
+            .send(intent(
+                2,
+                one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+                macs.build(),
+            ))
+            .unwrap();
+        let report = wait_for_generation(&mut h, 2).await;
+        assert!(report.failed.is_empty());
+        assert_eq!(
+            h.handle.kernel_snapshot().find_fdb(vni(100), mac(2)),
+            Some(&foreign)
+        );
+        let group_id = h
+            .handle
+            .kernel_fdb_nh_id(vni(100), mac(1))
+            .expect("CE retains an NHG");
+        if let Some(original) = original_group {
+            assert_eq!(
+                group_id, original,
+                "foreign intent must not replace the CE group"
+            );
+        }
+        assert_eq!(
+            single_active_kernel_destination(&h.handle, mac(1)),
+            ipa("10.0.0.2")
+        );
+        let nhs = h.handle.nexthop_ops();
+        let (members, groups) = split_nexthop_ops(&nhs);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(members.len(), 2, "active and pre-created standby remain");
+        assert!(members.iter().any(|member| matches!(member.kind,
+            KernelNexthopKind::Member { gateway } if gateway == ipa("10.0.0.3"))));
+        let handle = h.handle.clone();
+        h.shutdown().await;
+        assert_eq!(
+            handle.kernel_snapshot().find_fdb(vni(100), mac(2)),
+            Some(&foreign)
+        );
+    }
+}
+
+#[tokio::test]
+async fn single_active_conflicting_mac_origins_preserve_each_destination() {
+    // Exercise both lexical assignments and fresh / either-MAC-first arrival.
+    for reverse in [false, true] {
+        for first in [None, Some(1), Some(2)] {
+            let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+            h.handle.set_probe(vni(100), InstanceProbe::Ready);
+            let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+            let (primary, backup) = if reverse {
+                ("10.0.0.3", "10.0.0.2")
+            } else {
+                ("10.0.0.2", "10.0.0.3")
+            };
+            let entries = [
+                (1, entry_single_active(primary, backup, 7)),
+                (2, entry_single_active(backup, primary, 7)),
+            ];
+            let table = |selected: &[u8], consistent: bool| {
+                let mut macs = RemoteMacTable::builder();
+                for (index, entry) in &entries {
+                    if selected.contains(index) {
+                        macs.insert(
+                            vni(100),
+                            mac(*index),
+                            if consistent {
+                                entries[0].1.clone()
+                            } else {
+                                entry.clone()
+                            },
+                        )
+                        .unwrap();
+                    }
+                }
+                macs.build()
+            };
+            if let Some(index) = first {
+                h.intent_tx
+                    .send(intent(1, inst.clone(), table(&[index], false)))
+                    .unwrap();
+                let report = wait_for_generation(&mut h, 1).await;
+                assert!(report.failed.is_empty());
+                assert!(h.handle.kernel_fdb_nh_id(vni(100), mac(index)).is_some());
+            }
+            h.intent_tx
+                .send(intent(2, inst.clone(), table(&[1, 2], false)))
+                .unwrap();
+            let report = wait_for_generation(&mut h, 2).await;
+            assert!(report.failed.is_empty());
+            for (index, entry) in &entries {
+                assert_eq!(
+                    single_active_kernel_destination(&h.handle, mac(*index)),
+                    entry.remote_vtep_ip,
+                    "reverse={reverse}, first={first:?}, MAC={index}"
+                );
+            }
+            assert!(
+                h.handle.nexthop_ops().is_empty(),
+                "conflicting group and standby must be reaped"
+            );
+
+            // Agreement restores shared-group forwarding for both dst rows.
+            h.intent_tx
+                .send(intent(3, inst.clone(), table(&[1, 2], true)))
+                .unwrap();
+            let report = wait_for_generation(&mut h, 3).await;
+            assert!(report.failed.is_empty());
+            let group = h
+                .handle
+                .kernel_fdb_nh_id(vni(100), mac(1))
+                .expect("shared group restored");
+            assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(2)), Some(group));
+            assert_eq!(
+                single_active_kernel_destination(&h.handle, mac(2)),
+                ipa(primary)
+            );
+
+            // A conflict in an already shared group converts every reference.
+            h.intent_tx
+                .send(intent(4, inst.clone(), table(&[1, 2], false)))
+                .unwrap();
+            let report = wait_for_generation(&mut h, 4).await;
+            assert!(report.failed.is_empty());
+            assert_eq!(
+                single_active_kernel_destination(&h.handle, mac(1)),
+                ipa(primary)
+            );
+            assert_eq!(
+                single_active_kernel_destination(&h.handle, mac(2)),
+                ipa(backup)
+            );
+            assert!(h.handle.nexthop_ops().is_empty());
+
+            // Withdrawing the conflicting MAC also restores the surviving group.
+            h.intent_tx
+                .send(intent(5, inst.clone(), table(&[1], false)))
+                .unwrap();
+            let report = wait_for_generation(&mut h, 5).await;
+            assert!(report.failed.is_empty());
+            assert!(!h.handle.kernel_has_fdb(vni(100), mac(2)));
+            assert!(h.handle.kernel_fdb_nh_id(vni(100), mac(1)).is_some());
+            assert_eq!(
+                single_active_kernel_destination(&h.handle, mac(1)),
+                ipa(primary)
+            );
+            h.intent_tx
+                .send(intent(6, inst, RemoteMacTable::new()))
+                .unwrap();
+            let report = wait_for_generation(&mut h, 6).await;
+            assert!(report.failed.is_empty());
+            assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+            assert!(h.handle.nexthop_ops().is_empty());
+            h.shutdown().await;
+        }
+    }
+}
+
 // 2. Standby lifecycle through the actor: two MACs share the group;
 //    withdrawing one keeps group + backup NH (intent lives);
 //    withdrawing the last tears everything down — MAC rows leave
