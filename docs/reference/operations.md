@@ -3714,12 +3714,11 @@ unknown fields are rejected at parse time. Empty
 subcommand to drop a chain.
 
 A global chain change applies to every neighbor without its own chain and is
-persisted. Select the scope with `--global` or `--neighbor`; omitting both
-still selects the global chain but prints a deprecation warning, and a future
-release will reject it. When stdin and stdout are both terminals, a global
-change names the endpoint and asks `[y/N]` first; `-y`/`--yes` skips the
-prompt, and non-interactive runs never prompt. A declined prompt exits `1`
-without changing anything.
+persisted. Select the scope with `--global` or `--neighbor`; omitting both is
+a usage error (exit `2`) and changes nothing. When stdin and stdout are both
+terminals, a global change names the endpoint and asks `[y/N]` first;
+`-y`/`--yes` skips the prompt, and non-interactive runs never prompt. A
+declined prompt exits `1` without changing anything.
 
 ### Graceful shutdown (daemon exit)
 
@@ -3761,7 +3760,7 @@ rbgp gshut --all --clear
 
 An all-peers change asks `[y/N]` first when stdin and stdout are both
 terminals; `-y`/`--yes` skips it. `rbgp gshut` without `--all` or
-`--neighbor` still selects every peer but prints a deprecation warning.
+`--neighbor` is a usage error (exit `2`) and changes nothing.
 
 The toggle is **operator-runtime state**, not config — it lives on
 the `ManagedPeer` desired-state record, mirrors to the live session,

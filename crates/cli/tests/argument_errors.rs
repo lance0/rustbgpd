@@ -43,8 +43,14 @@ fn semantic_argument_errors_keep_exit_one_before_transport() {
     for (args, message) in [
         (vec!["top", "--interval", "0"], "interval must be between"),
         (vec!["top", "--interval", "61"], "interval must be between"),
-        (vec!["policy", "chain", "set-import"], "set-import requires"),
-        (vec!["policy", "chain", "set-export"], "set-export requires"),
+        (
+            vec!["policy", "chain", "set-import", "--global"],
+            "set-import requires",
+        ),
+        (
+            vec!["policy", "chain", "set-export", "--neighbor", "10.0.0.2"],
+            "set-export requires",
+        ),
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");

@@ -3,13 +3,12 @@
 //! - `list` / `get NAME` / `set NAME --from-file FILE` / `delete NAME`
 //!   for named `[[policy_definitions]]` entries.
 //! - `chain show [--neighbor ADDR]` for global or per-neighbor chains.
-//! - `chain set-import [--neighbor ADDR] POL...` /
-//!   `chain set-export [--neighbor ADDR] POL...` to install (or
-//!   replace) a chain. Omitting `--neighbor` applies the change to
-//!   the global chain.
-//! - `chain clear-import [--neighbor ADDR]` /
-//!   `chain clear-export [--neighbor ADDR]` to drop the resolved
-//!   chain entirely. Omitting `--neighbor` clears the global chain.
+//! - `chain set-import (--global | --neighbor ADDR) POL...` /
+//!   `chain set-export (--global | --neighbor ADDR) POL...` to install
+//!   (or replace) a chain.
+//! - `chain clear-import (--global | --neighbor ADDR)` /
+//!   `chain clear-export (--global | --neighbor ADDR)` to drop the
+//!   resolved chain entirely.
 
 use serde::Serialize;
 

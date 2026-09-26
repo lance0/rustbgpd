@@ -2836,8 +2836,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (gshut)
 _arguments "${_arguments_options[@]}" : \
-'(--all)--neighbor=[Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead]:NEIGHBOR:_default' \
-'(--all)--peer=[Neighbor address. Omitting both this and --all toggles every peer; that form is deprecated, so pass --all instead]:NEIGHBOR:_default' \
+'(--all)--neighbor=[Neighbor address; this or --all is required]:NEIGHBOR:_default' \
+'(--all)--peer=[Neighbor address; this or --all is required]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3064,8 +3064,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (set-import)
 _arguments "${_arguments_options[@]}" : \
-'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
-'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3085,8 +3085,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (set-export)
 _arguments "${_arguments_options[@]}" : \
-'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
-'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3106,8 +3106,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (clear-import)
 _arguments "${_arguments_options[@]}" : \
-'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
-'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3126,8 +3126,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (clear-export)
 _arguments "${_arguments_options[@]}" : \
-'(--global)--neighbor=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
-'(--global)--peer=[Neighbor address. Omitting both this and --global changes the global chain; that form is deprecated, so pass --global instead]:NEIGHBOR:_default' \
+'(--global)--neighbor=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
+'(--global)--peer=[Neighbor address; this or --global is required]:NEIGHBOR:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
