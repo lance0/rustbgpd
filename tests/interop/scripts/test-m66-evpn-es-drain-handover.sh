@@ -115,6 +115,43 @@ SIGHUP_MARKER="m66-sighup-while-drained"
 # Shared helpers live in test-lib.sh; M66-specific assertions stay below.
 # ---------------------------------------------------------------------------
 
+# Keep the first failure's full state in the CI log before retry teardown.
+# The RIB dump is deliberately unfiltered: another MAC can share the CE's NHG.
+M66_FAILURE_DUMPED=0
+dump_m66_failure_state() {
+    [ "$M66_FAILURE_DUMPED" -eq 0 ] || return 0
+    M66_FAILURE_DUMPED=1
+    local node
+    local -a ctl
+    for node in "$VTEP" "$PE1" "$PE2"; do
+        if [ "$node" = "$VTEP" ]; then
+            ctl=(vtep_ctl)
+        else
+            ctl=(pe_ctl "$node")
+        fi
+        printf '\n--- M66 failure: %s full EVPN RIB ---\n' "$node" >&2
+        "${ctl[@]}" evpn -j >&2 || true
+        printf '\n--- M66 failure: %s owned nexthops and ref_macs ---\n' "$node" >&2
+        "${ctl[@]}" evpn nexthops -j >&2 || true
+        printf '\n--- M66 failure: %s kernel FDB ---\n' "$node" >&2
+        docker exec "$node" bridge -j fdb show >&2 || true
+        printf '\n--- M66 failure: %s kernel nexthops ---\n' "$node" >&2
+        docker exec "$node" ip -j nexthop show >&2 || true
+        printf '\n--- M66 failure: %s full daemon log ---\n' "$node" >&2
+        docker exec "$node" cat /var/log/rustbgpd.log >&2 || true
+    done
+}
+
+m66_cleanup_on_exit() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ] || [ "$fail" -gt 0 ]; then
+        dump_m66_failure_state || true
+    fi
+    _cleanup_on_exit || true
+    return "$exit_code"
+}
+trap m66_cleanup_on_exit EXIT INT TERM HUP
+
 # Assert all four pe1 route classes are ABSENT from the vtep RIB
 # right now (used post-drain and post-SIGHUP). $1 = phase label.
 assert_pe1_routes_absent() {
@@ -243,6 +280,7 @@ if [ -n "$member_id" ] && [ "$members" = "$member_id" ]; then
 else
     fail "group ${group_id:-?} members '$members' (want exactly the via-$PE1_IP NH '$member_id')"
     rb_nh >&2
+    dump_m66_failure_state
 fi
 if [ -n "$standby_id" ] && [ "$standby_id" != "$member_id" ]; then
     ok "backup per-VTEP NH pre-created: $standby_id (via $PE2_IP)"
