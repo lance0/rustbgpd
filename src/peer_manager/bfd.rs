@@ -48,6 +48,10 @@ pub(super) struct BfdCoupling {
     next_revision: u64,
     /// During a generation, lifecycle mutations must not publish partial BFD membership.
     pub(super) reloading: bool,
+    /// The startup registration operation resyncs unchanged membership once at its end.
+    pub(super) registering: bool,
+    #[cfg(test)]
+    pub(super) desired_publications: usize,
     /// Inner compensation must read accepted strict settings without losing
     /// the candidate needed to fence an uncertain rollback.
     rollback_lookup: bool,
@@ -107,6 +111,9 @@ impl PeerManager {
             opened,
             next_revision: 1,
             reloading: false,
+            registering: false,
+            #[cfg(test)]
+            desired_publications: 0,
             rollback_lookup: false,
             retries: BTreeMap::new(),
             retry_at: None,
@@ -632,12 +639,15 @@ impl PeerManager {
             if c.reloading || !c.configured.contains_key(&peer) {
                 return false;
             }
-            if disabled {
-                c.disabled.insert(peer);
+            let changed = if disabled {
+                c.disabled.insert(peer)
             } else {
-                c.disabled.remove(&peer);
-            }
-            true
+                c.disabled.remove(&peer)
+            };
+            // Actual admin transitions must reach the actor immediately, even
+            // during registration. Outside that operation an unchanged enable
+            // still needs a fresh reconcile ack to release a new strict hold.
+            changed || !c.registering
         });
         if relevant {
             self.republish_bfd_desired();
@@ -708,6 +718,10 @@ impl PeerManager {
         };
         if coupling.reloading {
             return;
+        }
+        #[cfg(test)]
+        {
+            coupling.desired_publications += 1;
         }
         let disabled = coupling.disabled.clone();
         // A disabled peer's session is drained, so it can't be "held down".
