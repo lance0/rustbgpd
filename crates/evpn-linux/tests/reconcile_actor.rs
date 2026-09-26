@@ -4757,6 +4757,78 @@ fn single_active_kernel_destination(handle: &InMemoryHandle, mac: MacAddress) ->
 }
 
 #[tokio::test]
+async fn single_active_foreign_mac_does_not_conflict_with_programmable_group() {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+
+    for existing_group in [false, true] {
+        let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+        h.handle.set_probe(vni(100), InstanceProbe::Ready);
+        let original_group = if existing_group {
+            Some(install_and_settle_single_active(&mut h).await.0)
+        } else {
+            None
+        };
+        // A reflected Type 2 can name the local VXLAN interface's MAC.
+        // Its permanent kernel row is foreign and cannot join the group.
+        let mut foreign = foreign_fdb_entry(mac(2), "10.9.9.9");
+        foreign.dst = None;
+        h.handle.pre_load_fdb(vni(100), foreign.clone());
+        let mut macs = RemoteMacTable::builder();
+        macs.insert(
+            vni(100),
+            mac(1),
+            entry_single_active("10.0.0.2", "10.0.0.3", 7),
+        )
+        .unwrap();
+        macs.insert(
+            vni(100),
+            mac(2),
+            entry_single_active("10.0.0.3", "10.0.0.2", 7),
+        )
+        .unwrap();
+        h.intent_tx
+            .send(intent(
+                2,
+                one_instance_table(instance(100, Some("br100"), "10.0.0.1")),
+                macs.build(),
+            ))
+            .unwrap();
+        let report = wait_for_generation(&mut h, 2).await;
+        assert!(report.failed.is_empty());
+        assert_eq!(
+            h.handle.kernel_snapshot().find_fdb(vni(100), mac(2)),
+            Some(&foreign)
+        );
+        let group_id = h
+            .handle
+            .kernel_fdb_nh_id(vni(100), mac(1))
+            .expect("CE retains an NHG");
+        if let Some(original) = original_group {
+            assert_eq!(
+                group_id, original,
+                "foreign intent must not replace the CE group"
+            );
+        }
+        assert_eq!(
+            single_active_kernel_destination(&h.handle, mac(1)),
+            ipa("10.0.0.2")
+        );
+        let nhs = h.handle.nexthop_ops();
+        let (members, groups) = split_nexthop_ops(&nhs);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(members.len(), 2, "active and pre-created standby remain");
+        assert!(members.iter().any(|member| matches!(member.kind,
+            KernelNexthopKind::Member { gateway } if gateway == ipa("10.0.0.3"))));
+        let handle = h.handle.clone();
+        h.shutdown().await;
+        assert_eq!(
+            handle.kernel_snapshot().find_fdb(vni(100), mac(2)),
+            Some(&foreign)
+        );
+    }
+}
+
+#[tokio::test]
 async fn single_active_conflicting_mac_origins_preserve_each_destination() {
     // Exercise both lexical assignments and fresh / either-MAC-first arrival.
     for reverse in [false, true] {

@@ -379,12 +379,13 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    received routes, and verify peer sessions are Established.
 4. If the FDB row has `dst <ip>` (not `nhid`), the entry is in
    the single-dst fallback path. Common causes:
-   - MACs sharing `(VNI, ESI, EthernetTag)` disagree on active members or
+   - Programmable MACs sharing `(VNI, ESI, EthernetTag)` disagree on active members or
      standby. Each MAC uses its own primary VTEP until the intent agrees
      again, then shared-group forwarding resumes. This includes single-active
      MACs advertised by different PEs; one MAC must not overwrite another's
      destination. During fallback, backup preinstallation and group-wide
      failover are unavailable; updated intent reconciles each MAC separately.
+     MACs blocked by foreign kernel rows do not participate in this comparison.
    - Mixed address-family alias members: one FDB nexthop group
      cannot mix IPv4 and IPv6 VTEPs, so rustbgpd warns once per
      `(VNI, MAC)` and falls back to the primary VTEP. Homogeneous
