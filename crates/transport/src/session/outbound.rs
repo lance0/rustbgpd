@@ -56,17 +56,20 @@ type AttrGroupValue = (Arc<Vec<PathAttribute>>, Option<IpAddr>, Option<Ipv6Addr>
 /// UPDATEs. Post-policy attribute `Arc`s are allocated per RIB distribution
 /// pass, so a resync replaying routes stored across many passes would
 /// otherwise emit one UPDATE per original pass and can overrun the bounded
-/// writer queue. Pointer lookups stay the fast path; each pointer key pins
-/// its `Arc` so a freed allocation cannot alias a later one.
+/// writer queue. Pointer lookups stay the fast path. A pointer that opens a
+/// group is kept alive by that group; one that joins an existing group by
+/// value is pinned here, so a freed allocation cannot alias a later one.
 #[derive(Default)]
 struct AttrGroupIndex {
-    by_ptr: HashMap<AttrGroupKey, (Arc<Vec<PathAttribute>>, usize)>,
+    by_ptr: HashMap<AttrGroupKey, usize>,
     by_value: HashMap<AttrGroupValue, usize>,
+    pinned: Vec<Arc<Vec<PathAttribute>>>,
 }
 
 impl AttrGroupIndex {
     /// The group for these attributes: `Ok(existing)`, or `Err(next)` after
-    /// registering `next` as the index of a new group the caller pushes.
+    /// registering `next` as the index of a new group the caller pushes
+    /// holding `attrs`.
     fn group(
         &mut self,
         attrs: &Arc<Vec<PathAttribute>>,
@@ -79,15 +82,20 @@ impl AttrGroupIndex {
             next_hop,
             link_local_next_hop,
         };
-        if let Some((_, idx)) = self.by_ptr.get(&key) {
-            return Ok(*idx);
+        if let Some(&idx) = self.by_ptr.get(&key) {
+            return Ok(idx);
         }
         let idx = *self
             .by_value
             .entry((Arc::clone(attrs), next_hop, link_local_next_hop))
             .or_insert(next);
-        self.by_ptr.insert(key, (Arc::clone(attrs), idx));
-        if idx == next { Err(next) } else { Ok(idx) }
+        self.by_ptr.insert(key, idx);
+        if idx == next {
+            Err(next)
+        } else {
+            self.pinned.push(Arc::clone(attrs));
+            Ok(idx)
+        }
     }
 }
 struct V4BodyGroup {
