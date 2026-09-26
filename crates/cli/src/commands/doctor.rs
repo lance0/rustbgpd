@@ -54,6 +54,9 @@ const EVENT_FREE_TEXT_KEYS: &[&str] = &["summary", "reason", "shutdown_reason", 
 /// red, not merely "settling". Missing history cannot prove the age.
 const STUCK_PEER_SECS: u64 = 120;
 
+/// Investigation policy, not a bound on legitimate registration deferral.
+const OUTBOUND_REGISTRATION_GRACE_SECS: u64 = 300;
+
 /// Established peers that have flapped at least this often get an
 /// additional check. It is red only when retained history also proves
 /// recent instability; the counter itself covers the daemon lifetime.
@@ -725,6 +728,7 @@ fn nofile_check(pid: u32, soft: u64, hard: u64, run_context: &str) -> Check {
 
 /// Pure per-peer session checks: state (with time-in-state derived from
 /// the most recent session event), slow-peer health, and flap count.
+/// Called only after a successful neighbor/RIB snapshot read.
 #[expect(clippy::too_many_arguments, reason = "snapshot fields")]
 fn peer_checks(
     address: &str,
@@ -865,6 +869,20 @@ fn peer_checks(
             status,
             detail: format!(
                 "peer {address} flapped {flap_count} times during this daemon lifetime{evidence}"
+            ),
+        });
+    }
+    if !stale
+        && state == "Established"
+        && update_group.is_empty()
+        && uptime_seconds > OUTBOUND_REGISTRATION_GRACE_SECS
+    {
+        checks.push(Check {
+            name: format!("peer.{address}.outbound"),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "peer {address} Established for {}; outbound registration is absent in this snapshot (absence duration unknown). Queued imports can defer registration without a fixed deadline; inspect RIB backlog and peer state",
+                output::format_duration(uptime_seconds)
             ),
         });
     }
@@ -3949,7 +3967,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             false,
             None,
             false,
-            "",
+            "group:0",
             3600,
             0,
             retained_session_evidence(None, None),
@@ -4329,6 +4347,56 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
         assert!(checks[1].detail.contains("session loss 00:00:30 ago"));
+    }
+
+    #[test]
+    fn outbound_registration_advisory_requires_current_old_established_snapshot() {
+        for (state, stale, group, uptime, expected) in [
+            ("Established", false, "", 301, true),
+            ("Established", false, "", 300, false),
+            ("Established", false, "", 0, false),
+            ("Established", false, "group:0", 3600, false),
+            (
+                "Established",
+                false,
+                "private:policy_peer_context",
+                3600,
+                false,
+            ),
+            ("Established", true, "", 3600, false),
+            ("Idle", false, "", 3600, false),
+        ] {
+            let checks = peer_checks(
+                "fe80::1%eth0",
+                state,
+                stale,
+                None,
+                false,
+                group,
+                uptime,
+                0,
+                SessionHistoryEvidence::Unavailable,
+                1_000_000,
+                "",
+            );
+            let outbound = checks
+                .iter()
+                .find(|check| check.name == "peer.fe80::1%eth0.outbound");
+            assert_eq!(
+                outbound.is_some(),
+                expected,
+                "{state} {stale} {group} {uptime}"
+            );
+            if let Some(check) = outbound {
+                assert_eq!(check.status, CheckStatus::Warn);
+                assert!(check.detail.contains("Established for 00:05:01"));
+                assert!(
+                    check
+                        .detail
+                        .contains("absent in this snapshot (absence duration unknown)")
+                );
+            }
+        }
     }
 
     #[test]
@@ -5747,6 +5815,14 @@ paths = ["x"]
                 .contains("ListNeighbors response timed out after 0.25s")
         );
         assert!(find(&files, "peers/events.json").contains("retained session history"));
+        assert!(
+            manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| { !check["name"].as_str().unwrap().ends_with(".outbound") }),
+            "an unavailable neighbor/RIB snapshot cannot prove absent registration"
+        );
     }
 
     #[tokio::test]
@@ -5830,6 +5906,61 @@ paths = ["x"]
         for name in ["rpki.invalid_route_policy", "aspa.invalid_route_policy"] {
             assert_eq!(manifest_check(&manifest, name)["status"], "warn");
         }
+    }
+
+    #[tokio::test]
+    async fn doctor_bundle_reports_outbound_registration_as_advisory() {
+        let server = spawn_mock_server(None).await;
+        let dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            dir.path().display()
+        ));
+        let mut missing = neighbor(
+            "10.0.0.2",
+            rustbgpd_api::proto::SessionState::Established as i32,
+            0,
+            "",
+        );
+        missing.uptime_seconds = 301;
+        let mut registered = missing.clone();
+        registered.config.as_mut().unwrap().address = "10.0.0.3".to_string();
+        registered.update_group = "group:0".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![missing, registered];
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        let code = run(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 0, "delayed registration is an investigation advisory");
+        let files = extract_bundle(&bundle_path);
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        let warning = manifest_check(&manifest, "peer.10.0.0.2.outbound");
+        assert_eq!(warning["status"], "warn");
+        assert!(
+            warning["detail"]
+                .as_str()
+                .unwrap()
+                .contains("absence duration unknown")
+        );
+        assert!(
+            manifest["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| { check["name"] != "peer.10.0.0.3.outbound" }),
+            "the successful snapshot must retain a registered peer's group"
+        );
     }
 
     #[tokio::test]

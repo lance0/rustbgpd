@@ -1952,6 +1952,12 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
         "busy-actor PeerUp must not dump inline"
     );
     assert_eq!(manager.pending_initial_registrations.len(), 1);
+    assert!(
+        manager
+            .peer_outbound_state(restarter)
+            .update_group
+            .is_empty()
+    );
 
     // The restarter's re-announcements import and distribute to the
     // survivor while the restarter's own dump is still pending.
@@ -1977,7 +1983,22 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
 
     // The deferred registration completes: the restarter receives the
     // current table (the third peer's route, not its own) and an EoR.
+    // Drain the queued mutation before advancing the idle-only registration.
+    assert!(manager.drain_ready_updates().await);
+    assert!(
+        manager
+            .peer_outbound_state(restarter)
+            .update_group
+            .is_empty()
+    );
+    assert!(!manager.drain_ready_updates().await);
     manager.advance_pending_initial_registration();
+    assert!(
+        !manager
+            .peer_outbound_state(restarter)
+            .update_group
+            .is_empty()
+    );
     assert!(manager.pending_initial_registrations.is_empty());
     let dump = restarter_rx.try_recv().expect("deferred dump delivered");
     assert!(
