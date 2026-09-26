@@ -123,7 +123,8 @@ async fn outbound_root_cause_survives_writer_exit() {
 
 /// Load-bearing: omitting a cause, classifying a snapshot breach as generic
 /// post-commit failure, or labeling any exact-export site as saturation changes
-/// one of these production-source inventory counts.
+/// one of these production-source inventory counts. Only admission expiry uses
+/// the saturation cause in this module.
 #[test]
 fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
     let source = include_str!("../outbound.rs");
@@ -135,7 +136,7 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
         production
             .matches("trigger_outbound_out_of_resources_teardown(")
             .count(),
-        17
+        18
     );
     assert_eq!(
         production
@@ -161,7 +162,26 @@ fn outbound_out_of_resources_sites_have_specific_cause_inventory() {
             .count(),
         14
     );
-    assert!(!production.contains("SessionFailureCause::OutboundSaturation"));
+    let (before_expiry, expiry_and_after) = production
+        .split_once("pub(super) fn expire_outbound_admission(")
+        .expect("admission expiry has a dedicated handler");
+    let (expiry, after_expiry) = expiry_and_after
+        .split_once("pub(super) fn advance_pending_outbound(")
+        .expect("bounded admission follows its expiry handler");
+    assert_eq!(
+        expiry
+            .matches("trigger_outbound_out_of_resources_teardown(")
+            .count(),
+        1
+    );
+    assert_eq!(
+        expiry
+            .matches("SessionFailureCause::OutboundSaturation")
+            .count(),
+        1
+    );
+    assert!(!before_expiry.contains("SessionFailureCause::OutboundSaturation"));
+    assert!(!after_expiry.contains("SessionFailureCause::OutboundSaturation"));
 }
 
 /// ADR-0051: when the writer's bulk channel saturates, the session must
