@@ -5728,6 +5728,13 @@ async fn run<T>(
     // configured peers nothing is sent, as before.
     if !initial_peer_boot_failed && !startup_peers.is_empty() {
         let (labels, configs): (Vec<_>, Vec<_>) = startup_peers.into_iter().unzip();
+        // Channel failures concern the whole set: name it by size and first
+        // label rather than joining every label.
+        let batch = format!(
+            "{} configured peers starting with {}",
+            labels.len(),
+            labels[0]
+        );
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let peer_error = if let Err(error) = peer_mgr_tx
             .send(PeerManagerCommand::AddConfiguredPeers {
@@ -5738,7 +5745,7 @@ async fn run<T>(
         {
             Some((
                 "failed to send configured peer to peer manager during startup",
-                error.to_string(),
+                format!("{batch}: {error}"),
             ))
         } else {
             match reply_rx.await {
@@ -5749,7 +5756,7 @@ async fn run<T>(
                 )),
                 Err(error) => Some((
                     "peer manager dropped configured-peer reply during startup",
-                    error.to_string(),
+                    format!("{batch}: {error}"),
                 )),
             }
         };
