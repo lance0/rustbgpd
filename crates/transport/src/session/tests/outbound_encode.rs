@@ -204,7 +204,7 @@ fn update_messages_sent(session: &PeerSession) -> f64 {
 #[tokio::test]
 async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-    let (client, _server) = connected_stream_pair().await;
+    let (client, mut server) = connected_stream_pair().await;
     session.test_install_stream(client);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     let attrs = vec![
@@ -244,6 +244,25 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
         (1.0..=16.0).contains(&sent),
         "5,000 /24s with one attribute value need a handful of UPDATEs, sent {sent}"
     );
+    let mut announced = std::collections::HashSet::new();
+    while let Ok(message) = tokio::time::timeout(
+        Duration::from_millis(500),
+        read_single_bgp_message(&mut server),
+    )
+    .await
+    {
+        let Message::Update(msg) = message else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        for entry in parsed.announced {
+            assert!(announced.insert(entry.prefix), "duplicate {}", entry.prefix);
+        }
+    }
+    let expected: std::collections::HashSet<Ipv4Prefix> = (0..5_000u32)
+        .map(|i| Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | (i << 8)), 24))
+        .collect();
+    assert_eq!(announced, expected, "every route is announced exactly once");
 }
 
 /// The IPv6 `MP_REACH_NLRI` grouping keys on value too.
