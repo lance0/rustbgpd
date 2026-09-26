@@ -1557,9 +1557,9 @@ view is empty, so a view with rows never pays for it. The whole check is bounded
 by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
 
 At startup the gRPC listeners serve before the configured-peer roster is
-installed, so for that brief window a configured neighbor is not yet known and
-these views, like `GetNeighborState` and `GetPolicyStats`, return `NOT_FOUND`
-for it. The peer manager registers the whole configured set in one operation:
+installed. If a peer-scoped read would otherwise return `NOT_FOUND` in that
+window, it returns retryable `UNAVAILABLE` until registration completes.
+The peer manager registers the whole configured set in one operation:
 a view that reaches it while registration runs waits for the complete roster,
 within its read deadline, and `GetPolicyStats` sees every configured neighbor
 at once when registration ends. `/readyz` and systemd `READY=1` are reported

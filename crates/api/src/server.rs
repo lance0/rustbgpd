@@ -2095,6 +2095,7 @@ async fn run_tcp_listener(
         peer_manager: peer_mgr_tx.clone(),
         operator_lane: Some(peer_mgr_operator_tx.clone()),
         rib: rib_query_tx.clone(),
+        daemon_gate: daemon_gate.clone(),
     };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(
@@ -2364,6 +2365,7 @@ async fn run_uds_listener(
         peer_manager: peer_mgr_tx.clone(),
         operator_lane: Some(peer_mgr_operator_tx.clone()),
         rib: rib_query_tx.clone(),
+        daemon_gate: daemon_gate.clone(),
     };
     let mut routes = tonic::service::Routes::builder();
     routes.add_service(RibServiceServer::with_interceptor(

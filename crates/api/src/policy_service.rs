@@ -1470,6 +1470,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         } else {
             None
         };
+        // Snapshot before loading the roster: completion publishes it first.
+        let initial_roster_pending = self
+            .settlement
+            .as_ref()
+            .is_some_and(|(_, gate)| gate.initial_roster_pending());
         // One load per roster per request (ADR-0136): peer validation, import
         // and datasets read this roster, held across the awaits below.
         let roster = roster_cell.load();
@@ -1478,7 +1483,11 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 let selected =
                     policy_stats_request(deadline, "peer_validation", audit.as_ref(), async {
                         roster.unique_peer(address).ok_or_else(|| {
-                            Status::not_found(format!("neighbor {address} not found"))
+                            if initial_roster_pending {
+                                Status::unavailable("initial configured-peer roster not installed")
+                            } else {
+                                Status::not_found(format!("neighbor {address} not found"))
+                            }
                         })
                     })
                     .await?;

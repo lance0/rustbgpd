@@ -3738,6 +3738,7 @@ mod tests {
             peer_manager: peer_mgr_tx,
             operator_lane: None,
             rib: known_rib_tx,
+            daemon_gate: crate::health_probe::DaemonGate::new(),
         });
         let response = svc
             .list_received_routes(Request::new(proto::ListRoutesRequest {
