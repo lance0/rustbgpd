@@ -716,6 +716,15 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
+    /// Add the configured peers at startup as one operation, in order,
+    /// without updating the live config snapshot. Stops at the first
+    /// failure and reports its index; the peers before it stay added.
+    AddConfiguredPeers {
+        /// Neighbor configurations, in registration order.
+        configs: Vec<PeerManagerNeighborConfig>,
+        /// Reply channel: success, or the failing index and its error.
+        reply: oneshot::Sender<Result<(), (usize, PeerLifecycleError)>>,
+    },
     /// Create a runtime peer from a presence-preserving raw specification.
     RuntimeCreatePeer {
         /// Boxed raw create intent resolved only inside the actor.

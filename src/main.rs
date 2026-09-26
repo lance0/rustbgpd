@@ -5665,6 +5665,7 @@ async fn run<T>(
     // Add initial peers from config via PeerManager
     // Failures after the ownership boundary enter the common bounded teardown.
     let mut peer_ordinal = 0;
+    let mut startup_peers = Vec::new();
     for neighbor in peer_configs {
         if initial_peer_boot_failed {
             break;
@@ -5681,7 +5682,6 @@ async fn run<T>(
             remote_asn = transport_config.peer.remote_asn,
             "adding peer from config"
         );
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let mut peer_config = PeerManagerNeighborConfig {
             address: transport_config.remote_addr.ip(),
             interface: transport_config.peer_interface.clone(),
@@ -5741,28 +5741,42 @@ async fn run<T>(
         if test_initial_peer_rejection_at == Some(peer_ordinal) {
             peer_config.interface = Some("rustbgpd-test-invalid-interface".to_string());
         }
+        startup_peers.push((label, peer_config));
+    }
+    // One peer-manager operation for the whole configured set, so the
+    // import roster is published once rather than once per peer. With no
+    // configured peers nothing is sent, as before.
+    if !initial_peer_boot_failed && !startup_peers.is_empty() {
+        let (labels, configs): (Vec<_>, Vec<_>) = startup_peers.into_iter().unzip();
+        // Channel failures concern the whole set: name it by size and first
+        // label rather than joining every label.
+        let batch = format!(
+            "{} configured peers starting with {}",
+            labels.len(),
+            labels[0]
+        );
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let peer_error = if let Err(error) = peer_mgr_tx
-            .send(PeerManagerCommand::AddPeer {
-                config: peer_config,
-                sync_config_snapshot: false,
+            .send(PeerManagerCommand::AddConfiguredPeers {
+                configs,
                 reply: reply_tx,
             })
             .await
         {
             Some((
                 "failed to send configured peer to peer manager during startup",
-                format!("{label}: {error}"),
+                format!("{batch}: {error}"),
             ))
         } else {
             match reply_rx.await {
                 Ok(Ok(())) => None,
-                Ok(Err(error)) => Some((
+                Ok(Err((index, error))) => Some((
                     "failed to add configured peer during startup",
-                    format!("{label}: {error}"),
+                    format!("{}: {error}", labels[index]),
                 )),
                 Err(error) => Some((
                     "peer manager dropped configured-peer reply during startup",
-                    format!("{label}: {error}"),
+                    format!("{batch}: {error}"),
                 )),
             }
         };
@@ -5770,7 +5784,6 @@ async fn run<T>(
             error!(error = %error, "{message}");
             initial_peer_boot_failed = true;
             component_failed = true;
-            break;
         }
     }
 
@@ -6949,6 +6962,15 @@ mod tests {
         assert!(!peer_registration_loop.contains("fatal_startup_error("));
         assert!(peer_registration_loop.contains("component_failed = true;"));
         assert!(peer_registration_loop.contains("break;"));
+        // One registration command for the whole configured set, so the
+        // import roster is published once at startup.
+        assert_eq!(
+            peer_registration_loop
+                .matches("PeerManagerCommand::AddConfiguredPeers {")
+                .count(),
+            1
+        );
+        assert!(!peer_registration_loop.contains("PeerManagerCommand::AddPeer {"));
         for fatal_message in [
             "failed to send configured peer to peer manager during startup",
             "failed to add configured peer during startup",
