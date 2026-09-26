@@ -864,6 +864,35 @@ async fn connected_stream_pair() -> (TcpStream, TcpStream) {
     let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
     (client.unwrap(), server.unwrap().0)
 }
+fn notification_gr_open(helper_only: bool) -> rustbgpd_wire::OpenMessage {
+    rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as: 65002,
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs { asn: 65002 },
+            Capability::GracefulRestart {
+                restart_state: false,
+                notification: true,
+                restart_time: 120,
+                families: if helper_only {
+                    vec![]
+                } else {
+                    vec![rustbgpd_wire::GracefulRestartFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                    }]
+                },
+            },
+        ],
+    }
+}
 async fn establish_test_session(session: &mut PeerSession, remote_asn: u32) {
     session.drive_fsm(Event::ManualStart).await;
     session

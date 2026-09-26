@@ -629,7 +629,7 @@ does not mean no newer individual crate exists on the registry.
 | Crate | Published examples | Working tree |
 |---|---|---|
 | `rustbgpd-wire` | `0.21.2` | `0.21.3` |
-| `rustbgpd-fsm` | `0.8.2` | `0.8.2` |
+| `rustbgpd-fsm` | `0.8.2` | `0.8.3` |
 | `rustbgpd-rpki` | `0.3.2` | `0.3.2` |
 <!-- published-crate-versions:end -->
 

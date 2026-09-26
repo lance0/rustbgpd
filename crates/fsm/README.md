@@ -10,11 +10,11 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.8.2 is released on the `0.8` compatibility line with wire `0.21.2`.
-Upgrade dependencies that exchange public wire types together. The public API
-is unchanged from `0.8.0`; [Compatibility](#compatibility) describes the one
-ORF negotiation change in `0.8.1` and the timer-validation documentation in
-`0.8.2`.
+`rustbgpd-fsm` 0.8.2 is the latest published release. Version 0.8.3 is
+prepared in this checkout on the same `0.8` compatibility line with wire
+`0.21.3`. Use a path dependency to exercise the prepared version until it is
+published. The public API is unchanged from `0.8.0`;
+[Compatibility](#compatibility) describes the negotiation changes.
 
 ## Usage
 
@@ -137,6 +137,12 @@ than disabling retries. The send-hold-time documentation previously credited
 that check to "config validation", which belongs to the embedding
 application, not to this crate.
 
+`rustbgpd-fsm 0.8.3` is a prepared patch with no public API changes.
+Notification GR follows the two advertised N bits even when the peer's GR
+family list is empty, so protective teardown sends Hard Reset to helper-only
+peers. It also includes the pending malformed BGP Role negotiation correction;
+see the [changelog](CHANGELOG.md).
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
@@ -168,6 +174,9 @@ application, not to this crate.
   default hold time and the RFC 9687 §6 send-hold-time derivation (the
   greater of 8 minutes or twice the configured hold time), so embedders and
   other crates share one source for both defaults
+- **`NegotiatedSession::peer_notification_gr`** — RFC 8538 Notification GR
+  from the two advertised N bits, independently of peer GR/LLGR retention
+  families; protective teardown uses Hard Reset even for helper-only peers
 - **`graceful_restart_preserves_family`** — rustbgpd's implementation-support
   allowlist for families whose FSM/RIB lifecycle can retain GR/LLGR-stale routes
 

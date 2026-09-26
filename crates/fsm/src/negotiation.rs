@@ -363,11 +363,19 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
-        // RFC 8538 governs any retention the GR capability enables,
-        // including an LLGR-only session's.
-        peer_notification_gr: (peer_gr_capable || peer_llgr_capable)
-            && peer_notification
-            && config.graceful_restart,
+        // RFC 8538 negotiates Notification GR through the two advertised
+        // N bits, independently of which peer families we can retain. A
+        // helper-only peer can retain our routes despite an empty GR list.
+        peer_notification_gr: peer_notification
+            && config.local_capabilities().iter().any(|capability| {
+                matches!(
+                    capability,
+                    Capability::GracefulRestart {
+                        notification: true,
+                        ..
+                    }
+                )
+            }),
         peer_llgr_capable,
         peer_llgr_families,
         peer_route_refresh,
@@ -1586,7 +1594,8 @@ mod tests {
         // FRR's default OPEN: helper-mode GR (N bit, no families) plus an
         // LLGR capability with a zero Long-Lived Stale Time. Restart Time and
         // LLST are both zero for every family, so no RFC 9494 procedure
-        // applies and RFC 8538 notification handling stays off.
+        // applies to its routes. The exchanged N bits still require RFC 8538
+        // notification handling: the helper can retain our routes.
         let mut cfg = test_config();
         cfg.graceful_restart = true;
         let mut open = peer_open();
@@ -1600,6 +1609,62 @@ mod tests {
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(!neg.peer_gr_capable);
         assert!(!neg.peer_llgr_capable);
+        assert!(neg.peer_notification_gr);
+    }
+
+    #[test]
+    fn helper_only_notification_gr_requires_both_advertised_n_bits() {
+        for local_gr in [false, true] {
+            for remote_notification in [false, true] {
+                for llgr_stale_time in [None, Some(0), Some(3600)] {
+                    let mut cfg = test_config();
+                    cfg.graceful_restart = local_gr;
+                    cfg.llgr_stale_time = 3600;
+                    let mut open = peer_open();
+                    open.capabilities.push(Capability::GracefulRestart {
+                        restart_state: true,
+                        notification: remote_notification,
+                        restart_time: 120,
+                        families: vec![],
+                    });
+                    if let Some(stale_time) = llgr_stale_time {
+                        open.capabilities.push(llgr_v4(stale_time));
+                    }
+                    let neg = validate_open(&open, &cfg).unwrap();
+                    assert!(!neg.peer_gr_capable);
+                    assert_eq!(neg.peer_llgr_capable, llgr_stale_time == Some(3600));
+                    assert_eq!(neg.peer_notification_gr, local_gr && remote_notification);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn notification_gr_requires_an_emitted_local_gr_capability() {
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
+        // This tuple can negotiate MP, but has no GR retention support and
+        // therefore makes local_capabilities omit GR (and its N bit).
+        cfg.families = vec![(Afi::Ipv4, Safi::Multicast)];
+        assert!(
+            !cfg.local_capabilities()
+                .iter()
+                .any(|capability| matches!(capability, Capability::GracefulRestart { .. }))
+        );
+        let mut open = peer_open();
+        open.capabilities = vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Multicast,
+            },
+            Capability::GracefulRestart {
+                restart_state: false,
+                notification: true,
+                restart_time: 120,
+                families: vec![],
+            },
+        ];
+        let neg = validate_open(&open, &cfg).unwrap();
         assert!(!neg.peer_notification_gr);
     }
 

@@ -1109,7 +1109,11 @@ and RFC 8538 Notification GR applies to its retention too. A family with both a
 zero Restart Time and a zero Long-Lived Stale Time gets no retention ("none of
 these procedures would apply"). FRR's default helper-mode OPEN (a GR
 capability with no families and an LLGR capability with a zero stale time)
-therefore stays a non-GR, non-LLGR peer.
+therefore gets no route retention from rustbgpd. Notification GR is negotiated
+independently through the two advertised N bits (RFC 8538 §4), so that helper
+still receives Hard Reset for protective max-prefix and BFD teardown. The
+Hard Reset encapsulates the original Cease reason and its data, preventing
+the helper from retaining rustbgpd's routes after protective teardown.
 An LLGR capability without any GR capability is ignored.
 
 On re-establishment, a family already in the LLGR phase whose tuple the new
