@@ -2255,6 +2255,20 @@ async fn add_path_receive_max_warning_observes_but_does_not_bound() {
     }
     assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 3);
     assert!(session.read_half.is_some());
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 1.0).abs() < f64::EPSILON
+    );
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 1.0).abs() < f64::EPSILON,
+        "an admitted-ID replacement consumes no slot or over-limit attempt"
+    );
+    session.process_update(ipv4_announce(prefix, 3, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 4);
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 2.0).abs() < f64::EPSILON,
+        "another new ID beyond the cap records another attempt"
+    );
 }
 
 #[tokio::test]

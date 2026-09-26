@@ -1275,8 +1275,10 @@ net-new over-limit ID is withheld; recovery requires peer reannouncement or
 a session reset. Under `"shutdown"`, the peer receives Cease/1 and is latched
 off as above. Under `"warning"`, the excess is observed but accepted, so
 the cap does not bound memory. `bgp_add_path_receive_limit_attempts_total`
-counts over-limit NLRI attempts, including repeats, by peer, family and
-action. The `bgp_max_prefix_*` gauges and counters continue to describe
+counts net-new ID admission attempts beyond the cap, including repeated
+attempts to send a withheld ID. Replacing an already admitted ID does not
+count. The counter is labeled by peer, family and action. The
+`bgp_max_prefix_*` gauges and counters continue to describe
 unique-prefix bounds, not this path count. A `receive_max` config edit
 rebuilds the session; a lower cap applies to the replacement session, not as
 an in-place trim of previously retained paths.
@@ -1554,7 +1556,7 @@ exactly under the floods these drops account for.
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
-| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Over-limit received Add-Path NLRI attempts, including repeated IDs, for negotiated `ipv4_unicast` or `ipv6_unicast`; `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
+| `bgp_add_path_receive_limit_attempts_total{peer,family,action}` | Net-new received Add-Path ID admission attempts beyond the per-prefix cap for negotiated `ipv4_unicast` or `ipv6_unicast`; a repeated withheld ID counts again, but an admitted-ID replacement does not. `action` is `block`, `shutdown`, or `warning`. No prefix label or per-prefix gauge. Reaped when the configured peer is deleted |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
 | `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited |

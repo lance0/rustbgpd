@@ -1304,7 +1304,7 @@ impl BgpMetrics {
         let add_path_receive_limit_attempts = IntCounterVec::new(
             Opts::new(
                 "bgp_add_path_receive_limit_attempts_total",
-                "Over-limit Add-Path receive NLRI attempts per peer, family and action; repeated path IDs count again.",
+                "Net-new Add-Path receive IDs attempted beyond the per-prefix cap; repeated withheld IDs count again, admitted-ID replacements do not.",
             ),
             &["peer", "family", "action"],
         )
@@ -4514,8 +4514,8 @@ impl BgpMetrics {
         self.0.max_prefix_exceeded.with_label_values(&[peer]).inc();
     }
 
-    /// Count one over-limit Add-Path NLRI attempt. Repeated IDs are attempts,
-    /// not distinct offending identities; labels have a closed vocabulary.
+    /// Count one net-new Add-Path ID attempted beyond the cap. Repeated
+    /// withheld IDs count again; an admitted-ID replacement does not.
     pub fn record_add_path_receive_limit_attempt(&self, peer: &str, family: &str, action: &str) {
         debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
         debug_assert!(matches!(action, "shutdown" | "block" | "warning"));
