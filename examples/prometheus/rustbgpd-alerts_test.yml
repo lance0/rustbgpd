@@ -513,6 +513,113 @@ tests:
                 session was torn down with a Cease / Maximum Number of
                 Prefixes Reached NOTIFICATION.
 
+  # ── BgpMaxPrefixLatched ───────────────────────────────────────
+  # Load-bearing: the breach at 1m pages both alerts. At 31m the 10-minute
+  # event alert has resolved while the member is still latched, and only the
+  # level alert holds. Removing the latch gauge or its alert empties the 31m
+  # case. 192.0.2.42 was enabled at 4m and must not fire at 31m; 192.0.2.41
+  # never latched. Only 192.0.2.40 has a `bgp_peer_info` row, so the join and
+  # the `or ignoring` fallback are both pinned.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_max_prefix_exceeded_total{peer="192.0.2.40", instance="edge1:9179"}'
+        values: "0 1x40"
+      - series: 'bgp_max_prefix_latched{peer="192.0.2.40", interface="", instance="edge1:9179"}'
+        values: "0 1x40"
+      - series: 'bgp_peer_info{peer="192.0.2.40", interface="", remote_asn="64496", description="Example Member", peer_group="members", instance="edge1:9179"}'
+        values: "1x41"
+      - series: 'bgp_max_prefix_latched{peer="192.0.2.41", interface="", instance="edge1:9179"}'
+        values: "0x41"
+      - series: 'bgp_max_prefix_exceeded_total{peer="192.0.2.42", instance="edge1:9179"}'
+        values: "0 1x40"
+      - series: 'bgp_max_prefix_latched{peer="192.0.2.42", interface="", instance="edge1:9179"}'
+        values: "0 1 1 1 0x37"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpMaxPrefixLatched
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.40
+              instance: edge1:9179
+              remote_asn: "64496"
+              description: Example Member
+              peer_group: members
+            exp_annotations:
+              summary: "Peer 192.0.2.40 is latched off by max-prefix"
+              description: >-
+                Peer 192.0.2.40 on interface "" at edge1:9179 is held down
+                after a max-prefix shutdown. It stays down until `rbgp
+                neighbor <addr> enable` or, when max_prefix_restart_seconds
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.42
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Peer 192.0.2.42 is latched off by max-prefix"
+              description: >-
+                Peer 192.0.2.42 on interface "" at edge1:9179 is held down
+                after a max-prefix shutdown. It stays down until `rbgp
+                neighbor <addr> enable` or, when max_prefix_restart_seconds
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
+      - eval_time: 31m
+        alertname: BgpMaxPrefixLimitExceeded
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: BgpMaxPrefixLatched
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              peer: 192.0.2.40
+              instance: edge1:9179
+              remote_asn: "64496"
+              description: Example Member
+              peer_group: members
+            exp_annotations:
+              summary: "Peer 192.0.2.40 is latched off by max-prefix"
+              description: >-
+                Peer 192.0.2.40 on interface "" at edge1:9179 is held down
+                after a max-prefix shutdown. It stays down until `rbgp
+                neighbor <addr> enable` or, when max_prefix_restart_seconds
+                is set, until the hold-down expires into a successful restart
+                or, under strict BFD, into the BFD withhold.
+
+  # ── BgpMaxPrefixBlocking ──────────────────────────────────────
+  # Load-bearing: pending at 4m30s and firing at 5m30s pins the 5-minute
+  # hold. The finite nonblocking scope (gauge present at 0) and a transient
+  # episode shorter than the hold stay silent.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.50", scope="ipv4_unicast", instance="edge1:9179"}'
+        values: "1x14"
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.51", scope="ipv6_unicast", instance="edge1:9179"}'
+        values: "0x14"
+      - series: 'bgp_max_prefix_blocking{peer="192.0.2.52", scope="ipv4_unicast", instance="edge1:9179"}'
+        values: "1 1 1 1 1 1 0x8"
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: BgpMaxPrefixBlocking
+        exp_alerts: []
+      - eval_time: 5m30s
+        alertname: BgpMaxPrefixBlocking
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.50
+              scope: ipv4_unicast
+              instance: edge1:9179
+            exp_annotations:
+              summary: >-
+                Inbound max-prefix blocking for 192.0.2.50 (ipv4_unicast)
+              description: >-
+                The inbound max-prefix blocking gauge for 192.0.2.50
+                (ipv4_unicast) on edge1:9179 has remained 1 for 5 minutes;
+                net-new prefixes from this peer are withheld until its usage
+                falls back under the bound.
+
   # ── BgpMaxPrefixNearLimit ─────────────────────────────────────
   # Load-bearing: deleting the usage/limit ratio, changing the 80% boundary,
   # or dropping the 10-minute hold changes an exact firing/non-firing case.

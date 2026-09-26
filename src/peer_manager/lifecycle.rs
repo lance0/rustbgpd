@@ -63,6 +63,20 @@ impl PeerManager {
         );
     }
 
+    /// Publish `bgp_max_prefix_latched` for an installed peer. A latch change
+    /// while the peer is absent (a retiring session during delete or
+    /// reconfigure) publishes nothing: the delete-path reap owns that
+    /// identity, and a re-added peer is seeded from the latch map.
+    fn publish_max_prefix_latched_metric(&self, peer: &PeerKey, latched: bool) {
+        if self.peers.contains_key(peer) {
+            self.metrics.set_max_prefix_latched(
+                &rustbgpd_telemetry::peer_label(peer.address),
+                peer.interface.as_deref().unwrap_or(""),
+                latched,
+            );
+        }
+    }
+
     /// Publish the `bgp_peer_info` identity join series from the installed
     /// [`ManagedPeer`]. A peer that has gone away is skipped; its series are
     /// dropped by the identity and bare-address reaps on removal.
@@ -84,6 +98,11 @@ impl PeerManager {
         let interface = peer.interface.as_deref().unwrap_or("");
         self.metrics
             .set_peer_admin_enabled(&peer_label, interface, enabled);
+        self.metrics.set_max_prefix_latched(
+            &peer_label,
+            interface,
+            self.max_prefix_latches.contains_key(peer),
+        );
         self.metrics
             .set_peer_session_established(&peer_label, interface, false);
         self.metrics
@@ -163,6 +182,7 @@ impl PeerManager {
         let deadline = restart_seconds.map(|seconds| {
             tokio::time::Instant::now() + std::time::Duration::from_secs(seconds.into())
         });
+        self.publish_max_prefix_latched_metric(&peer, true);
         self.max_prefix_latches.insert(
             peer,
             super::MaxPrefixLatch {
@@ -238,6 +258,7 @@ impl PeerManager {
 
     pub(super) fn remove_max_prefix_latch(&mut self, peer: &PeerKey) {
         if self.max_prefix_latches.remove(peer).is_some() {
+            self.publish_max_prefix_latched_metric(peer, false);
             self.recompute_next_max_prefix_restart_deadline();
         }
     }
@@ -334,6 +355,7 @@ impl PeerManager {
                 }
                 self.publish_peer_admin_enabled_metric(&peer, true);
                 let _ = self.max_prefix_latches.remove(&peer);
+                self.publish_max_prefix_latched_metric(&peer, false);
                 self.set_bfd_peer_disabled(address, false);
                 self.mark_bfd_withheld(address);
                 self.publish_peer_lifecycle_event(
@@ -375,6 +397,7 @@ impl PeerManager {
                     }
                     self.publish_peer_admin_enabled_metric(&peer, true);
                     let _ = self.max_prefix_latches.remove(&peer);
+                    self.publish_max_prefix_latched_metric(&peer, false);
                     self.set_bfd_peer_disabled(address, false);
                     self.publish_peer_lifecycle_event(
                         &peer,

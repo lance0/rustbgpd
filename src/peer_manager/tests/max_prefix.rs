@@ -1181,3 +1181,99 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
     assert!(mgr.peers.get(&key(addr)).unwrap().enabled);
     assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
 }
+
+/// Load-bearing latch-gauge proof: `bgp_max_prefix_latched` follows the
+/// manager latch through its whole life. Dropping the install publish leaves
+/// the breach at 0; dropping the latch-map read from the seed re-adds a
+/// latched peer at 0; dropping the clear on explicit enable or on a
+/// successful timed restart leaves the recovered peer at 1 (the strict-BFD
+/// expiry clear is pinned in the BFD tests). A duplicate
+/// terminal notice must not move it.
+#[tokio::test(start_paused = true)]
+async fn max_prefix_latched_gauge_follows_latch_until_enable_or_timed_restart() {
+    let mut mgr = test_peer_manager();
+    let enabled_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 90));
+    let restarted_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 91));
+    let mut counters = Vec::new();
+    for (session_id, addr) in [(1, enabled_addr), (2, restarted_addr)] {
+        let peer_counters = Arc::new(FakePeerCounters::default());
+        let handle = max_prefix_on_command_peer_handle(
+            addr,
+            session_id,
+            rustbgpd_transport::SessionRole::Primary,
+            MaxPrefixTrigger::Start,
+            mgr.session_notify_tx.clone(),
+            peer_counters.clone(),
+        );
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+        assert_eq!(mgr.peers[&key(addr)].session_id(), session_id);
+        mgr.seed_peer_truth_metrics(&key(addr), true);
+        counters.push(peer_counters);
+    }
+    mgr.peers
+        .get_mut(&key(restarted_addr))
+        .unwrap()
+        .max_prefix_restart_seconds = Some(30);
+    let latched = |mgr: &PeerManager, peer: &str| {
+        peer_identity_gauge(&mgr.metrics, "bgp_max_prefix_latched", peer, "")
+    };
+    assert_eq!(latched(&mgr, "10.0.0.90"), Some(0.0));
+    assert_eq!(latched(&mgr, "10.0.0.91"), Some(0.0));
+
+    // The first Start makes each fake session report a terminal breach.
+    for addr in [enabled_addr, restarted_addr] {
+        mgr.peers[&key(addr)].handle().start().await.unwrap();
+    }
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    mgr.drain_ready_session_notifications().await;
+    for peer in ["10.0.0.90", "10.0.0.91"] {
+        assert_eq!(latched(&mgr, peer), Some(1.0), "{peer} latched");
+        assert_eq!(
+            peer_identity_gauge(&mgr.metrics, "bgp_peer_admin_enabled", peer, ""),
+            Some(0.0)
+        );
+    }
+
+    let generation = mgr.max_prefix_latches[&key(enabled_addr)].generation;
+    mgr.session_notify_tx
+        .send(SessionNotification::MaxPrefixExceeded {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr: enabled_addr,
+            count: 502,
+            bound: 500,
+            family: None,
+            received: false,
+        })
+        .unwrap();
+    mgr.drain_ready_session_notifications().await;
+    assert_eq!(
+        mgr.max_prefix_latches[&key(enabled_addr)].generation,
+        generation
+    );
+    assert_eq!(latched(&mgr, "10.0.0.90"), Some(1.0));
+
+    // A re-added latched peer is seeded from the latch map, not as healthy.
+    mgr.metrics.reap_peer_identity_series("10.0.0.90", "");
+    mgr.seed_peer_truth_metrics(&key(enabled_addr), false);
+    assert_eq!(latched(&mgr, "10.0.0.90"), Some(1.0));
+
+    mgr.enable_peer(key(enabled_addr)).await.unwrap();
+    assert_eq!(latched(&mgr, "10.0.0.90"), Some(0.0));
+    assert_eq!(latched(&mgr, "10.0.0.91"), Some(1.0));
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    mgr.handle_due_max_prefix_restarts().await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(counters[1].start.load(Ordering::SeqCst), 2);
+    assert!(!mgr.max_prefix_latches.contains_key(&key(restarted_addr)));
+    assert_eq!(latched(&mgr, "10.0.0.91"), Some(0.0));
+    assert_eq!(
+        peer_identity_gauge(&mgr.metrics, "bgp_peer_admin_enabled", "10.0.0.91", ""),
+        Some(1.0)
+    );
+}

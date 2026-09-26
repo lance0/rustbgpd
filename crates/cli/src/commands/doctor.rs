@@ -903,6 +903,33 @@ fn outbound_prefix_limit_checks(
         .collect()
 }
 
+/// A blocking inbound scope is withholding a member's net-new prefixes under
+/// `max_prefix_action = "block"` while the session stays Established. It is a
+/// containment state to act on, not a failed daemon, so it warns.
+fn inbound_prefix_limit_checks(
+    identity: &str,
+    rows: &[crate::proto::InboundPrefixLimitState],
+) -> Vec<Check> {
+    rows.iter()
+        .filter(|row| row.blocking)
+        .map(|row| {
+            let reason = row
+                .reason
+                .as_deref()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("unknown (daemon omitted reason)");
+            Check {
+                name: format!("peer.{identity}.inbound_prefix_limit.{}", row.scope),
+                status: CheckStatus::Warn,
+                detail: format!(
+                    "peer {identity} scope {} is withholding net-new received prefixes: usage {}, limit {}, reason {reason}",
+                    row.scope, row.usage, row.limit
+                ),
+            }
+        })
+        .collect()
+}
+
 /// Most recent session-event timestamp per peer, for time-in-state.
 fn last_transition_by_peer(events: &[serde_json::Value]) -> HashMap<String, u64> {
     last_event_by_peer(events, |_| true)
@@ -2940,6 +2967,11 @@ async fn run_with_deadlines(
                         )?;
                         for check in
                             outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
+                                .into_iter()
+                                .chain(inbound_prefix_limit_checks(
+                                    &identity,
+                                    &n.inbound_prefix_limits,
+                                ))
                         {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
@@ -4012,6 +4044,54 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking, unlimited]).is_empty());
         assert!(outbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
+    }
+
+    /// Load-bearing inbound blocking predicate: removing the `blocking` filter
+    /// adds a check for the finite nonblocking scope. Dropping the call from
+    /// the neighbor loop is caught by the bundle test. The scoped identity and
+    /// scope name are exact.
+    #[test]
+    fn inbound_prefix_checks_warn_only_for_blocking_scopes() {
+        let blocking = crate::proto::InboundPrefixLimitState {
+            scope: "ipv4_unicast".to_string(),
+            usage: 3,
+            limit: 3,
+            headroom: 0,
+            blocking: true,
+            reason: Some("inbound_prefix_limit_reached".to_string()),
+        };
+        let nonblocking = crate::proto::InboundPrefixLimitState {
+            scope: "ipv6_unicast".to_string(),
+            usage: 2,
+            limit: 3,
+            headroom: 1,
+            blocking: false,
+            reason: None,
+        };
+
+        let checks =
+            inbound_prefix_limit_checks("fe80::1%eth0", &[blocking.clone(), nonblocking.clone()]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(
+            checks[0].name,
+            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast"
+        );
+        assert_eq!(checks[0].status, CheckStatus::Warn);
+        assert!(
+            checks[0]
+                .detail
+                .contains("usage 3, limit 3, reason inbound_prefix_limit_reached")
+        );
+
+        let mut missing_reason = blocking;
+        missing_reason.reason = None;
+        assert!(
+            inbound_prefix_limit_checks("fe80::1%eth0", &[missing_reason])[0]
+                .detail
+                .contains("reason unknown (daemon omitted reason)")
+        );
+        assert!(inbound_prefix_limit_checks("fe80::1%eth1", &[nonblocking]).is_empty());
+        assert!(inbound_prefix_limit_checks("fe80::1%eth1", &[]).is_empty());
     }
 
     /// ADR-0112 doctor contract, all four dispositions in one place.
@@ -5888,6 +5968,7 @@ paths = ["x"]
 
     /// End-to-end load-bearing proof for the doctor-private neighbor record.
     /// Dropping the blocking check loses exit 2 and its exact scoped check;
+    /// dropping the inbound check loses the scoped inbound warning;
     /// serializing the private wrapper instead of its redacted support
     /// projection exposes one of the forbidden internal keys.
     #[tokio::test]
@@ -5916,6 +5997,14 @@ paths = ["x"]
             blocking: true,
             reason: Some("outbound_prefix_limit_reached".to_string()),
         }];
+        blocked.inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
+            scope: "ipv4_unicast".to_string(),
+            usage: 3,
+            limit: 3,
+            headroom: 0,
+            blocking: true,
+            reason: Some("inbound_prefix_limit_reached".to_string()),
+        }];
 
         let mut unblocked = neighbor(
             "fe80::1",
@@ -5929,6 +6018,14 @@ paths = ["x"]
             usage: 99,
             limit: Some(100),
             headroom: Some(1),
+            blocking: false,
+            reason: None,
+        }];
+        unblocked.inbound_prefix_limits = vec![rustbgpd_api::proto::InboundPrefixLimitState {
+            scope: "ipv4_unicast".to_string(),
+            usage: 2,
+            limit: 3,
+            headroom: 1,
             blocking: false,
             reason: None,
         }];
@@ -5970,6 +6067,23 @@ paths = ["x"]
                 .as_str()
                 .unwrap()
                 .starts_with("peer.fe80::1%eth1.outbound_prefix_limit")
+        }));
+        let inbound_check = manifest_check(
+            &manifest,
+            "peer.fe80::1%eth0.inbound_prefix_limit.ipv4_unicast",
+        );
+        assert_eq!(inbound_check["status"], "warn");
+        assert!(
+            inbound_check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("usage 3, limit 3, reason inbound_prefix_limit_reached")
+        );
+        assert!(manifest["checks"].as_array().unwrap().iter().all(|check| {
+            !check["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("peer.fe80::1%eth1.inbound_prefix_limit")
         }));
         assert_eq!(
             manifest_check(&manifest, "peer.fe80::1%eth0.session")["status"],

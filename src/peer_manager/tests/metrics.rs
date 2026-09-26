@@ -290,6 +290,7 @@ fn seed_peer_metric_series(metrics: &BgpMetrics, peer_label: &str) {
     metrics.record_state_transition(peer_label, "idle", "connect");
     metrics.record_state_transition(peer_label, "open_confirm", "established");
     metrics.set_peer_admin_enabled(peer_label, "", true);
+    metrics.set_max_prefix_latched(peer_label, "", false);
     metrics.set_peer_session_established(peer_label, "", true);
     metrics.set_peer_session_state(peer_label, "", "established");
     metrics.record_message_sent(peer_label, "keepalive");

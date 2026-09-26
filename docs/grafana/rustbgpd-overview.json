@@ -542,7 +542,7 @@
       "id": 61,
       "type": "timeseries",
       "title": "Peer administrative / session truth",
-      "description": "Exact configured identity truth: administrative intent and active-primary Established state. Interface is empty for unscoped peers.",
+      "description": "Exact configured identity truth: effective administrative state (0 also covers a max-prefix latch) and active-primary Established state. Interface is empty for unscoped peers.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

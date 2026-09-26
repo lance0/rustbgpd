@@ -1308,6 +1308,18 @@ TCP/OPEN retry; it does not mean that the session is already Established.
 Explicit enable clears the latch, including any armed countdown, and requests
 an immediate start (subject to strict BFD withholding).
 
+From Prometheus, `bgp_max_prefix_latched{peer,interface}` (see the
+[Health metrics](#health)) is 1 for exactly this latch. It returns to 0 on
+explicit enable, or when the timed hold-down expires into a successful restart
+or, under strict BFD, into the BFD withhold (BGP then starts on BFD Up).
+The latched peer also reads `bgp_peer_admin_enabled` = 0, so the shipped
+`BgpSessionNotEstablished` alert stays silent for it. The shipped
+`BgpMaxPrefixLimitExceeded` alert pages on the breach and resolves 10 minutes
+later; `BgpMaxPrefixLatched` keeps firing until the latch clears. For a
+`max_prefix_action = "block"` episode, the shipped `BgpMaxPrefixBlocking` alert
+warns after `bgp_max_prefix_blocking` has stayed 1 for 5 minutes, and
+`rbgp doctor` warns on each blocking `inbound_prefix_limits[]` row.
+
 Neighbor detail also reports the session actor's O(1) aggregate
 max-prefix-counted NLRI identity count plus unique IPv4- and IPv6-unicast
 prefix counts. Each count is paired with its effective finite limit and
@@ -1430,6 +1442,7 @@ families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
 never removed.
 
 The exact `bgp_peer_admin_enabled{peer,interface}`,
+`bgp_max_prefix_latched{peer,interface}`,
 `bgp_peer_session_established{peer,interface}`,
 `bgp_peer_session_state{peer,interface,state}`, and
 `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity is
@@ -1447,7 +1460,8 @@ one beside it, so `group_left` joins never match two identities for one peer.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_peer_admin_enabled{peer,interface}` | Authoritative configured administrative intent: 1 enabled, 0 disabled |
+| `bgp_peer_admin_enabled{peer,interface}` | Effective administrative state: 1 enabled, 0 disabled. 0 covers both an operator disable and a max-prefix shutdown latch, even though the configuration still says enabled; `bgp_max_prefix_latched` separates the two |
+| `bgp_max_prefix_latched{peer,interface}` | 1 while a max-prefix shutdown latch holds the peer off, from the breach until an explicit enable, or until the timed hold-down expires into a successful restart or, under strict BFD, into the BFD withhold; 0 otherwise. Seeded and reaped with the other exact peer-identity gauges. The shipped `BgpMaxPrefixLatched` alert holds on it after the 10-minute `BgpMaxPrefixLimitExceeded` event alert resolves |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
 | `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |
@@ -1456,10 +1470,12 @@ one beside it, so `group_left` joins never match two identities for one peer.
 | `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
-The shipped `BgpSessionNotEstablished` alert requires administrative intent 1
-and Established state 0 for the same `(instance, peer, interface)` for two
-minutes. It therefore covers never-established and previously-down peers
-without paging on disabled peers. Flap-rate alerting remains based on
+The shipped `BgpSessionNotEstablished` alert requires effective administrative
+state 1 and Established state 0 for the same `(instance, peer, interface)` for
+two minutes. It therefore covers never-established and previously-down peers
+without paging on disabled peers. A max-prefix latched peer reads effective
+administrative state 0, so it is silent here and covered by
+`BgpMaxPrefixLatched` instead. Flap-rate alerting remains based on
 `bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
 the same 200 ms core-actor deadline as `/readyz`. `rbgp health --liveness`
@@ -1693,9 +1709,9 @@ identify causes and tune local alert policy.
 The shipped `BgpMaxPrefixNearLimit` example alert warns after a finite scope
 has remained at or above 80% usage for ten minutes. This threshold lives in the
 editable Prometheus rule, not daemon configuration. Unlimited and disconnected
-scopes cannot fire because their limit series is absent; the existing
-`BgpMaxPrefixLimitExceeded` counter alert remains the durable post-teardown
-signal.
+scopes cannot fire because their limit series is absent. After a teardown,
+the `BgpMaxPrefixLimitExceeded` counter alert pages on the breach and resolves
+10 minutes later; `BgpMaxPrefixLatched` holds while the peer stays latched.
 
 ### Event Streams
 
@@ -2587,7 +2603,11 @@ session evidence still takes precedence. An active outbound prefix-limit
 blocking episode is red as
 `peer.<scoped-address>.outbound_prefix_limit.<family>` because that peer is
 intentionally withholding routes until capacity recovers. Merely configured,
-unlimited, and nonblocking family rows do not add checks. Link-local identities
+unlimited, and nonblocking family rows do not add checks. An open inbound
+`max_prefix_action = "block"` episode is yellow as
+`peer.<scoped-address>.inbound_prefix_limit.<scope>`: the session stays
+Established while that peer's net-new prefixes are withheld. Nonblocking
+inbound scopes add no checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
 Doctor parses the effective-config document once and reads probe targets from
