@@ -41,6 +41,12 @@ if node.endswith("-pe1"):
     sys.exit(19)
 if command == ["ip", "nexthop", "show"]:
     print("id 369 via 10.0.2.2 fdb\nid 370 via 10.0.1.2 fdb\nid 827 group 369 fdb")
+elif command == ["ip", "-j", "nexthop", "show"]:
+    print('[{"id":369,"via":"10.0.2.2","fdb":true},'
+          '{"id":827,"group":[{"id":369}],"fdb":true}]')
+elif command == ["bridge", "-j", "fdb", "show"]:
+    print('[{"mac":"02:00:00:00:00:01","dev":"vxlan100",'
+          '"nhid":827,"flags":["self"],"state":"permanent"}]')
 elif command[-3:] == ["evpn", "nexthops", "-j"]:
     print('{"groups":[{"group_id":827,"ref_macs":["ce-mac","other-mac"]}]}')
 elif command[-2:] == ["evpn", "-j"]:
@@ -89,6 +95,11 @@ class M66FailureDiagnosticsTests(unittest.TestCase):
         self.assertIn('"ref_macs":["ce-mac","other-mac"]', result.stderr)
         self.assertIn('"route_type":1', result.stderr)
         self.assertIn('"route_type":2,"mac":"other-mac"', result.stderr)
+        self.assertIn('[{"id":369,"via":"10.0.2.2","fdb":true},'
+                      '{"id":827,"group":[{"id":369}],"fdb":true}]', result.stderr)
+        self.assertIn('[{"mac":"02:00:00:00:00:01","dev":"vxlan100",'
+                      '"nhid":827,"flags":["self"],"state":"permanent"}]',
+                      result.stderr)
         self.assertIn("missing daemon:", result.stderr)
         self.assertIn("[cleanup] containerlab destroy", result.stdout)
         self.assertEqual(calls[-1][0], "containerlab")
