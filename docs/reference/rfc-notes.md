@@ -962,6 +962,15 @@ restarting-speaker behavior is described in §4.1 and ADR-0040.
   bits or restart unchanged peers. Restart-required blackhole settings stay
   pinned to the running process. The standalone FSM retains its conservative
   default of advertising both bits clear.
+- If runtime FIB ownership becomes uncertain, the next OPEN also keeps F=0
+  for the union of committed and potentially installed unicast families.
+  This uses the settlement watchdog's terminal fence, including lost
+  acknowledgements and failed compensation; it does not publish a candidate
+  as committed. A late acknowledgement after that fence cannot erase the
+  conservative union. Failed or interrupted EVPN convergence similarly keeps
+  the EVPN bit clear until acknowledged convergence proves its role; validation
+  and no-op requests cannot clear that uncertainty. Other families keep their
+  own role-derived bits.
 - If a peer sends multiple GR capabilities (malformed OPEN), only the
   first is used. A warning is logged.
 - Capability decode is bounded to the enclosing optional-parameter slice

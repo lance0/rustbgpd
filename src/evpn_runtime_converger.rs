@@ -2673,6 +2673,11 @@ where
     }
 
     begin_mutation();
+    let mut forwarding_attempt = forwarding_state.map(|state| {
+        state.begin_evpn_attempt(
+            !candidate.instances().is_empty() || !candidate.ip_vrfs().is_empty(),
+        )
+    });
     if let Err(error) = converger.converge(&current, &candidate, &plan).await {
         // #268: a candidate the dispatch rejects as an unsupported *mixed*
         // composition may still converge as an ordered sequence of
@@ -2680,6 +2685,9 @@ where
         // generation. Only `Unsupported` triggers the attempt — a `Failed`
         // converge had side effects and must pin, exactly as before.
         if matches!(error, DaemonEvpnRuntimeConvergeError::Unsupported(_)) {
+            if let Some(attempt) = forwarding_attempt.take() {
+                attempt.reject_no_effect();
+            }
             match crate::evpn_plan_decomposer::decompose_evpn_runtime_candidate(
                 &current, &candidate, &plan,
             ) {
@@ -2742,6 +2750,9 @@ where
                 || !coordinator.model().ip_vrfs().is_empty(),
         );
     }
+    if let Some(attempt) = forwarding_attempt {
+        attempt.finish();
+    }
     let snapshot = coordinator.snapshot();
     Ok(proto::ApplyEvpnRuntimeResponse {
         outcome: runtime_apply_outcome_to_proto(report.outcome),
@@ -2800,6 +2811,11 @@ async fn apply_decomposed_evpn_runtime_steps(
         if step_plan.is_noop() {
             continue;
         }
+        let mut forwarding_attempt = forwarding_state.map(|state| {
+            state.begin_evpn_attempt(
+                !step.candidate.instances().is_empty() || !step.candidate.ip_vrfs().is_empty(),
+            )
+        });
         if let Err(error) = converger
             .converge(&step_current, &step.candidate, &step_plan)
             .await
@@ -2810,6 +2826,8 @@ async fn apply_decomposed_evpn_runtime_steps(
                 // Fail-stop pinned the coordinator (mutation_state=Failed);
                 // the ERROR log below carries the human detail.
                 metrics.add_evpn_runtime_decomposed_fail_stops(1);
+            } else if let Some(attempt) = forwarding_attempt.take() {
+                attempt.reject_no_effect();
             }
             let committed_summary = if committed_generations.is_empty() {
                 "no earlier step committed".to_string()
@@ -2849,6 +2867,9 @@ async fn apply_decomposed_evpn_runtime_steps(
             }
             report
         };
+        if let Some(attempt) = forwarding_attempt {
+            attempt.finish();
+        }
         tracing::info!(
             step = step_number,
             total_steps = total,

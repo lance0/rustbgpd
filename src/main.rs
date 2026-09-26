@@ -4563,7 +4563,12 @@ async fn run<T>(
             None
         };
 
-    let local_forwarding_state = Arc::new(forwarding_state::ForwardingState::new(&config));
+    let runtime_config_settlement = RuntimeConfigSettlementWatchdog::new();
+    runtime_config_settlement.register_metrics(metrics.registry());
+    let local_forwarding_state = Arc::new(
+        forwarding_state::ForwardingState::new(&config)
+            .with_settlement(runtime_config_settlement.clone()),
+    );
 
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     // ADR-0067 step 4 — BFD/BGP coupling channels. Created here so PeerManager
@@ -5170,6 +5175,7 @@ async fn run<T>(
         fib_status_tx,
         fib_event_tx,
         fib_runtime_shutdown.clone(),
+        Some(local_forwarding_state.clone()),
     );
     // Command sender for runtime `[[fib_tables]]` hot-swap (SIGHUP reload now;
     // gRPC CRUD later). `Some` iff the FIB reconciler actually spawned at
@@ -5358,8 +5364,6 @@ async fn run<T>(
     // runtime-config owner and the readiness/admission surfaces.
     let daemon_gate = DaemonGate::new();
     daemon_gate.arm_initial_roster();
-    let runtime_config_settlement = RuntimeConfigSettlementWatchdog::new();
-    runtime_config_settlement.register_metrics(metrics.registry());
     let config_transaction_controller =
         config_transaction_control::ConfigTransactionController::new_accepted(
             fib_table_control::FibTableControlDeps {
