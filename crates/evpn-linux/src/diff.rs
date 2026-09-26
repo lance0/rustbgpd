@@ -3,9 +3,8 @@
 //! [`compute_diff`] takes desired intent + kernel snapshot + previously-
 //! applied set + per-instance probe results, and returns a [`Plan`] of
 //! [`crate::DataplaneOp`]s the actor should attempt to apply. The
-//! function is pure: no I/O, no clocks, no allocations beyond the
-//! returned `Vec`. That makes the entire reconciliation contract
-//! unit-testable without touching netlink.
+//! function is pure: no I/O or clocks. That makes the entire
+//! reconciliation contract unit-testable without touching netlink.
 //!
 //! ## Foreign-entry preservation (ADR-0054 §5/§6/§7)
 //!
@@ -35,7 +34,7 @@
 //! `dst` but no `extern_learn` flag — that's a foreign entry the
 //! operator placed by hand. Skip; never overwrite.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
 use rustbgpd_evpn::{
     EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry, RemoteMacTable, group_members,
@@ -158,6 +157,35 @@ pub fn compute_diff(
     // the exact slot. See `Plan::foreign_blocked_keys`.
     let mut foreign_blocked: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
+    // A segment key is shareable only when every eligible MAC agrees on
+    // membership and standby. In particular, single-active MACs can name
+    // different advertising PEs (RFC 7432 §14.1.1); neither MAC may replace
+    // the other's destination. Detect conflicts before emitting any group op.
+    let mut group_intents = BTreeMap::new();
+    let mut conflicting_groups = BTreeSet::new();
+    for (&(vni, _), entry) in desired.iter() {
+        let Some((esi, tag)) = entry.alias_group_key else {
+            continue;
+        };
+        if !probes.is_ready(vni)
+            || !all_same_family(entry)
+            || instances.get(vni).is_some_and(|i| !i.apply_aliasing_ecmp)
+        {
+            continue;
+        }
+        let key = AliasGroupKey::new(vni, esi, tag);
+        let intent = (group_members(entry), entry.single_active_backup_vtep_ip);
+        match group_intents.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(intent);
+            }
+            Entry::Occupied(slot) if slot.get() != &intent => {
+                conflicting_groups.insert(key);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+
     // Pass 1 + 1b — creates / updates. Scoped to Ready instances;
     // entries for NotReady / Unbound instances contribute zero ops.
     for (&(vni, mac), entry) in desired.iter() {
@@ -190,7 +218,13 @@ pub fn compute_diff(
             all_same_family(entry),
             aliasing_enabled,
         ) {
-            (Some(portable_key), true, true) => {
+            (Some(portable_key), true, true)
+                if !conflicting_groups.contains(&AliasGroupKey::new(
+                    vni,
+                    portable_key.0,
+                    portable_key.1,
+                )) =>
+            {
                 // FDB-NHG path — all-active aliasing groups and
                 // ADR-0083 single-active one-member groups (the
                 // latter distinguished by
@@ -247,6 +281,9 @@ pub fn compute_diff(
             }
             _ => {
                 // Catch-all single-dst:
+                //   - Conflicting same-key group intent: preserve each MAC's
+                //     primary. Existing group refs are removed by the usual
+                //     conversion path; agreement restores sharing next pass.
                 //   - (None, _, _) — single-homed entry, slice 1 shape.
                 //   - (Some(_), _, false) — multi-homed entry on a VNI
                 //     with the operator off-switch flipped. Same path
@@ -2643,6 +2680,81 @@ mod tests {
             }],
             "single-active install: one member (the active PE), the backup as standby"
         );
+    }
+
+    #[test]
+    fn shared_groups_require_equal_canonical_members_and_standby() {
+        let cases = [
+            (
+                "standby disagreement",
+                entry_single_active("10.0.0.2", "10.0.0.3", 7),
+                entry_single_active("10.0.0.2", "10.0.0.4", 7),
+                false,
+            ),
+            (
+                "standby-free failover disagreement",
+                entry_multi_homed("10.0.0.2", &[], 7),
+                entry_multi_homed("10.0.0.3", &[], 7),
+                false,
+            ),
+            (
+                "mixed single-active and all-active intent",
+                entry_single_active("10.0.0.2", "10.0.0.3", 7),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+                false,
+            ),
+            (
+                "all-active member disagreement",
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+                entry_multi_homed("10.0.0.2", &["10.0.0.4"], 7),
+                false,
+            ),
+            (
+                "all-active canonical order and dedup",
+                entry_multi_homed("10.0.0.2", &["10.0.0.3", "10.0.0.4"], 7),
+                entry_multi_homed("10.0.0.4", &["10.0.0.3", "10.0.0.2", "10.0.0.3"], 7),
+                true,
+            ),
+        ];
+        for (name, first, second, compatible) in cases {
+            let mut desired = RemoteMacTable::builder();
+            for (mac, entry) in [(mac(1), first.clone()), (mac(2), second.clone())] {
+                desired.insert(vni(100), mac, entry).unwrap();
+            }
+            let plan = compute_diff(
+                &desired.build(),
+                &KernelSnapshot::new(),
+                &OwnedSet::new(),
+                &ready_probes(&[vni(100)]),
+                &GroupOwnedMap::new(),
+                &EvpnInstanceTable::new(),
+            );
+            let expected: Vec<_> = [(mac(1), first), (mac(2), second)]
+                .into_iter()
+                .map(|(mac, entry)| {
+                    if compatible {
+                        DataplaneOp::InstallFdbNhg {
+                            vni: vni(100),
+                            mac,
+                            vlan: None,
+                            group_key: linux_key(100, 7),
+                            members: group_members(&entry),
+                            standby: entry.single_active_backup_vtep_ip,
+                            convert_from_dst: false,
+                        }
+                    } else {
+                        DataplaneOp::AddRemoteFdb {
+                            vni: vni(100),
+                            mac,
+                            vlan: None,
+                            dst: entry.remote_vtep_ip,
+                        }
+                    }
+                })
+                .collect();
+            assert_eq!(plan.ops, expected, "{name}");
+            assert!(plan.ipv6_alias_fallback_keys.is_empty(), "{name}");
+        }
     }
 
     #[test]
