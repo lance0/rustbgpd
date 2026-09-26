@@ -795,11 +795,21 @@ fn flowspec_validation_survives_raw_effective_and_persisted_config() {
         let ordinary = persisted_config_document(&config).unwrap();
         let bounded = persisted_config_document_bounded(&mut config).unwrap();
         assert_eq!(ordinary, bounded);
-        for document in [raw_config_document_bounded(&mut config).unwrap(), bounded] {
-            let decoded = parse_strict(&document).unwrap();
+        let raw = raw_config_document_bounded(&mut config).unwrap();
+        for document in [&raw, &bounded] {
+            let decoded = parse_strict(document).unwrap();
             assert_eq!(decoded.flowspec.validation, mode);
-            let value: toml::Value = toml::from_str(&document).unwrap();
-            assert_eq!(value["flowspec"]["validation"].as_str(), Some(expected));
+        }
+        let raw_value: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(raw_value["flowspec"]["validation"].as_str(), Some(expected));
+        let persisted_value: toml::Value = toml::from_str(&bounded).unwrap();
+        if mode == FlowSpecValidationMode::Off {
+            assert!(persisted_value.get("flowspec").is_none());
+        } else {
+            assert_eq!(
+                persisted_value["flowspec"]["validation"].as_str(),
+                Some(expected)
+            );
         }
     }
 }

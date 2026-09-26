@@ -1614,7 +1614,7 @@ fn effective_bounded_writer_release_probe() {
         let started = Instant::now();
         let (document, stats) = match arm.as_str() {
             "legacy" => (
-                super::canonical::render(&config.effective_redacted()).unwrap(),
+                super::canonical::render_effective(&config.effective_redacted()).unwrap(),
                 super::canonical::BoundedRenderStats::default(),
             ),
             "candidate" => super::canonical::render_effective_bounded(&mut config).unwrap(),

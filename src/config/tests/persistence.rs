@@ -47,6 +47,160 @@ fn persisted_config_sorts_every_hash_map_and_round_trips_to_a_fixpoint() {
     assert_eq!(statements[1].action, "deny");
 }
 
+const DEFAULT_OPTIONAL_SECTIONS: [&str; 6] = [
+    "security",
+    "policy",
+    "flowspec",
+    "managed_netdevs",
+    "event_history",
+    "inbound_admission",
+];
+
+fn canonicalized(mut config: Config) -> Config {
+    let posture = config.rfc8212_posture();
+    config.config_epoch = Some(posture.config_epoch_effective);
+    config.global.ebgp_requires_policy = Some(posture.policy_effective);
+    config
+}
+
+#[test]
+fn canonical_persistence_omits_default_optional_sections_and_reaches_a_fixpoint() {
+    let mut config = parse_schema_only(valid_toml()).unwrap();
+    let ordinary = persisted_config_document(&config).unwrap();
+    let bounded = persisted_config_document_bounded(&mut config).unwrap();
+    assert_eq!(bounded, ordinary);
+
+    let value: toml::Value = toml::from_str(&bounded).unwrap();
+    let root = value.as_table().unwrap();
+    for section in DEFAULT_OPTIONAL_SECTIONS {
+        assert!(
+            !root.contains_key(section),
+            "default [{section}] leaked into canonical persistence:\n{bounded}"
+        );
+    }
+    assert_eq!(root["config_epoch"].as_integer(), Some(1));
+    assert_eq!(root["apply_bum_enforcement"].as_bool(), Some(true));
+    assert_eq!(
+        root["global"]["ebgp_requires_policy"].as_bool(),
+        Some(false)
+    );
+
+    let reloaded: Config = toml::from_str(&bounded).unwrap();
+    assert_eq!(reloaded, canonicalized(config));
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), bounded);
+}
+
+#[test]
+fn effective_config_api_body_retains_default_optional_sections() {
+    let mut config = parse_schema_only(valid_toml()).unwrap();
+    let persisted = persisted_config_document_bounded(&mut config).unwrap();
+    let effective = config.effective_redacted_toml().unwrap();
+    let persisted: toml::Value = toml::from_str(&persisted).unwrap();
+    let effective: toml::Value = toml::from_str(&effective).unwrap();
+
+    for section in DEFAULT_OPTIONAL_SECTIONS {
+        assert!(
+            !persisted.as_table().unwrap().contains_key(section),
+            "default [{section}] must stay out of durable persistence"
+        );
+        assert!(
+            effective.as_table().unwrap().contains_key(section),
+            "GetEffectiveConfig must retain resolved default [{section}]"
+        );
+    }
+}
+
+#[test]
+fn canonical_persistence_retains_each_configured_optional_section() {
+    let mut config = parse(valid_toml()).unwrap();
+    config
+        .security
+        .grpc
+        .roles
+        .insert("fixture-operator".into(), GrpcRoleConfig::Operator);
+    config.policy.rpol_max_graph_bytes += 1;
+    config.flowspec.validation = FlowSpecValidationMode::Rfc9117;
+    config.managed_netdevs.owner_token = "fixture-owner".into();
+    config
+        .managed_netdevs
+        .bridges
+        .push(ManagedBridgeNetdevConfig {
+            name: "br-fixture".into(),
+            vlan_filtering: true,
+        });
+    config.event_history.enabled = true;
+    config.inbound_admission.enabled = true;
+    config.validate().unwrap();
+
+    let ordinary = persisted_config_document(&config).unwrap();
+    let bounded = persisted_config_document_bounded(&mut config).unwrap();
+    assert_eq!(bounded, ordinary);
+    let value: toml::Value = toml::from_str(&bounded).unwrap();
+    let root = value.as_table().unwrap();
+    for section in DEFAULT_OPTIONAL_SECTIONS {
+        assert!(
+            root.contains_key(section),
+            "configured [{section}] missing from canonical persistence:\n{bounded}"
+        );
+    }
+
+    let reloaded: Config = toml::from_str(&bounded).unwrap();
+    assert_eq!(reloaded, canonicalized(config));
+    assert_eq!(persisted_config_document(&reloaded).unwrap(), bounded);
+}
+
+#[test]
+fn v071_archived_configs_emit_only_released_root_schema_keys() {
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tag_root = repository.join("tests/fixtures/v1-stable/v0.71.0");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            repository.join("tests/fixtures/v1-stable-schema-root-keys/v0.71.0.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["source_tag"], "v0.71.0");
+    assert_eq!(
+        manifest["schema_sha256"],
+        "480e1d69aaa6ab10397e389eb240e124d1f9c35dcdbb9b2dc0bc9d1c1f191a64"
+    );
+    assert_eq!(manifest["additional_properties"], false);
+    let allowed: std::collections::BTreeSet<&str> = manifest["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(
+        !allowed.contains("flowspec"),
+        "the v0.71.0 red proof requires FlowSpec to be a newer root key"
+    );
+
+    let mut exercised = 0;
+    for entry in std::fs::read_dir(&tag_root).unwrap() {
+        let directory = entry.unwrap().path();
+        if !directory.is_dir() {
+            continue;
+        }
+        let source = std::fs::read_to_string(directory.join("config.toml")).unwrap();
+        let mut config: Config = toml::from_str(&source).unwrap();
+        config.load_rpol_files(Some(&directory)).unwrap();
+        config.validate().unwrap();
+        let persisted = persisted_config_document_bounded(&mut config).unwrap();
+        let value: toml::Value = toml::from_str(&persisted).unwrap();
+        for key in value.as_table().unwrap().keys() {
+            assert!(
+                allowed.contains(key.as_str()),
+                "{} canonical persistence emitted root key {key:?} outside the released v0.71.0 schema:\n{persisted}",
+                directory.display()
+            );
+        }
+        exercised += 1;
+    }
+    assert!(exercised > 0, "no supported v0.71.0 configs were exercised");
+}
+
 fn raw_bounded_fixture(
     reverse: bool,
     statement_count: usize,
@@ -183,7 +337,7 @@ fn bounded_effective_matches_legacy_for_every_lane_boundary_key_and_posture() {
                 .unwrap()
                 .md5_password = Some("group-7ab98100de32".into());
             let original = config.clone();
-            let legacy = super::canonical::render(&config.effective_redacted()).unwrap();
+            let legacy = super::canonical::render_effective(&config.effective_redacted()).unwrap();
             let (bounded, stats) = super::canonical::render_effective_bounded(&mut config).unwrap();
             assert_eq!(config, original);
             assert_eq!(
@@ -667,17 +821,20 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
 fn canonical_projection_borrows_every_large_config_field() {
     let source = include_str!("../canonical.rs");
     for field in [
-        "security: &'a SecurityConfig",
+        "security: Option<&'a SecurityConfig>",
         "neighbors: &'a [Neighbor]",
         "peer_groups: &'a std::collections::HashMap",
-        "policy: &'a PolicyConfig",
+        "policy: Option<&'a PolicyConfig>",
         "dynamic_neighbors: &'a [DynamicNeighborConfig]",
         "evpn_instances: &'a [EvpnInstanceConfig]",
         "ethernet_segments: &'a [EthernetSegmentConfig]",
         "evpn_ip_vrfs: &'a [EvpnIpVrfConfig]",
         "fib_tables: &'a [FibTableConfig]",
-        "managed_netdevs: &'a ManagedNetdevsConfig",
+        "flowspec: Option<&'a FlowSpecConfig>",
+        "managed_netdevs: Option<&'a ManagedNetdevsConfig>",
         "bfd_profiles: &'a [BfdProfileConfig]",
+        "event_history: Option<&'a EventHistoryConfig>",
+        "inbound_admission: Option<&'a InboundAdmissionConfig>",
     ] {
         assert!(source.contains(field), "canonical projection lost {field}");
     }
@@ -685,7 +842,9 @@ fn canonical_projection_borrows_every_large_config_field() {
     assert_eq!(source.matches(".clone()").count(), 4, "{source}");
     assert!(source.contains("let mut canonical_global = global.clone()"));
     assert!(!source.contains("toml::Value::try_from"), "{source}");
-    assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::from(config))"));
+    assert!(source.contains("toml::to_string_pretty(&CanonicalConfig::new("));
+    assert!(source.contains("OptionalSections::IncludeDefaults"));
+    assert!(source.contains("OptionalSections::OmitDefaults"));
 }
 
 #[cfg(target_os = "linux")]
