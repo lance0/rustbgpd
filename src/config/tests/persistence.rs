@@ -134,7 +134,10 @@ fn v071_archived_configs_emit_only_released_root_schema_keys() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let tag_root = repository.join("tests/fixtures/v1-stable/v0.71.0");
     let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(tag_root.join("config-schema-root-keys.json")).unwrap(),
+        &std::fs::read_to_string(
+            repository.join("tests/fixtures/v1-stable-schema-root-keys/v0.71.0.json"),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(manifest["source_tag"], "v0.71.0");

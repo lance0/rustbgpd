@@ -818,13 +818,14 @@ Before rolling any versions:
      schema_path=docs/reference/rustbgpd.schema.json
      git show "${prev_tag}:${schema_path}" > /tmp/rustbgpd-prev-schema.json
      schema_sha256=$(sha256sum /tmp/rustbgpd-prev-schema.json | cut -d' ' -f1)
+     mkdir -p tests/fixtures/v1-stable-schema-root-keys
      jq --arg source_tag "$prev_tag" --arg schema_path "$schema_path" \
        --arg schema_sha256 "$schema_sha256" \
        '{source_tag:$source_tag,schema_path:$schema_path,
          schema_sha256:$schema_sha256,
          additional_properties:.additionalProperties,
          properties:(.properties|keys)}' /tmp/rustbgpd-prev-schema.json \
-       > "tests/fixtures/v1-stable/${prev_tag}/config-schema-root-keys.json"
+       > "tests/fixtures/v1-stable-schema-root-keys/${prev_tag}.json"
      ```
 
      This compact fixture proves only that canonical persistence introduces no
