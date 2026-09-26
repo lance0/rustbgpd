@@ -89,6 +89,14 @@ neighbor_state() {
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
+capture_live_sink_baseline() {
+    state_before=$(neighbor_state "$SINK_ADDR") || return 1
+    echo "$state_before" | jq -e '
+        .state == "SESSION_STATE_ESTABLISHED"
+        and ((.uptimeSeconds // 0 | tonumber) > 0)
+    ' >/dev/null 2>&1
+}
+
 neighbor_established() {
     neighbor_state "${1:?}" | jq -e '.state == "SESSION_STATE_ESTABLISHED"' >/dev/null
 }
@@ -315,15 +323,16 @@ else
 fi
 
 metric_before=$(exact_rejections)
-state_before=$(neighbor_state "$SINK_ADDR")
-flaps_before=$(echo "$state_before" | jq -r '.flapCount // 0 | tonumber')
-uptime_before=$(echo "$state_before" | jq -r '.uptimeSeconds // 0 | tonumber')
-if [ "$uptime_before" -gt 0 ]; then
-    ok "captured live BIRD-session baseline (metric=$metric_before, flapCount=$flaps_before, uptime=$uptime_before)"
-else
-    fail "BIRD session baseline has uptimeSeconds=0"
+# A newly Established session legitimately reports zero whole seconds.
+# Wait for a usable baseline, retaining one state sample for both counters.
+if ! wait_condition 10 1 capture_live_sink_baseline; then
+    fail "BIRD session did not reach Established with nonzero uptime within 10 polls"
+    echo "$state_before" >&2
     exit 1
 fi
+flaps_before=$(echo "$state_before" | jq -r '.flapCount // 0 | tonumber')
+uptime_before=$(echo "$state_before" | jq -r '.uptimeSeconds // 0 | tonumber')
+ok "captured live BIRD-session baseline (metric=$metric_before, flapCount=$flaps_before, uptime=$uptime_before)"
 
 log "Phase 2: replace with 337 Large Communities (4,095 bytes before sink policy)"
 if inject_boundary_route; then

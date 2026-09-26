@@ -156,6 +156,7 @@ jobs:
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
           python3 tests/interop/scripts/test_interop_signal_cleanup.py
           python3 tests/interop/scripts/test_m66_failure_diagnostics.py
+          python3 tests/interop/scripts/test_m87_session_baseline.py
           bash -n tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           python3 tests/interop/scripts/test_m111_capture_oracle.py
