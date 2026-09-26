@@ -63,6 +63,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -511,6 +512,7 @@ fn ibgp_default_local_pref_when_missing() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs =
@@ -541,6 +543,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs =
@@ -588,6 +591,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let attrs =

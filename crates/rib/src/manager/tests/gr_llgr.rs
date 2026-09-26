@@ -604,6 +604,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     tx.send(RibUpdate::RoutesReceived {

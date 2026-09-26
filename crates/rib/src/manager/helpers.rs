@@ -283,10 +283,12 @@ pub(super) fn vrp_covering_prefix(entry: &rustbgpd_rpki::VrpEntry) -> Option<Pre
 
 /// Validate a route's origin against the VRP table (RFC 6811).
 ///
-/// Extracts the origin ASN from the route's `AS_PATH` (last AS in rightmost
+/// Extracts the origin ASN from the received `AS_PATH` (last AS in rightmost
 /// `AS_SEQUENCE`). Returns `NotFound` if no `AS_PATH` is present.
 pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable) -> RpkiValidation {
-    let origin = route.as_path().and_then(rustbgpd_wire::AsPath::origin_asn);
+    let origin = route
+        .validation_as_path()
+        .and_then(rustbgpd_wire::AsPath::origin_asn);
     match origin {
         Some(asn) => table.validate(&route.prefix, asn),
         None => RpkiValidation::NotFound,
@@ -322,7 +324,7 @@ pub(super) fn validate_route_aspa_detailed(
             invalid_hop: None,
         };
     }
-    match route.as_path() {
+    match route.validation_as_path() {
         Some(path) => rustbgpd_rpki::aspa_verify::verify_detailed(path, table, route.aspa_context),
         None => AspaVerificationResult {
             state: AspaValidation::Unknown,

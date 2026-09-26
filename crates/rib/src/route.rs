@@ -133,6 +133,12 @@ pub struct Route {
     pub validation_state: RpkiValidation,
     /// ASPA path verification state. Default: `Unknown`.
     pub aspa_state: AspaValidation,
+    /// Received `AS_PATH` when import policy changed the stored path.
+    /// Shared across NLRI from the UPDATE, independently of attribute interning.
+    /// `None` uses the stored path; `Some(None)` preserves an absent received
+    /// attribute, and `Some(Some(path))` preserves a present (possibly empty) path.
+    /// Selection and export continue to use [`Self::as_path`].
+    pub received_as_path: Option<Arc<Option<AsPath>>>,
     /// Relationship context used to recompute `aspa_state` on ASPA cache
     /// updates. Empty for locally originated or non-BGP synthetic routes.
     pub aspa_context: AspaValidationContext,
@@ -214,6 +220,15 @@ impl Route {
             PathAttribute::AsPath(p) => Some(p),
             _ => None,
         })
+    }
+
+    /// Path received before import policy, for initial and cache validation.
+    #[must_use]
+    pub fn validation_as_path(&self) -> Option<&AsPath> {
+        match &self.received_as_path {
+            Some(received) => received.as_ref().as_ref(),
+            None => self.as_path(),
+        }
     }
 
     /// Extract the `LOCAL_PREF` attribute value, defaulting to 100.

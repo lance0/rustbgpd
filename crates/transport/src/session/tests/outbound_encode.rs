@@ -139,6 +139,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let route2 = Route {
@@ -231,6 +232,7 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         })
         .collect();
@@ -297,6 +299,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let route2 = Route {
@@ -337,6 +340,7 @@ fn v4_route_with(attributes: Arc<AttrSet>, third_octet: u8, next_hop: Ipv4Addr) 
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
@@ -525,6 +529,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let route2 = Route {
@@ -629,6 +634,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     };
     let routes: Vec<Route> = (0..count).map(route).collect();
@@ -799,6 +805,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         })
         .collect();
@@ -967,6 +974,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         })
         .collect();
@@ -1201,6 +1209,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            received_as_path: None,
             aspa_context: rustbgpd_wire::AspaValidationContext::default(),
         })
         .collect();

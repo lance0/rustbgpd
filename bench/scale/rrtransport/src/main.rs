@@ -130,6 +130,7 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: AspaValidationContext::default(),
     }
 }

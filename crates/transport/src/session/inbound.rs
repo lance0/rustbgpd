@@ -600,6 +600,7 @@ const IMPORT_ATTR_MEMO_SLOTS: usize = 8;
 #[derive(Default)]
 pub struct ImportAttrMemo {
     entries: Vec<ImportAttrMemoEntry>,
+    received_as_path: Option<Arc<Option<rustbgpd_wire::AsPath>>>,
 }
 
 /// Canonical source, modifications, and the resulting attributes and
@@ -612,6 +613,30 @@ type ImportAttrMemoEntry = (
 );
 
 impl ImportAttrMemo {
+    /// Preserve validation provenance only when import actually changes `AS_PATH`.
+    /// All changed body/MP unicast NLRI share one original path per UPDATE;
+    /// attribute interning and outbound equality remain about wire attributes.
+    fn received_path_override(
+        &mut self,
+        received: Option<&rustbgpd_wire::AsPath>,
+        modified: &AttrSet,
+        mods: &RouteModifications,
+    ) -> Option<Arc<Option<rustbgpd_wire::AsPath>>> {
+        // Prepend is the only import action that can change AS_PATH.
+        mods.as_path_prepend?;
+        let stored = modified.iter().find_map(|attr| match attr {
+            PathAttribute::AsPath(path) => Some(path),
+            _ => None,
+        });
+        if stored == received {
+            return None;
+        }
+        Some(Arc::clone(
+            self.received_as_path
+                .get_or_insert_with(|| Arc::new(received.cloned())),
+        ))
+    }
+
     /// [`materialize_attrs`], sharing the result across equal modifications
     /// of the same canonical variant.
     pub fn materialize(
@@ -2269,6 +2294,11 @@ impl PeerSession {
                         link_local_next_hop: None,
                         next_hop_scope: self.link_local_next_hop_scope(next_hop),
                         peer: self.peer_ip,
+                        received_as_path: import_attr_memo.received_path_override(
+                            parsed_as_path,
+                            &attrs,
+                            &result.modifications,
+                        ),
                         attributes: attrs,
                         received_at: now,
                         origin_type: route_origin,
@@ -2871,6 +2901,11 @@ impl PeerSession {
                                 link_local_next_hop,
                                 next_hop_scope: self.link_local_next_hop_scope(next_hop),
                                 peer: self.peer_ip,
+                                received_as_path: import_attr_memo.received_path_override(
+                                    parsed_as_path,
+                                    &attrs,
+                                    &result.modifications,
+                                ),
                                 attributes: attrs,
                                 received_at: now,
                                 origin_type: route_origin,
@@ -3450,6 +3485,56 @@ mod route_attr_bundle_tests {
         assert!(!has_next_hop(&bundle.mp) && !has_otc(&bundle.mp));
         assert!(!has_next_hop(&bundle.mp_unicast) && !has_otc(&bundle.mp_unicast));
     }
+    #[test]
+    fn received_path_provenance_allocates_only_for_an_actual_path_change() {
+        let original = rustbgpd_wire::AsPath {
+            segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65002, 65003])],
+        };
+        let canonical = AttrSet::new(vec![PathAttribute::AsPath(original.clone())]);
+        let mut memo = ImportAttrMemo::default();
+        for mods in [
+            RouteModifications::default(),
+            RouteModifications {
+                set_local_pref: Some(200),
+                ..RouteModifications::default()
+            },
+            RouteModifications {
+                as_path_prepend: Some((65001, 0)),
+                ..RouteModifications::default()
+            },
+        ] {
+            let (attrs, _) = memo.materialize(&canonical, &mods);
+            assert!(
+                memo.received_path_override(Some(&original), &attrs, &mods)
+                    .is_none()
+            );
+            assert!(memo.received_as_path.is_none());
+        }
+        let mods = RouteModifications {
+            as_path_prepend: Some((65001, 1)),
+            ..RouteModifications::default()
+        };
+        let (attrs, _) = memo.materialize(&canonical, &mods);
+        let first = memo
+            .received_path_override(Some(&original), &attrs, &mods)
+            .unwrap();
+        let second = memo
+            .received_path_override(Some(&original), &attrs, &mods)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_ref(), &Some(original));
+
+        let mut absent_memo = ImportAttrMemo::default();
+        let (attrs, _) = absent_memo.materialize(&AttrSet::new(vec![]), &mods);
+        let absent = absent_memo
+            .received_path_override(None, &attrs, &mods)
+            .unwrap();
+        assert!(
+            absent.is_none(),
+            "missing received attribute must not fall back to the prepended path"
+        );
+    }
+
     #[test]
     fn materialize_shares_arc_when_no_modifications() {
         let bundle = RouteAttrBundle::new(&base_attrs(), None);

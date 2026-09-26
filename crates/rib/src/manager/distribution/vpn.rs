@@ -27,6 +27,7 @@ fn vpn_suppression_probe(route: &crate::route::VpnRibRoute) -> crate::route::Rou
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        received_as_path: None,
         aspa_context: rustbgpd_wire::AspaValidationContext::default(),
     }
 }
