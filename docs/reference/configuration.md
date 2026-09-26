@@ -4554,8 +4554,9 @@ When the events DB fails to open or is corrupted:
 
 - EHM retries the open once after 200 ms, so a brief lock or I/O error
   does not quarantine a healthy store.
-- If the retry also fails, the database and its `-wal` / `-shm` files are
-  renamed to `events.db.stale` (matches the `*.json.stale` convention from
+- If the retry also fails because of the store's content (SQLite reports
+  the file corrupt or not a database, or its metadata is malformed), the
+  database and its `-wal` / `-shm` files are renamed to `events.db.stale` (matches the `*.json.stale` convention from
   `fib-owned.json`). An earlier quarantine is never overwritten: its files
   first move to `events.db.stale.1`, or the next unused number, so the
   highest number is the most recent earlier copy. Each copy is a full
@@ -4582,6 +4583,18 @@ before starting`. With `required = true` the daemon exits 1; with
 way the store stays in place: upgrade the daemon again, or move `events.db`
 and its `-wal` / `-shm` files aside by hand (for example to
 `events.db.stale-downgrade`) before starting the older daemon.
+
+A store the host will not let the daemon open or write is not corruption
+either, and is never quarantined. A full filesystem, a read-only mount,
+files the daemon's user cannot write (for example after a manual run as
+root), I/O errors, or a lock held elsewhere fail the open with the SQLite
+error, such as `unable to open database file`, `attempt to write a readonly
+database`, or `database or disk is full`. Startup also stages one write and
+rolls it back, so a store the daemon can read but not write fails here rather
+than at the first event. As with a newer schema, `required = true` exits 1,
+`required = false` continues in live-only mode, and the files stay in place.
+Fix the ownership, space, or mount (for a read-only `events.db`, the `-wal`
+and `-shm` files SQLite created beside it too) and restart.
 
 If the storage thread stops while the daemon runs (for example, after a
 panic), the outbox closes producer admission, refuses new `SubscribeFromEvent`

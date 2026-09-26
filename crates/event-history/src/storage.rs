@@ -485,11 +485,13 @@ impl StoreHandle {
 
 /// Spawn the blocking storage thread on the current tokio runtime.
 ///
-/// `path` is the events DB. If opening fails (corruption, permission
-/// denied), quarantines and reopens fresh — caller learns which path
-/// was taken via [`StorageInit::had_quarantine`]. A newer on-disk
-/// schema is returned as [`EventHistoryError::SchemaDowngrade`] with
-/// the store left in place.
+/// `path` is the events DB. If opening fails because of the store's
+/// content (corrupt or non-SQLite file, malformed metadata, or an
+/// unclassified error), quarantines it and reopens fresh — caller learns
+/// which path was taken via [`StorageInit::had_quarantine`]. A host error
+/// (full or read-only filesystem, denied permissions, I/O failure, locks)
+/// is returned with the store left in place, as is a newer on-disk schema
+/// ([`EventHistoryError::SchemaDowngrade`]).
 ///
 /// The returned `JoinHandle` resolves when the storage thread exits
 /// (after a `StoreOp::Shutdown` or unrecoverable error).
@@ -541,7 +543,9 @@ pub(crate) struct StorageInit {
 ///   async side keeps the error path off the blocking thread.
 /// - A failed primary open is retried once after [`PROBE_RETRY_DELAY`];
 ///   the pause blocks the calling thread, once, at startup. Only a second
-///   failure quarantines the DB. A schema downgrade is neither retried nor
+///   failure quarantines the DB, and only when it points at the store's
+///   content: a host error (see [`is_host_error`]) is returned with the
+///   store left in place. A schema downgrade is neither retried nor
 ///   quarantined; it is returned as is.
 /// - If the primary fails to open, we attempt quarantine metadata before
 ///   creating a fresh DB. The sidecar is a diagnostic hint only because
@@ -621,6 +625,20 @@ fn open_with_recovery(
             recovered_via_fallback: false,
         }),
         Err(primary_err @ EventHistoryError::SchemaDowngrade { .. }) => Err(primary_err),
+        // The host would not let SQLite open or write an otherwise intact
+        // store. Quarantining it would move the history aside, and a fresh
+        // store would meet the same condition. Like the downgrade fence,
+        // leave it in place and let startup apply `required`.
+        Err(primary_err) if is_host_error(&primary_err) => {
+            error!(
+                events_db = %path.display(),
+                error = %primary_err,
+                "events DB cannot be opened or written because of a host error \
+                 (disk full, read-only filesystem, permissions, or locks); \
+                 leaving it in place"
+            );
+            Err(primary_err)
+        }
         Err(primary_err) => {
             warn!(
                 events_db = %path.display(),
@@ -634,6 +652,34 @@ fn open_with_recovery(
             quarantine_db(path)?;
             recover_after_quarantine(path, &stale, &sidecar, synchronous)
         }
+    }
+}
+
+/// Whether `err` comes from the host environment rather than from the
+/// content of the store: a full or read-only filesystem, denied
+/// permissions, I/O failure, locks, or exhausted memory or descriptors.
+/// Only content errors (corrupt pages, not a database, bad metadata) are
+/// evidence that quarantining the store can help.
+fn is_host_error(err: &EventHistoryError) -> bool {
+    use rusqlite::ErrorCode as Code;
+    match err {
+        EventHistoryError::Io { .. } => true,
+        EventHistoryError::Sqlite(err) => matches!(
+            err.sqlite_error_code(),
+            Some(
+                Code::PermissionDenied
+                    | Code::DatabaseBusy
+                    | Code::DatabaseLocked
+                    | Code::OutOfMemory
+                    | Code::ReadOnly
+                    | Code::SystemIoFailure
+                    | Code::DiskFull
+                    | Code::CannotOpen
+                    | Code::FileLockingProtocolFailed
+                    | Code::NoLargeFileSupport
+            )
+        ),
+        _ => false,
     }
 }
 
@@ -705,8 +751,20 @@ fn recover_after_quarantine(
 fn probe_open(path: &Path, synchronous: SynchronousMode) -> Result<u64, EventHistoryError> {
     let mut conn = Connection::open(path).map_err(EventHistoryError::Sqlite)?;
     bootstrap(&mut conn, synchronous)?;
-    crate::sequence::read_allocator(&conn)?
-        .ok_or_else(|| EventHistoryError::AllocatorCorrupt("missing post-bootstrap".to_string()))
+    let allocator = crate::sequence::read_allocator(&conn)?
+        .ok_or_else(|| EventHistoryError::AllocatorCorrupt("missing post-bootstrap".to_string()))?;
+    // An existing store can bootstrap without writing, and SQLite opens a
+    // file it may only read as read-only. Stage one write and roll it back
+    // so a store the daemon cannot write fails here, at startup, rather
+    // than on the first append. Taking the write lock alone is not enough:
+    // in WAL mode that lock lives in the `-shm` file.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    conn.execute(
+        "UPDATE metadata SET value = value WHERE key = ?1",
+        params![META_LAST_EVENT_ID],
+    )?;
+    conn.execute_batch("ROLLBACK")?;
+    Ok(allocator)
 }
 
 /// The dedicated storage thread loop. Runs on a `spawn_blocking` task.
@@ -1286,6 +1344,45 @@ mod tests {
             ),
             "expected SchemaDowngrade, got {result:?}"
         );
+    }
+
+    #[test]
+    fn only_content_errors_are_quarantine_evidence() {
+        // Disk full, I/O errors and locks cannot be staged with file
+        // permissions, so pin their classification directly.
+        let sqlite = |code| {
+            EventHistoryError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        for code in [
+            rusqlite::ffi::SQLITE_FULL,
+            rusqlite::ffi::SQLITE_READONLY,
+            rusqlite::ffi::SQLITE_CANTOPEN,
+            rusqlite::ffi::SQLITE_PERM,
+            rusqlite::ffi::SQLITE_IOERR_SHMOPEN,
+            rusqlite::ffi::SQLITE_IOERR_WRITE,
+            rusqlite::ffi::SQLITE_BUSY,
+            rusqlite::ffi::SQLITE_NOMEM,
+        ] {
+            assert!(is_host_error(&sqlite(code)), "code {code} is a host error");
+        }
+        assert!(is_host_error(&EventHistoryError::Io {
+            path: "events.db".into(),
+            source: std::io::Error::from_raw_os_error(28),
+        }));
+
+        for code in [rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            assert!(!is_host_error(&sqlite(code)), "code {code} is corruption");
+        }
+        for err in [
+            EventHistoryError::SchemaCorrupt("missing key".into()),
+            EventHistoryError::AllocatorCorrupt("missing".into()),
+            EventHistoryError::SchemaMigrationGap { from: 0, to: 1 },
+        ] {
+            assert!(!is_host_error(&err), "{err} is corruption");
+        }
     }
 
     #[tokio::test]

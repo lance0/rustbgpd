@@ -497,9 +497,9 @@ enum Command {
     /// RFC 8326 will set local_pref = 0 on tagged paths, draining
     /// traffic ahead of planned maintenance. An all-peers change asks for
     /// confirmation when stdin and stdout are terminals; `--yes` skips it.
+    #[command(group(clap::ArgGroup::new("scope").required(true).args(["neighbor", "all"])))]
     Gshut {
-        /// Neighbor address. Omitting both this and --all toggles every
-        /// peer; that form is deprecated, so pass --all instead
+        /// Neighbor address; this or --all is required
         #[arg(
             long = "neighbor",
             visible_alias = "peer",
@@ -1002,9 +1002,9 @@ enum PolicyChainAction {
 
 /// Which chain a `policy chain` set or clear changes.
 #[derive(Args)]
+#[command(group(clap::ArgGroup::new("scope").required(true).args(["neighbor", "global"])))]
 struct ChainScope {
-    /// Neighbor address. Omitting both this and --global changes the global
-    /// chain; that form is deprecated, so pass --global instead
+    /// Neighbor address; this or --global is required
     #[arg(
         long,
         visible_alias = "peer",
@@ -3184,16 +3184,10 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-const CHAIN_SCOPE_WARNING: &str = "warning: omitting --neighbor selects the global chain; \
-    pass --global (this will become an error in a future release)";
-const GSHUT_SCOPE_WARNING: &str = "warning: omitting --neighbor selects all peers; \
-    pass --all (this will become an error in a future release)";
-
 /// A mutation that changes every session at once.
 struct DaemonWideChange {
     question: String,
     yes: bool,
-    omitted_scope_warning: Option<&'static str>,
 }
 
 fn daemon_wide_change(command: &Command, addr: &str) -> Option<DaemonWideChange> {
@@ -3203,20 +3197,18 @@ fn daemon_wide_change(command: &Command, addr: &str) -> Option<DaemonWideChange>
                 "Shut down the rustbgpd daemon at {addr}? This drops every BGP session."
             ),
             yes: *yes,
-            omitted_scope_warning: None,
         }),
         Command::Gshut {
             neighbor: None,
-            all,
             clear,
             yes,
+            ..
         } => Some(DaemonWideChange {
             question: format!(
                 "{} GRACEFUL_SHUTDOWN for ALL peers on {addr}?",
                 if *clear { "Clear" } else { "Enable" }
             ),
             yes: *yes,
-            omitted_scope_warning: (!all).then_some(GSHUT_SCOPE_WARNING),
         }),
         Command::Policy {
             action: PolicyAction::Chain { action },
@@ -3234,24 +3226,20 @@ fn daemon_wide_change(command: &Command, addr: &str) -> Option<DaemonWideChange>
                      This affects every neighbor without its own chain."
                 ),
                 yes: scope.yes,
-                omitted_scope_warning: (!scope.global).then_some(CHAIN_SCOPE_WARNING),
             })
         }
         _ => None,
     }
 }
 
-/// Warn about an omitted scope and, when stdin and stdout are both
-/// terminals and `--yes` is absent, ask before a daemon-wide change.
+/// When stdin and stdout are both terminals and `--yes` is absent, ask
+/// before a daemon-wide change.
 /// Non-interactive runs never prompt.
 fn confirm_daemon_wide(command: &Command, addr: &str) -> Result<(), CliError> {
     use std::io::IsTerminal;
     let Some(change) = daemon_wide_change(command, addr) else {
         return Ok(());
     };
-    if let Some(warning) = change.omitted_scope_warning {
-        eprintln!("{warning}");
-    }
     let interactive =
         !change.yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     confirm(
@@ -7973,12 +7961,11 @@ printf '%s\n' "${COMPREPLY[@]}"
     }
 
     #[test]
-    fn daemon_wide_changes_name_endpoint_scope_and_deprecation() {
+    fn daemon_wide_changes_name_endpoint_and_scope() {
         let addr = "unix:///run/rustbgpd/grpc.sock";
         let change = |args: &str| {
             let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
-            daemon_wide_change(&cli.command, addr)
-                .map(|change| (change.question, change.yes, change.omitted_scope_warning))
+            daemon_wide_change(&cli.command, addr).map(|change| (change.question, change.yes))
         };
         let chain_question = |verb: &str, direction: &str| {
             format!(
@@ -7987,51 +7974,40 @@ printf '%s\n' "${COMPREPLY[@]}"
             )
         };
         assert_eq!(
-            change("rbgp policy chain clear-import"),
-            Some((
-                chain_question("Clear", "import"),
-                false,
-                Some(CHAIN_SCOPE_WARNING)
-            ))
+            change("rbgp policy chain clear-import --global"),
+            Some((chain_question("Clear", "import"), false))
         );
         assert_eq!(
             change("rbgp policy chain clear-export --global -y"),
-            Some((chain_question("Clear", "export"), true, None))
+            Some((chain_question("Clear", "export"), true))
         );
         assert_eq!(
             change("rbgp policy chain set-import --global p1"),
-            Some((chain_question("Replace", "import"), false, None))
+            Some((chain_question("Replace", "import"), false))
         );
         assert_eq!(
-            change("rbgp policy chain set-export --yes p1"),
-            Some((
-                chain_question("Replace", "export"),
-                true,
-                Some(CHAIN_SCOPE_WARNING)
-            ))
+            change("rbgp policy chain set-export --global --yes p1"),
+            Some((chain_question("Replace", "export"), true))
         );
         assert_eq!(
             change("rbgp shutdown"),
             Some((
                 format!("Shut down the rustbgpd daemon at {addr}? This drops every BGP session."),
-                false,
-                None
+                false
             ))
         );
         assert_eq!(
-            change("rbgp gshut"),
+            change("rbgp gshut --all"),
             Some((
                 format!("Enable GRACEFUL_SHUTDOWN for ALL peers on {addr}?"),
-                false,
-                Some(GSHUT_SCOPE_WARNING)
+                false
             ))
         );
         assert_eq!(
             change("rbgp gshut --all --clear --yes"),
             Some((
                 format!("Clear GRACEFUL_SHUTDOWN for ALL peers on {addr}?"),
-                true,
-                None
+                true
             ))
         );
         for scoped in [
@@ -8518,8 +8494,8 @@ printf '%s\n' "${COMPREPLY[@]}"
         for args in [
             "rbgp top --interval 1",
             "rbgp top --interval 60",
-            "rbgp policy chain set-import import-policy",
-            "rbgp policy chain set-export export-policy fallback-policy",
+            "rbgp policy chain set-import --global import-policy",
+            "rbgp policy chain set-export --neighbor 10.0.0.2 export-policy fallback-policy",
             "rbgp watch --family ipv6",
             "rbgp flowspec --family ipv4_flowspec",
             "rbgp flowspec add --family ipv6-flowspec",
@@ -8589,11 +8565,11 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "interval must be between 1 and 60 seconds",
             ),
             (
-                "policy chain set-import",
+                "policy chain set-import --global",
                 "set-import requires at least one policy name; use clear-import to drop the chain",
             ),
             (
-                "policy chain set-export",
+                "policy chain set-export --neighbor 10.0.0.2",
                 "set-export requires at least one policy name; use clear-export to drop the chain",
             ),
             (

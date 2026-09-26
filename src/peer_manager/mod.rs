@@ -1389,6 +1389,10 @@ impl PeerManager {
                             let result = self.add_peer(config, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::AddConfiguredPeers { configs, reply } => {
+                            let result = self.add_configured_peers(configs).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::RuntimeCreatePeer { spec, reply } => {
                             let result = self.runtime_create_peer(spec).await;
                             let _ = reply.send(result);

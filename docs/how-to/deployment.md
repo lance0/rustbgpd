@@ -1423,6 +1423,9 @@ is unsupported without moving the directory aside: the older writer ignores
 v3, can expose stale rows, and may reuse its sequence. There is no
 backfill or down-conversion. Re-upgrade fails closed on duplicate sequences or
 an over-cap roster; it cannot make an old writer's collisions trustworthy.
+Builds that recognize newer-format history rows (see
+[ADR-0124](../adr/0124-bounded-config-history-retention.md)) list them as
+unreadable and skip recording, with a warning, until they are moved aside.
 
 Then stop cleanly, move history aside if required above, and install the selected older package:
 

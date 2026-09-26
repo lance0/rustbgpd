@@ -368,6 +368,35 @@ The allocation mutation cloned the oversized Config inside recording and
 exceeded the receipt's peak bound. The mutations were removed; the production
 path borrows the accepted Config and retains only audit metadata.
 
+## Amendment (2026-09-26): rows from a newer history format
+
+The v2→v3 boundary above relied on a manual move-aside rule because the older
+reader recognized only its own prefixes. The shipped store now fences every
+later format boundary in the older binary itself:
+
+- The final-name grammar accepts any `v<N>-<sequence:020>-<timestamp>-<digest>.json`
+  with `N >= 2` and no leading zero. Versions 2 and 3 decode as before. A
+  higher version is a row written by a newer rustbgpd: it keeps its sequence
+  and counts toward the twenty-row roster cap, is never opened, and lists as
+  `UNREADABLE` with the summary `(history format vN written by a newer
+  rustbgpd)`. Rollback to it fails under the existing unreadable-row rule.
+- While any such row exists, the writer refuses to record before stage
+  cleanup, sequence allocation, dedupe, or eviction. Recording is best effort,
+  so the accepted config still commits; the persister logs the refusal as a
+  history-recording warning. No row or stage changes, including a newer
+  release's `.v<N>-…json.tmp` stages, which this build never parses as its
+  own.
+- Recording resumes once the operator moves the newer rows aside. The older
+  binary never allocates below a newer row's sequence, never evicts it, and
+  never hides it behind stale rows, so a re-upgrade finds no collisions.
+
+This is the fail-closed choice among the options considered. Reserving the
+newer sequences and continuing to write was rejected: at the roster cap it
+must either refuse anyway or exceed the cap, and it would interleave rows into
+a chronology whose newest members the older binary cannot interpret. The
+fence covers downgrades to a build that contains it; binaries older than the
+fence still need the move-aside rule for the v3 boundary.
+
 ## References
 
 - [ADR-0076](0076-config-transaction-model.md), config transactions and

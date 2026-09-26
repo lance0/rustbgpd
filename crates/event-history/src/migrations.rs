@@ -125,6 +125,9 @@ fn first_init(conn: &mut Connection) -> Result<(), EventHistoryError> {
     Ok(())
 }
 
+/// Only a missing row or an unparseable value is schema corruption. Any other
+/// SQLite error (a lock, I/O failure, or read-only file) propagates as is, so
+/// the recovery ladder can tell a host condition from a corrupt store.
 fn read_schema_version(conn: &Connection) -> Result<u32, EventHistoryError> {
     let raw: String = conn
         .query_row(
@@ -132,7 +135,8 @@ fn read_schema_version(conn: &Connection) -> Result<u32, EventHistoryError> {
             params![META_SCHEMA_VERSION],
             |row| row.get(0),
         )
-        .map_err(|_| {
+        .optional()?
+        .ok_or_else(|| {
             EventHistoryError::SchemaCorrupt(format!("metadata.{META_SCHEMA_VERSION} missing"))
         })?;
     raw.parse::<u32>().map_err(|e| {
@@ -263,6 +267,51 @@ mod tests {
                 "missing index {required}; have {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn missing_schema_version_row_is_schema_corruption() {
+        let mut conn = open_in_memory();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
+        conn.execute(
+            "DELETE FROM metadata WHERE key = ?1",
+            params![META_SCHEMA_VERSION],
+        )
+        .unwrap();
+        let err = read_schema_version(&conn).unwrap_err();
+        assert!(
+            matches!(err, EventHistoryError::SchemaCorrupt(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn locked_schema_version_read_is_not_schema_corruption() {
+        // Load-bearing break: every query error became `SchemaCorrupt`, so a
+        // lock held elsewhere made the recovery ladder quarantine an intact
+        // store. A rollback-journal writer holding EXCLUSIVE blocks readers,
+        // which pins the error to this read.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let mut conn = Connection::open(&path).unwrap();
+        bootstrap(&mut conn, SynchronousMode::Full).unwrap();
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let err = read_schema_version(&conn).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                EventHistoryError::Sqlite(e)
+                    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+            ),
+            "a lock must surface as SQLITE_BUSY, got {err:?}"
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(read_schema_version(&conn).unwrap(), CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

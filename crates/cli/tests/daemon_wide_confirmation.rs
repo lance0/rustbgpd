@@ -1,6 +1,6 @@
 //! Daemon-wide mutations run without a prompt when stdin and stdout are not
-//! terminals, and an omitted scope still selects the global chain or every
-//! peer while warning that the form is deprecated.
+//! terminals, and an omitted scope is a usage error that never reaches the
+//! daemon.
 
 use std::process::{Command, Output, Stdio};
 
@@ -13,11 +13,6 @@ use rustbgpd_api::proto;
     reason = "shared CLI mock includes services unused by this contract"
 )]
 mod test_support;
-
-const CHAIN_WARNING: &str = "warning: omitting --neighbor selects the global chain; \
-    pass --global (this will become an error in a future release)";
-const GSHUT_WARNING: &str = "warning: omitting --neighbor selects all peers; \
-    pass --all (this will become an error in a future release)";
 
 fn rbgp(addr: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_rbgp"))
@@ -34,24 +29,32 @@ fn stderr(output: &Output) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn omitted_chain_scope_clears_global_chain_with_deprecation_warning() {
+async fn omitted_chain_scope_is_a_usage_error_without_rpc() {
     let server = test_support::spawn_mock_server(None).await;
-    let output = rbgp(&server.addr, &["policy", "chain", "clear-import"]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(stderr(&output).trim_end(), CHAIN_WARNING);
-    assert!(!stderr(&output).contains("[y/N]"));
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Global import chain cleared"),
-        "{output:?}"
-    );
-    assert!(
-        server
-            .state
-            .last_clear_global_import_chain
-            .lock()
-            .await
-            .is_some()
-    );
+    for args in [
+        vec!["policy", "chain", "set-import", "p1"],
+        vec!["policy", "chain", "set-export", "--yes", "p1"],
+        vec!["policy", "chain", "clear-import"],
+        vec!["policy", "chain", "clear-export", "-y"],
+    ] {
+        let output = rbgp(&server.addr, &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let error = stderr(&output);
+        assert!(
+            error.contains("the following required arguments were not provided"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            error.contains("<--neighbor <NEIGHBOR>|--global>"),
+            "{args:?}: {error}"
+        );
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+    }
+    let state = &server.state;
+    assert!(state.last_set_global_import_chain.lock().await.is_none());
+    assert!(state.last_set_global_export_chain.lock().await.is_none());
+    assert!(state.last_clear_global_import_chain.lock().await.is_none());
+    assert!(state.last_clear_global_export_chain.lock().await.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -107,22 +110,37 @@ async fn shutdown_runs_without_prompt_when_not_a_terminal() {
 }
 
 #[test]
-fn gshut_scope_warning_is_emitted_only_when_scope_is_omitted() {
+fn gshut_requires_an_explicit_scope_before_transport() {
     let directory = tempfile::tempdir().unwrap();
     let absent = format!("unix://{}/absent.sock", directory.path().display());
-    for (args, warned) in [
-        (vec!["gshut"], true),
-        (vec!["gshut", "--clear"], true),
-        (vec!["gshut", "--all"], false),
-        (vec!["gshut", "--neighbor", "10.0.0.2"], false),
+    for args in [
+        vec!["gshut"],
+        vec!["gshut", "--clear"],
+        vec!["gshut", "--yes"],
     ] {
         let output = rbgp(&absent, &args);
-        // The warning precedes the connection attempt, which proves the
-        // command went on to transport without waiting for an answer.
+        // A connection attempt would report the absent socket; exit 2
+        // without it proves the all-peers toggle never reached transport.
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let error = stderr(&output);
+        assert!(
+            error.contains("<--neighbor <NEIGHBOR>|--all>"),
+            "{args:?}: {error}"
+        );
+        assert!(
+            !error.contains("cannot reach rustbgpd"),
+            "{args:?}: {error}"
+        );
+    }
+    for args in [
+        vec!["gshut", "--all"],
+        vec!["gshut", "--neighbor", "10.0.0.2", "--clear"],
+    ] {
+        let output = rbgp(&absent, &args);
+        // Non-interactive runs go on to transport without a prompt.
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
         let error = stderr(&output);
         assert!(error.contains("cannot reach rustbgpd"), "{args:?}: {error}");
-        assert_eq!(error.contains(GSHUT_WARNING), warned, "{args:?}: {error}");
         assert!(!error.contains("[y/N]"), "{args:?}: {error}");
     }
 }

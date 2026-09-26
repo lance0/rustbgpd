@@ -5,11 +5,15 @@ The fixture intentionally sends UPDATEs that compliant FRR will not naturally
 emit: a Customer-role route carrying OTC, and a malformed-length OTC attribute.
 It keeps the TCP session alive long enough for the shell driver to assert that
 rustbgpd drops only the announcements and leaves the session Established.
+
+The baseline route stays announced until the driver has observed it and
+creates GO_FILE; only then are the leak and malformed UPDATEs sent.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 import struct
 import sys
@@ -30,6 +34,9 @@ ATTR_ORIGIN = 1
 ATTR_AS_PATH = 2
 ATTR_NEXT_HOP = 3
 ATTR_OTC = 35
+GO_FILE = "/tmp/m55-go"
+GO_TIMEOUT_SECONDS = 300
+KEEPALIVE_SECONDS = 5
 
 
 def message(msg_type: int, body: bytes = b"") -> bytes:
@@ -118,7 +125,24 @@ def send_update(sock: socket.socket, *, withdrawn: bytes = b"", announced: bytes
     sock.sendall(update(withdrawn, path_attrs(*attrs), announced))
 
 
+def wait_for_go(sock: socket.socket) -> None:
+    """Hold the baseline, keeping the session alive, until GO_FILE exists."""
+    deadline = time.time() + GO_TIMEOUT_SECONDS
+    next_keepalive = 0.0
+    while not os.path.exists(GO_FILE):
+        if time.time() >= deadline:
+            raise RuntimeError(f"no go signal ({GO_FILE}) within {GO_TIMEOUT_SECONDS}s")
+        if time.time() >= next_keepalive:
+            sock.sendall(message(TYPE_KEEPALIVE))
+            next_keepalive = time.time() + KEEPALIVE_SECONDS
+        time.sleep(0.2)
+
+
 def main() -> int:
+    try:
+        os.remove(GO_FILE)
+    except FileNotFoundError:
+        pass
     listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listen.bind(("0.0.0.0", 179))
@@ -152,7 +176,7 @@ def main() -> int:
         # to prove withdrawals still apply when announcements are treated as
         # withdraw.
         send_update(sock, announced=nlri("198.51.100.57/32"))
-        time.sleep(1)
+        wait_for_go(sock)
 
         # Customer-role peer sending OTC is a semantic RFC 9234 I1 leak.
         send_update(
@@ -160,7 +184,6 @@ def main() -> int:
             announced=nlri("198.51.100.55/32"),
             attrs_extra=[attr(ATTR_OPTIONAL | ATTR_TRANSITIVE, ATTR_OTC, struct.pack("!I", 65001))],
         )
-        time.sleep(1)
 
         # Malformed OTC length: the announced prefix must be dropped, but the
         # withdrawal of the previously accepted baseline route must survive.

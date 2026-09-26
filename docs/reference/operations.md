@@ -2794,8 +2794,9 @@ rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
 
 Crash reports: a daemon panic writes a small TOML report (panic message,
 source location, thread, version — never environment variables or argv)
-to `<runtime_state_dir>/crash/panic-<ts>.toml`, keeping the 10 most
-recent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
+to `<runtime_state_dir>/crash/panic-<ts>-<pid>-<n>.toml`, keeping the 10
+most recent. Each report is written to a temporary file and renamed into
+place, so a report is either complete or absent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
 ticket usually pinpoints the crash without a core dump.
 
 Attach the tarball to bug reports — the GitHub bug-report template asks
@@ -3714,12 +3715,11 @@ unknown fields are rejected at parse time. Empty
 subcommand to drop a chain.
 
 A global chain change applies to every neighbor without its own chain and is
-persisted. Select the scope with `--global` or `--neighbor`; omitting both
-still selects the global chain but prints a deprecation warning, and a future
-release will reject it. When stdin and stdout are both terminals, a global
-change names the endpoint and asks `[y/N]` first; `-y`/`--yes` skips the
-prompt, and non-interactive runs never prompt. A declined prompt exits `1`
-without changing anything.
+persisted. Select the scope with `--global` or `--neighbor`; omitting both is
+a usage error (exit `2`) and changes nothing. When stdin and stdout are both
+terminals, a global change names the endpoint and asks `[y/N]` first;
+`-y`/`--yes` skips the prompt, and non-interactive runs never prompt. A
+declined prompt exits `1` without changing anything.
 
 ### Graceful shutdown (daemon exit)
 
@@ -3761,7 +3761,7 @@ rbgp gshut --all --clear
 
 An all-peers change asks `[y/N]` first when stdin and stdout are both
 terminals; `-y`/`--yes` skips it. `rbgp gshut` without `--all` or
-`--neighbor` still selects every peer but prints a deprecation warning.
+`--neighbor` is a usage error (exit `2`) and changes nothing.
 
 The toggle is **operator-runtime state**, not config — it lives on
 the `ManagedPeer` desired-state record, mirrors to the live session,
