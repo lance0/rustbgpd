@@ -1,0 +1,54 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=1662018
+established 700 at 0.8s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.9s rss_mib=430
+control_maxgap_ms: p50=18.56 p95=19.73 max=41.97 (n=700)
+control_rss_mib 370
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1790420120223285 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 1 receiver_barriers_complete awaiting_daemon_settlement
+reload 1 daemon_applied complete_before=0 complete_after=1
+reload 1 completion_s: p50=1.60 p95=1.86 max=1.88 (n=700)
+reload 1 maxgap_ms: p50=463.04 p95=700.47 max=815.63 (n=700)
+reload 1 all_observer_maxgap_ms: p50=463.04 p95=700.47 max=815.63 (n=700)
+reload 1 changed_first_generation_update_ms: p50=1089.61 p95=1327.52 max=1444.30 (n=700)
+reload 1 rss_mib before=394 after=495 comms_sample=[4286056400]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 0/0
+reload 1 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,700,700,0,400400,1.597716,1.862547,1.877336,463.041,700.466,815.630,463.041,700.466,815.630,1089.614,1327.520,1444.295,394,495,0,700,0
+reload 2 SIGHUP wall_us=1790420142830876 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 2 daemon_applied complete_before=1 complete_after=2
+reload 2 completion_s: p50=1.52 p95=1.80 max=1.83 (n=700)
+reload 2 maxgap_ms: p50=512.75 p95=935.28 max=1214.14 (n=700)
+reload 2 all_observer_maxgap_ms: p50=512.75 p95=935.28 max=1214.14 (n=700)
+reload 2 changed_first_generation_update_ms: p50=1067.78 p95=1523.38 max=1802.48 (n=700)
+reload 2 rss_mib before=410 after=468 comms_sample=[4286055400]
+reload 2 sessions_up 700/700
+reload 2 stable_marker_peers 0/0
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,700,700,0,400400,1.523782,1.799250,1.830205,512.753,935.281,1214.138,512.753,935.281,1214.138,1067.784,1523.378,1802.476,410,468,0,700,0
+reload 3 SIGHUP wall_us=1790420164795135 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 3 daemon_applied complete_before=2 complete_after=3
+reload 3 completion_s: p50=1.46 p95=1.75 max=1.78 (n=700)
+reload 3 maxgap_ms: p50=566.38 p95=1103.15 max=1208.77 (n=700)
+reload 3 all_observer_maxgap_ms: p50=566.38 p95=1103.15 max=1208.77 (n=700)
+reload 3 changed_first_generation_update_ms: p50=1052.79 p95=1655.28 max=1762.27 (n=700)
+reload 3 rss_mib before=406 after=473 comms_sample=[4286056400]
+reload 3 sessions_up 700/700
+reload 3 stable_marker_peers 0/0
+reload 3 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,700,700,0,400400,1.456667,1.754834,1.782309,566.382,1103.153,1208.774,566.382,1103.153,1208.774,1052.788,1655.280,1762.272,406,473,0,700,0
+reload 4 SIGHUP wall_us=1790420186732166 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 4 daemon_applied complete_before=3 complete_after=4
+reload 4 completion_s: p50=1.48 p95=1.73 max=1.77 (n=700)
+reload 4 maxgap_ms: p50=566.75 p95=1004.70 max=1219.11 (n=700)
+reload 4 all_observer_maxgap_ms: p50=566.75 p95=1004.70 max=1219.11 (n=700)
+reload 4 changed_first_generation_update_ms: p50=1029.10 p95=1526.46 max=1738.80 (n=700)
+reload 4 rss_mib before=409 after=506 comms_sample=[4286055400]
+reload 4 sessions_up 700/700
+reload 4 stable_marker_peers 0/0
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,700,700,0,400400,1.476432,1.732249,1.765187,566.755,1004.702,1219.111,566.755,1004.702,1219.111,1029.096,1526.465,1738.795,409,506,0,700,0
+done rss_mib=386
