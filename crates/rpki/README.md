@@ -8,6 +8,9 @@ newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
 `rustbgpd-rpki` 0.3.2 is released on the `0.3` compatibility line with wire `0.21.2`.
+Version 0.4.0 is prepared in this checkout for the wire `0.22.0` dependency
+upgrade. Verifier and RTR method signatures are unchanged; use the path
+dependencies below until the coordinated versions are published.
 Upgrade dependencies that exchange public wire types together. The `0.3` line
 makes four RTR enums non-exhaustive; downstream exhaustive matches need a
 fallback, as described under [Enum exhaustiveness](#enum-exhaustiveness).
@@ -84,8 +87,8 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.3.2", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.21.3", path = "../rustbgpd/crates/wire" }
+rustbgpd-rpki = { version = "0.4.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.22.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust

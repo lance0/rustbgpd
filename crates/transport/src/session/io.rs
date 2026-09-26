@@ -206,7 +206,20 @@ impl PeerSession {
     /// "no stream" branch, just at a different layer.
     pub(super) fn enqueue_priority(&mut self, msg: &Message) -> Result<(), TransportError> {
         let max_len = self.outbound_max_message_len();
-        let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
+        let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?.freeze();
+        // Preserve the initiating cause on a best-effort enqueue failure.
+        if self.bmp_tx.is_some() && matches!(msg, Message::Notification(_)) {
+            self.last_down_reason = Some(PeerDownReason::LocalNotification(encoded.clone()));
+        }
+        self.enqueue_priority_encoded(msg, encoded)
+    }
+
+    /// Enqueue bytes prepared before a teardown action clears negotiation.
+    pub(super) fn enqueue_priority_encoded(
+        &mut self,
+        msg: &Message,
+        encoded: Bytes,
+    ) -> Result<(), TransportError> {
         let Some(tx) = self.writer_priority_tx.as_ref() else {
             debug!(
                 peer = %self.peer_label,
@@ -215,8 +228,7 @@ impl PeerSession {
             );
             return Err(TransportError::WriterClosed);
         };
-        tx.send(Bytes::from(encoded))
-            .map_err(|_| TransportError::WriterClosed)
+        tx.send(encoded).map_err(|_| TransportError::WriterClosed)
     }
 
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
@@ -526,15 +538,6 @@ impl PeerSession {
         self.log_notification(SessionNotificationDirection::Sent, &notif, None);
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
         self.last_error = cause.to_string();
-        // Classify the upcoming BMP Peer Down as the locally initiated
-        // NOTIFICATION teardown, carrying the attempted Cease/8 PDU instead
-        // of the reason-4 "remote closed" default. The following enqueue is
-        // best-effort and does not change that initiating cause.
-        if self.bmp_tx.is_some()
-            && let Ok(pdu) = rustbgpd_wire::encode_message(&Message::Notification(notif.clone()))
-        {
-            self.last_down_reason = Some(PeerDownReason::LocalNotification(pdu.freeze()));
-        }
         // Best-effort: the writer's priority channel is unbounded, so
         // this only fails if we already dropped the writer (e.g. a
         // double-trigger race). Either way, proceed with teardown.
@@ -690,8 +693,79 @@ impl PeerSession {
             if self.expire_refresh_accounting_windows().await.is_err() {
                 return;
             }
-            match self.read_buf.try_decode() {
-                Ok(Some((msg, raw_pdu))) => {
+            let raw_pdu = match self.read_buf.try_frame() {
+                Ok(Some(raw)) => raw,
+                Ok(None) => break,
+                Err(error) => {
+                    error!(peer = %self.peer_label, %error, "BGP decode error");
+                    self.drive_fsm(Event::DecodeError(error)).await;
+                    break;
+                }
+            };
+            // RFC 7313 §5 applies only when the peer advertised ERR. Inspect
+            // identifiable subtypes before the normal decoder interprets ORF.
+            if self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.peer_enhanced_route_refresh)
+                && raw_pdu[18] == rustbgpd_wire::constants::message_type::ROUTE_REFRESH
+                && let Some(&subtype) = raw_pdu.get(21)
+            {
+                if subtype > 2 {
+                    self.metrics
+                        .record_message_received(&self.peer_label, "route_refresh");
+                    let afi_raw = u16::from_be_bytes([raw_pdu[19], raw_pdu[20]]);
+                    let safi_raw = raw_pdu.get(22).copied();
+                    warn!(peer = %self.peer_label, subtype, afi_raw, ?safi_raw,
+                        "ignoring ROUTE-REFRESH with unknown subtype");
+                    // Preserve the established hold-timer behavior of ignored
+                    // subtypes with a complete, negotiated AFI/SAFI header.
+                    // A three-byte body has no SAFI and cannot identify one.
+                    if self
+                        .negotiated
+                        .as_ref()
+                        .is_some_and(|n| n.peer_route_refresh)
+                        && let (Some(afi), Some(safi)) = (
+                            rustbgpd_wire::Afi::from_u16(afi_raw),
+                            safi_raw.and_then(rustbgpd_wire::Safi::from_u8),
+                        )
+                        && self.negotiated_families().contains(&(afi, safi))
+                    {
+                        self.drive_fsm(Event::RouteRefreshReceived { afi, safi })
+                            .await;
+                    }
+                    continue;
+                }
+                if subtype != 0 && raw_pdu.len() != 23 {
+                    let received_length =
+                        u16::try_from(raw_pdu.len()).expect("validated BGP frame length fits u16");
+                    let limit = self.outbound_max_message_len();
+                    let data = if raw_pdu.len() <= usize::from(limit) - 21 {
+                        raw_pdu
+                    } else {
+                        // RFC 8654's receive limit prevents including the whole
+                        // PDU required by RFC 7313; never send a truncated PDU.
+                        warn!(peer = %self.peer_label, received_length, limit,
+                            "ROUTE-REFRESH error PDU exceeds notification data budget; omitting data");
+                        Bytes::new()
+                    };
+                    let notification = rustbgpd_wire::NotificationMessage::new(
+                        NotificationCode::RouteRefreshMessage,
+                        rustbgpd_wire::notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH,
+                        data,
+                    );
+                    self.drive_fsm_with_notification(
+                        Event::DecodeError(rustbgpd_wire::DecodeError::InvalidLength {
+                            length: received_length,
+                        }),
+                        Some(notification),
+                    )
+                    .await;
+                    break;
+                }
+            }
+            match self.read_buf.decode_frame(raw_pdu.clone()) {
+                Ok(msg) => {
                     let event = match msg {
                         Message::Open(open) => {
                             // Cache raw OPEN PDU for BMP Peer Up
@@ -973,7 +1047,6 @@ impl PeerSession {
                     };
                     self.drive_fsm(event).await;
                 }
-                Ok(None) => break, // need more data
                 Err(e) => {
                     error!(
                         peer = %self.peer_label,

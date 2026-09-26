@@ -1588,17 +1588,28 @@ impl RibManager {
                 self.set_outbound_blocking(peer, afi, false);
                 blocking
             });
+        // An ORF-deferred or backpressured initial dump still owes its first
+        // EoR. RFC 7313 §4 forbids BoRR before that marker reaches the queue.
+        let initial_eor_owed = deferred_eor
+            || self
+                .pending_eor
+                .get(&peer)
+                .is_some_and(|families| families.contains(&family));
         let (end_of_rib, refresh_markers) = match replay_kind {
             FamilyReplayKind::PeerRefresh { .. } => (
-                if deferred_eor || suppress_eor {
+                if initial_eor_owed || suppress_eor {
                     vec![]
                 } else {
                     vec![family]
                 },
-                vec![
-                    (afi, safi, RouteRefreshSubtype::BoRR),
-                    (afi, safi, RouteRefreshSubtype::EoRR),
-                ],
+                if initial_eor_owed {
+                    vec![]
+                } else {
+                    vec![
+                        (afi, safi, RouteRefreshSubtype::BoRR),
+                        (afi, safi, RouteRefreshSubtype::EoRR),
+                    ]
+                },
             ),
             FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
                 (vec![], vec![])

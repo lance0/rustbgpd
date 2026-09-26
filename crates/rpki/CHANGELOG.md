@@ -3,6 +3,12 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## 0.4.0 - Unreleased
+
+- Move the public wire dependency to 0.22. Upgrade dependencies that
+  exchange wire types together; verifier and RTR method signatures are
+  unchanged.
+
 ## 0.3.2 - 2026-09-23
 
 - `RtrClient::new` now clamps a `RtrClientConfig::retry_interval` above

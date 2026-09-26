@@ -44,6 +44,15 @@ impl ReadBuffer {
     /// Returns [`DecodeError`] if the header is malformed or the message
     /// body fails validation.
     pub fn try_decode(&mut self) -> Result<Option<(Message, Bytes)>, DecodeError> {
+        let Some(raw) = self.try_frame()? else {
+            return Ok(None);
+        };
+        let msg = self.decode_frame(raw.clone())?;
+        Ok(Some((msg, raw)))
+    }
+
+    /// Retain the complete PDU before body decoding for session-specific errors.
+    pub(crate) fn try_frame(&mut self) -> Result<Option<Bytes>, DecodeError> {
         let len = match peek_message_length(&self.buf, self.max_message_len)? {
             Some(len) => usize::from(len),
             None => return Ok(None),
@@ -53,11 +62,11 @@ impl ReadBuffer {
             return Ok(None);
         }
 
-        let frame = self.buf.split_to(len).freeze();
-        let raw = frame.clone(); // Bytes::clone is refcount-only, no data copy
-        let mut bytes = frame;
-        let msg = decode_message(&mut bytes, self.max_message_len)?;
-        Ok(Some((msg, raw)))
+        Ok(Some(self.buf.split_to(len).freeze()))
+    }
+
+    pub(crate) fn decode_frame(&self, mut frame: Bytes) -> Result<Message, DecodeError> {
+        decode_message(&mut frame, self.max_message_len)
     }
 
     /// True when the buffer holds at least one complete BGP frame —

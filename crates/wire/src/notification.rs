@@ -1,6 +1,6 @@
 /// RFC 4271 §4.5 — NOTIFICATION error codes.
 ///
-/// Codes 1–6 and 8 have named variants. Unknown codes from the wire are
+/// Codes 1–8 have named variants. Unknown codes from the wire are
 /// preserved via `Unknown(u8)` so the original byte is never lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -17,6 +17,8 @@ pub enum NotificationCode {
     FsmError,
     /// Administrative or resource-related session termination (code 6).
     Cease,
+    /// Error in an Enhanced ROUTE-REFRESH message (code 7, RFC 7313 §5).
+    RouteRefreshMessage,
     /// Send Hold Timer expired: the local system could not hand outbound
     /// BGP data to the peer within the `SendHoldTime` (code 8, RFC 9687 §5;
     /// subcode is always 0 per §6).
@@ -37,6 +39,7 @@ impl NotificationCode {
             4 => Self::HoldTimerExpired,
             5 => Self::FsmError,
             6 => Self::Cease,
+            7 => Self::RouteRefreshMessage,
             8 => Self::SendHoldTimerExpired,
             other => Self::Unknown(other),
         }
@@ -52,6 +55,7 @@ impl NotificationCode {
             Self::HoldTimerExpired => 4,
             Self::FsmError => 5,
             Self::Cease => 6,
+            Self::RouteRefreshMessage => 7,
             Self::SendHoldTimerExpired => 8,
             Self::Unknown(v) => v,
         }
@@ -67,6 +71,7 @@ impl std::fmt::Display for NotificationCode {
             Self::HoldTimerExpired => write!(f, "Hold Timer Expired"),
             Self::FsmError => write!(f, "Finite State Machine Error"),
             Self::Cease => write!(f, "Cease"),
+            Self::RouteRefreshMessage => write!(f, "ROUTE-REFRESH Message Error"),
             Self::SendHoldTimerExpired => write!(f, "Send Hold Timer Expired"),
             Self::Unknown(code) => write!(f, "Unknown({code})"),
         }
@@ -149,6 +154,12 @@ pub mod cease_subcode {
     pub const HARD_RESET: u8 = 9;
     /// Subcode 10: BFD Down (RFC 9384).
     pub const BFD_DOWN: u8 = 10;
+}
+
+/// ROUTE-REFRESH Message Error subcodes (code 7, RFC 7313 §5).
+pub mod route_refresh_subcode {
+    /// Subcode 1: Invalid Message Length.
+    pub const INVALID_MESSAGE_LENGTH: u8 = 1;
 }
 
 /// Encode a shutdown communication reason string (RFC 9003).
@@ -353,7 +364,7 @@ mod tests {
 
     #[test]
     fn from_u8_roundtrip() {
-        for code_val in 1..=6u8 {
+        for code_val in 1..=8u8 {
             let code = NotificationCode::from_u8(code_val);
             assert_eq!(code.as_u8(), code_val);
             assert!(!matches!(code, NotificationCode::Unknown(_)));
@@ -363,13 +374,43 @@ mod tests {
     #[test]
     fn from_u8_unknown_preserved() {
         assert_eq!(NotificationCode::from_u8(0), NotificationCode::Unknown(0));
-        assert_eq!(NotificationCode::from_u8(7), NotificationCode::Unknown(7));
+        assert_eq!(NotificationCode::from_u8(9), NotificationCode::Unknown(9));
         assert_eq!(
             NotificationCode::from_u8(255),
             NotificationCode::Unknown(255)
         );
         // Raw byte survives roundtrip
         assert_eq!(NotificationCode::from_u8(42).as_u8(), 42);
+    }
+
+    #[test]
+    fn route_refresh_error_round_trips_named_code_and_diagnostic_data() {
+        let notification = crate::NotificationMessage::new(
+            NotificationCode::RouteRefreshMessage,
+            route_refresh_subcode::INVALID_MESSAGE_LENGTH,
+            bytes::Bytes::from_static(b"offending PDU"),
+        );
+        let mut encoded =
+            crate::encode_message(&crate::Message::Notification(notification.clone()))
+                .unwrap()
+                .freeze();
+        assert_eq!(&encoded[19..21], &[7, 1]);
+        assert_eq!(
+            crate::decode_message(&mut encoded, 4096).unwrap(),
+            crate::Message::Notification(notification)
+        );
+        assert_eq!(
+            NotificationCode::from_u8(7),
+            NotificationCode::RouteRefreshMessage
+        );
+        assert_eq!(
+            NotificationCode::RouteRefreshMessage.to_string(),
+            "ROUTE-REFRESH Message Error"
+        );
+        assert_eq!(
+            description(NotificationCode::RouteRefreshMessage, 1),
+            "Invalid Message Length"
+        );
     }
 
     #[test]

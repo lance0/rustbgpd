@@ -1214,6 +1214,22 @@ does not change that boundary.
   unreplaced routes. 5-minute timeout on the refresh window.
 - Outbound: Enhanced peers get BoRR → routes → EoRR; legacy peers get
   routes → EoR.
+- A GR restarter's initial flood remains unmarked until its first EoR,
+  including ORF-deferred and backpressured initial dumps. Later refreshes
+  use the normal BoRR/EoRR brackets.
+- For peers advertising Enhanced Route Refresh, subtype 1/2 bodies whose
+  length is not four bytes close the session with ROUTE-REFRESH Message
+  Error / Invalid Message Length (7/1). Data contains the complete received
+  PDU, including the BGP header, when it fits the peer's receive limit.
+  This permits offending PDUs up to 4075 bytes, or 65514 bytes when the
+  peer advertised Extended Messages. Larger PDUs produce empty Data and
+  a log of the received length: RFC 7313 section 5's full-PDU requirement
+  cannot be met within RFC 8654 section 4's message-size limit in this
+  exceptional case. Data is never truncated and the peer's receive limit
+  is never exceeded; our own Extended Messages advertisement does not
+  increase that limit. Unknown identifiable subtypes are ignored before
+  ORF decoding. A body too short to contain a subtype retains the generic
+  framing error; subtype 0 and peers without ERR retain their prior rules.
 - Joint behavior with GR/LLGR retention: routes flagged
   GR-stale or LLGR-stale are NOT snapshotted at BoRR, so EoRR (or the
   window timeout) never purges them. A restarting peer's refresh replay

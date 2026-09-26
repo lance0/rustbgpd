@@ -3,7 +3,10 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.8.3 - Unreleased
+## 0.9.0 - Unreleased
+
+- Move the public wire dependency to 0.22. Public wire types must be
+  upgraded together by embedders; FSM method signatures are unchanged.
 
 - Negotiate RFC 8538 Notification GR from the two advertised N bits,
   independently of peer GR/LLGR route-retention families. Helper-only peers

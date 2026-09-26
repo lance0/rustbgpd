@@ -3,7 +3,13 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.21.3 - Unreleased
+## 0.22.0 - Unreleased
+
+- Add `NotificationCode::RouteRefreshMessage` and
+  `notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH` for RFC 7313
+  error 7/1. Decoding code 7 now produces the named variant instead of
+  `Unknown(7)`; raw-byte encoding is unchanged. Upgrade consumers sharing
+  wire types to the paired FSM 0.9 and RPKI 0.4 compatibility lines.
 
 - Reject a zero-length `CLUSTER_LIST` with Attribute Length Error. Revised
   decoding treats an UPDATE from an internal neighbor as withdrawn and

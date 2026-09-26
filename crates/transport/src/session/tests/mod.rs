@@ -2110,6 +2110,7 @@ mod outbound_attrs;
 mod outbound_encode;
 mod outbound_pacing;
 mod refresh;
+mod refresh_protocol;
 mod reject_retention;
 mod rfc7606;
 mod rpki_aspa;
