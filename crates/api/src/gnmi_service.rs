@@ -19,6 +19,7 @@ use crate::actor_read::peer_manager_operator_read;
 use crate::audit::{gnmi_set_summary, set_request_summary};
 use crate::gnmi;
 use crate::gnmi_ext;
+use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     EnqueuedOperatorQuery, PeerInfo, PeerManagerCommand, PeerManagerOperatorQuery,
 };
@@ -145,6 +146,7 @@ pub struct GnmiService {
     /// mutating service, in addition to the authz tier cap on `gnmi.gNMI/Set`.
     access_mode: AccessMode,
     peer_snapshot: PeerSnapshotFn,
+    initial_roster_gate: Option<DaemonGate>,
     /// Bounds concurrent `Subscribe` streams; a permit is held for the lifetime
     /// of each open stream.
     subscribe_slots: Arc<tokio::sync::Semaphore>,
@@ -259,6 +261,7 @@ impl GnmiService {
             router_id: router_id.into(),
             access_mode: AccessMode::ReadWrite,
             peer_snapshot: Arc::new(move || Box::pin(peer_snapshot())),
+            initial_roster_gate: None,
             subscribe_slots: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
             event_history: None,
             set_handler: None,
@@ -282,6 +285,13 @@ impl GnmiService {
         self
     }
 
+    /// Use the daemon's initial roster boundary for concrete-neighbor Gets.
+    #[must_use]
+    pub fn with_initial_roster_gate(mut self, gate: DaemonGate) -> Self {
+        self.initial_roster_gate = Some(gate);
+        self
+    }
+
     async fn render_get(&self, request: gnmi::GetRequest) -> Result<gnmi::GetResponse, Status> {
         validate_get_request(&request)?;
         let encoding = gnmi::Encoding::try_from(request.encoding).unwrap_or(gnmi::Encoding::Json);
@@ -297,6 +307,12 @@ impl GnmiService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Snapshot before ListPeers: registration may finish during that read.
+        let initial_roster_pending = self
+            .initial_roster_gate
+            .as_ref()
+            .is_some_and(DaemonGate::initial_roster_pending);
+
         // Snapshot peers once per request (a multi-path Get otherwise fans out
         // one peer-manager round-trip per neighbor path); sort once for stable
         // ordering across the whole response.
@@ -310,7 +326,18 @@ impl GnmiService {
 
         let mut notifications = Vec::with_capacity(queries.len());
         for query in &queries {
-            let updates = self.render_query(query, peers.as_deref(), encoding)?;
+            let updates = self
+                .render_query(query, peers.as_deref(), encoding)
+                .map_err(|status| {
+                    if initial_roster_pending
+                        && matches!(query, SupportedPath::Neighbor { .. })
+                        && status.code() == tonic::Code::NotFound
+                    {
+                        Status::unavailable("initial configured-peer roster not installed")
+                    } else {
+                        status
+                    }
+                })?;
             notifications.push(gnmi::Notification {
                 timestamp: now_nanos(),
                 prefix: None,
@@ -3644,6 +3671,38 @@ mod tests {
         service.get(request).await.unwrap();
         // Two neighbor paths, but the peer snapshot is fetched exactly once.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concrete_neighbor_get_is_unavailable_until_initial_roster_completes() {
+        let gate = DaemonGate::new();
+        gate.arm_initial_roster();
+        let peer: IpAddr = "203.0.113.2".parse().unwrap();
+        let path = mounted_path(&[
+            pe("bgp"),
+            pe("neighbors"),
+            keyed_pe("neighbor", "neighbor-address", "203.0.113.2"),
+            pe("state"),
+        ]);
+        let absent = test_service(Vec::new()).with_initial_roster_gate(gate.clone());
+        assert_eq!(
+            absent
+                .get(get_request(path.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        test_service(vec![test_peer(peer)])
+            .with_initial_roster_gate(gate.clone())
+            .get(get_request(path.clone()))
+            .await
+            .unwrap();
+        gate.complete_initial_roster();
+        assert_eq!(
+            absent.get(get_request(path)).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
     }
 
     #[tokio::test]

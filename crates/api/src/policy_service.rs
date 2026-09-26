@@ -981,11 +981,22 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        // Capture before the peer-manager read; registration may finish while it waits.
+        let initial_roster_pending = self
+            .settlement
+            .as_ref()
+            .is_some_and(|(_, gate)| gate.initial_roster_pending());
         let chains = peer_manager_read(&self.peer_mgr_tx, |reply| {
             PeerManagerCommand::GetNeighborPolicyChains { address, reply }
         })
         .await?
-        .ok_or_else(|| Status::not_found("neighbor not found"))?;
+        .ok_or_else(|| {
+            if initial_roster_pending {
+                Status::unavailable("initial configured-peer roster not installed")
+            } else {
+                Status::not_found("neighbor not found")
+            }
+        })?;
         Ok(Response::new(proto::NeighborPolicyChains {
             address: req.address,
             import_policy_names: chains.import_policy_names,

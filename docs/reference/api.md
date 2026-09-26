@@ -1559,6 +1559,9 @@ by one peer-manager read deadline, and exceeding it returns `DEADLINE_EXCEEDED`.
 At startup the gRPC listeners serve before the configured-peer roster is
 installed. If a peer-scoped read would otherwise return `NOT_FOUND` in that
 window, it returns retryable `UNAVAILABLE` until registration completes.
+This includes `GetNeighborState`, `GetNeighborPolicyChains`, scoped
+`GetPolicyStats`, and a concrete-neighbor gNMI `Get`. gNMI `Subscribe` retains
+its empty snapshot behavior for an absent neighbor.
 The peer manager registers the whole configured set in one operation:
 a view that reaches it while registration runs waits for the complete roster,
 within its read deadline, and `GetPolicyStats` sees every configured neighbor

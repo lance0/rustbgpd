@@ -538,6 +538,7 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
         let mut rib = proto::rib_service_client::RibServiceClient::new(channel.clone());
         let mut bfd = proto::bfd_service_client::BfdServiceClient::new(channel);
         let peer = "127.0.0.2";
+        let unknown = "127.0.0.99";
         let neighbor_read = || {
             observer_request(proto::GetNeighborStateRequest {
                 address: peer.into(),
@@ -548,6 +549,11 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
             observer_request(proto::GetPolicyStatsRequest {
                 peer_address: peer.into(),
                 direction: "import".into(),
+            })
+        };
+        let policy_chain_read = || {
+            observer_request(proto::GetNeighborPolicyChainsRequest {
+                address: peer.into(),
             })
         };
         let rib_read = || {
@@ -578,6 +584,25 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
             Code::Unavailable
         );
         assert_eq!(
+            policy
+                .get_neighbor_policy_chains(observer_request(
+                    proto::GetNeighborPolicyChainsRequest {
+                        address: unknown.into(),
+                    },
+                ))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unavailable
+        );
+        if configured {
+            // Configured chain data can be published before the peer roster.
+            policy
+                .get_neighbor_policy_chains(policy_chain_read())
+                .await
+                .unwrap();
+        }
+        assert_eq!(
             rib.list_received_routes(rib_read())
                 .await
                 .unwrap_err()
@@ -598,10 +623,13 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
         if configured {
             neighbor.get_neighbor_state(neighbor_read()).await.unwrap();
             policy.get_policy_stats(policy_read()).await.unwrap();
+            policy
+                .get_neighbor_policy_chains(policy_chain_read())
+                .await
+                .unwrap();
             rib.list_received_routes(rib_read()).await.unwrap();
             bfd.get_bfd_sessions(bfd_read()).await.unwrap();
         }
-        let unknown = "127.0.0.99";
         assert_eq!(
             neighbor
                 .get_neighbor_state(observer_request(proto::GetNeighborStateRequest {
@@ -619,6 +647,18 @@ async fn initial_roster_unknown_peer_reads_are_retryable_until_registration() {
                     peer_address: unknown.into(),
                     direction: "import".into(),
                 }))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::NotFound
+        );
+        assert_eq!(
+            policy
+                .get_neighbor_policy_chains(observer_request(
+                    proto::GetNeighborPolicyChainsRequest {
+                        address: unknown.into(),
+                    }
+                ))
                 .await
                 .unwrap_err()
                 .code(),

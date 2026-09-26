@@ -2168,7 +2168,7 @@ async fn run_tcp_listener(
             config_mutation_gate.clone(),
             runtime_config_lock,
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate.clone())
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone())
         .with_import_roster(import_roster.clone())
@@ -2239,6 +2239,7 @@ async fn run_tcp_listener(
                 peer_mgr_tx.clone(),
                 Some(peer_mgr_operator_tx.clone()),
             )
+            .with_initial_roster_gate(daemon_gate.clone())
             .with_set_handler(gnmi_set.clone())
             .with_event_history(event_history.clone()),
             interceptor.clone(),
@@ -2438,7 +2439,7 @@ async fn run_uds_listener(
             config_mutation_gate.clone(),
             runtime_config_lock,
         )
-        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
+        .with_runtime_config_settlement(runtime_config_settlement, daemon_gate.clone())
         .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone())
         .with_import_roster(import_roster.clone())
@@ -2508,6 +2509,7 @@ async fn run_uds_listener(
             peer_mgr_tx.clone(),
             Some(peer_mgr_operator_tx),
         )
+        .with_initial_roster_gate(daemon_gate.clone())
         .with_set_handler(gnmi_set)
         .with_event_history(event_history.clone()),
         interceptor,
