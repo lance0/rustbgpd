@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use prometheus::{
@@ -448,6 +448,12 @@ thread_local! {
     static POLICY_ROUTES_MEMO: RefCell<Option<PolicyRoutesMemo>> = const { RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    // Count wildcard-reap work without relying on load-sensitive timings.
+    static REAP_SERIES_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Registered metric handles shared by each public handle clone.
 #[derive(Debug)]
 struct BgpMetricsInner {
@@ -464,6 +470,9 @@ struct BgpMetricsInner {
     peer_session_established: IntGaugeVec,
     peer_session_state: IntGaugeVec,
     peer_info: IntGaugeVec,
+    // Exact last-published labels, owned with the family across peer replacements.
+    // Always lock this map before modifying peer_info; no family scans under the lock.
+    peer_info_labels: Mutex<BTreeMap<(String, String), [String; 3]>>,
     session_down: IntCounterVec,
     stale_timer_events: IntCounterVec,
     session_notification_outstanding_value: Arc<AtomicI64>,
@@ -3280,6 +3289,7 @@ impl BgpMetrics {
             peer_session_established,
             peer_session_state,
             peer_info,
+            peer_info_labels: Mutex::new(BTreeMap::new()),
             session_down,
             stale_timer_events,
             dynamic_neighbor_slots_used,
@@ -3565,7 +3575,29 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.max_prefix_latched, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
-        Self::reap_peer_series_from_vec(&self.0.peer_info, peer);
+        {
+            let mut identities = self
+                .0
+                .peer_info_labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let keys: Vec<_> = identities
+                .range((peer.to_owned(), String::new())..)
+                .take_while(|((address, _), _)| address == peer)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in keys {
+                if let Some([asn, description, group]) = identities.remove(&key) {
+                    let _ = self.0.peer_info.remove_label_values(&[
+                        peer,
+                        &key.1,
+                        &asn,
+                        &description,
+                        &group,
+                    ]);
+                }
+            }
+        }
         Self::reap_peer_series_from_vec(&self.0.session_down, peer);
         Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
         self.reap_bfd_series(peer);
@@ -3699,10 +3731,24 @@ impl BgpMetrics {
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.max_prefix_latched.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
-        Self::reap_label_series_from_vec(
-            &self.0.peer_info,
-            &[("peer", peer), ("interface", interface)],
-        );
+        {
+            let mut identities = self
+                .0
+                .peer_info_labels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some([asn, description, group]) =
+                identities.remove(&(peer.to_owned(), interface.to_owned()))
+            {
+                let _ = self.0.peer_info.remove_label_values(&[
+                    peer,
+                    interface,
+                    &asn,
+                    &description,
+                    &group,
+                ]);
+            }
+        }
         for state in SESSION_STATES {
             let _ = self
                 .0
@@ -3747,6 +3793,8 @@ impl BgpMetrics {
         let mut removed = 0;
         for family in vec.collect() {
             for metric in family.get_metric() {
+                #[cfg(test)]
+                REAP_SERIES_VISITED.set(REAP_SERIES_VISITED.get() + 1);
                 let labels = metric.get_label();
                 if !matches.iter().all(|(label, value)| {
                     labels
@@ -3822,7 +3870,9 @@ impl BgpMetrics {
     /// Publish the configured identity of one exact `(peer, interface)` peer
     /// for `group_left` joins from dashboards and alert rules.
     ///
-    /// Any prior `bgp_peer_info` series for that identity is removed first,
+    /// The last published label tuple is retained with the family, allowing
+    /// exact replacement without scanning unrelated peers. Any changed prior
+    /// `bgp_peer_info` series for that identity is removed first,
     /// so a reconfigured description or peer group, or an ASN learned from
     /// OPEN on an accept-any dynamic range, never leaves a stale identity
     /// beside the current one. `description` and `peer_group` are scrubbed
@@ -3835,19 +3885,33 @@ impl BgpMetrics {
         description: &str,
         peer_group: &str,
     ) {
-        Self::reap_label_series_from_vec(
-            &self.0.peer_info,
-            &[("peer", peer), ("interface", interface)],
-        );
-        self.0
-            .peer_info
-            .with_label_values(&[
+        let labels = [
+            remote_asn.to_string(),
+            scrub_info_label(description),
+            scrub_info_label(peer_group),
+        ];
+        let mut identities = self
+            .0
+            .peer_info_labels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prior = identities.insert((peer.to_owned(), interface.to_owned()), labels.clone());
+        if let Some(prior) = prior
+            && prior != labels
+        {
+            let [asn, description, group] = prior;
+            let _ = self.0.peer_info.remove_label_values(&[
                 peer,
                 interface,
-                &remote_asn.to_string(),
-                &scrub_info_label(description),
-                &scrub_info_label(peer_group),
-            ])
+                &asn,
+                &description,
+                &group,
+            ]);
+        }
+        let [asn, description, group] = &labels;
+        self.0
+            .peer_info
+            .with_label_values(&[peer, interface, asn, description, group])
             .set(1);
     }
 
@@ -6787,11 +6851,26 @@ mod tests {
     }
 
     #[test]
+    fn peer_info_publication_does_not_scan_existing_peers() {
+        let m = BgpMetrics::new();
+        for index in 1..=32 {
+            m.set_peer_info(&format!("192.0.2.{index}"), "", 64496, "member", "");
+        }
+        REAP_SERIES_VISITED.set(0);
+        m.set_peer_info("192.0.2.33", "", 64496, "new", "members");
+        m.set_peer_info("192.0.2.1", "", 64497, "renamed", "other");
+        m.reap_peer_identity_series("192.0.2.2", "");
+        assert_eq!(REAP_SERIES_VISITED.get(), 0);
+        assert_eq!(gather_text(&m).matches("bgp_peer_info{").count(), 32);
+    }
+
+    #[test]
     fn peer_info_replaces_prior_identity_and_reaps_exactly() {
         let m = BgpMetrics::new();
         m.set_peer_info("192.0.2.1", "", 64496, "Example Member", "members");
         m.set_peer_info("fe80::1", "eth0", 64497, "Scoped A", "");
         m.set_peer_info("fe80::1", "eth1", 64498, "Scoped B", "");
+        m.set_peer_info("fe80::10", "eth0", 64499, "Other address", "");
 
         let text = gather_text(&m);
         assert!(text.contains(
@@ -6800,13 +6879,14 @@ mod tests {
 
         // A reconfigured description and a learned ASN replace the series
         // for that exact identity instead of accumulating beside it.
-        m.set_peer_info("192.0.2.1", "", 64499, "Renamed Member", "members");
+        m.clone()
+            .set_peer_info("192.0.2.1", "", 64499, "Renamed\n Member", "new group");
         let text = gather_text(&m);
         assert!(!text.contains(r#"description="Example Member""#));
         assert!(text.contains(
-            r#"bgp_peer_info{description="Renamed Member",interface="",peer="192.0.2.1",peer_group="members",remote_asn="64499"} 1"#
+            r#"bgp_peer_info{description="Renamed Member",interface="",peer="192.0.2.1",peer_group="new group",remote_asn="64499"} 1"#
         ));
-        assert_eq!(text.matches(r"bgp_peer_info{").count(), 3);
+        assert_eq!(text.matches(r"bgp_peer_info{").count(), 4);
 
         // The exact identity reap spares the scoped sibling; the bare
         // address reap removes whatever remains for the address.
@@ -6818,6 +6898,24 @@ mod tests {
         let text = gather_text(&m);
         assert!(!text.contains(r#"peer="fe80::1""#));
         assert!(text.contains(r#"description="Renamed Member""#));
+
+        // Recreate an identical tuple after either kind of reap, then change
+        // it again. Deleted rows must not leave retained identity state behind.
+        assert_eq!(m.0.peer_info_labels.lock().unwrap().len(), 2);
+        assert!(text.contains(r#"description="Other address""#));
+        for (interface, asn, description) in
+            [("eth0", 64497, "Scoped A"), ("eth1", 64498, "Scoped B")]
+        {
+            m.set_peer_info("fe80::1", interface, asn, description, "");
+            m.set_peer_info("fe80::1", interface, 64498, "Scoped B", "group");
+        }
+        assert_eq!(gather_text(&m).matches("bgp_peer_info{").count(), 4);
+        m.reap_peer_identity_series("fe80::1", "eth0");
+        m.reap_peer_identity_series("fe80::1", "eth1");
+        m.reap_peer_series("192.0.2.1");
+        m.reap_peer_series("fe80::10");
+        assert!(m.0.peer_info_labels.lock().unwrap().is_empty());
+        assert!(!gather_text(&m).contains("bgp_peer_info{"));
     }
 
     #[test]
