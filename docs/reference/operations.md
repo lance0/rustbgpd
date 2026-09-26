@@ -2794,8 +2794,9 @@ rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines
 
 Crash reports: a daemon panic writes a small TOML report (panic message,
 source location, thread, version — never environment variables or argv)
-to `<runtime_state_dir>/crash/panic-<ts>.toml`, keeping the 10 most
-recent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
+to `<runtime_state_dir>/crash/panic-<ts>-<pid>-<n>.toml`, keeping the 10
+most recent. Each report is written to a temporary file and renamed into
+place, so a report is either complete or absent. `rbgp doctor` sweeps them into `crashes/`; a report in a bug
 ticket usually pinpoints the crash without a core dump.
 
 Attach the tarball to bug reports — the GitHub bug-report template asks
