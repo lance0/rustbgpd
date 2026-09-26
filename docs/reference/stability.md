@@ -28,6 +28,10 @@ In particular:
 - Linux dataplane work, including FIB and managed-netdev behavior, remains
   outside the control-plane contract.
 - Experimental features remain outside the contract.
+- Files under `runtime_state_dir`, and the event store wherever
+  `[event_history].path` places it, remain outside the inventory; the
+  contract's [on-disk runtime state](v1-stable-contract.md#on-disk-runtime-state)
+  section records how each reader treats older and newer versions today.
 - Unlisted RPCs and CLI commands remain alpha. For an inventoried CLI command,
   only the dimensions named by the inventory are stable; flags and output are
   not stable by implication.
