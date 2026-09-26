@@ -26,7 +26,8 @@ use rustbgpd_wire::{
 };
 use tracing::warn;
 
-use crate::best_path::BestPathReason;
+use crate::best_path::{BestPathReason, stale_rank};
+use crate::loc_rib::vpn_stale_rank;
 use crate::route::{Route, VpnRibRoute};
 
 /// `AS_TRANS` (RFC 6793): 2-byte OPEN AS field stand-in for ASNs > 65535.
@@ -92,6 +93,22 @@ pub fn loc_rib_path_status(is_stale: bool, reason: Option<BestPathReason>) -> Bm
         status,
         reason: reason.and_then(path_marking_reason_code),
     }
+}
+
+/// Internal status for a selected unicast route. A received `LLGR_STALE`
+/// community is least-preferred in selection even without local stale flags;
+/// retain that same classification in the BMP status candidate. This is an
+/// internal inference, not a separate LLGR bit defined by Path Marking.
+#[must_use]
+pub(crate) fn unicast_path_status(route: &Route, reason: Option<BestPathReason>) -> BmpPathStatus {
+    loc_rib_path_status(stale_rank(route) != 0, reason)
+}
+
+/// Internal status for a selected VPN route, using the same stale tier as
+/// VPN best-path selection. Path Marking is still omitted from BMPv3/v4.
+#[must_use]
+pub(crate) fn vpn_path_status(route: &VpnRibRoute) -> BmpPathStatus {
+    loc_rib_path_status(vpn_stale_rank(route) != 0, None)
 }
 
 fn empty_mp_reach(afi: Afi, safi: Safi, next_hop: IpAddr) -> MpReachNlri {

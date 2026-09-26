@@ -1121,7 +1121,7 @@ impl PeerSession {
         reject_reason: ImportRejectReason,
         reject_detail: Option<&str>,
     ) {
-        let rejected_unicast = self.eligible_unicast_announcements(parsed);
+        let mut rejected_unicast = self.eligible_unicast_announcements(parsed);
         let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
             .withdrawn
             .iter()
@@ -1249,6 +1249,12 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
+        let mut path_admission = self.path_receive_admission();
+        if let Some(admission) = path_admission.as_mut() {
+            rejected_unicast.retain(|&(prefix, path_id)| {
+                admission.permits(self, prefix, path_id, self.tracks_received(prefix))
+            });
+        }
         for &(prefix, path_id) in &rejected_unicast {
             if self.forget_known_path(prefix, path_id) {
                 loop_withdrawn.push((prefix, path_id));
@@ -1353,6 +1359,11 @@ impl PeerSession {
         // gauges) after the complete accounting transaction and before the
         // first awaited RIB delivery so actor state and gauges cannot diverge
         // on backpressure or channel failure.
+        if let Some(admission) = path_admission
+            && self.enforce_path_receive_admission(admission).await
+        {
+            return;
+        }
         if self.enforce_max_prefix_limits(true).await {
             return;
         }
@@ -1887,7 +1898,7 @@ impl PeerSession {
         );
         let otc_drop_unicast_announcements =
             matches!(otc_action, OtcIngressAction::DropUnicastAnnouncements(_));
-        let otc_rejected_unicast = if otc_drop_unicast_announcements {
+        let mut otc_rejected_unicast = if otc_drop_unicast_announcements {
             self.eligible_unicast_announcements(&parsed)
         } else {
             Vec::new()
@@ -1907,7 +1918,7 @@ impl PeerSession {
                 None
             };
         let ownership_drop_unicast_announcements = next_hop_ownership_rejection.is_some();
-        let ownership_rejected_unicast = if ownership_drop_unicast_announcements {
+        let mut ownership_rejected_unicast = if ownership_drop_unicast_announcements {
             self.eligible_unicast_announcements(&parsed)
         } else {
             Vec::new()
@@ -3017,6 +3028,21 @@ impl PeerSession {
             self.forget_known_path(prefix, path_id);
             self.forget_rejected_path(prefix, path_id);
         }
+        let mut path_admission = self.path_receive_admission();
+        if let Some(admission) = path_admission.as_mut() {
+            otc_rejected_unicast.retain(|&(prefix, path_id)| {
+                admission.permits(self, prefix, path_id, self.tracks_received(prefix))
+            });
+            ownership_rejected_unicast.retain(|&(prefix, path_id)| {
+                admission.permits(self, prefix, path_id, self.tracks_received(prefix))
+            });
+            denied_unicast.retain(|&(prefix, path_id)| {
+                admission.permits(self, prefix, path_id, self.tracks_received(prefix))
+            });
+            announced.retain(|route| admission.permits(self, route.prefix, route.path_id, true));
+            rejected_retained
+                .retain(|(prefix, path_id, _)| admission.retained(self, *prefix, *path_id));
+        }
         // LAN-472: an explicit withdrawal clears any retained reject for
         // the identity — the peer no longer announces it, so "why isn't
         // it accepted?" is moot. Runs before the reject inserts below,
@@ -3236,6 +3262,11 @@ impl PeerSession {
         self.import_policy_routes_denied = self
             .import_policy_routes_denied
             .saturating_add(import_policy_routes_denied);
+        if let Some(admission) = path_admission
+            && self.enforce_path_receive_admission(admission).await
+        {
+            return;
+        }
         if self.enforce_max_prefix_limits(true).await {
             return;
         }

@@ -5438,10 +5438,7 @@ impl RibManager {
                                 let reason = runner_up.map(|r| {
                                     crate::best_path::best_path_cmp_with_reason(best, r).1
                                 });
-                                let status = crate::bmp_sync::loc_rib_path_status(
-                                    best.is_stale || best.is_llgr_stale,
-                                    reason,
-                                );
+                                let status = crate::bmp_sync::unicast_path_status(best, reason);
                                 (
                                     crate::bmp_sync::synthesize_unicast_announce(best),
                                     Some(status),

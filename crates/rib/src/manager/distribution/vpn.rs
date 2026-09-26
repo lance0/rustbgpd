@@ -840,10 +840,7 @@ impl RibManager {
                             // Status bits only: the VPN selection ladder
                             // (`vpn_tiebreak`) has no with-reason variant,
                             // and the Reason Code is optional.
-                            Some(crate::bmp_sync::loc_rib_path_status(
-                                best.is_stale || best.is_llgr_stale,
-                                None,
-                            )),
+                            Some(crate::bmp_sync::vpn_path_status(best)),
                         ),
                         None => (
                             bmp_prev_nlri

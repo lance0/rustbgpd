@@ -5,7 +5,7 @@
 use std::time::SystemTime;
 
 use rustbgpd_bmp::{BmpDumpCursor, BmpEvent, BmpPathStatus, tlv as bmp_tlv};
-use rustbgpd_wire::UpdateMessage;
+use rustbgpd_wire::{COMMUNITY_LLGR_STALE, UpdateMessage};
 
 use super::*;
 
@@ -250,6 +250,103 @@ async fn stale_best_route_sets_stale_path_status_bit() {
         status.status,
         bmp_tlv::PATH_STATUS_BEST | bmp_tlv::PATH_STATUS_STALE
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A received `LLGR_STALE` community has the same least-preferred rank as
+/// locally marked LLGR routes, even when neither local stale flag is set.
+/// Live emissions and the collector-connect dump must retain that status.
+#[tokio::test]
+async fn received_llgr_stale_best_has_consistent_loc_rib_status() {
+    let (tx, rx) = mpsc::channel(64);
+    let (bmp_tx, mut bmp_rx) = mpsc::channel(64);
+    let manager =
+        RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new()).with_bmp_tx(bmp_tx);
+    let handle = tokio::spawn(manager.run());
+
+    let peer = Ipv4Addr::new(10, 0, 0, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 8, 0, 0), 16);
+    let mut unicast = make_route_with_lp(prefix, peer, 100);
+    let mut vpn = make_vpn_rib_route(peer, 43, 1043, 100);
+    for attrs in [&mut unicast.attributes, &mut vpn.attributes] {
+        AttrSet::edit(attrs, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+        });
+    }
+    assert!(!unicast.is_stale && !unicast.is_llgr_stale);
+    assert!(!vpn.is_stale && !vpn.is_llgr_stale);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![unicast],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        peer: IpAddr::V4(peer),
+        session_id: 0,
+        announced: vec![vpn],
+        withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let expected = bmp_tlv::PATH_STATUS_BEST | bmp_tlv::PATH_STATUS_STALE;
+    for is_vpn in [false, true] {
+        let (pdu, _, status) = recv_loc_rib_rm(&mut bmp_rx).await;
+        let parsed = decode_pdu(&pdu);
+        assert_eq!(
+            parsed
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::MpReachNlri(_))),
+            is_vpn,
+            "live status must cover unicast and VPN"
+        );
+        assert!(
+            parsed.attributes.iter().any(|attr| matches!(
+                attr,
+                PathAttribute::Communities(values) if values.contains(&COMMUNITY_LLGR_STALE)
+            )),
+            "received community must survive Loc-RIB synthesis"
+        );
+        let status = status.expect("live best carries internal status");
+        assert_eq!(status.status, expected);
+        assert_eq!(status.reason, None);
+    }
+
+    let (messages, _) = drive_loc_rib_dump_from(&tx, None, SystemTime::now()).await;
+    assert_eq!(messages.len(), 2 + crate::bmp_sync::LOC_RIB_FAMILIES.len());
+    for (is_vpn, (pdu, _, status)) in [false, true].into_iter().zip(&messages[..2]) {
+        let parsed = decode_pdu(pdu);
+        assert_eq!(
+            parsed
+                .attributes
+                .iter()
+                .any(|attr| matches!(attr, PathAttribute::MpReachNlri(_))),
+            is_vpn,
+            "dump status must cover unicast and VPN"
+        );
+        assert!(
+            parsed.attributes.iter().any(|attr| matches!(
+                attr,
+                PathAttribute::Communities(values) if values.contains(&COMMUNITY_LLGR_STALE)
+            )),
+            "received community must survive dump synthesis"
+        );
+        let status = status.expect("dumped best carries internal status");
+        assert_eq!(status.status, expected);
+        assert_eq!(status.reason, None);
+    }
+    assert!(messages[2..].iter().all(|(_, _, status)| status.is_none()));
 
     drop(tx);
     handle.await.unwrap();
