@@ -1,6 +1,7 @@
 //! Session-side outbound encode: `send_route_update` grouping, UPDATE build
 //! and writer-queue enqueue for one announce-only envelope, against an
-//! in-memory writer queue.
+//! in-memory writer queue. Only `send_route_update` is timed; draining the
+//! queue happens outside the measurement.
 //!
 //! - `shared_arc`: every route shares one attribute allocation (the common
 //!   case: interned source attributes and a pass-scoped export memo).
@@ -71,7 +72,11 @@ fn bench(c: &mut Criterion) {
             let mut bench = OutboundEncodeBench::new(1 << 16);
             group.throughput(Throughput::Elements(u64::from(count)));
             group.bench_with_input(BenchmarkId::new(shape, count), &announce, |b, announce| {
-                b.iter(|| black_box(bench.send(black_box(announce))));
+                b.iter_custom(|iterations| {
+                    (0..iterations)
+                        .map(|_| bench.send(black_box(announce)))
+                        .sum()
+                });
             });
         }
     }

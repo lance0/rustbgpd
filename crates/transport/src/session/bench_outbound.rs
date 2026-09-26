@@ -74,28 +74,29 @@ impl OutboundEncodeBench {
         }
     }
 
-    /// Encode one announce-only envelope and return the UPDATE frames it
-    /// produced.
+    /// Encode one announce-only envelope and return the time spent in
+    /// `send_route_update` alone. The in-memory writer queue is drained
+    /// afterwards, outside the returned duration, so frame count does not
+    /// add channel-receive work to the measurement.
     ///
     /// # Panics
     ///
     /// If the writer queue saturated and the session tore down.
-    pub fn send(&mut self, announce: &Arc<[Route]>) -> usize {
+    pub fn send(&mut self, announce: &Arc<[Route]>) -> std::time::Duration {
         let update = OutboundRouteUpdate {
             exact_export_snapshot: Some(self.session.publish_export_profile()),
             announce: Arc::clone(announce),
             next_hop_override: vec![None; announce.len()].into(),
             ..OutboundRouteUpdate::default()
         };
+        let start = std::time::Instant::now();
         self.session.send_route_update(update);
+        let elapsed = start.elapsed();
         assert!(
             self.session.writer_bulk_tx.is_some(),
             "bench writer queue saturated"
         );
-        let mut frames = 0;
-        while self.bulk_rx.try_recv().is_ok() {
-            frames += 1;
-        }
-        frames
+        while self.bulk_rx.try_recv().is_ok() {}
+        elapsed
     }
 }
