@@ -2772,8 +2772,8 @@ fn regroup_baseline_diff_and_force() {
 }
 
 /// The per-peer update-group gauge tracks membership: it reports the
-/// group id after grouping, changes on regroup, drops to the ungrouped
-/// sentinel on the fallback path, and is reaped on peer-down.
+/// group id after grouping, changes on regroup, and drops to the ungrouped
+/// sentinel on the fallback path.
 #[test]
 fn peer_update_group_gauge_tracks_membership() {
     let (_tx, rx) = tokio::sync::mpsc::channel(1);
@@ -2814,17 +2814,100 @@ fn peer_update_group_gauge_tracks_membership() {
         manager.metrics.peer_update_group(&peer),
         rustbgpd_telemetry::BgpMetrics::UPDATE_GROUP_UNGROUPED
     );
+}
 
-    // Peer-down: the series is reaped. Re-reading re-instantiates a
-    // fresh child at 0 (the default), proving the stale -1 series was
-    // removed rather than left behind.
-    manager.update_groups.members.remove(&MEMBER);
-    manager.metrics.reap_peer_series(&peer);
+fn gathered_peer_update_group(
+    metrics: &rustbgpd_telemetry::BgpMetrics,
+    peer: IpAddr,
+) -> Option<f64> {
+    let peer = peer.to_string();
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_peer_update_group")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    .then(|| metric.get_gauge().value())
+            })
+        })
+}
+
+/// A down or GR-retained session has no outbound membership; a replacement
+/// and a surviving member keep theirs. Query the registry directly because
+/// `BgpMetrics::peer_update_group` creates a child for an absent peer.
+#[test]
+fn peer_update_group_series_follows_session_teardown() {
+    let metrics = rustbgpd_telemetry::BgpMetrics::new();
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+    let mut manager = RibManager::new(rx, query_rx, None, None, metrics.clone());
+    let _down_rx = register_growth_peer(&mut manager, MEMBER, 1);
+    let _gr_rx = register_growth_peer(&mut manager, OTHER1, 2);
+    let _survivor_rx = register_growth_peer(&mut manager, OTHER2, 3);
+    let _replacement_rx = register_growth_peer(&mut manager, OTHER2, 4);
+
+    let surviving_group = gathered_peer_update_group(&metrics, OTHER2)
+        .expect("registered survivor has a group series");
+    assert!(gathered_peer_update_group(&metrics, MEMBER).is_some());
+    assert!(gathered_peer_update_group(&metrics, OTHER1).is_some());
+
+    manager.handle_update(crate::RibUpdate::PeerDown {
+        peer: OTHER2,
+        session_id: 3,
+    });
     assert_eq!(
-        manager.metrics.peer_update_group(&peer),
-        0,
-        "reaped series must be removed; a fresh read defaults to 0, not the stale -1"
+        gathered_peer_update_group(&metrics, OTHER2),
+        Some(surviving_group),
+        "stale predecessor teardown must preserve the replacement's series"
     );
+
+    manager.handle_update(crate::RibUpdate::PeerDown {
+        peer: MEMBER,
+        session_id: 1,
+    });
+    assert_eq!(gathered_peer_update_group(&metrics, MEMBER), None);
+    assert_eq!(
+        gathered_peer_update_group(&metrics, OTHER2),
+        Some(surviving_group)
+    );
+
+    manager.handle_update(crate::RibUpdate::PeerGracefulRestart {
+        peer: OTHER1,
+        session_id: 2,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: Vec::new(),
+        llgr_stale_time: 0,
+    });
+    assert!(manager.gr_peers.contains_key(&OTHER1));
+    assert_eq!(gathered_peer_update_group(&metrics, OTHER1), None);
+    assert_eq!(
+        gathered_peer_update_group(&metrics, OTHER2),
+        Some(surviving_group)
+    );
+
+    let _second_replacement_rx = register_growth_peer(&mut manager, OTHER2, 5);
+    assert!(gathered_peer_update_group(&metrics, OTHER2).is_some());
+    manager.handle_update(crate::RibUpdate::PeerDown {
+        peer: OTHER2,
+        session_id: 5,
+    });
+    assert!(
+        gathered_peer_update_group(&metrics, OTHER2).is_some(),
+        "failover must publish the promoted session's new membership"
+    );
+    manager.handle_update(crate::RibUpdate::PeerDown {
+        peer: OTHER2,
+        session_id: 4,
+    });
+    assert_eq!(gathered_peer_update_group(&metrics, OTHER2), None);
 }
 
 /// Carried-over extra withdraws (a dirty member regrouping) emit

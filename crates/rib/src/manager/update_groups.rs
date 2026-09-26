@@ -2067,6 +2067,7 @@ impl RibManager {
             }
             self.refresh_update_group_gauges();
         }
+        self.metrics.remove_peer_update_group(&peer.to_string());
     }
 
     /// Apply a transport slow-peer flag change (LAN-470,
@@ -2241,7 +2242,7 @@ impl RibManager {
         // Recomputed for every member on each call, so the per-peer group
         // gauge is refreshed on every membership-change path (join, leave,
         // grouped↔grouped move, grouped↔fallback) — no guard. Peers that
-        // left the map are dropped here and reaped on peer-down.
+        // left the map are removed at `remove_update_group_member`.
         for (peer, membership) in &self.update_groups.members {
             checkpoint();
             let group_id = if let GroupMembership::Grouped(id) = membership {
