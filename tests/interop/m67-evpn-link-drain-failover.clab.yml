@@ -82,6 +82,16 @@
 name: m67-evpn-link-drain-failover
 
 topology:
+  # Containerlab raises veth endpoints before ordinary node exec commands.
+  # Disable IPv6 before that first link-up so MLD/DAD cannot teach a PE's
+  # own AC MAC to the other PE through the dual-homed CE.
+  defaults:
+    stages:
+      create-links:
+        exec:
+          - command: sh -ec 'echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6; echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6'
+            target: container
+            phase: on-enter
   nodes:
     vtep:
       kind: linux
@@ -92,8 +102,6 @@ topology:
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
       exec:
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
         # The vtep routes between the two PE subnets (pe1 <-> pe2
         # flood frames transit it).
         - sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
@@ -129,8 +137,6 @@ topology:
         - ./configs/m67-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
         - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
       exec:
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
         - ip addr add 10.0.1.2/24 dev eth1
         - ip link set eth1 up
         - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.1.2 100 10.0.2.0/24 10.0.1.1
@@ -148,8 +154,6 @@ topology:
         - ./configs/m67-grpc-operator.token:/etc/rustbgpd/grpc-operator.token:ro
         - ./scripts/start-rustbgpd-sa-pe.sh:/usr/local/bin/start-rustbgpd-sa-pe.sh:ro
       exec:
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
         - ip addr add 10.0.2.2/24 dev eth1
         - ip link set eth1 up
         - /usr/local/bin/start-rustbgpd-sa-pe.sh 10.0.2.2 100 10.0.1.0/24 10.0.2.1
@@ -168,8 +172,6 @@ topology:
       image: rustbgpd:dev
       cmd: sleep infinity
       exec:
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
         # mcast_snooping 0 + multicast off: the kernel's IGMP machinery
         # otherwise emits bring-up frames that the CE bridge floods out
         # BOTH legs, kernel-learning the CE/port MACs on the non-DF PE
@@ -194,8 +196,6 @@ topology:
       image: rustbgpd:dev
       cmd: sleep infinity
       exec:
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6"
-        - sh -c "echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6"
         - ip link set eth1 address 02:aa:aa:aa:aa:01
         - ip link set dev eth1 multicast off
         - ip addr add 192.168.67.20/24 dev eth1
