@@ -2077,6 +2077,7 @@ mod orf;
 mod otc;
 mod outbound_attrs;
 mod outbound_encode;
+mod outbound_pacing;
 mod refresh;
 mod reject_retention;
 mod rfc7606;

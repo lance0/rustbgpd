@@ -11,6 +11,388 @@ use super::{
 use super::{FlowSpecRoute, LabeledRibRoute, RtcRibRoute, VpnRibRoute};
 use std::sync::Arc;
 
+/// One envelope remains owned until its final marker is admitted. Slices
+/// reuse the exact export snapshot, without growing the bounded writer queue.
+pub(super) struct PendingOutbound {
+    pub(super) update: OutboundRouteUpdate,
+    pub(super) shared: Option<(Arc<super::shared_group::ProgressiveUnicastEncode>, usize)>,
+    requests: Vec<(Afi, Safi)>,
+    phase: usize,
+    offset: usize,
+    capacity_blocked: bool,
+}
+
+#[derive(Clone, Copy)]
+enum OutboundPhase {
+    Requests,
+    Begin,
+    Withdraw,
+    Announce,
+    FlowspecWithdraw,
+    EvpnWithdraw,
+    BgplsWithdraw,
+    VpnWithdraw,
+    LabeledWithdraw,
+    RtcWithdraw,
+    EvpnAnnounce,
+    BgplsAnnounce,
+    VpnAnnounce,
+    LabeledAnnounce,
+    RtcAnnounce,
+    FlowspecAnnounce,
+    End,
+    Eor,
+}
+
+const OUTBOUND_PHASES: &[OutboundPhase] = &[
+    OutboundPhase::Requests,
+    OutboundPhase::Begin,
+    OutboundPhase::Withdraw,
+    OutboundPhase::Announce,
+    OutboundPhase::FlowspecWithdraw,
+    OutboundPhase::EvpnWithdraw,
+    OutboundPhase::BgplsWithdraw,
+    OutboundPhase::VpnWithdraw,
+    OutboundPhase::LabeledWithdraw,
+    OutboundPhase::RtcWithdraw,
+    OutboundPhase::EvpnAnnounce,
+    OutboundPhase::BgplsAnnounce,
+    OutboundPhase::VpnAnnounce,
+    OutboundPhase::LabeledAnnounce,
+    OutboundPhase::RtcAnnounce,
+    OutboundPhase::FlowspecAnnounce,
+    OutboundPhase::End,
+    OutboundPhase::Eor,
+];
+
+impl PendingOutbound {
+    /// Waits inside the existing run-loop select, never inside a sender.
+    pub(super) async fn ready(&self, writer: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) {
+        if let Some((shared, next)) = &self.shared {
+            shared.ready(*next).await;
+        }
+        if self.capacity_blocked
+            && let Some(writer) = writer
+        {
+            // The session is the sole bulk producer. The temporary permit only
+            // waits for space; synchronous admission rechecks the full budget.
+            let _ = writer.reserve().await;
+        }
+    }
+
+    fn finish_empty_phases(&mut self) -> bool {
+        while let Some(phase) = OUTBOUND_PHASES.get(self.phase) {
+            let len = match phase {
+                OutboundPhase::Requests => self.requests.len(),
+                OutboundPhase::Begin => self
+                    .update
+                    .refresh_markers
+                    .iter()
+                    .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::BoRR)
+                    .count(),
+                OutboundPhase::End => self
+                    .update
+                    .refresh_markers
+                    .iter()
+                    .filter(|(_, _, kind)| *kind == RouteRefreshSubtype::EoRR)
+                    .count(),
+                OutboundPhase::Withdraw => self.update.withdraw.len(),
+                OutboundPhase::Announce => self.update.announce.len(),
+                OutboundPhase::FlowspecWithdraw => self.update.flowspec_withdraw.len(),
+                OutboundPhase::EvpnWithdraw => self.update.evpn_withdraw.len(),
+                OutboundPhase::BgplsWithdraw => self.update.bgpls_withdraw.len(),
+                OutboundPhase::VpnWithdraw => self.update.vpn_withdraw.len(),
+                OutboundPhase::LabeledWithdraw => self.update.labeled_withdraw.len(),
+                OutboundPhase::RtcWithdraw => self.update.rtc_withdraw.len(),
+                OutboundPhase::EvpnAnnounce => self.update.evpn_announce.len(),
+                OutboundPhase::BgplsAnnounce => self.update.bgpls_announce.len(),
+                OutboundPhase::VpnAnnounce => self.update.vpn_announce.len(),
+                OutboundPhase::LabeledAnnounce => self.update.labeled_announce.len(),
+                OutboundPhase::RtcAnnounce => self.update.rtc_announce.len(),
+                OutboundPhase::FlowspecAnnounce => self.update.flowspec_announce.len(),
+                OutboundPhase::Eor => self.update.end_of_rib.len(),
+            };
+            if self.offset < len {
+                return false;
+            }
+            self.phase += 1;
+            self.offset = 0;
+        }
+        true
+    }
+
+    fn next_slice(&mut self, budget: usize) -> Option<OutboundRouteUpdate> {
+        while let Some(phase) = OUTBOUND_PHASES.get(self.phase) {
+            let mut slice = OutboundRouteUpdate {
+                exact_export_snapshot: self.update.exact_export_snapshot.clone(),
+                announce_source_exclusion: self.update.announce_source_exclusion,
+                ..OutboundRouteUpdate::default()
+            };
+            macro_rules! payload {
+                ($field:ident) => {{
+                    let end = (self.offset + budget).min(self.update.$field.len());
+                    slice.$field = self.update.$field[self.offset..end].to_vec().into();
+                    end
+                }};
+            }
+            let end = match phase {
+                // Requests are sent directly, one frame at a time by advance.
+                OutboundPhase::Requests => self.requests.len(),
+                OutboundPhase::Begin | OutboundPhase::End => {
+                    let wanted = if matches!(phase, OutboundPhase::Begin) {
+                        RouteRefreshSubtype::BoRR
+                    } else {
+                        RouteRefreshSubtype::EoRR
+                    };
+                    slice.refresh_markers = self
+                        .update
+                        .refresh_markers
+                        .iter()
+                        .copied()
+                        .filter(|(_, _, subtype)| *subtype == wanted)
+                        .skip(self.offset)
+                        .take(budget)
+                        .collect();
+                    self.offset + slice.refresh_markers.len()
+                }
+                OutboundPhase::Withdraw => payload!(withdraw),
+                OutboundPhase::Announce => {
+                    let end = payload!(announce);
+                    let overrides_end = end.min(self.update.next_hop_override.len());
+                    if self.offset < overrides_end {
+                        slice.next_hop_override = self.update.next_hop_override
+                            [self.offset..overrides_end]
+                            .to_vec()
+                            .into();
+                    }
+                    end
+                }
+                OutboundPhase::FlowspecWithdraw => payload!(flowspec_withdraw),
+                OutboundPhase::EvpnWithdraw => payload!(evpn_withdraw),
+                OutboundPhase::BgplsWithdraw => payload!(bgpls_withdraw),
+                OutboundPhase::VpnWithdraw => payload!(vpn_withdraw),
+                OutboundPhase::LabeledWithdraw => payload!(labeled_withdraw),
+                OutboundPhase::RtcWithdraw => payload!(rtc_withdraw),
+                OutboundPhase::EvpnAnnounce => payload!(evpn_announce),
+                OutboundPhase::BgplsAnnounce => payload!(bgpls_announce),
+                OutboundPhase::VpnAnnounce => payload!(vpn_announce),
+                OutboundPhase::LabeledAnnounce => payload!(labeled_announce),
+                OutboundPhase::RtcAnnounce => payload!(rtc_announce),
+                OutboundPhase::FlowspecAnnounce => payload!(flowspec_announce),
+                OutboundPhase::Eor => payload!(end_of_rib),
+            };
+            if end == self.offset {
+                self.phase += 1;
+                self.offset = 0;
+            } else {
+                self.offset = end;
+                return Some(slice);
+            }
+        }
+        None
+    }
+}
+
+impl PeerSession {
+    pub(super) fn handle_outbound_route_update(&mut self, mut update: OutboundRouteUpdate) {
+        debug_assert!(self.pending_outbound.is_none());
+        let shared = if update.replay.is_none() {
+            self.prepare_shared_group(&update)
+        } else {
+            None
+        };
+        let mut requests = Vec::new();
+        if update.request_refresh_all_negotiated {
+            if let Some(negotiated) = &self.negotiated
+                && negotiated.peer_route_refresh
+            {
+                requests.clone_from(&negotiated.negotiated_families);
+            } else {
+                warn!(peer = %self.peer_label, "ROUTE-REFRESH request skipped: peer lacks the capability");
+            }
+        }
+        if update.replay.is_none() {
+            let peer_err = self
+                .negotiated
+                .as_ref()
+                .is_some_and(|n| n.peer_enhanced_route_refresh);
+            update.end_of_rib.retain(|(afi, safi)| {
+                !peer_err
+                    || !update.refresh_markers.iter().any(|(ma, ms, kind)| {
+                        ma == afi
+                            && ms == safi
+                            && matches!(kind, RouteRefreshSubtype::BoRR | RouteRefreshSubtype::EoRR)
+                    })
+            });
+            if !peer_err {
+                update.refresh_markers.clear();
+            }
+            // Validate before even the first marker, and publish OTC diagnostics
+            // once for the original envelope, not once per payload slice.
+            if self.outbound_snapshot(&update).is_none() {
+                return;
+            }
+            for route in std::mem::take(&mut update.otc_blocked) {
+                self.record_otc_egress_block(&route);
+            }
+        }
+        self.pending_outbound = Some(PendingOutbound {
+            update,
+            shared,
+            requests,
+            phase: 0,
+            offset: 0,
+            capacity_blocked: false,
+        });
+        self.advance_pending_outbound();
+    }
+
+    pub(super) fn expire_outbound_admission(&mut self) {
+        self.outbound_admission_timer = None;
+        if self
+            .writer_bulk_tx
+            .as_ref()
+            .is_none_or(tokio::sync::mpsc::Sender::is_closed)
+        {
+            // Writer closure and resource expiry can be ready in the same
+            // select turn. The writer-exit arm must retain its actual cause.
+            self.pending_outbound = None;
+            return;
+        }
+        warn!(peer = %self.peer_label, "outbound writer capacity admission deadline expired — sending Cease/Out-of-Resources and tearing down");
+        self.trigger_outbound_out_of_resources_teardown(
+            crate::handle::SessionFailureCause::OutboundSaturation,
+        );
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bounded admission step keeps shared, ordinary, and terminal cursor ownership together"
+    )]
+    pub(super) fn advance_pending_outbound(&mut self) {
+        let Some(mut pending) = self.pending_outbound.take() else {
+            return;
+        };
+        let Some(writer) = &self.writer_bulk_tx else {
+            self.outbound_admission_timer = None;
+            return;
+        };
+        if writer.is_closed() {
+            // The writer-exit arm owns its actual failure cause. A stale
+            // admission deadline must not relabel it as resource saturation.
+            self.outbound_admission_timer = None;
+            return;
+        }
+        // Every valid payload entry contributes at most one UPDATE frame;
+        // grouping can only reduce that count. Requests and terminal markers
+        // consume their own exact frame budget in separate phases.
+        let budget = writer
+            .capacity()
+            .min(super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+        let before = self.writer_bulk_admitted;
+        let mut finished = false;
+        pending.capacity_blocked = budget == 0;
+        if let Some((shared, next)) = &mut pending.shared {
+            let (chunks, terminal) =
+                shared.snapshot_from(*next, super::shared_group::PROGRESSIVE_SLICE_ROUTES);
+            let end = *next + chunks.len();
+            let mut available = budget;
+            pending.capacity_blocked = false;
+            for chunk in chunks {
+                if self.wants_shared_chunk(&pending.update, &chunk) {
+                    if available == 0 {
+                        pending.capacity_blocked = true;
+                        break;
+                    }
+                    if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
+                        self.outbound_admission_timer = None;
+                        return;
+                    }
+                    available -= 1;
+                    self.updates_sent += 1;
+                    self.metrics.record_message_sent(&self.peer_label, "update");
+                }
+                *next += 1;
+            }
+            if *next == end {
+                match terminal {
+                    Some(super::shared_group::StreamTerminal::Complete) => finished = true,
+                    Some(super::shared_group::StreamTerminal::Failed) => pending.shared = None,
+                    None => {}
+                }
+            }
+        } else if pending.update.replay.is_some() {
+            // Even without writer capacity, cancellation must discard a terminal.
+            finished =
+                self.enqueue_replay_terminal_slice(&pending.update, &mut pending.offset, budget);
+        } else if budget > 0 {
+            if pending.phase == 0 && pending.offset < pending.requests.len() {
+                let (afi, safi) = pending.requests[pending.offset];
+                if self
+                    .enqueue_bulk(&Message::RouteRefresh(RouteRefreshMessage::new(afi, safi)))
+                    .is_err()
+                {
+                    self.outbound_admission_timer = None;
+                    return;
+                }
+                self.metrics
+                    .record_message_sent(&self.peer_label, "route_refresh");
+                pending.offset += 1;
+            } else {
+                if pending.phase == 0 {
+                    pending.phase = 1;
+                    pending.offset = 0;
+                }
+                if let Some(slice) = pending.next_slice(budget) {
+                    self.send_route_update(slice);
+                } else {
+                    finished = true;
+                }
+            }
+        }
+        if pending.shared.is_none() && pending.update.replay.is_none() {
+            finished |= pending.finish_empty_phases();
+        }
+        if self.writer_bulk_admitted != before {
+            self.outbound_admission_timer = None;
+        }
+        if !finished
+            && self
+                .writer_bulk_tx
+                .as_ref()
+                .is_some_and(|tx| !tx.is_closed())
+        {
+            if pending.shared.is_none() {
+                pending.capacity_blocked = self
+                    .writer_bulk_tx
+                    .as_ref()
+                    .is_some_and(|tx| tx.capacity() == 0);
+            }
+            let blocked = pending.capacity_blocked;
+            self.pending_outbound = Some(pending);
+            if blocked
+                && self
+                    .writer_bulk_tx
+                    .as_ref()
+                    .is_some_and(|tx| tx.capacity() == 0)
+                && self.outbound_admission_timer.is_none()
+            {
+                let seconds = if self.config.peer.send_hold_time == 0 {
+                    rustbgpd_fsm::default_send_hold_time(self.config.peer.hold_time)
+                } else {
+                    self.config.peer.send_hold_time
+                };
+                self.outbound_admission_timer = Some(Box::pin(tokio::time::sleep(
+                    std::time::Duration::from_secs(u64::from(seconds)),
+                )));
+            }
+        } else {
+            self.outbound_admission_timer = None;
+        }
+        self.sample_outbound_queue_depth();
+    }
+}
+
 // The per-batch outbound maps (`PreparedAttrCacheKey` cache + the
 // `AttrGroupKey` UPDATE-grouping indices) use FxHash rather than the
 // default SipHash: keying is once per announced route, and SipHash on
@@ -179,6 +561,53 @@ impl PeerSession {
                 as_path: as_path_string,
             });
     }
+    /// Validate the original envelope before admitting any payload or marker.
+    fn outbound_snapshot(
+        &mut self,
+        update: &OutboundRouteUpdate,
+    ) -> Option<Arc<dyn rustbgpd_rib::ExactExportSnapshot>> {
+        let snapshot: Arc<dyn rustbgpd_rib::ExactExportSnapshot> = match update
+            .exact_export_snapshot
+            .as_ref()
+        {
+            Some(snapshot) => Arc::clone(snapshot),
+            None if !has_route_payload(update) => self.export_encoder.snapshot(),
+            None => {
+                warn!(
+                    peer = %self.peer_label,
+                    "RIB route-bearing envelope omitted its exact export snapshot — sending Cease/Out-of-Resources and tearing down"
+                );
+                self.trigger_outbound_out_of_resources_teardown(
+                    crate::handle::SessionFailureCause::ExportSnapshotMissing,
+                );
+                return None;
+            }
+        };
+        let Some(export) = snapshot.as_any().downcast_ref::<SessionExportProfile>() else {
+            warn!(
+                peer = %self.peer_label,
+                "RIB outbound envelope carries an exact export snapshot from the wrong encoder — sending Cease/Out-of-Resources and tearing down"
+            );
+            self.trigger_outbound_out_of_resources_teardown(
+                crate::handle::SessionFailureCause::ExportSnapshotIncompatible,
+            );
+            return None;
+        };
+        if rustbgpd_rib::ExactExportSnapshot::owner_id(export)
+            != rustbgpd_rib::ExactExportEncoder::owner_id(self.export_encoder.as_ref())
+        {
+            warn!(
+                peer = %self.peer_label,
+                "RIB outbound envelope carries an exact export snapshot owned by another session — sending Cease/Out-of-Resources and tearing down"
+            );
+            self.trigger_outbound_out_of_resources_teardown(
+                crate::handle::SessionFailureCause::ExportSnapshotWrongOwner,
+            );
+            return None;
+        }
+        Some(snapshot)
+    }
+
     /// Send an outbound route update as wire UPDATE messages.
     ///
     /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
@@ -192,45 +621,13 @@ impl PeerSession {
         reason = "export pipeline keeps policy, ORF, and advertisement ordering in one pass"
     )]
     pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
-        let snapshot: Arc<dyn rustbgpd_rib::ExactExportSnapshot> = match update
-            .exact_export_snapshot
-            .as_ref()
-        {
-            Some(snapshot) => Arc::clone(snapshot),
-            None if !has_route_payload(&update) => self.export_encoder.snapshot(),
-            None => {
-                warn!(
-                    peer = %self.peer_label,
-                    "RIB route-bearing envelope omitted its exact export snapshot — sending Cease/Out-of-Resources and tearing down"
-                );
-                self.trigger_outbound_out_of_resources_teardown(
-                    crate::handle::SessionFailureCause::ExportSnapshotMissing,
-                );
-                return;
-            }
-        };
-        let Some(export) = snapshot.as_any().downcast_ref::<SessionExportProfile>() else {
-            warn!(
-                peer = %self.peer_label,
-                "RIB outbound envelope carries an exact export snapshot from the wrong encoder — sending Cease/Out-of-Resources and tearing down"
-            );
-            self.trigger_outbound_out_of_resources_teardown(
-                crate::handle::SessionFailureCause::ExportSnapshotIncompatible,
-            );
+        let Some(snapshot) = self.outbound_snapshot(&update) else {
             return;
         };
-        if rustbgpd_rib::ExactExportSnapshot::owner_id(export)
-            != rustbgpd_rib::ExactExportEncoder::owner_id(self.export_encoder.as_ref())
-        {
-            warn!(
-                peer = %self.peer_label,
-                "RIB outbound envelope carries an exact export snapshot owned by another session — sending Cease/Out-of-Resources and tearing down"
-            );
-            self.trigger_outbound_out_of_resources_teardown(
-                crate::handle::SessionFailureCause::ExportSnapshotWrongOwner,
-            );
-            return;
-        }
+        let export = snapshot
+            .as_any()
+            .downcast_ref::<SessionExportProfile>()
+            .expect("validated session export snapshot");
         for route in &update.otc_blocked {
             self.record_otc_egress_block(route);
         }
