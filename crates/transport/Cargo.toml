@@ -54,6 +54,11 @@ harness = false
 required-features = ["bench-internals"]
 
 [[bench]]
+name = "outbound_encode"
+harness = false
+required-features = ["bench-internals"]
+
+[[bench]]
 name = "fanout"
 harness = false
 required-features = ["bench-internals"]
