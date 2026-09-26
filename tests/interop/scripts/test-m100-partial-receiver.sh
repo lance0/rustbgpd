@@ -48,7 +48,7 @@ m100_on_exit() {
     _cleanup_on_exit
     exit "$status"
 }
-trap m100_on_exit EXIT INT TERM HUP
+trap m100_on_exit EXIT
 
 die() {
     echo "ERROR: $*" >&2
