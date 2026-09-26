@@ -665,9 +665,9 @@ require_quiet() {
   load=${!load_name}
   competitors=${!competitors_name}
   cpus=$(nproc)
-  [[ ${governors_ref[*]} == performance ]]
-  awk -v load="$load" -v cpus="$cpus" 'BEGIN {exit !(load < cpus/4)}'
-  [[ -z $competitors ]]
+  [[ ${governors_ref[*]} == performance ]] &&
+    awk -v load1="$load" -v cpus="$cpus" 'BEGIN {exit !(load1 < cpus/4)}' &&
+    [[ -z $competitors ]]
 }
 
 cleanup() {
@@ -700,6 +700,17 @@ case ${1:-} in
     [[ $# == 2 ]] || exit 2
     check_seam "$2"
     exit
+    ;;
+  --require-quiet-fixture)
+    [[ $# == 4 ]] || exit 2
+    # shellcheck disable=SC2034 # require_quiet reads these by prefix.
+    fixture_governors=("$2")
+    # shellcheck disable=SC2034 # require_quiet reads these by prefix.
+    fixture_load=$3
+    # shellcheck disable=SC2034 # require_quiet reads these by prefix.
+    fixture_competitors=$4
+    require_quiet fixture && exit
+    exit 1
     ;;
   --classify-rss)
     [[ $# == 3 ]] || exit 2

@@ -774,3 +774,11 @@ flapstorm withdraw p50 spans 0.30–0.43 seconds. S2 settled RSS is 373/372 MiB
 and S3 settled RSS is 440/449 MiB for runs A/B. These source-equivalent rows
 are current rustbgpd observations; BIRD remains dated to the v0.64.0 refresh,
 and OpenBGPD 9.2 to its separate 2026-08-30 amendment.
+
+## v0.72.0 headline refresh — 2026-09-26
+
+The rustbgpd rows were re-measured on 2026-09-26 for the v0.72.0 release tree
+and current main, alternating on the same host. Results, method, and the
+cross-date gap to the 2026-08-30 rows above are in the
+[v0.72.0 headline refresh receipt](headline-refresh-v0720-2026-09.md). The
+sections above are unchanged as history.

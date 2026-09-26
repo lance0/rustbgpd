@@ -739,7 +739,7 @@ def event_outbox_queue_depth_inventory(
 
 def rust_metric_inventory(source: str) -> dict[str, str]:
     source, strings = rust_lex(source)
-    source = source.split("#[cfg(test)]", 1)[0]
+    source = re.split(r"#\[cfg\(test\)\]\s*mod\s+tests\s*\{", source, maxsplit=1)[0]
     constructors: dict[str, tuple[str, str]] = {}
     pattern = re.compile(
         r"let\s+(\w+)\s*=\s*(IntCounter(?:Vec)?|IntGauge(?:Vec)?|HistogramVec)::new\(\s*"
@@ -788,7 +788,7 @@ def registered_metric_definitions(
 ) -> dict[str, tuple[str, tuple[str, ...]]]:
     """Return directly registered Prometheus kind and constructor labels."""
     source, strings = rust_lex(source)
-    source = source.split("#[cfg(test)]", 1)[0]
+    source = re.split(r"#\[cfg\(test\)\]\s*mod\s+tests\s*\{", source, maxsplit=1)[0]
     constructors: dict[str, tuple[str, tuple[str, ...]]] = {}
     pattern = re.compile(
         r"let\s+(\w+)\s*=\s*"
