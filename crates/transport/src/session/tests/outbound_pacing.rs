@@ -182,6 +182,90 @@ async fn outbound_pacing_resource_deadline_is_finite_with_send_hold_disabled() {
 }
 
 #[tokio::test]
+async fn outbound_pacing_samples_backlog_before_envelope_completion() {
+    let (mut session, _commands, mut rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    recv_peer_up_after_export_context(&mut rib_rx).await;
+    while let Ok(update) = rib_rx.try_recv() {
+        assert!(!matches!(update, RibUpdate::PeerSlowState { .. }));
+    }
+    session.writer_join.take().unwrap().abort();
+    session.config.slow_peer_duration = 60;
+    session.config.slow_peer_threshold_pct = 50;
+    session.config.slow_peer_isolation = true;
+    let (bulk, mut held) = mpsc::channel(2);
+    session.writer_bulk_tx = Some(bulk);
+
+    let update = pacing_update(&session, pacing_routes(3, true));
+    session.handle_outbound_route_update(update);
+    assert!(session.pending_outbound.is_some());
+    assert_eq!(session.writer_bulk_tx.as_ref().unwrap().capacity(), 0);
+    assert_eq!(
+        session
+            .metrics
+            .peer_outbound_queue_depth(&session.peer_label),
+        2
+    );
+    let since = session.slow_peer_backlog_since.unwrap();
+    assert!(session.slow_peer_timer.is_some());
+
+    for _ in 0..3 {
+        session.advance_pending_outbound();
+        assert!(session.pending_outbound.is_some());
+        assert_eq!(session.slow_peer_backlog_since, Some(since));
+        assert!(!session.slow_peer);
+        assert_eq!(session.metrics.peer_slow(&session.peer_label), 0);
+        assert!(rib_rx.try_recv().is_err());
+    }
+
+    // The detector uses elapsed wall-clock time, not an observation count.
+    // Seed its private episode timestamp to avoid sleeping in the regression.
+    session.slow_peer_backlog_since = Some(
+        std::time::Instant::now()
+            .checked_sub(Duration::from_secs(61))
+            .unwrap(),
+    );
+    session.evaluate_slow_peer();
+    session.evaluate_slow_peer();
+    assert!(session.slow_peer);
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 1);
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::PeerSlowState { slow: true, .. }
+    ));
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "one isolation event per transition"
+    );
+
+    held.try_recv().unwrap();
+    held.try_recv().unwrap();
+    session.sample_outbound_queue_depth();
+    assert!(session.pending_outbound.is_some());
+    assert_eq!(
+        session
+            .metrics
+            .peer_outbound_queue_depth(&session.peer_label),
+        0
+    );
+    assert!(!session.slow_peer);
+    assert_eq!(session.metrics.peer_slow(&session.peer_label), 0);
+    assert!(session.slow_peer_backlog_since.is_none());
+    assert!(session.slow_peer_timer.is_none());
+    assert!(matches!(
+        rib_rx.try_recv().unwrap(),
+        RibUpdate::PeerSlowState { slow: false, .. }
+    ));
+    session.evaluate_slow_peer();
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "one recovery event per transition"
+    );
+}
+
+#[tokio::test]
 async fn outbound_pacing_exact_capacity_finishes_without_waiting_for_drain() {
     let (mut session, _wire) = shared_group_member(65001).await;
     session.writer_join.take().unwrap().abort();

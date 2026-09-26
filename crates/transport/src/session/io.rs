@@ -321,8 +321,8 @@ impl PeerSession {
     }
 
     /// Sample this peer's outbound bulk-queue depth (coalesced update
-    /// frames buffered for its writer) at batch granularity. Called once
-    /// per RIB outbound envelope — never per message — as the growth-side
+    /// frames buffered for its writer) after each bounded admission step,
+    /// including while an envelope remains pending, as the growth-side
     /// counterpart to the writer loop's drain-side sample: a slow or
     /// wedged peer whose writer is parked mid-write still shows its
     /// climbing backlog here. Both `max_capacity` and `capacity` are cheap
@@ -349,7 +349,7 @@ impl PeerSession {
     /// `slow_peer_threshold_pct`% of the writer's bulk-buffer capacity
     /// for `slow_peer_duration` seconds, and the flag clears at the
     /// first evaluation that sees the backlog below the threshold.
-    /// Evaluated at batch granularity — once per outbound RIB envelope
+    /// Evaluated after each bounded outbound admission step
     /// (piggybacked on [`Self::sample_outbound_queue_depth`]) plus a
     /// 1s re-check timer that is armed only while an episode is in
     /// progress — never per message, the same cost discipline as the
