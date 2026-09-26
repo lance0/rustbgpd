@@ -1,0 +1,38 @@
+{
+  "source_head": "292c32b39d1c9f8f056a472ed0c6d0a72658e87f",
+  "source_dirty": "",
+  "binaries": {
+    "rustbgpd": "28a062f43732f174cb93bd37c59c1bf071d233198878a17798c2b7c0a7f0042e",
+    "rbgp": "c569d105fded537637646d979153bdcbea8a667225ff93542d5c22ae9b508ad4",
+    "reloadstall": "501f3937f44315fa8bd39aa0b5d773f65c500cc10e98dbd4e03c9624676f7af5"
+  },
+  "versions": {
+    "rustbgpd": "rustbgpd 0.72.0",
+    "rbgp": "rbgp 0.72.0"
+  },
+  "shape": {
+    "peers": 1000,
+    "prefixes": 400000,
+    "reloads": 12,
+    "control_secs": 15,
+    "quiesce_secs": 40,
+    "run_cap_secs": 1515,
+    "pair_offset_s": 0.5,
+    "quiescent_offset_s": 20
+  },
+  "placement": {
+    "daemon_cpus": "2-3",
+    "engine_cpus": "4-5",
+    "probe_cpus": "8-15"
+  },
+  "kernel": "7.0.0-30-generic",
+  "nproc": 64,
+  "loadavg_start": [
+    "1.95",
+    "2.21",
+    "2.14"
+  ],
+  "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+  "cpu_topology": "CPU CORE SOCKET NODE\n  0    0      0    0\n  1    1      0    0\n  2    2      0    0\n  3    3      0    0\n  4    4      0    0\n  5    5      0    0\n  6    6      0    0\n  7    7      0    0\n  8    8      0    0\n  9    9      0    0\n 10   10      0    0\n 11   11      0    0\n 12   12      0    0\n 13   13      0    0\n 14   14      0    0\n 15   15      0    0\n 16   16      0    0\n 17   17      0    0\n 18   18      0    0\n 19   19      0    0\n 20   20      0    0\n 21   21      0    0\n 22   22      0    0\n 23   23      0    0\n 24   24      0    0\n 25   25      0    0\n 26   26      0    0\n 27   27      0    0\n 28   28      0    0\n 29   29      0    0\n 30   30      0    0\n 31   31      0    0\n 32    0      0    0\n 33    1      0    0\n 34    2      0    0\n 35    3      0    0\n 36    4      0    0\n 37    5      0    0\n 38    6      0    0\n 39    7      0    0\n 40    8      0    0\n 41    9      0    0\n 42   10      0    0\n 43   11      0    0\n 44   12      0    0\n 45   13      0    0\n 46   14      0    0\n 47   15      0    0\n 48   16      0    0\n 49   17      0    0\n 50   18      0    0\n 51   19      0    0\n 52   20      0    0\n 53   21      0    0\n 54   22      0    0\n 55   23      0    0\n 56   24      0    0\n 57   25      0    0\n 58   26      0    0\n 59   27      0    0\n 60   28      0    0\n 61   29      0    0\n 62   30      0    0\n 63   31      0    0",
+  "compiler_processes_at_start": 0
+}

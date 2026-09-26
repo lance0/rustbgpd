@@ -23,38 +23,39 @@ resolved.
 
 - **Fleet policy stats can time out during reload.** The daemon's
   `GetPolicyStats` RPC shares one absolute 2 s deadline across peer validation,
-  export counters, import counters, and dataset reads. Fleet calls such as
-  `rbgp policy stats --direction both` can return `DEADLINE_EXCEEDED` during
-  reload activity, with no partial rows. Check reload settlement before
+  export counters, import counters, and dataset reads. A fleet call such as
+  `rbgp policy stats --direction both` that exhausts it returns
+  `DEADLINE_EXCEEDED` with no partial rows. Check reload settlement before
   retrying the read. Peer validation, import counters and dataset status
   are read from the roster the peer manager publishes, and export counters
   from the roster the RIB manager publishes
   ([ADR-0136](../adr/0136-owner-published-counter-reads.md)), so no stage
-  queues on either actor. A read can still wait for a Pending session
+  waits for either actor. A read can still wait for a Pending session
   publication, a busy counter or dataset error lock, runtime scheduling, or
-  response delivery. Installed import
-  counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md).
-  The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
-  records CPU placement, complete call results and remaining stale observations.
-  The paired native rollback cell passes on both baseline and candidate; it
-  does not establish a general deadline guarantee. The route-server flagship
-  soak, which runs `rbgp policy stats --direction both` every 5 s through
-  serialized SIGHUP reloads, passed on v0.70.0
+  response delivery.
+  The [isolated reload cell](../perf/artifacts/policy-stats-owner-published-2026-09-26/README.md)
+  now shows the capture flat through reloads: on main `292c32b39`, with 1,000
+  route-server peers of 400 IPv4 prefixes each, 12 changed-policy reloads and
+  the daemon on two dedicated cores, every capture stage took under 1 ms,
+  including calls inside the reload commit window, against up to 469 ms
+  before ADR-0136. The slowest statistics call took 229 ms end to end. That
+  result covers this shape and placement only; it is not evidence for larger
+  fleets, other placements or a loaded host.
+  The route-server flagship soak, which runs `rbgp policy stats --direction both`
+  every 5 s through serialized SIGHUP reloads, has not yet completed on a
+  build with ADR-0136. On earlier builds it passed on v0.70.0
   ([2026-09-14](../soaks/soak-rs-flagship-24h-2026-09-14.md), a pass under
   the current gates on reanalysis; the original on-host verdict failed a
   since-superseded metrics-cadence rule) and on the v0.71.0 tag
-  ([2026-09-21](../soaks/soak-rs-flagship-24h-2026-09-21.md)). In the
-  v0.71.0 run the slowest `policy stats` read took 1969 ms, 31 ms under the
-  2 s deadline. The same soak on the v0.72.0 tag
-  ([2026-09-24](../soaks/soak-rs-flagship-24h-2026-09-24.md)) failed on one
-  such read: one of 17,556 `policy stats` calls returned `DEADLINE_EXCEEDED`
-  inside a reload commit, its import stage exhausting the remainder of the
-  2 s deadline. All three runs are IPv4-only; no dual-stack soak has run, and a
-  soak covers only the tag it ran on. This issue stays open until ADR-0136's
-  qualification (the isolated cell and the next flagship soak) passes on
-  the final runtime candidate. Retrying an operator
-  command does not
-  turn a failed management-soak sample into a pass. See the
+  ([2026-09-21](../soaks/soak-rs-flagship-24h-2026-09-21.md)), where the
+  slowest `policy stats` read took 1969 ms, 31 ms under the deadline. On
+  the v0.72.0 tag ([2026-09-24](../soaks/soak-rs-flagship-24h-2026-09-24.md))
+  one of 17,556 `policy stats` calls returned `DEADLINE_EXCEEDED` inside a
+  reload commit, its import stage exhausting the remainder of the deadline.
+  All three runs are IPv4-only; no dual-stack soak has run, and a soak covers
+  only the tag it ran on. This issue stays open until the next flagship soak
+  passes `management_failures` with the gate unchanged. Retrying an operator
+  command does not turn a failed management-soak sample into a pass. See the
   [policy stats contract](api.md#policyservice).
 
 ## Resolved

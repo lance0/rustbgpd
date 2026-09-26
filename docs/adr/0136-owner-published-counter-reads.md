@@ -394,6 +394,38 @@ be retained.
 - **Soak.** The next flagship soak passes `management_failures` with the gate
   unchanged. A soak covers only the tag it ran on.
 
+## Qualification evidence
+
+**2026-09-26, isolated cell: PASS.** The latency proof above ran on main
+`292c32b39`, after slices 1–3 merged, with the slice 0 shape and placement:
+1,000 peers with 400 IPv4 prefixes each, 12 reloads in alternating directions,
+the daemon on CPUs 2–3 with two runtime workers, the generator on CPUs 4–5 and
+probes on CPUs 8–15. All 12 pairs started in the commit band, all 36 calls
+succeeded with no deadline misses, and every statistics reply carried all
+1,000 import and 1,000 export rows. The in-band maximum of
+the summed stage `elapsed_ms` fell at each slice:
+
+| Run | Source | In-band summed stage max | Limit | Verdict |
+| --- | --- | ---: | ---: | --- |
+| Slice 0 baseline | `439cb3412` | 469 ms | 52 ms | FAIL |
+| Slice 2, import roster | `3af1c3292` | 171 ms | 50 ms | FAIL |
+| Slice 3, export roster | `904676ad5` | 0 ms | 50 ms | PASS |
+| Merged main | `292c32b39` | 0 ms | 50 ms | PASS |
+
+At slice 0 the export stage waited up to 256 ms for the RIB and the import
+stage up to 454 ms for the peer manager. Slice 2 left only the export wait.
+From slice 3 on, every stage of every call took under 1 ms. The external CLI
+time on merged main had an in-band p50 of 70 ms and a maximum of 229 ms
+(487 ms at slice 0); what remains is process start, runtime scheduling,
+rendering and delivery. Each reply reported one export counter-instance id
+across all rows. The runs and their limits are in the
+[retained receipt](../perf/artifacts/policy-stats-owner-published-2026-09-26/README.md).
+
+This passes the isolated-cell half of slice 4 at that shape only. Full
+qualification still waits on the next route-server flagship soak passing
+`management_failures` with the gate unchanged, so the status keeps its
+evidence gate until then.
+
 ## Consequences
 
 Once delivered and qualified, `GetPolicyStats` reads owner-published live
