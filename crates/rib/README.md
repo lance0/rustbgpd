@@ -92,6 +92,8 @@ independent observations; no fleet-wide atomic snapshot is implied.
 - **`RibManager`** — event loop processing `RibUpdate` messages
 - **`adj_rib_in::AdjRibIn`** — per-peer inbound route table
 - **`Route`** — prefix + attributes + metadata (path_id, validation_state, stale flags)
+- **`AttrSet`** — shared attributes and cached best-path inputs; copy-on-write
+  edits rebuild the cache, including when an edit unwinds
 - **`best_path_cmp()`** — standalone comparison function (not `Ord` on `Route`)
 
 ## License

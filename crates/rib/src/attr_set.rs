@@ -124,12 +124,19 @@ impl AttrSet {
     }
 
     /// Edit the attribute list copy-on-write (`Arc::make_mut`) and rebuild
-    /// the summary. This is the only way to mutate an `AttrSet`.
+    /// the summary, including if the callback unwinds. This is the only
+    /// way to mutate an `AttrSet`.
     pub fn edit<R>(this: &mut Arc<Self>, f: impl FnOnce(&mut Vec<PathAttribute>) -> R) -> R {
-        let set = Arc::make_mut(this);
-        let result = f(&mut set.attrs);
-        set.summary = SelectionSummary::compute(&set.attrs);
-        result
+        struct RebuildSummary<'a>(&'a mut AttrSet);
+
+        impl Drop for RebuildSummary<'_> {
+            fn drop(&mut self) {
+                self.0.summary = SelectionSummary::compute(&self.0.attrs);
+            }
+        }
+
+        let guard = RebuildSummary(Arc::make_mut(this));
+        f(&mut guard.0.attrs)
     }
 
     /// The attribute list, without copying when this is the last reference.
@@ -219,5 +226,23 @@ mod tests {
         assert!(set.summary().llgr_stale);
         assert_eq!(shared.summary().local_pref, 50);
         assert!(!shared.summary().llgr_stale);
+    }
+
+    #[test]
+    fn edit_rebuilds_summary_when_callback_unwinds() {
+        let mut set = AttrSet::new(vec![PathAttribute::LocalPref(50)]);
+        let shared = Arc::clone(&set);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            AttrSet::edit(&mut set, |attrs| {
+                attrs.insert(0, PathAttribute::LocalPref(200));
+                panic!("edit interrupted after changing attributes");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(set[0], PathAttribute::LocalPref(200));
+        assert_eq!(set.summary().local_pref, 200);
+        assert_eq!(shared[0], PathAttribute::LocalPref(50));
+        assert_eq!(shared.summary().local_pref, 50);
     }
 }
