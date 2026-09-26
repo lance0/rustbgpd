@@ -357,13 +357,17 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 - A configured session that is already Established keeps its connection;
   the inbound one is closed with Cease 6/7.
 - If the configured session's state cannot be read within the peer-query
-  deadline, it is treated as possibly Established: it keeps its
-  connection and the inbound one is closed with Cease 6/7.
-- These rules run when the inbound connection's OPEN arrives. When one of
-  the conditions that keep the configured session (Established, disabled,
-  BFD hold, state-query timeout, or NOTIFICATION backoff) already holds as
-  the TCP connection is accepted, the connection is closed at accept,
-  before any BGP message is exchanged.
+  deadline when the inbound connection's OPEN arrives, it is treated as
+  possibly Established: it keeps its connection and the inbound one is
+  closed with Cease 6/7. A timeout at TCP accept is handled differently;
+  see the next item.
+- The Cease 6/7 outcomes above apply to an inbound candidate session, which
+  exists only after the TCP connection is accepted. At accept, before any
+  candidate exists, the raw TCP connection is closed without a NOTIFICATION,
+  and before any BGP message is exchanged, when any of these holds:
+  - the neighbor is disabled or BFD-held;
+  - the configured session is Established or in NOTIFICATION backoff;
+  - the query for its state times out.
 
 ### §8 — Finite State Machine
 
