@@ -97,7 +97,7 @@ the query scan can grow even though the displayed result is aggregated.
 
 A ready-to-load Prometheus alert-rule pack (rules include daemon down and
 restarted, slow runtime-config settlement, session down/flapping,
-empty Adj-RIB-In, max-prefix near-limit, breach, shutdown latch and sustained
+delayed outbound registration, empty Adj-RIB-In, max-prefix near-limit, breach, shutdown latch and sustained
 inbound blocking, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
@@ -116,6 +116,16 @@ with per-rule unit tests in
 [`rustbgpd-alerts_test.yml`](../../examples/prometheus/rustbgpd-alerts_test.yml)
 (`promtool test rules`). It assumes the scrape config above
 (`job_name: rustbgpd`).
+
+`BgpPeerOutboundUnregistered` warns when an Established peer address has no
+update-group series for five continuous minutes. Values `0` and `-1` both mean
+registered. The hold is an investigation policy: queued imports can defer
+registration without a fixed maximum, and the warning is not proof of lost
+registration. Matching preserves `instance` and `peer`; same-address scoped
+siblings share RIB membership and cannot be diagnosed independently by this
+signal. See [delayed outbound registration](../reference/operations.md#delayed-outbound-registration)
+for the distinct snapshot-and-session-age advisory in `rbgp doctor`, which
+requires a known supporting daemon version before reporting absence.
 
 `BgpSessionNotEstablished` joins `bgp_peer_info` with
 `group_left(remote_asn, description, peer_group)`, so its alert labels carry

@@ -184,6 +184,25 @@ groups:
             still buffered; inspect bgp_peer_outbound_queue_depth and the
             remote receiver before the backlog reaches its bound.
 
+      - alert: BgpPeerOutboundUnregistered
+        # Address-level RIB membership: any group value, including 0 and -1,
+        # means registered. Scoped siblings share this address-level signal.
+        # Five minutes is investigation policy, not a scheduler deadline:
+        # queued imports can defer initial registration without a fixed bound.
+        expr: >-
+          max by (instance, peer) (bgp_peer_session_established) == 1
+          unless on (instance, peer) bgp_peer_update_group
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbound registration absent for {{ $labels.peer }}"
+          description: >-
+            An Established session to {{ $labels.peer }} on {{ $labels.instance }}
+            has had no observed address-level outbound registration for five minutes.
+            Queued imports can defer registration without a fixed deadline; inspect
+            RIB backlog and peer state. This advisory does not prove lost registration.
+
       - alert: BgpPeerAdjRibInEmpty
         # At least one current scoped session is Established, but the
         # peer holds no counted Adj-RIB-In paths. The sum covers every

@@ -1572,7 +1572,7 @@ exactly under the floods these drops account for.
 | `bgp_route_refresh_in_progress{peer,afi_safi}` | Active inbound Enhanced Route Refresh window for a peer/family (1 = active, 0 = inactive) |
 | `bgp_route_refresh_stale_entries{peer,afi_safi}` | Routes still awaiting replacement before EoRR or timeout during an inbound Enhanced Route Refresh window |
 | `bgp_rib_route_refresh_actor_duration_seconds{operation}` | Wall-clock RIB-actor time for accepted inbound Enhanced Route Refresh work. The closed `operation` label is `begin` (BoRR's full stale snapshot/count/gauge update), `eorr` (an active EoRR's complete stale sweep, recompute, distribution, and cleanup), or `timeout` (the same active finisher after expiry). Duplicate accepted BoRRs are counted; stale-session markers and EoRR/timeout markers without an active family are not. Uses the standard RIB actor duration buckets. |
-| `bgp_rib_outbound_registered_peers` | Global count of peers currently registered for outbound route distribution. It has no `peer` label and cannot identify an unregistered Established peer. Confirm a suspected gap with the peer's session state and `bgp_peer_update_group{peer}`: its series is absent when no outbound membership exists; a brief absence can also occur while initial registration is deferred |
+| `bgp_rib_outbound_registered_peers` | Global count of peers currently registered for outbound route distribution. It has no `peer` label and cannot identify an unregistered Established peer. Confirm a suspected gap with the peer's session state and `bgp_peer_update_group{peer}`: its series is absent when no outbound membership exists; absence can also persist while initial registration is deferred behind queued imports; there is no fixed maximum delay |
 | `bgp_rib_outbound_registration_replaced_total{peer}` | `PeerUp` re-registrations that replaced a still-registered outbound sender for the same address — two sessions overlapped (collision window); the replacement resets the prior session's RIB state and keeps the superseded session live for failover; its `PeerDown` is matched by session identity |
 | `bgp_rib_stale_peer_down_ignored_total{peer}` | `PeerDown`/`PeerGracefulRestart` events discarded because their session id didn't match the registered session — a stale teardown from a superseded collision-loser session; the surviving session's state is untouched |
 | `bgp_rib_stale_session_message_ignored_total{peer,kind}` | Session-scoped RIB messages discarded by the same session-identity rule — a superseded session's queued message processed after the replacement's `PeerUp`. `kind` labels: `routes`, `bgpls`, `vpn`, `labeled`, `rtc`, `eor`, `refresh`, `orf`, `policy_context`, `slow_peer`. These identify the combined unicast / FlowSpec / EVPN `RoutesReceived` envelope, the separate BGP-LS, VPN, labeled-unicast, and RT-Constrain route-message variants, End-of-RIB, route-refresh request / RFC 7313 BoRR/EoRR, RFC 5291 ORF push, peer-group policy identity, and slow-peer state respectively. The registered session's state is untouched |
@@ -1945,6 +1945,34 @@ reference skeleton. The pattern is:
    across event categories. The durable `event_id` is
    order-of-arrival at the EHM actor, not order-of-occurrence at
    each producer.
+
+## Delayed outbound registration
+
+`BgpPeerOutboundUnregistered` warns after five minutes of continuously observed
+Established sessions without `bgp_peer_update_group` membership for that
+`instance` and `peer` address. Any present value, including group `0` or the
+private-path sentinel `-1`, means registered. Queued imports take priority over
+initial outbound registration and can defer it without a fixed maximum delay.
+Five minutes is an investigation policy, not a guaranteed startup budget or
+proof that registration was lost. Inspect peer state and RIB backlog before
+attributing the absence to a fault; slow-peer and writer-queue signals can stay
+quiet when no outbound registration exists.
+
+`rbgp doctor` adds a yellow `peer.<addr>.outbound` check when a successful,
+non-stale neighbor/RIB snapshot shows an Established session older than five
+minutes with an empty `update_group`. The message reports **session age and
+current absence**, not the duration of missing registration. Unavailable
+snapshots and stale session observations do not establish absence. An empty
+field also requires a recognized daemon health version of at least `0.50.0`,
+a release that exposes membership. Missing, older, malformed, or prerelease
+version strings leave registration unknown; any nonempty group remains evidence
+of registration. The warning does not change readiness or make doctor exit red.
+
+RIB membership is address-level. Same-address IPv6 link-local sessions on
+different interfaces share the membership evidence: one registered sibling can
+mask another's missing registration. A scoped doctor check name identifies the
+session observed, but does not make the underlying membership interface-scoped.
+The aggregate `bgp_rib_outbound_registered_peers` remains an unlabeled total.
 
 ## Slow peers (detection and isolation)
 

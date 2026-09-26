@@ -351,6 +351,11 @@ async fn frozen_roster_rearms_satisfied_peer_on_session_replacement() {
     stage_gr_context(&tx, a, 4).await;
     tx.send(peer_up(a, 4, a4_tx)).await.unwrap();
     let rebound = query_state(&tx, a).await;
+    assert!(rebound.selection_deferral[0].active);
+    assert!(
+        !rebound.update_group.is_empty(),
+        "GR selection deferral holds routes, not outbound registration"
+    );
     assert_eq!(rebound.selection_deferral[0].waiter_state, "awaiting_eor");
     assert_eq!(rebound.selection_deferral[0].waiter_session_id, Some(4));
 

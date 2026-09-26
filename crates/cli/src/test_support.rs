@@ -41,6 +41,7 @@ pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
     pub(crate) liveness_calls: AtomicUsize,
     pub(crate) health_calls: AtomicUsize,
+    pub(crate) health_daemon_version: Mutex<Option<String>>,
     pub(crate) health_failures_remaining: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
@@ -987,7 +988,13 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
             uptime_seconds: 42,
             active_peers: 2,
             total_routes: 10,
-            daemon_version: "0.0.0-mock".to_string(),
+            daemon_version: self
+                .state
+                .health_daemon_version
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| "0.0.0-mock".to_string()),
         }))
     }
 

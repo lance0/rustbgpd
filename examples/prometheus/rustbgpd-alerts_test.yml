@@ -2100,3 +2100,59 @@ tests:
       - eval_time: 21m
         alertname: BmpCollectorDrops
         exp_alerts: []
+
+  # Address-level absence must persist for five minutes; any present value
+  # suppresses the alert, including on a different scoped sibling.
+  - interval: 30s
+    input_series:
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="192.0.2.1",interface=""}'
+        values: "1x20"
+      # Membership appears after firing, proving recovery.
+      - series: 'bgp_peer_update_group{instance="edge1:9179",peer="192.0.2.1"}'
+        values: "_ _ _ _ _ _ _ _ _ _ _ _ 0x8"
+      # Same address on another instance must not suppress edge1.
+      - series: 'bgp_peer_session_established{instance="edge2:9179",peer="192.0.2.1",interface=""}'
+        values: "1x20"
+      - series: 'bgp_peer_update_group{instance="edge2:9179",peer="192.0.2.1"}'
+        values: "0x20"
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="192.0.2.2",interface=""}'
+        values: "1x20"
+      - series: 'bgp_peer_update_group{instance="edge1:9179",peer="192.0.2.2"}'
+        values: "-1x20"
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="192.0.2.3",interface=""}'
+        values: "0x20"
+      # A brief absence interrupted by registration must restart the hold.
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="192.0.2.4",interface=""}'
+        values: "1x20"
+      - series: 'bgp_peer_update_group{instance="edge1:9179",peer="192.0.2.4"}'
+        values: "_ _ _ _ _ _ _ _ 7 stale _ _ _ _ _ _ _ _ 7x2"
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="fe80::1",interface="eth0"}'
+        values: "1x20"
+      - series: 'bgp_peer_session_established{instance="edge1:9179",peer="fe80::1",interface="eth1"}'
+        values: "0x20"
+      - series: 'bgp_peer_update_group{instance="edge1:9179",peer="fe80::1"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: BgpPeerOutboundUnregistered
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: BgpPeerOutboundUnregistered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: edge1:9179
+              peer: 192.0.2.1
+            exp_annotations:
+              summary: "Outbound registration absent for 192.0.2.1"
+              description: >-
+                An Established session to 192.0.2.1 on edge1:9179
+                has had no observed address-level outbound registration for five minutes.
+                Queued imports can defer registration without a fixed deadline; inspect
+                RIB backlog and peer state. This advisory does not prove lost registration.
+      - eval_time: 6m
+        alertname: BgpPeerOutboundUnregistered
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpPeerOutboundUnregistered
+        exp_alerts: []
