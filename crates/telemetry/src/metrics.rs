@@ -1635,7 +1635,8 @@ impl BgpMetrics {
                  Grouped peers carry their group id (0, 1, 2, …); the sentinel \
                  -1 marks a private path (peer-context policy, Add-Path send, \
                  per-client best, ORR vantage, negotiated ORF, or recoverable \
-                 slow-peer isolation). Refreshed on every membership change.",
+                 slow-peer isolation). Refreshed on every membership change; \
+                 removed when the peer's outbound registration ends.",
             ),
             &["peer"],
         )
@@ -4723,6 +4724,11 @@ impl BgpMetrics {
             .peer_update_group
             .with_label_values(&[peer])
             .set(group_id);
+    }
+
+    /// Remove a peer's update-group series when its outbound membership ends.
+    pub fn remove_peer_update_group(&self, peer: &str) {
+        let _ = self.0.peer_update_group.remove_label_values(&[peer]);
     }
 
     /// Read a peer's update-group-id gauge. Test/diagnostic helper.
