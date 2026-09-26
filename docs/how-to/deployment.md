@@ -1407,6 +1407,16 @@ stopping the current daemon. If the old binary rejects the current config,
 restore a version-controlled config known to that release, preflight that exact
 file with the old binary, and install it only after the stop.
 
+Canonical persistence omits genuinely optional sections while they remain at
+their defaults. This keeps routine runtime changes from adding unused feature
+tables to the file. Omitted values use the receiving release's defaults, as
+they do in hand-written TOML; this is not a cross-release semantic round-trip
+or downgrade compatibility promise. Once a new feature is configured, its
+section is retained; renamed fields use the current canonical spelling. An
+older binary can therefore still reject a newer persisted config. Restoring an
+older version-controlled config also discards API-driven changes made since
+that saved copy, so reconcile those changes explicitly before the rollback.
+
 Before downgrading, run `rbgp doctor --pre-upgrade` against the intended
 rollback config (or `rbgp config status`) and finish a pending confirmed
 transaction with `rbgp config confirm <id>` or `rbgp config abort <id>`. Do not

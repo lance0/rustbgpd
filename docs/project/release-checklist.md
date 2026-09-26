@@ -810,6 +810,27 @@ Before rolling any versions:
      the workspace version. For a new release line, append the consecutive
      upgrade exercise using the previous release's immutable fixture and
      the shared `v1_stable_archived_fixtures_parse` test. Keep the README baseline aligned; preserve older exercises.
+   - Freeze the previous tag's root config-schema manifest beside its archived
+     fixture. Derive it from the immutable tag rather than the working tree:
+
+     ```sh
+     prev_tag=vX.Y.Z
+     schema_path=docs/reference/rustbgpd.schema.json
+     git show "${prev_tag}:${schema_path}" > /tmp/rustbgpd-prev-schema.json
+     schema_sha256=$(sha256sum /tmp/rustbgpd-prev-schema.json | cut -d' ' -f1)
+     jq --arg source_tag "$prev_tag" --arg schema_path "$schema_path" \
+       --arg schema_sha256 "$schema_sha256" \
+       '{source_tag:$source_tag,schema_path:$schema_path,
+         schema_sha256:$schema_sha256,
+         additional_properties:.additionalProperties,
+         properties:(.properties|keys)}' /tmp/rustbgpd-prev-schema.json \
+       > "tests/fixtures/v1-stable/${prev_tag}/config-schema-root-keys.json"
+     ```
+
+     This compact fixture proves only that canonical persistence introduces no
+     root key the previous schema rejects. Semantic round-trip tests cover the
+     rendered values; this is not full previous-release schema validation or a
+     downgrade guarantee.
    - Update the workspace release and target changelog section in
      `scripts/check_metric_release_notes.py` and its companion test. The
      baseline stays on the previous release here; it rolls to this tag in

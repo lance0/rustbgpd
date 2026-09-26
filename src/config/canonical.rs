@@ -7,7 +7,8 @@ use super::{
     BfdProfileConfig, BmpConfig, Config, ConfigEpoch, DynamicNeighborConfig, EthernetSegmentConfig,
     EventHistoryConfig, EvpnInstanceConfig, EvpnIpVrfConfig, FibTableConfig, FlowSpecConfig,
     Global, GnmiDialoutConfig, InboundAdmissionConfig, ManagedNetdevsConfig, MrtConfig, Neighbor,
-    PeerGroupConfig, PolicyConfig, PolicyStatementConfig, RpkiConfig, SecurityConfig,
+    PeerGroupConfig, PolicyConfig, PolicyExplainConfig, PolicyRejectRetentionConfig,
+    PolicyStatementConfig, RpkiConfig, SecurityConfig,
 };
 
 const STATEMENT_CHUNK_LEN: usize = 256;
@@ -357,6 +358,47 @@ fn serialization_error(message: &str) -> toml::ser::Error {
     <toml::ser::Error as serde::ser::Error>::custom(message)
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference to the borrowed projection field"
+)]
+fn borrowed_is_default<T: Default + PartialEq>(value: &&T) -> bool {
+    **value == T::default()
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes a reference to the borrowed projection field"
+)]
+fn policy_is_default(value: &&PolicyConfig) -> bool {
+    let PolicyConfig {
+        definitions,
+        neighbor_sets,
+        import_chain,
+        export_chain,
+        explain,
+        reject_retention,
+        rpol_files,
+        rpol_roots,
+        rpol_max_graph_bytes,
+        rpol: _,
+        datasets,
+        dataset_bindings: _,
+        dataset_events: _,
+        external_sources_digest: _,
+    } = *value;
+    definitions.is_empty()
+        && neighbor_sets.is_empty()
+        && import_chain.is_empty()
+        && export_chain.is_empty()
+        && *explain == PolicyExplainConfig::default()
+        && *reject_retention == PolicyRejectRetentionConfig::default()
+        && rpol_files.is_empty()
+        && rpol_roots.is_empty()
+        && *rpol_max_graph_bytes == rustbgpd_policy::rpol::DEFAULT_MAX_GRAPH_BYTES
+        && datasets.is_empty()
+}
+
 /// Borrowed canonical projection used only by durable/effective sinks.
 ///
 /// The large policy and map state remains borrowed. Only `Global` is cloned so
@@ -366,13 +408,16 @@ fn serialization_error(message: &str) -> toml::ser::Error {
 struct CanonicalConfig<'a> {
     config_epoch: ConfigEpoch,
     global: Global,
+    #[serde(skip_serializing_if = "borrowed_is_default")]
     security: &'a SecurityConfig,
     neighbors: &'a [Neighbor],
     #[serde(serialize_with = "super::schema::serialize_sorted_hash_map")]
     peer_groups: &'a std::collections::HashMap<String, PeerGroupConfig>,
+    #[serde(skip_serializing_if = "policy_is_default")]
     policy: &'a PolicyConfig,
     dynamic_neighbors: &'a [DynamicNeighborConfig],
     rpki: &'a Option<RpkiConfig>,
+    #[serde(skip_serializing_if = "borrowed_is_default")]
     flowspec: &'a FlowSpecConfig,
     bmp: &'a Option<BmpConfig>,
     gnmi_dialout: &'a Option<GnmiDialoutConfig>,
@@ -381,10 +426,13 @@ struct CanonicalConfig<'a> {
     ethernet_segments: &'a [EthernetSegmentConfig],
     evpn_ip_vrfs: &'a [EvpnIpVrfConfig],
     fib_tables: &'a [FibTableConfig],
+    #[serde(skip_serializing_if = "borrowed_is_default")]
     managed_netdevs: &'a ManagedNetdevsConfig,
     bfd_profiles: &'a [BfdProfileConfig],
     apply_bum_enforcement: bool,
+    #[serde(skip_serializing_if = "borrowed_is_default")]
     event_history: &'a EventHistoryConfig,
+    #[serde(skip_serializing_if = "borrowed_is_default")]
     inbound_admission: &'a InboundAdmissionConfig,
 }
 
