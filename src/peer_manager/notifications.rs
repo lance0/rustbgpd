@@ -103,18 +103,107 @@ impl PeerManager {
     /// before an inbound-accept command. This closes the cross-channel race in
     /// which a passive reconnect could replace the breached session generation
     /// before its max-prefix latch was applied.
-    pub(super) async fn drain_ready_session_notifications(&mut self) {
-        while let Ok(notification) = self.session_notify_rx.try_recv() {
-            self.drain_ready_session_lifecycle_notifications();
-            self.handle_session_notification(notification).await;
+    ///
+    /// Outside a notification handler this handles every ready notification.
+    /// Inside one (a promotion or retirement fence for `peer`) it handles
+    /// `peer`'s notifications in order and defers the rest to the outermost
+    /// handler, so nesting is bounded by one peer's notices instead of growing
+    /// with every queued collision until the worker stack overflows. A
+    /// notification is `peer`'s when its session resolves to `peer`; one that
+    /// does not resolve, or a fence with no `peer`, handles nothing.
+    pub(super) async fn drain_ready_session_notifications(&mut self, peer: Option<&PeerKey>) {
+        if self.session_notification_depth == 0 {
+            while let Ok(notification) = self.session_notify_rx.try_recv() {
+                self.drain_ready_session_lifecycle_notifications();
+                self.handle_session_notification(notification).await;
+            }
+            return;
         }
+        loop {
+            // `peer`'s deferred notices are older than anything still queued.
+            let deferred = peer
+                .filter(|peer| {
+                    self.deferred_session_notification_counts
+                        .contains_key(*peer)
+                })
+                .and_then(|peer| self.take_deferred_session_notification(peer));
+            let notification = if deferred.is_some() {
+                self.drain_ready_session_lifecycle_notifications();
+                deferred
+            } else if let Ok(notification) = self.session_notify_rx.try_recv() {
+                self.drain_ready_session_lifecycle_notifications();
+                let owner = self.peer_key_for_session(session_notification_id(&notification));
+                if owner.is_some() && owner.as_ref() == peer {
+                    Some(notification)
+                } else {
+                    if let Some(owner) = &owner {
+                        *self
+                            .deferred_session_notification_counts
+                            .entry(owner.clone())
+                            .or_default() += 1;
+                    }
+                    self.deferred_session_notifications
+                        .push_back((owner, notification));
+                    None
+                }
+            } else {
+                return;
+            };
+            if let Some(notification) = notification {
+                self.handle_session_notification(notification).await;
+            }
+        }
+    }
+
+    /// Remove `peer`'s oldest deferred notification. The scan is O(deferred)
+    /// and runs only while `peer` has one, so a fence costs O(deferred) per
+    /// own notice rather than per drained notification.
+    fn take_deferred_session_notification(
+        &mut self,
+        peer: &PeerKey,
+    ) -> Option<SessionNotification> {
+        let index = self
+            .deferred_session_notifications
+            .iter()
+            .position(|(owner, _)| owner.as_ref() == Some(peer))?;
+        self.release_deferred_session_notification(index)
+    }
+
+    fn release_deferred_session_notification(
+        &mut self,
+        index: usize,
+    ) -> Option<SessionNotification> {
+        let (owner, notification) = self.deferred_session_notifications.remove(index)?;
+        if let Some(owner) = owner
+            && let Some(count) = self.deferred_session_notification_counts.get_mut(&owner)
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.deferred_session_notification_counts.remove(&owner);
+            }
+        }
+        Some(notification)
+    }
+
+    /// Handle one notification; the outermost call then handles whatever
+    /// nested drains deferred, oldest first.
+    pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        self.session_notification_depth += 1;
+        self.handle_one_session_notification(notification).await;
+        if self.session_notification_depth == 1 {
+            while let Some(deferred) = self.release_deferred_session_notification(0) {
+                self.drain_ready_session_lifecycle_notifications();
+                self.handle_one_session_notification(deferred).await;
+            }
+        }
+        self.session_notification_depth -= 1;
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
     )]
-    pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+    async fn handle_one_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::OpenReceived {
                 session_id,
@@ -556,5 +645,14 @@ impl PeerManager {
             managed.transport_config.peer.remote_asn = peer_asn;
             self.publish_peer_info_metric(peer_key);
         }
+    }
+}
+
+fn session_notification_id(notification: &SessionNotification) -> u64 {
+    match notification {
+        SessionNotification::OpenReceived { session_id, .. }
+        | SessionNotification::BackToIdle { session_id, .. }
+        | SessionNotification::MaxPrefixExceeded { session_id, .. }
+        | SessionNotification::MaxPrefixWarning { session_id, .. } => *session_id,
     }
 }

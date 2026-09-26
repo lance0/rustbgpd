@@ -17,7 +17,6 @@ use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-#[cfg(test)]
 use rustbgpd_transport::SessionNotification;
 use rustbgpd_transport::{
     PeerHandle, SessionLifecycleNotification,
@@ -490,6 +489,28 @@ pub struct PeerManager {
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     session_notify_tx: SessionNotificationSender,
     session_notify_rx: SessionNotificationReceiver,
+    /// Nesting depth of [`Self::handle_session_notification`]. Handling one
+    /// notification can drain the queue again (collision promotion and
+    /// session retirement both do).
+    ///
+    /// Invariant: no future that can reach `handle_session_notification` is
+    /// dropped before it completes, so the increment and decrement always pair.
+    /// Reaching it needs `&mut PeerManager`, which rules out `&self` futures,
+    /// spawned tasks and the inner future of `await_with_readiness{,_budget}`.
+    /// The only `&mut self` futures raced in a `select!` or wrapped in a
+    /// `timeout` are `plan_config_transaction`, `await_with_readiness` (whose
+    /// arms serve only readiness and operator reads) and
+    /// `query_warm_checkpoint_capture`, and none of them drains session
+    /// notifications. Keep it that way, or reset the depth where a drop can
+    /// happen; the run loop `debug_assert!`s the depth is zero between steps.
+    session_notification_depth: usize,
+    /// Notifications a nested drain left for the outermost handler because
+    /// they belong to a different peer, with the peer their session resolved
+    /// to. Empty whenever the depth is zero.
+    deferred_session_notifications: VecDeque<(Option<PeerKey>, SessionNotification)>,
+    /// Per-peer count of `deferred_session_notifications`, so a fence scans
+    /// the queue only when its own peer has an entry there.
+    deferred_session_notification_counts: HashMap<PeerKey, usize>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -1093,6 +1114,9 @@ impl PeerManager {
             validation_rx,
             session_notify_tx,
             session_notify_rx,
+            session_notification_depth: 0,
+            deferred_session_notifications: VecDeque::new(),
+            deferred_session_notification_counts: HashMap::new(),
             session_lifecycle_tx,
             session_lifecycle_rx,
             session_notification_event_tx,
@@ -1357,6 +1381,11 @@ impl PeerManager {
             self.peers.settle_abandoned_batches();
             #[cfg(test)]
             self.assert_import_roster_projection();
+            debug_assert!(
+                self.session_notification_depth == 0
+                    && self.deferred_session_notifications.is_empty()
+                    && self.deferred_session_notification_counts.is_empty()
+            );
             let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             tokio::select! {
