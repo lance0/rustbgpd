@@ -1461,7 +1461,12 @@ processes is unsupported even when their configuration files differ.
 | `<absolute lexical config path>.commit-confirm-locator.json` | Confidential paths/digests and sole v3 pending boot authority; no raw TOML. Published last and checked before candidate contents. | Until durable unlink and parent sync make the transaction terminal |
 | `config-history/*` | Last 20 owner-private v2/v3 JSON rows for `rbgp config history`; newest is index 0. V2 retains secret-bearing TOML up to 10 MiB; larger accepted snapshots receive at-most-64-KiB metadata-only v3 rows without payloads or source rosters. V3 is permanently rollback-ineligible and independent of commit-confirm recovery. Retired TOML files are ignored and retained. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
+| `fib-owned.json.stale` | Quarantined copy of a FIB ownership receipt that could not be used: a newer version than this build reads, a shape mismatch, or a config mismatch at startup. Diagnostic only; never read back. | Yes; replaced by the next quarantine |
 | `blackhole-owned.json` | Exact BLACKHOLE prefix authority. Mode `0600`; adoption and deletion require this receipt plus the kernel marker. | Yes |
+| `events.db`, `events.db-wal`, `events.db-shm` | Durable event history (SQLite, ADR-0072), present only when `[event_history].enabled = true`. `[event_history].path` can move it; the files below always sit beside it. | Yes |
+| `events.last_id` | Event-ID allocator hint written beside `events.db`. Diagnostic only; not authoritative for allocator recovery. | Yes |
+| `events.db.stale` (+`-wal`/`-shm`), `events.db.stale.<n>` | Quarantined event store that failed to open cleanly. A new quarantine moves the previous set to the lowest unused `<n>`. Never read back as the live store. | Yes; not pruned |
+| `crash/panic-*.toml` | Panic reports (message, location, thread, binary version, timestamp; never environment or arguments). Write-only; the newest 10 are kept, and `rbgp doctor` includes them in support bundles. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
 
 Stop the daemon before deleting `blackhole-owned.json`; deletion intentionally

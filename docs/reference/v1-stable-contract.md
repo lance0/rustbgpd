@@ -171,6 +171,34 @@ Two deprecation floors apply, each to a different set of surfaces:
 
 The [stability guide](stability.md) lists which surfaces are alpha.
 
+### On-disk runtime state
+
+Files under `runtime_state_dir`, and the commit-confirm locator beside the
+launch config, are outside the inventoried v1 surface. No inventory digest pins
+their formats, and the migration window above covers configuration and the
+inventoried surfaces, not these files. The
+[persistent-state table](../how-to/deployment.md#persistent-state-on-disk)
+lists every file, and [Format and version namespaces](format-version-namespaces.md)
+lists each file's version marker and reader behavior. What holds today:
+
+- **Upgrade:** a reader accepts the older versions that page lists, such as
+  GR marker v1–v3 and FIB owned state v1–v5. A format that has had one version
+  has nothing older to read. Retired commit-confirm journals refuse boot by
+  design; the persistent-state table gives their recovery path.
+- **Newer state under an older binary:** a reader that meets a version it does
+  not understand refuses, quarantines, or ignores it; it does not decode it as
+  its own. Commit-confirm authority refuses boot with the artifact untouched,
+  the GR marker is rejected and the daemon cold-starts, FIB owned state is
+  quarantined, the event store and BLACKHOLE receipt stay in place with their
+  feature disabled, and config-history rows of an unknown version are ignored.
+- **Binary rollback:** follow the
+  [rollback procedure](../how-to/deployment.md#rollback). It settles pending
+  commit-confirm transactions and moves `config-history/` aside when the
+  target release cannot read it.
+
+No stronger promise, such as every 1.x release reading the state its
+predecessor wrote, is made yet.
+
 ## Operator-read observation semantics
 
 These meanings are part of the inventoried RPC contract:
