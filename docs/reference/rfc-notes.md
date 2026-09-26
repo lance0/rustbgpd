@@ -349,8 +349,21 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 - A configured session in Idle, Connect or Active has no connection to
   collide with (RFC 4271 §6.8), so the inbound connection replaces it
   without a Cease; its outbound connect attempt and reconnect timer stop.
+  Two exceptions keep the configured session and close the inbound
+  connection with Cease 6/7 instead: the neighbor is administratively
+  disabled, or BFD is holding BGP down for it. While the neighbor waits
+  out an escalated NOTIFICATION reconnect backoff, the inbound connection
+  is closed without a NOTIFICATION.
 - A configured session that is already Established keeps its connection;
   the inbound one is closed with Cease 6/7.
+- If the configured session's state cannot be read within the peer-query
+  deadline, it is treated as possibly Established: it keeps its
+  connection and the inbound one is closed with Cease 6/7.
+- These rules run when the inbound connection's OPEN arrives. When one of
+  the conditions that keep the configured session (Established, disabled,
+  BFD hold, state-query timeout, or NOTIFICATION backoff) already holds as
+  the TCP connection is accepted, the connection is closed at accept,
+  before any BGP message is exchanged.
 
 ### §8 — Finite State Machine
 
@@ -1040,9 +1053,13 @@ loops. FRR also ranks on the community without a session check
 least-preferred routes here fall back to normal tie-breaking, as §4.4
 requires.
 
-The check reads the route's community list on each comparison, like the
-other attribute-derived steps (`LOCAL_PREF`, `AS_PATH`, MED); no per-route
-field is added. It runs only when the route is not already LLGR-stale.
+The check reads the route's community list, like the other
+attribute-derived steps (`LOCAL_PREF`, `AS_PATH`, MED); no per-route field is
+added, and the list is read only when the route is not already LLGR-stale.
+Unicast Loc-RIB selection ranks each candidate once per recompute, so it
+reads each list once rather than on every comparison. The other families'
+rankers and single pairwise comparisons, such as best-path explain, read it
+on each comparison.
 
 ### All GR Families Retained
 
@@ -1846,10 +1863,11 @@ carries inactive (absent), unlimited (zero), or finite.
   Type 2 / Type 3 Withdraws ride still-open BGP sessions. The
   dataplane reconciler drains afterward (FDB teardown doesn't need
   active BGP).
-- **Bidirectional VTEP interop (M37):** validated end-to-end against
-  Linux 6.17 + FRR 10.3.1 via
-  `tests/interop/m37-evpn-local-origination.clab.yml` (the topology now
-  pins FRR 10.7.1). rustbgpd as
+- **Bidirectional VTEP interop (M37):** first validated end-to-end
+  against Linux 6.17 + FRR 10.3.1 via
+  `tests/interop/m37-evpn-local-origination.clab.yml`; the topology now
+  pins FRR 10.7.1, and the hosted gate below runs it against that
+  version. rustbgpd as
   VTEP originator, FRR as consumer. 4/4 PASS: Type 3 IMET originated
   at startup, Type 2 originated within ~3 s of `bridge fdb add`,
   Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET
