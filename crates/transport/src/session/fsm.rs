@@ -327,6 +327,16 @@ impl PeerSession {
     /// produce follow-up events (like TCP connect or send failure)
     /// queue them for the next iteration.
     pub(super) async fn drive_fsm(&mut self, initial_event: Event) {
+        self.drive_fsm_with_notification(initial_event, None).await;
+    }
+
+    /// Preserve the FSM's teardown actions while supplying a transport-level
+    /// diagnostic that requires the original received PDU.
+    pub(super) async fn drive_fsm_with_notification(
+        &mut self,
+        initial_event: Event,
+        mut notification: Option<rustbgpd_wire::NotificationMessage>,
+    ) {
         let mut pending = vec![initial_event];
 
         while let Some(event) = pending.pop() {
@@ -351,6 +361,13 @@ impl PeerSession {
                         .is_some_and(|negotiated| negotiated.peer_notification_gr);
             let actions = self.fsm.handle_event(event.clone());
             let mut actions = self.hold_keepalive_for_collision_verdict(actions);
+            if let Some(replacement) = notification.take()
+                && let Some(Action::SendNotification(original)) = actions
+                    .iter_mut()
+                    .find(|action| matches!(action, Action::SendNotification(_)))
+            {
+                *original = replacement;
+            }
             if bfd_notification_gr {
                 for action in &mut actions {
                     if let Action::SendNotification(notification) = action
@@ -426,6 +443,28 @@ impl PeerSession {
     )]
     pub(super) async fn execute_actions(&mut self, actions: Vec<Action>) -> Vec<Event> {
         let mut follow_up = Vec::new();
+        // Decode-error batches can put SessionDown before SendNotification.
+        // Prepare its final bytes while peer receive limits and BMP context
+        // still exist, after drive_fsm has applied any notification wrapping.
+        let notification_limit = self.outbound_max_message_len();
+        let mut notification_pdu = actions.iter().find_map(|action| {
+            if let Action::SendNotification(notification) = action {
+                Some(
+                    rustbgpd_wire::encode_message_with_limit(
+                        &Message::Notification(notification.clone()),
+                        notification_limit,
+                    )
+                    .map(bytes::BytesMut::freeze),
+                )
+            } else {
+                None
+            }
+        });
+        if self.bmp_tx.is_some()
+            && let Some(Ok(pdu)) = &notification_pdu
+        {
+            self.last_down_reason = Some(PeerDownReason::LocalNotification(pdu.clone()));
+        }
 
         for action in actions {
             match action {
@@ -485,16 +524,14 @@ impl PeerSession {
                         self.sent_hard_reset = true;
                     }
                     let msg = Message::Notification(notif);
-                    // Cache the attempted raw NOTIFICATION PDU for BMP Peer
-                    // Down reason 1. The locally initiated cause survives a
-                    // best-effort enqueue/write failure.
-                    if self.bmp_tx.is_some()
-                        && let Ok(encoded) = rustbgpd_wire::encode_message(&msg)
+                    let encoded = notification_pdu.take().unwrap_or_else(|| {
+                        rustbgpd_wire::encode_message_with_limit(&msg, notification_limit)
+                            .map(bytes::BytesMut::freeze)
+                    });
+                    if let Err(e) = encoded
+                        .map_err(crate::TransportError::from)
+                        .and_then(|pdu| self.enqueue_priority_encoded(&msg, pdu))
                     {
-                        self.last_down_reason =
-                            Some(PeerDownReason::LocalNotification(Bytes::from(encoded)));
-                    }
-                    if let Err(e) = self.enqueue_priority(&msg) {
                         warn!(peer = %self.peer_label, error = %e, "failed to send NOTIFICATION");
                         // Continue — we're tearing down anyway
                     }

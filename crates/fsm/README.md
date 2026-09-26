@@ -10,10 +10,10 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.8.2 is the latest published release. Version 0.8.3 is
-prepared in this checkout on the same `0.8` compatibility line with wire
-`0.21.3`. Use a path dependency to exercise the prepared version until it is
-published. The public API is unchanged from `0.8.0`;
+`rustbgpd-fsm` 0.8.2 is the latest published release. Version 0.9.0 is
+prepared in this checkout with wire `0.22.0`. Upgrade dependencies exchanging
+public wire types together. Use a path dependency to exercise the prepared
+version until it is published. FSM method signatures are unchanged;
 [Compatibility](#compatibility) describes the negotiation changes.
 
 ## Usage
@@ -137,7 +137,7 @@ than disabling retries. The send-hold-time documentation previously credited
 that check to "config validation", which belongs to the embedding
 application, not to this crate.
 
-`rustbgpd-fsm 0.8.3` is a prepared patch with no public API changes.
+`rustbgpd-fsm 0.9.0` is prepared with the wire 0.22 dependency upgrade.
 Notification GR follows the two advertised N bits even when the peer's GR
 family list is empty, so protective teardown sends Hard Reset to helper-only
 peers. It also includes the pending malformed BGP Role negotiation correction;

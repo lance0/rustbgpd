@@ -1,4 +1,5 @@
 use super::*;
+use rustbgpd_wire::RouteRefreshSubtype;
 
 fn orf_permit(seq: u32, min: u8, max: u8, p: Ipv4Prefix) -> AddressPrefixOrf {
     AddressPrefixOrf {
@@ -816,6 +817,12 @@ async fn gr_restarter_defers_eor_for_orf_gated_family() {
     )
     .await;
     let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.refresh_markers.is_empty()),
+        "initial ORF flood must not emit BoRR before the deferred EoR"
+    );
     let announced = prefixes_announced(&updates);
     assert!(
         announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
@@ -863,6 +870,12 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
     .unwrap();
 
     let updates = drain_until_eor(&mut out_rx, (Afi::Ipv4, Safi::Unicast)).await;
+    assert!(
+        updates
+            .iter()
+            .all(|update| update.refresh_markers.is_empty()),
+        "initial refresh flood must not emit BoRR before the deferred EoR"
+    );
     let announced = prefixes_announced(&updates);
     assert!(
         announced.contains(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
@@ -873,8 +886,96 @@ async fn gr_restarter_deferred_eor_follows_plain_refresh_flood() {
         16
     ))));
 
+    tx.send(RibUpdate::RouteRefreshRequest {
+        queued: Arc::default(),
+        session_id: 0,
+        peer: target,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+    let subsequent = out_rx.recv().await.unwrap();
+    assert_eq!(
+        subsequent.refresh_markers,
+        vec![
+            (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::BoRR),
+            (Afi::Ipv4, Safi::Unicast, RouteRefreshSubtype::EoRR),
+        ]
+    );
+
     drop(tx);
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn dirty_initial_dump_refresh_waits_for_pending_eor() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let family = (Afi::Ipv4, Safi::Unicast);
+    manager.enqueue_routes_received(
+        source.into(),
+        vec![make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            source,
+        )],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+    while manager.process_next_route_chunk() {}
+    // Capacity one admits the initial routes but forces the separate EoR
+    // into pending_eor. No scheduler race or synthetic pending state.
+    let (outbound_tx, mut out_rx) = mpsc::channel(1);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: vec![family],
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    assert!(manager.pending_eor[&peer].contains(&family));
+    assert!(manager.dirty_peers.contains(&peer));
+    assert!(!out_rx.try_recv().unwrap().announce.is_empty());
+    manager.send_route_refresh_response(peer, family.0, family.1);
+    let refresh = out_rx.try_recv().unwrap();
+    assert!(!refresh.announce.is_empty());
+    assert!(
+        refresh.refresh_markers.is_empty(),
+        "pending initial EoR forbids BoRR"
+    );
+    assert!(
+        refresh.end_of_rib.is_empty(),
+        "dirty resync still owns the initial EoR"
+    );
+    manager.distribute_changes(&HashSet::new(), &HashSet::new());
+    let resync = out_rx.try_recv().unwrap();
+    assert!(resync.refresh_markers.is_empty());
+    assert_eq!(resync.end_of_rib, vec![family]);
+    assert!(!manager.pending_eor.contains_key(&peer));
+    manager.send_route_refresh_response(peer, family.0, family.1);
+    assert_eq!(
+        out_rx.try_recv().unwrap().refresh_markers,
+        vec![
+            (family.0, family.1, RouteRefreshSubtype::BoRR),
+            (family.0, family.1, RouteRefreshSubtype::EoRR),
+        ]
+    );
 }
 
 /// Two independently gated families lift independently: each family's

@@ -628,9 +628,9 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.21.2` | `0.21.3` |
-| `rustbgpd-fsm` | `0.8.2` | `0.8.3` |
-| `rustbgpd-rpki` | `0.3.2` | `0.3.2` |
+| `rustbgpd-wire` | `0.21.2` | `0.22.0` |
+| `rustbgpd-fsm` | `0.8.2` | `0.9.0` |
+| `rustbgpd-rpki` | `0.3.2` | `0.4.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`

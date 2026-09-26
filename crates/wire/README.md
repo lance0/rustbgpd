@@ -29,7 +29,12 @@ it corrects the `FlowSpecAction::TrafficAction::terminal` field documentation.
 cap against the 255-byte RFC 9003 section 3 receive limit. Neither patch
 changes a public item, an encoding, or a decoding.
 
-The staged 0.21.3 patch rejects a zero-length `CLUSTER_LIST` on decode. Under
+The prepared 0.22.0 minor release adds `NotificationCode::RouteRefreshMessage`
+and the Invalid Message Length subcode for RFC 7313 error 7/1. Code 7 now
+decodes to the named variant instead of `Unknown(7)`; encoding preserves the
+same byte. It pairs with FSM 0.9 and RPKI 0.4 when sharing public wire types.
+
+The prepared release also rejects a zero-length `CLUSTER_LIST` on decode. Under
 RFC 7606 section 7.10, revised decoding treats the UPDATE as withdrawn for
 an internal neighbor and discards the attribute for an external neighbor.
 
@@ -343,7 +348,7 @@ path:
 
 ```toml
 [dependencies]
-rustbgpd-wire = { version = "0.21.3", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.22.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

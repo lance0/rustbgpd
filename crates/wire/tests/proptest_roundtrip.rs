@@ -24,11 +24,11 @@ fn arb_notification_code() -> impl Strategy<Value = NotificationCode> {
         Just(NotificationCode::HoldTimerExpired),
         Just(NotificationCode::FsmError),
         Just(NotificationCode::Cease),
+        Just(NotificationCode::RouteRefreshMessage),
         Just(NotificationCode::SendHoldTimerExpired),
-        // Unknown codes: 0, 7, and 9–255 (outside the assigned range —
-        // 8 became RFC 9687 Send Hold Timer Expired, so `Unknown(8)`
-        // no longer round-trips).
-        prop_oneof![Just(0u8), Just(7u8), 9..=255u8].prop_map(NotificationCode::Unknown),
+        // Codes without a named variant: 0 and 9–255. Named codes decode
+        // to their canonical variant rather than `Unknown(code)`.
+        prop_oneof![Just(0u8), 9..=255u8].prop_map(NotificationCode::Unknown),
     ]
 }
 

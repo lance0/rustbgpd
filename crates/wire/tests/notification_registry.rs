@@ -45,11 +45,10 @@ fn documented_notification_registry_matches_descriptions() {
             }
         }
     }
-    // Description coverage must not change the decoder's public enum variants.
-    for code in [7, 9] {
-        assert_eq!(
-            NotificationCode::from_u8(code),
-            NotificationCode::Unknown(code)
-        );
-    }
+    assert_eq!(
+        NotificationCode::from_u8(7),
+        NotificationCode::RouteRefreshMessage
+    );
+    // Description-only coverage for code 9 does not add a named wire variant.
+    assert_eq!(NotificationCode::from_u8(9), NotificationCode::Unknown(9));
 }
