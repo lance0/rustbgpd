@@ -124,7 +124,8 @@ registration without a fixed maximum, and the warning is not proof of lost
 registration. Matching preserves `instance` and `peer`; same-address scoped
 siblings share RIB membership and cannot be diagnosed independently by this
 signal. See [delayed outbound registration](../reference/operations.md#delayed-outbound-registration)
-for the distinct snapshot-and-session-age advisory in `rbgp doctor`.
+for the distinct snapshot-and-session-age advisory in `rbgp doctor`, which
+requires a known supporting daemon version before reporting absence.
 
 `BgpSessionNotEstablished` joins `bgp_peer_info` with
 `group_left(remote_asn, description, peer_group)`, so its alert labels carry

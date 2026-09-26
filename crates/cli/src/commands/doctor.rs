@@ -726,6 +726,25 @@ fn nofile_check(pid: u32, soft: u64, hard: u64, run_context: &str) -> Check {
     }
 }
 
+/// v0.50.0 exposes update_group and propagates failed RIB reads. Unknown
+/// version strings cannot establish that an empty protobuf field is present.
+fn supports_outbound_registration(version: Option<&str>) -> bool {
+    let Some(version) = version else {
+        return false;
+    };
+    let mut parts = version.split('.');
+    let mut next = || {
+        parts
+            .next()
+            .filter(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|part| part.parse::<u64>().ok())
+    };
+    let (Some(major), Some(minor), Some(patch)) = (next(), next(), next()) else {
+        return false;
+    };
+    parts.next().is_none() && (major, minor, patch) >= (0, 50, 0)
+}
+
 /// Pure per-peer session checks: state (with time-in-state derived from
 /// the most recent session event), slow-peer health, and flap count.
 /// Called only after a successful neighbor/RIB snapshot read.
@@ -742,6 +761,7 @@ fn peer_checks(
     session_evidence: SessionHistoryEvidence,
     now: u64,
     last_error: &str,
+    daemon_version: Option<&str>,
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     if stale {
@@ -880,10 +900,14 @@ fn peer_checks(
         checks.push(Check {
             name: format!("peer.{address}.outbound"),
             status: CheckStatus::Warn,
-            detail: format!(
-                "peer {address} Established for {}; outbound registration is absent in this snapshot (absence duration unknown). Queued imports can defer registration without a fixed deadline; inspect RIB backlog and peer state",
-                output::format_duration(uptime_seconds)
-            ),
+            detail: if supports_outbound_registration(daemon_version) {
+                format!(
+                    "peer {address} Established for {}; outbound registration is absent in this snapshot (absence duration unknown). Queued imports can defer registration without a fixed deadline; inspect RIB backlog and peer state",
+                    output::format_duration(uptime_seconds)
+                )
+            } else {
+                format!("peer {address} outbound registration is unknown: daemon version does not establish update-group field support")
+            },
         });
     }
     checks
@@ -3084,6 +3108,7 @@ async fn run_with_deadlines(
                             session_evidence,
                             now,
                             &record.support.last_error,
+                            daemon_version.as_deref(),
                         ) {
                             reporter.record(check.name, check.status, check.detail)?;
                         }
@@ -3973,6 +3998,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Ok);
@@ -3990,7 +4016,18 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         };
         let diagnose = |stale, countdown, evidence| {
             peer_checks(
-                "10.0.0.2", "Connect", stale, countdown, false, "", 0, 0, evidence, 1_000_000, "",
+                "10.0.0.2",
+                "Connect",
+                stale,
+                countdown,
+                false,
+                "",
+                0,
+                0,
+                evidence,
+                1_000_000,
+                "",
+                Some("0.50.0"),
             )
         };
 
@@ -4185,6 +4222,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(transitioned), None),
             now,
             "",
+            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 1);
         assert!(checks[0].status == CheckStatus::Fail);
@@ -4210,6 +4248,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - STUCK_PEER_SECS + 1), None),
             now,
             "",
+            Some("0.50.0"),
         );
         assert!(checks[0].status == CheckStatus::Warn);
     }
@@ -4236,6 +4275,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             ),
             now,
             "",
+            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 3);
@@ -4269,6 +4309,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Enabled)),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 1);
@@ -4293,6 +4334,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
         assert!(checks[0].status == CheckStatus::Warn);
         assert!(checks[0].detail.contains("unknown duration"));
@@ -4315,6 +4357,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Warn);
@@ -4343,10 +4386,34 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(Some(now - 30), Some(now - 30)),
             now,
             "",
+            Some("0.50.0"),
         );
         assert_eq!(checks.len(), 2);
         assert!(checks[1].status == CheckStatus::Fail);
         assert!(checks[1].detail.contains("session loss 00:00:30 ago"));
+    }
+
+    #[test]
+    fn outbound_registration_version_support_is_conservative() {
+        for version in ["0.50.0", "0.50.1", "0.72.0", "1.0.0"] {
+            assert!(supports_outbound_registration(Some(version)), "{version}");
+        }
+        for version in [
+            None,
+            Some(""),
+            Some("0.49.99"),
+            Some("0.45.0"),
+            Some("0.50"),
+            Some("0.50.0.1"),
+            Some("v0.50.0"),
+            Some("0.50.0-rc1"),
+            Some("0.72.0+custom"),
+            Some("+1.0.0"),
+            Some("1..0"),
+            Some("18446744073709551616.0.0"),
+        ] {
+            assert!(!supports_outbound_registration(version), "{version:?}");
+        }
     }
 
     #[test]
@@ -4378,6 +4445,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
                 SessionHistoryEvidence::Unavailable,
                 1_000_000,
                 "",
+                Some("0.50.0"),
             );
             let outbound = checks
                 .iter()
@@ -4413,6 +4481,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence_with_admin(Some(1), None, Some(RetainedAdminState::Disabled)),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
         // LAN-668 red proof: retained disabled intent must not turn a stale
         // timeout placeholder green.
@@ -4438,6 +4507,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
 
         assert_eq!(checks.len(), 2);
@@ -4458,6 +4528,7 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
             retained_session_evidence(None, None),
             1_000_000,
             "",
+            Some("0.50.0"),
         );
         assert_eq!(ungrouped[1].detail, expected);
     }
@@ -5910,57 +5981,61 @@ paths = ["x"]
 
     #[tokio::test]
     async fn doctor_bundle_reports_outbound_registration_as_advisory() {
-        let server = spawn_mock_server(None).await;
-        let dir = tempfile::tempdir().unwrap();
-        *server.state.config_effective_toml.lock().await = Some(format!(
-            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
-            dir.path().display()
-        ));
-        let mut missing = neighbor(
-            "10.0.0.2",
-            rustbgpd_api::proto::SessionState::Established as i32,
-            0,
-            "",
-        );
-        missing.uptime_seconds = 301;
-        let mut registered = missing.clone();
-        registered.config.as_mut().unwrap().address = "10.0.0.3".to_string();
-        registered.update_group = "group:0".to_string();
-        *server.state.list_neighbors_response.lock().await = vec![missing, registered];
-        let bundle_path = dir.path().join("bundle.tar.gz");
-        let code = run(
-            connect(&server.addr, None).await,
-            &DoctorOptions {
-                output: Some(&bundle_path),
-                log_file: None,
-                daemon_address: &server.addr,
-                token_file_configured: false,
-                json: true,
-                pre_upgrade: None,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(code, 0, "delayed registration is an investigation advisory");
-        let files = extract_bundle(&bundle_path);
-        let manifest: serde_json::Value =
-            serde_json::from_str(find(&files, "manifest.json")).unwrap();
-        let warning = manifest_check(&manifest, "peer.10.0.0.2.outbound");
-        assert_eq!(warning["status"], "warn");
-        assert!(
-            warning["detail"]
-                .as_str()
-                .unwrap()
-                .contains("absence duration unknown")
-        );
-        assert!(
-            manifest["checks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|check| { check["name"] != "peer.10.0.0.3.outbound" }),
-            "the successful snapshot must retain a registered peer's group"
-        );
+        for version in ["0.50.0", "0.45.0", ""] {
+            let server = spawn_mock_server(None).await;
+            *server.state.health_daemon_version.lock().await = Some(version.to_string());
+            let dir = tempfile::tempdir().unwrap();
+            *server.state.config_effective_toml.lock().await = Some(format!(
+                "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+                dir.path().display()
+            ));
+            let mut missing = neighbor(
+                "10.0.0.2",
+                rustbgpd_api::proto::SessionState::Established as i32,
+                0,
+                "",
+            );
+            missing.uptime_seconds = 301;
+            let mut registered = missing.clone();
+            registered.config.as_mut().unwrap().address = "10.0.0.3".to_string();
+            registered.update_group = "group:0".to_string();
+            *server.state.list_neighbors_response.lock().await = vec![missing, registered];
+            let bundle_path = dir.path().join("bundle.tar.gz");
+            let code = run(
+                connect(&server.addr, None).await,
+                &DoctorOptions {
+                    output: Some(&bundle_path),
+                    log_file: None,
+                    daemon_address: &server.addr,
+                    token_file_configured: false,
+                    json: true,
+                    pre_upgrade: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(code, 0, "delayed registration is an investigation advisory");
+            let files = extract_bundle(&bundle_path);
+            let manifest: serde_json::Value =
+                serde_json::from_str(find(&files, "manifest.json")).unwrap();
+            let warning = manifest_check(&manifest, "peer.10.0.0.2.outbound");
+            assert_eq!(warning["status"], "warn");
+            let detail = warning["detail"].as_str().unwrap();
+            if version == "0.50.0" {
+                assert!(detail.contains("absence duration unknown"));
+            } else {
+                assert!(detail.contains("outbound registration is unknown"));
+                assert!(!detail.contains("absent"));
+            }
+            assert!(
+                manifest["checks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|check| { check["name"] != "peer.10.0.0.3.outbound" }),
+                "the successful snapshot must retain a registered peer's group"
+            );
+        }
     }
 
     #[tokio::test]

@@ -1942,8 +1942,11 @@ quiet when no outbound registration exists.
 non-stale neighbor/RIB snapshot shows an Established session older than five
 minutes with an empty `update_group`. The message reports **session age and
 current absence**, not the duration of missing registration. Unavailable
-snapshots and stale session observations do not establish absence. The warning
-does not change readiness or make doctor exit red.
+snapshots and stale session observations do not establish absence. An empty
+field also requires a recognized daemon health version of at least `0.50.0`,
+a release that exposes membership. Missing, older, malformed, or prerelease
+version strings leave registration unknown; any nonempty group remains evidence
+of registration. The warning does not change readiness or make doctor exit red.
 
 RIB membership is address-level. Same-address IPv6 link-local sessions on
 different interfaces share the membership evidence: one registered sibling can
