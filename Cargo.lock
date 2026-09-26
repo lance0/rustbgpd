@@ -3333,6 +3333,7 @@ dependencies = [
 name = "rustbgpd-rib"
 version = "0.72.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "criterion",
  "ipnet",

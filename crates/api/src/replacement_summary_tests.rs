@@ -180,6 +180,7 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     let (summary_tx, summary_rx) = mpsc::channel::<RibSummaryQuery>(8);
     let manager = RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new())
         .with_summary_queries(summary_rx);
+    let export_roster = manager.export_roster();
     let manager_task = tokio::spawn(manager.run());
     let (peer_tx, _peer_rx) = mpsc::channel(1);
     let (operator_tx, mut operator_rx) = mpsc::channel::<EnqueuedOperatorQuery>(8);
@@ -205,8 +206,8 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         PolicyService::new(AccessMode::ReadOnly, peer_tx.clone(), None, None)
             .with_rib_query(query_tx.clone())
             .with_operator_queries(operator_tx.clone())
-            .with_rib_summary_queries(summary_tx.clone())
-            .with_import_roster(roster.reader()),
+            .with_import_roster(roster.reader())
+            .with_export_roster(export_roster),
     );
     let neighbor = Arc::new(
         NeighborService::new(65000, AccessMode::ReadOnly, peer_tx, query_tx.clone(), None)
@@ -298,21 +299,23 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let mut policy_request = tokio::spawn({
-        let policy = policy.clone();
-        async move { stats(&policy, peer).await }
-    });
+    // Export statistics read the RIB's published roster (ADR-0136): they
+    // complete while the restore still holds the RIB, reporting the
+    // instances of the last completed operation.
+    let actual_stats = tokio::time::timeout(Duration::from_secs(1), stats(&policy, peer))
+        .await
+        .expect("export statistics do not wait for the held RIB");
     let mut neighbor_request = tokio::spawn({
         let neighbor = neighbor.clone();
         async move { neighbors(&neighbor).await }
     });
     tokio::time::timeout(Duration::from_secs(1), async {
-        while summary_tx.capacity() != 6 {
+        while summary_tx.capacity() != 7 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("both RPCs reached the real RIB summary lane");
+    .expect("the neighbor RPC reached the real RIB summary lane");
     release_tx.send(()).unwrap();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), entered_rx.recv())
@@ -323,22 +326,17 @@ async fn replacement_summaries_complete_api_reads_inside_actual_rib_restore() {
     assert_eq!(
         summary_tx.capacity(),
         8,
-        "checkpoint must have consumed both queued summaries"
+        "checkpoint must have consumed the queued summary"
     );
-    let (actual_stats, actual_neighbors) = tokio::time::timeout(Duration::from_secs(1), async {
-        (
-            (&mut policy_request).await.unwrap(),
-            (&mut neighbor_request).await.unwrap(),
-        )
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!(
-            "operator RPCs incomplete while restore held: {error}; policy={}, neighbor={}",
-            policy_request.is_finished(),
-            neighbor_request.is_finished()
-        )
-    });
+    let actual_neighbors = tokio::time::timeout(Duration::from_secs(1), &mut neighbor_request)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "neighbor RPC incomplete while restore held: {error}; neighbor={}",
+                neighbor_request.is_finished()
+            )
+        })
+        .unwrap();
     assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(actual_stats, baseline_stats);
     assert_eq!(actual_neighbors, baseline_neighbors);

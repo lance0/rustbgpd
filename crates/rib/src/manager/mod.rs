@@ -13,6 +13,7 @@ pub use bench_support::{
     bench_evpn_dataplane_legacy_snapshot,
 };
 mod distribution;
+mod export_chains;
 mod flowspec_validation;
 mod graceful_restart;
 mod helpers;
@@ -597,8 +598,9 @@ pub struct RibManager {
     peer_unexportable: HashMap<IpAddr, HashSet<ExactExportKey>>,
     #[cfg(test)]
     grouped_advertised_count_calls: std::sync::atomic::AtomicUsize,
-    export_policy: Option<PolicyChain>,
-    peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
+    /// Installed export chains, per peer and global fallback, and their
+    /// published counter roster (ADR-0136).
+    export_chains: export_chains::ExportChains,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Families for which each registered outbound peer advertised the
@@ -1676,10 +1678,6 @@ impl RibManager {
         cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
     ) -> Self {
-        // ADR-0136: the global fallback's counters exist from install.
-        if let Some(chain) = &export_policy {
-            let _ = chain.hit_counters();
-        }
         let (route_events_tx, _) = broadcast::channel(4096);
         metrics.set_route_event_history_capacity(
             i64::try_from(ROUTE_EVENT_HISTORY_CAPACITY).unwrap_or(i64::MAX),
@@ -1758,8 +1756,9 @@ impl RibManager {
             peer_unexportable: HashMap::new(),
             #[cfg(test)]
             grouped_advertised_count_calls: std::sync::atomic::AtomicUsize::new(0),
-            export_policy,
-            peer_export_policies: HashMap::new(),
+            // ADR-0136: publishes the first roster, creating the global
+            // fallback's counters.
+            export_chains: export_chains::ExportChains::new(export_policy),
             peer_sendable_families: HashMap::new(),
             peer_advertised_llgr_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
@@ -2222,8 +2221,8 @@ impl RibManager {
     }
 
     /// Create the counter instance of each named peer's installed export
-    /// chain (ADR-0136), compiling it if needed, so a statistics read never
-    /// compiles or creates one inside the actor. Policy replacements call this
+    /// chain (ADR-0136), compiling it if needed, at install rather than at
+    /// the roster's publication or first evaluation. Policy replacements call this
     /// once membership has settled: a grouped member's per-peer chain has then
     /// been replaced by its group's already-counted handle, so a discarded
     /// chain is never compiled. Registration needs no call: its initial dump
@@ -2231,18 +2230,34 @@ impl RibManager {
     /// always shares.
     fn create_installed_export_counters(&self, peers: impl IntoIterator<Item = IpAddr>) {
         for peer in peers {
-            if let Some(Some(chain)) = self.peer_export_policies.get(&peer) {
+            if let Some(Some(chain)) = self.export_chains.get(&peer) {
                 let _ = chain.hit_counters();
             }
         }
     }
 
+    /// Publish the export roster if the installed export chains changed.
+    /// Skipped while a clean transition is parked: its pre-commit phases
+    /// change no committed chain, and its `CommitMembers` batches switch
+    /// members that must publish together at the terminal batch.
+    fn publish_export_roster(&mut self) {
+        if self.pending_clean_policy_transition.is_none() {
+            self.export_chains.publish_if_changed();
+            #[cfg(test)]
+            self.export_chains.assert_published();
+        }
+    }
+
+    /// The export roster `GetPolicyStats` reads (ADR-0136). The cell closes
+    /// when this manager is dropped.
+    #[must_use]
+    pub fn export_roster(&self) -> crate::export_roster::ExportRosterReader {
+        self.export_chains.reader()
+    }
+
     /// Resolve the export policy for a peer: per-peer if set, else global.
     fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
-        match self.peer_export_policies.get(&peer) {
-            Some(policy) => policy.as_ref(),
-            None => self.export_policy.as_ref(),
-        }
+        self.export_chains.for_peer(peer)
     }
 
     /// Clear all enhanced route refresh state for a peer.
@@ -3274,9 +3289,6 @@ impl RibManager {
                     .filter(|group| group.members.is_empty())
                     .count();
                 let _ = reply.send(count);
-            }
-            RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
-                self.handle_query_export_policy_term_hits(peer, reply);
             }
             RibUpdate::PrepareOutboundPrefixLimits { txn, config, reply } => {
                 self.handle_prepare_outbound_prefix_limits(txn, config, reply);
@@ -4423,6 +4435,11 @@ impl RibManager {
         tokio::pin!(selection_sleep);
 
         loop {
+            // The export roster's one publication point (ADR-0136): after
+            // each completed unit, never while a grouped transition is
+            // parked between `CommitMembers` batches.
+            self.publish_export_roster();
+
             // Sample ingest-channel depth once per iteration — a gauge
             // pegged at the channel capacity on scrape means producers
             // (sessions, local originators) are parked on backpressure.

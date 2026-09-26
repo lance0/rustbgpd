@@ -26,17 +26,13 @@ resolved.
   export counters, import counters, and dataset reads. Fleet calls such as
   `rbgp policy stats --direction both` can return `DEADLINE_EXCEEDED` during
   reload activity, with no partial rows. Check reload settlement before
-  retrying the read. Typed admission reduces specific actor waits; the
-  [operator-read design](../adr/0132-operator-read-path.md) adds temporary RIB
-  summaries for synchronous policy replacement and dataset reevaluation,
-  plus read service between queued RIB work units. Final phase coverage
-  remains outstanding. General RIB queries retain their
-  consistency fences, incomplete restoration can fence live peer-manager
-  reads. Peer validation, import counters and dataset status read the peer
-  manager's published roster ([ADR-0136](../adr/0136-owner-published-counter-reads.md))
-  instead of queueing on the peer manager; the export stage still queues on
-  the RIB, and an import read can still wait for a Pending session
-  publication, a busy counter or dataset error lock, or response delivery. Installed import
+  retrying the read. Peer validation, import counters and dataset status
+  are read from the roster the peer manager publishes, and export counters
+  from the roster the RIB manager publishes
+  ([ADR-0136](../adr/0136-owner-published-counter-reads.md)), so no stage
+  queues on either actor. A read can still wait for a Pending session
+  publication, a busy counter or dataset error lock, runtime scheduling, or
+  response delivery. Installed import
   counter publication is documented in [ADR-0133](../adr/0133-installed-import-counter-reads.md).
   The [separate-generator control](../perf/artifacts/installed-import-counters-isolated-2026-09-13/README.md)
   records CPU placement, complete call results and remaining stale observations.
@@ -54,8 +50,9 @@ resolved.
   such read: one of 17,556 `policy stats` calls returned `DEADLINE_EXCEEDED`
   inside a reload commit, its import stage exhausting the remainder of the
   2 s deadline. All three runs are IPv4-only; no dual-stack soak has run, and a
-  soak covers only the tag it ran on. This issue stays open until the final
-  phase coverage passes on the final runtime candidate. Retrying an operator
+  soak covers only the tag it ran on. This issue stays open until ADR-0136's
+  qualification (the isolated cell and the next flagship soak) passes on
+  the final runtime candidate. Retrying an operator
   command does not
   turn a failed management-soak sample into a pass. See the
   [policy stats contract](api.md#policyservice).

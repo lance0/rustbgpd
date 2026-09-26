@@ -905,9 +905,10 @@ enum PolicyAction {
     ///
     /// Reports how many routes matched each term of the installed
     /// import/export chains since chain install (ADR-0096). Counters
-    /// reset when a chain is replaced (policy reload / hot-apply);
-    /// import chains report their install generation so a replacement
-    /// is visible.
+    /// reset when a chain is replaced (policy reload / hot-apply), and
+    /// export counters also when a session re-registers; import chains
+    /// report their install generation and export chains their
+    /// counter-instance id, so a reset is visible.
     #[command(visible_alias = "counters")]
     Stats {
         /// Restrict to one neighbor's installed chain

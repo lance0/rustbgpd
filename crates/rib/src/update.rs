@@ -54,13 +54,6 @@ pub enum RibReadinessQuery {
 /// Route queries and mutations deliberately cannot enter this lane.
 #[derive(Debug)]
 pub enum RibSummaryQuery {
-    /// Snapshot installed export-policy counters.
-    ExportPolicyTermHits {
-        /// Filter by peer, or include all installed chains and the global fallback.
-        peer: Option<IpAddr>,
-        /// Response channel.
-        reply: oneshot::Sender<Vec<ExportPolicyTermHits>>,
-    },
     /// Snapshot the RIB-owned portion of neighbor state.
     NeighborRibSnapshots {
         /// Requested peers in response order.
@@ -75,9 +68,6 @@ pub enum RibSummaryQuery {
 impl From<RibSummaryQuery> for RibUpdate {
     fn from(query: RibSummaryQuery) -> Self {
         match query {
-            RibSummaryQuery::ExportPolicyTermHits { peer, reply } => {
-                Self::QueryExportPolicyTermHits { peer, reply }
-            }
             RibSummaryQuery::NeighborRibSnapshots {
                 peers,
                 comparison,
@@ -1128,14 +1118,19 @@ pub struct NeighborPolicyStats {
     pub export_policy_routes_denied: u64,
 }
 
-/// Per-term hit-counter snapshot for one installed export chain
-/// (`RibUpdate::QueryExportPolicyTermHits`).
+/// Per-term hit-counter snapshot for one installed export chain, captured
+/// from the published export roster
+/// ([`capture_export`](crate::export_roster::capture_export)).
 #[derive(Debug, Clone)]
 pub struct ExportPolicyTermHits {
     /// Peer the chain is installed for; `None` = the shared global
     /// fallback chain instance (peers evaluated against the fallback
     /// before any per-peer install).
     pub peer: Option<IpAddr>,
+    /// Process-wide id of the counter instance
+    /// ([`PolicyHitCounters::id`](rustbgpd_policy::PolicyHitCounters::id)):
+    /// nonzero, and a new id means the counters restarted.
+    pub counter_instance: u64,
     /// Routes evaluated through the chain since install.
     pub evals: u64,
     /// Routes denied by an evaluation error since install (ADR-0103
@@ -2539,16 +2534,6 @@ pub enum RibUpdate {
     TestQueryUncommittedPolicyTransitionGroups {
         /// Response channel for the number of still-unowned group RIBs.
         reply: oneshot::Sender<usize>,
-    },
-    /// Query: snapshot the live per-term guard-hit counters of the
-    /// installed export chains (ADR-0096 Decision 3.3). Counters
-    /// accumulate since a chain instance was installed and reset when
-    /// it is replaced.
-    QueryExportPolicyTermHits {
-        /// Optional peer filter; `None` = every installed chain.
-        peer: Option<IpAddr>,
-        /// Response channel.
-        reply: oneshot::Sender<Vec<ExportPolicyTermHits>>,
     },
     /// Preflight an outbound prefix-limit edit across every affected live
     /// peer and hold it as an inactive prepared transaction (ADR-0113).

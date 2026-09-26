@@ -1243,6 +1243,7 @@ policy chain_default_permit {
 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let roster = manager.export_roster();
     let handle = tokio::spawn(manager.run());
 
     let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1321,16 +1322,7 @@ policy chain_default_permit {
     // Live counters: the two distributed routes evaluated once each;
     // the deny term matched exactly one. The explain above must not
     // have counted (side-effect-free read).
-    let hits = {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryExportPolicyTermHits {
-            peer: None,
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let hits = published_export_rows(&tx, &roster, None).await;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].peer, Some(target));
     assert_eq!(hits[0].evals, 2);
@@ -1344,28 +1336,11 @@ policy chain_default_permit {
 
     // The peer-filtered form answers the same; an unknown peer answers
     // empty.
-    let filtered = {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryExportPolicyTermHits {
-            peer: Some(target),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let filtered = published_export_rows(&tx, &roster, Some(target)).await;
     assert_eq!(filtered.len(), 1);
     assert_eq!(filtered[0].terms[0].hits, 1);
-    let missing = {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryExportPolicyTermHits {
-            peer: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))),
-            reply: reply_tx,
-        })
-        .await
-        .unwrap();
-        reply_rx.await.unwrap()
-    };
+    let missing =
+        published_export_rows(&tx, &roster, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99)))).await;
     assert!(missing.is_empty());
 
     // An anonymous `.rpol` Deny has no stable member identity. Its term must

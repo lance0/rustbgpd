@@ -67,7 +67,11 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
         .unwrap();
     let (reply, mut summary_response) = oneshot::channel();
     summary_tx
-        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            reply,
+        })
         .unwrap();
     let (readiness, mut readiness_response) = oneshot::channel();
     readiness_tx
@@ -99,6 +103,7 @@ async fn assert_timer_drain_yields_before_backlog_is_empty(pending_chunk: bool) 
         summary_response
             .try_recv()
             .expect("typed summary must be served at the first drain seam")
+            .snapshots
             .is_empty()
     );
     assert!(
@@ -215,7 +220,11 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
         .unwrap();
     let (reply, mut summary) = oneshot::channel();
     summary_tx
-        .try_send(crate::update::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
+        .try_send(crate::update::RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            reply,
+        })
         .unwrap();
     let (reply, mut readiness) = oneshot::channel();
     readiness_tx
@@ -251,7 +260,7 @@ async fn timer_drain_preserves_newly_accepted_policy_transition_fence() {
     ));
     let handle = tokio::spawn(actor);
     assert_eq!(query.await.unwrap(), 0);
-    assert!(summary.await.unwrap().is_empty());
+    assert!(summary.await.unwrap().snapshots.is_empty());
     let _outcome = transition.await.unwrap();
     assert_eq!(primary.await.unwrap(), 0);
     drop(tx);

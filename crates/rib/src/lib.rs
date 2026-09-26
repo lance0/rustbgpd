@@ -28,6 +28,8 @@ pub mod event;
 /// Sink boundary for handing route + EVPN events to an out-of-crate
 /// consumer (ADR-0072 durable event outbox).
 pub mod event_sink;
+/// The RIB's published export-policy counter roster (ADR-0136).
+pub mod export_roster;
 /// Received `FlowSpec` feasibility against the unicast RIB.
 mod flowspec_validation;
 /// Loc-RIB: best route per prefix.

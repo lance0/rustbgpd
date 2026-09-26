@@ -2829,7 +2829,7 @@ impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicySer
             peer_address: peer_address.clone(),
             direction: "export".to_string(),
             routes_evaluated: 7,
-            policy_generation: 0,
+            policy_generation: 41,
             eval_errors: 2,
             last_error: "overflow in policy customer-in(200) term customer-routes".to_string(),
             terms: vec![

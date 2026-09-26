@@ -11,15 +11,15 @@ use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::{
-    peer_manager_operator_read, peer_manager_read, rib_manager_read, rib_summary_read,
-};
+use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
 use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::import_roster::{
     DatasetCaptureError, ImportCaptureProgress, ImportRosterReader, capture_datasets,
     capture_import,
 };
+use rustbgpd_rib::export_roster::{ExportCaptureError, ExportRosterReader, capture_export};
+
 use crate::peer_types::{
     ConfigEvent, EnqueuedOperatorQuery, NamedPolicyDefinition, OwnedCatalogMutation,
     OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
@@ -372,11 +372,14 @@ pub struct PolicyService {
     /// (ADR-0096 Decision 6). `None` when the service was built
     /// without it — `TestPolicy` then reports `FAILED_PRECONDITION`.
     rib_tx: Option<mpsc::Sender<rustbgpd_rib::RibUpdate>>,
-    rib_summary_tx: Option<mpsc::Sender<rustbgpd_rib::RibSummaryQuery>>,
     /// The peer manager's published import roster, backing `GetPolicyStats`
     /// peer validation, import counters and dataset status (ADR-0136).
     /// `None` makes `GetPolicyStats` report `FAILED_PRECONDITION`.
     import_roster: Option<ImportRosterReader>,
+    /// The RIB manager's published export roster, backing `GetPolicyStats`
+    /// export counters (ADR-0136). `None` makes an export read report
+    /// `FAILED_PRECONDITION`.
+    export_roster: Option<ExportRosterReader>,
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     owned_actor_timeout: Duration,
 }
@@ -420,8 +423,8 @@ impl PolicyService {
             runtime_config_lock,
             config_mutation_gate,
             rib_tx: None,
-            rib_summary_tx: None,
             import_roster: None,
+            export_roster: None,
             settlement: None,
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
         }
@@ -453,20 +456,17 @@ impl PolicyService {
         self
     }
 
-    /// Attach the summary lane served from frozen values during RIB replacement.
-    #[must_use]
-    pub fn with_rib_summary_queries(
-        mut self,
-        tx: mpsc::Sender<rustbgpd_rib::RibSummaryQuery>,
-    ) -> Self {
-        self.rib_summary_tx = Some(tx);
-        self
-    }
-
     /// Attach the peer manager's published import roster.
     #[must_use]
     pub fn with_import_roster(mut self, roster: ImportRosterReader) -> Self {
         self.import_roster = Some(roster);
+        self
+    }
+
+    /// Attach the RIB manager's published export roster.
+    #[must_use]
+    pub fn with_export_roster(mut self, roster: ExportRosterReader) -> Self {
+        self.export_roster = Some(roster);
         self
     }
 
@@ -1440,7 +1440,6 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::GetPolicyStatsRequest>,
     ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
-        use rustbgpd_rib::RibSummaryQuery;
         use rustbgpd_transport::handle::ImportPolicyStatsError;
 
         let deadline = tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT;
@@ -1466,8 +1465,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         let unavailable =
             || Status::failed_precondition("policy stats runtime unavailable on this listener");
         let roster_cell = self.import_roster.as_ref().ok_or_else(unavailable)?;
-        // One load per request (ADR-0136): peer validation, import and
-        // datasets read this roster, held across the awaits below.
+        let export_cell = if want_export {
+            Some(self.export_roster.as_ref().ok_or_else(unavailable)?)
+        } else {
+            None
+        };
+        // One load per roster per request (ADR-0136): peer validation, import
+        // and datasets read this roster, held across the awaits below.
         let roster = roster_cell.load();
         let selected = match peer {
             Some(address) => {
@@ -1498,16 +1502,21 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // "both" reports export chains first, then import chains, each
         // block sorted by peer address (deterministic output).
         let mut out = Vec::new();
-        if want_export {
-            let rib_tx = self.rib_tx.as_ref().ok_or_else(unavailable)?;
-            let chains = policy_stats_request(
-                deadline,
-                "export",
-                audit.as_ref(),
-                rib_summary_read(rib_tx, self.rib_summary_tx.as_ref(), |reply| {
-                    RibSummaryQuery::ExportPolicyTermHits { peer, reply }
-                }),
-            )
+        if let Some(export_cell) = export_cell {
+            // The RIB's published export roster, held across the awaits below.
+            let export_roster = export_cell.load();
+            let chains = policy_stats_request(deadline, "export", audit.as_ref(), async {
+                capture_export(&export_roster, peer, deadline)
+                    .await
+                    .map_err(|error| match error {
+                        ExportCaptureError::TimedOut => {
+                            Status::deadline_exceeded("policy stats aggregate deadline exceeded")
+                        }
+                        ExportCaptureError::Unavailable => {
+                            Status::unavailable("installed export policy counters unavailable")
+                        }
+                    })
+            })
             .await?;
             out.extend(chains.into_iter().map(|chain| {
                 proto::PolicyChainStats {
@@ -1519,9 +1528,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                     eval_errors: chain.eval_errors,
                     last_error: chain.last_error.unwrap_or_default(),
                     terms: term_stats(chain.terms),
-                    // Export chains do not track an install generation yet
-                    // (LAN-311); 0 = untracked, per the proto contract.
-                    policy_generation: 0,
+                    // The counter-instance id: a new id means the counters
+                    // restarted.
+                    policy_generation: chain.counter_instance,
                 }
             }));
         }
@@ -1589,9 +1598,12 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         .collect();
 
         // Checked after capture, not only before it: a roster loaded before
-        // the peer manager stopped must not report its values as success.
+        // its owner stopped must not report its values as success.
         if roster_cell.is_closed() {
             return Err(Status::unavailable("peer manager stopped"));
+        }
+        if export_cell.is_some_and(ExportRosterReader::is_closed) {
+            return Err(Status::unavailable("RIB manager stopped"));
         }
 
         Ok(Response::new(proto::GetPolicyStatsResponse {
@@ -1892,11 +1904,12 @@ mod tests {
         ExplainImportPolicy,
         ListRejectedRoutes,
         TestPolicy,
-        GetPolicyStats,
         GetValidationPolicyPosture,
     }
 
-    const POLICY_READS: [PolicyRead; 11] = [
+    /// `GetPolicyStats` reads only published rosters (ADR-0136), so it sends
+    /// to no actor and has no row here.
+    const POLICY_READS: [PolicyRead; 10] = [
         PolicyRead::ListPolicies,
         PolicyRead::GetPolicy,
         PolicyRead::ListNeighborSets,
@@ -1906,13 +1919,12 @@ mod tests {
         PolicyRead::ExplainImportPolicy,
         PolicyRead::ListRejectedRoutes,
         PolicyRead::TestPolicy,
-        PolicyRead::GetPolicyStats,
         PolicyRead::GetValidationPolicyPosture,
     ];
 
     impl PolicyRead {
         const fn rib_first(self) -> bool {
-            matches!(self, Self::TestPolicy | Self::GetPolicyStats)
+            matches!(self, Self::TestPolicy)
         }
     }
 
@@ -1996,12 +2008,6 @@ mod tests {
                     .await
                     .map(|_| ())
             }
-            PolicyRead::GetPolicyStats => PolicyServiceRpc::get_policy_stats(
-                service,
-                Request::new(policy_stats_rpc_request("", "export")),
-            )
-            .await
-            .map(|_| ()),
             PolicyRead::GetValidationPolicyPosture => {
                 PolicyServiceRpc::get_validation_policy_posture(
                     service,
@@ -2033,7 +2039,7 @@ mod tests {
     }
 
     /// Load-bearing: restoring any included RPC's first actor-send mapping to
-    /// `INTERNAL` makes its row red. The two multi-stage RPCs start at the RIB.
+    /// `INTERNAL` makes its row red. `TestPolicy` starts at the RIB.
     #[tokio::test]
     async fn policy_read_send_failures_are_unavailable() {
         for rpc in POLICY_READS {
@@ -2096,8 +2102,8 @@ mod tests {
         TestPolicyPeerContext,
     }
 
-    /// `GetPolicyStats` stages other than export read the published roster,
-    /// not a peer-manager lane, so only `TestPolicy`'s peer context remains.
+    /// `GetPolicyStats` reads published rosters, not an actor lane, so only
+    /// `TestPolicy`'s peer context remains.
     const POLICY_READ_EXTRA_STAGES: [PolicyReadExtraStage; 1] =
         [PolicyReadExtraStage::TestPolicyPeerContext];
 
@@ -2437,57 +2443,6 @@ mod tests {
         .await
         .expect("listing succeeds");
         assert_eq!(response.evictions_since_reset, Some(0));
-    }
-
-    /// Peer validation, import and datasets read the published roster; only
-    /// export uses a lane (the RIB summary lane), and no peer-manager lane is
-    /// used at all.
-    #[tokio::test]
-    async fn policy_stats_use_the_roster_and_rib_summary_lane() {
-        use crate::import_roster::test_support::{dataset, installed, peer, publisher};
-
-        let (peer_tx, mut peer_rx) = mpsc::channel(1);
-        let (operator_tx, mut operator_rx) = mpsc::channel(1);
-        let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let (summary_tx, mut summary_rx) = mpsc::channel(1);
-        let (_publication, receiver) = tokio::sync::watch::channel(Some(installed(2, None)));
-        let roster = publisher(
-            vec![peer("192.0.2.1", receiver)],
-            vec![dataset("customers", "customers.list")],
-        );
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_operator_queries(operator_tx)
-            .with_rib_query(rib_tx)
-            .with_rib_summary_queries(summary_tx)
-            .with_import_roster(roster.reader());
-        let rib = tokio::spawn(async move {
-            let rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { peer, reply } =
-                summary_rx.recv().await.unwrap()
-            else {
-                panic!("expected export counters");
-            };
-            assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
-            reply.send(Vec::new()).unwrap();
-        });
-        let response = PolicyServiceRpc::get_policy_stats(
-            &svc,
-            Request::new(proto::GetPolicyStatsRequest {
-                peer_address: "192.0.2.1".into(),
-                direction: "both".into(),
-            }),
-        )
-        .await
-        .unwrap()
-        .into_inner();
-        rib.await.unwrap();
-        assert!(
-            response.chains.is_empty(),
-            "a chainless session adds no row"
-        );
-        assert_eq!(response.datasets.len(), 1);
-        assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
-        assert!(matches!(operator_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     /// LAN-661 red proof: mapping a stalled live session back onto either
@@ -3834,6 +3789,7 @@ policy customer-in(peer_lp: u32) {
     // -- GetPolicyStats (ADR-0096 Decision 3.3, ADR-0136) ---------------
 
     use crate::import_roster::test_support as roster_support;
+    use rustbgpd_rib::export_roster::ExportRosterPublisher;
 
     type Publication =
         tokio::sync::watch::Sender<Option<Arc<rustbgpd_transport::handle::InstalledImportPolicy>>>;
@@ -3860,56 +3816,71 @@ policy customer-in(peer_lp: u32) {
         )
     }
 
-    /// Fake RIB backend answering export term hits with one chain snapshot,
-    /// plus the stats roster. Keep the returned values alive for the service.
-    fn stats_service() -> (PolicyService, ImportRosterPublisher, Publication) {
-        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
-        tokio::spawn(async move {
-            while let Some(update) = rib_rx.recv().await {
-                match update {
-                    rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply } => {
-                        assert_eq!(peer, Some("10.0.0.2".parse().unwrap()));
-                        let _ = reply.send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
-                            peer,
-                            evals: 7,
-                            eval_errors: 2,
-                            last_error: Some(
-                                "overflow in policy customer-in(200) term customer-routes"
-                                    .to_string(),
-                            ),
-                            terms: vec![
-                                rustbgpd_policy::TermHitRow {
-                                    policy_index: 0,
-                                    policy: Some("customer-in(200)".to_string()),
-                                    term_index: 0,
-                                    term: Some("customer-routes".to_string()),
-                                    hits: 5,
-                                },
-                                rustbgpd_policy::TermHitRow {
-                                    policy_index: 0,
-                                    policy: Some("customer-in(200)".to_string()),
-                                    term_index: 1,
-                                    term: None,
-                                    hits: 2,
-                                },
-                            ],
-                        }]);
-                    }
-                    _ => panic!("unexpected RIB query"),
-                }
-            }
-        });
-        let (roster, publication) = stats_roster();
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_rib_query(rib_tx)
-            .with_import_roster(roster.reader());
-        (svc, roster, publication)
+    /// An installed `.rpol` export chain, `customer-in`, that has evaluated 7
+    /// routes: 5 matched `customer-routes` and 2 overflowed its guard.
+    fn stats_export_chain() -> rustbgpd_policy::PolicyChain {
+        use rustbgpd_policy::rpol::compile_rpol;
+        use rustbgpd_policy::sets::SetStore;
+        use rustbgpd_policy::{NamedPolicy, PolicyChain};
+
+        let compiled = compile_rpol(
+            "policy customer-in {\n\
+             term customer-routes { if route.med + 1 >= 1 { accept } }\n\
+             term rest { accept }\n\
+             }",
+            &mut SetStore::new(),
+        )
+        .unwrap();
+        let chain = PolicyChain::from_named(vec![NamedPolicy::from_rpol(
+            "customer-in".to_string(),
+            Arc::new(compiled),
+        )]);
+        let mut context = roster_support::route_context();
+        for med in [5, 5, 5, 5, 5, u32::MAX, u32::MAX] {
+            context.med = Some(med);
+            let _ = chain.evaluate(&context);
+        }
+        chain
     }
 
+    /// The RIB's export roster designating `chain`'s instance for `10.0.0.2`.
+    fn stats_export_roster(chain: &rustbgpd_policy::PolicyChain) -> ExportRosterPublisher {
+        let mut publisher = ExportRosterPublisher::new();
+        publisher.publish(
+            vec![(
+                "10.0.0.2".parse().unwrap(),
+                Some(Arc::clone(chain.hit_counters())),
+            )],
+            None,
+        );
+        publisher
+    }
+
+    /// Both published rosters: import as [`stats_roster`], export with
+    /// [`stats_export_chain`] installed for `10.0.0.2`, whose counter-instance
+    /// id is returned. Keep the returned values alive for the service.
+    fn stats_service() -> (
+        PolicyService,
+        ImportRosterPublisher,
+        Publication,
+        ExportRosterPublisher,
+        u64,
+    ) {
+        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
+        let chain = stats_export_chain();
+        let export = stats_export_roster(&chain);
+        let (roster, publication) = stats_roster();
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        (svc, roster, publication, export, chain.hit_counters().id())
+    }
+
+    /// Export rows come from the RIB's published roster: live counters of the
+    /// designated instance, whose id is the row's `policy_generation`.
     #[tokio::test]
     async fn get_policy_stats_round_trips_term_rows() {
-        let (svc, _roster, _publication) = stats_service();
+        let (svc, _roster, _publication, _export, instance) = stats_service();
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
@@ -3926,22 +3897,23 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.direction, "export");
         assert_eq!(chain.routes_evaluated, 7);
         assert_eq!(chain.terms.len(), 2);
-        assert_eq!(chain.terms[0].policy, "customer-in(200)");
+        assert_eq!(chain.terms[0].policy, "customer-in");
         assert_eq!(chain.terms[0].term, "customer-routes");
         assert_eq!(chain.terms[0].hits, 5);
-        assert_eq!(chain.terms[1].term, "", "TOML statements are unnamed");
+        assert_eq!(chain.terms[1].term, "rest");
         assert_eq!(chain.terms[1].term_index, 1);
-        assert_eq!(chain.terms[1].hits, 2);
+        assert_eq!(chain.terms[1].hits, 0);
+        assert_ne!(instance, 0);
         assert_eq!(
-            chain.policy_generation, 0,
-            "export chains do not track an install generation yet (LAN-311)"
+            chain.policy_generation, instance,
+            "export rows report the counter-instance id"
         );
         // LAN-301: eval-error counters and the rendered last error
         // ride the chain rows.
         assert_eq!(chain.eval_errors, 2);
         assert_eq!(
             chain.last_error,
-            "overflow in policy customer-in(200) term customer-routes"
+            "overflow in policy customer-in term customer-routes"
         );
         // LAN-305: dataset status rides the same response.
         assert_eq!(resp.datasets.len(), 1);
@@ -3959,7 +3931,7 @@ policy customer-in(peer_lp: u32) {
     /// zero, generation advanced) is never presented as continuous history.
     #[tokio::test]
     async fn get_policy_stats_reports_import_chains_with_generation() {
-        let (svc, _roster, _publication) = stats_service();
+        let (svc, _roster, _publication, _export, _) = stats_service();
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
@@ -3978,6 +3950,7 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(chain.policy_generation, 3);
         assert_eq!(chain.terms.len(), 1);
         assert_eq!(chain.terms[0].policy, "customer-in(200)");
+        assert_eq!(chain.terms[0].term, "", "TOML statements are unnamed");
         assert_eq!(chain.terms[0].hits, 9);
         assert_eq!(chain.eval_errors, 0);
         assert_eq!(chain.last_error, "", "no error since install");
@@ -4034,7 +4007,7 @@ policy customer-in(peer_lp: u32) {
     /// import block — one deterministic response, not two commands.
     #[tokio::test]
     async fn get_policy_stats_both_orders_export_then_import() {
-        let (svc, _roster, _publication) = stats_service();
+        let (svc, _roster, _publication, _export, _) = stats_service();
         let resp = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
@@ -4053,21 +4026,40 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(directions, ["export", "import"]);
     }
 
-    /// A listener built without the peer manager's roster cannot answer.
+    /// A listener built without the peer manager's roster cannot answer, and
+    /// one without the RIB's roster cannot answer an export read.
     #[tokio::test]
     async fn get_policy_stats_without_a_roster_is_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let svc =
             PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+        let import = ImportRosterPublisher::new();
+        let export_only = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_export_roster(ExportRosterPublisher::new().reader());
+        let import_only = PolicyService::new(AccessMode::ReadOnly, mpsc::channel(1).0, None, None)
+            .with_import_roster(import.reader());
         for direction in ["export", "import", "both"] {
-            let error = PolicyServiceRpc::get_policy_stats(
-                &svc,
-                Request::new(policy_stats_rpc_request("", direction)),
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{direction}");
+            for (svc, answers) in [
+                (&svc, false),
+                (&export_only, false),
+                (&import_only, direction == "import"),
+            ] {
+                let result = PolicyServiceRpc::get_policy_stats(
+                    svc,
+                    Request::new(policy_stats_rpc_request("", direction)),
+                )
+                .await;
+                if answers {
+                    assert!(result.is_ok(), "{direction}");
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().code(),
+                        tonic::Code::FailedPrecondition,
+                        "{direction}"
+                    );
+                }
+            }
         }
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
         assert!(matches!(rib_rx.try_recv(), Err(TryRecvError::Empty)));
@@ -4104,134 +4096,149 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(error.message(), "peer manager stopped");
     }
 
-    /// A `.rpol` reload hands the RIB actor an atomic export-policy
-    /// transition, and general RIB queries — including this RPC's export
-    /// term-hit read — stay queued for its whole length. That ownership is
-    /// normal bounded work, so a stats poll that lands inside the window must
-    /// still answer instead of failing the operator's read with
-    /// `DEADLINE_EXCEEDED` and no output.
-    #[tokio::test(start_paused = true)]
-    async fn get_policy_stats_rides_out_a_fenced_rib_policy_transition() {
-        // Longer than a sub-second budget, shorter than the operator-read
-        // budget the daemon uses everywhere else.
-        const FENCED_TRANSITION: Duration = Duration::from_millis(1_100);
-
-        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
-        tokio::spawn(async move {
-            while let Some(update) = rib_rx.recv().await {
-                // The actor owns the transition before it reaches this query.
-                tokio::time::sleep(FENCED_TRANSITION).await;
-                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } = update
-                else {
-                    panic!("unexpected RIB query");
-                };
-                let _ = reply.send(Vec::new());
-            }
-        });
-        let roster = ImportRosterPublisher::new();
+    /// ADR-0136 closure, export side: a `both` request that captured the
+    /// RIB's roster and is then held in its import capture while the RIB
+    /// manager is dropped returns `UNAVAILABLE` when it resumes. Checking the
+    /// export flag only before capture turns this into `Ok`.
+    #[tokio::test]
+    async fn get_policy_stats_fails_when_the_rib_stopped_during_capture() {
+        let (publication, receiver) = tokio::sync::watch::channel(None);
+        let roster =
+            roster_support::publisher(vec![roster_support::peer("10.0.0.2", receiver)], Vec::new());
+        let export = stats_export_roster(&stats_export_chain());
+        let (peer_tx, _) = mpsc::channel(1);
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_rib_query(rib_tx)
-            .with_import_roster(roster.reader());
-
-        PolicyServiceRpc::get_policy_stats(
-            &svc,
-            Request::new(proto::GetPolicyStatsRequest {
-                peer_address: String::new(),
-                direction: "both".to_string(),
-            }),
-        )
-        .await
-        .expect("a fenced export-policy transition must not fail an operator stats read");
-    }
-
-    /// Dataset status is read from the roster after a slow export reply; it
-    /// adds no wait of its own and keeps the export rows.
-    #[tokio::test(start_paused = true)]
-    async fn get_policy_stats_reads_datasets_after_a_staged_export_reply() {
-        let (peer_tx, _peer_rx) = mpsc::channel(1);
-        let (rib_tx, mut rib_rx) = mpsc::channel(1);
-        let (roster, _publication) = stats_roster();
-        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_rib_query(rib_tx)
-            .with_import_roster(roster.reader());
-        let started = tokio::time::Instant::now();
-        let audit = GrpcAuditHandle::default();
-        let mut request = Request::new(policy_stats_rpc_request("", "export"));
-        request.extensions_mut().insert(audit.clone());
-        let read =
-            tokio::spawn(async move { PolicyServiceRpc::get_policy_stats(&svc, request).await });
-        let Some(rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply }) =
-            tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
-                .await
-                .expect("stats must request export counters first")
-        else {
-            panic!("expected export counters");
-        };
-        assert!(peer.is_none());
-        tokio::time::advance(Duration::from_millis(800)).await;
-        reply
-            .send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
-                peer: Some("10.0.0.2".parse().unwrap()),
-                evals: 7,
-                eval_errors: 0,
-                last_error: None,
-                terms: Vec::new(),
-            }])
-            .unwrap();
-        let response = read.await.unwrap().unwrap().into_inner();
-        assert_eq!(started.elapsed(), Duration::from_millis(800));
-        assert_eq!(
-            audit.summary().unwrap().as_str(),
-            concat!(
-                "stage=export elapsed_ms=800 budget_ms=2000 rpc_elapsed_ms=800 code=Ok; ",
-                "stage=datasets elapsed_ms=0 budget_ms=1200 rpc_elapsed_ms=800 code=Ok",
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
+        let read = tokio::spawn(async move {
+            PolicyServiceRpc::get_policy_stats(
+                &svc,
+                Request::new(policy_stats_rpc_request("", "both")),
             )
-        );
-        assert_eq!(
-            response.chains,
-            vec![proto::PolicyChainStats {
-                peer_address: "10.0.0.2".into(),
-                direction: "export".into(),
-                routes_evaluated: 7,
-                ..Default::default()
-            }]
-        );
-        assert_eq!(
-            response.datasets,
-            vec![proto::PolicyDatasetStatus {
-                name: "customers".into(),
-                kind: "asn-set".into(),
-                generation: 1,
-                records: 2,
-                path: "/var/lib/rustbgpd/datasets/customers.list".into(),
-                last_error: "line 3: bad".into(),
-            }]
-        );
+            .await
+        });
+        // Export capture is done; the import capture awaits the Pending
+        // publication on a cursor of its own.
+        while publication.receiver_count() < 2 {
+            tokio::task::yield_now().await;
+        }
+        drop(export);
+        publication.send_replace(Some(roster_support::installed(0, None)));
+        let error = read.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "RIB manager stopped");
+        drop(roster);
     }
 
-    /// A backend reply that is ready only at or after the aggregate deadline
-    /// discards every row, even though Tokio polls the ready reply first.
+    /// ADR-0136 held owner: export and `both` requests succeed from the RIB's
+    /// published roster while a real RIB manager is never polled, with its
+    /// primary mailbox, query lane and summary lane full. Before the export
+    /// roster the export stage queued there and returned `DEADLINE_EXCEEDED`.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_succeeds_while_a_real_rib_is_never_polled() {
+        let (rib_mailbox, rib_rx) = mpsc::channel(1);
+        let (query_tx, query_rx) = mpsc::channel(1);
+        let (summary_tx, summary_rx) = mpsc::channel(1);
+        let rib = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            query_rx,
+            Some(stats_export_chain()),
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+        .with_summary_queries(summary_rx);
+        for lane in [&rib_mailbox, &query_tx] {
+            let (reply, _) = oneshot::channel();
+            lane.try_send(rustbgpd_rib::RibUpdate::QueryLocRibCount { reply })
+                .unwrap();
+        }
+        let (reply, _) = oneshot::channel();
+        summary_tx
+            .try_send(rustbgpd_rib::RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+            })
+            .unwrap();
+        let (roster, _publication) = stats_roster();
+        let (peer_tx, _) = mpsc::channel(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_rib_query(query_tx.clone())
+            .with_import_roster(roster.reader())
+            .with_export_roster(rib.export_roster());
+        let started = tokio::time::Instant::now();
+        for (peer, direction, expected) in [
+            ("", "export", vec![("global", "export")]),
+            (
+                "10.0.0.2",
+                "both",
+                vec![("10.0.0.2", "export"), ("10.0.0.2", "import")],
+            ),
+        ] {
+            let audit = GrpcAuditHandle::default();
+            let mut request = Request::new(policy_stats_rpc_request(peer, direction));
+            request.extensions_mut().insert(audit.clone());
+            let response = PolicyServiceRpc::get_policy_stats(&svc, request)
+                .await
+                .expect("a held RIB must not fail an export read")
+                .into_inner();
+            let rows: Vec<_> = response
+                .chains
+                .iter()
+                .map(|chain| (chain.peer_address.as_str(), chain.direction.as_str()))
+                .collect();
+            assert_eq!(rows, expected);
+            assert_eq!(response.chains[0].routes_evaluated, 7, "live counters");
+            assert!(
+                audit
+                    .summary()
+                    .unwrap()
+                    .as_str()
+                    .contains("stage=export elapsed_ms=0 budget_ms=2000 rpc_elapsed_ms=0 code=Ok"),
+                "{:?}",
+                audit.summary()
+            );
+        }
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(
+            (
+                rib_mailbox.capacity(),
+                query_tx.capacity(),
+                summary_tx.capacity()
+            ),
+            (0, 0, 0),
+            "no RIB lane was used"
+        );
+        drop(rib);
+    }
+
+    /// A capture that becomes ready only at or after the aggregate deadline
+    /// discards every row, even though Tokio polls the ready capture first.
+    /// Export capture never waits, so the import capture's Pending
+    /// publication is the backend here.
     #[tokio::test(start_paused = true)]
     async fn get_policy_stats_ready_reply_obeys_aggregate_deadline() {
         use std::future::{Future, poll_fn};
         use std::task::Poll;
 
-        for (elapsed_ms, close_reply) in [
+        let chain = roster_support::chain("late-in", 1);
+        for (elapsed_ms, close_publication) in [
             (1_900, false),
             (2_000, false),
             (2_001, false),
             (2_001, true),
         ] {
+            let (publication, receiver) = tokio::sync::watch::channel(None);
+            let roster = roster_support::publisher(
+                vec![roster_support::peer("10.0.0.2", receiver)],
+                Vec::new(),
+            );
             let (peer_tx, _peer_rx) = mpsc::channel(1);
-            let (rib_tx, mut rib_rx) = mpsc::channel(1);
-            let roster = ImportRosterPublisher::new();
             let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-                .with_rib_query(rib_tx)
                 .with_import_roster(roster.reader());
             let started = tokio::time::Instant::now();
             let audit = GrpcAuditHandle::default();
-            let mut request = Request::new(policy_stats_rpc_request("", "export"));
+            let mut request = Request::new(policy_stats_rpc_request("", "import"));
             request.extensions_mut().insert(audit.clone());
             let read = PolicyServiceRpc::get_policy_stats(&svc, request);
             tokio::pin!(read);
@@ -4240,105 +4247,86 @@ policy customer-in(peer_lp: u32) {
                     .await
                     .is_pending()
             );
-            let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } =
-                rib_rx.try_recv().unwrap()
-            else {
-                panic!("expected export counters");
-            };
             // Keep the RPC unpolled until the chosen observation time. In the
-            // expiry cases, both backend and timer are ready on resume.
+            // expiry cases, both capture and timer are ready on resume.
             tokio::time::advance(Duration::from_millis(elapsed_ms)).await;
-            if close_reply {
-                drop(reply);
+            if close_publication {
+                drop(publication);
             } else {
-                reply
-                    .send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
-                        peer: None,
-                        evals: 7,
-                        eval_errors: 0,
-                        last_error: None,
-                        terms: Vec::new(),
-                    }])
-                    .unwrap();
+                publication.send_replace(Some(roster_support::installed(0, Some(&chain))));
             }
             let result = read.await;
             let code = if elapsed_ms < 2_000 {
                 let response = result.unwrap().into_inner();
                 assert_eq!(response.chains.len(), 1);
-                assert_eq!(response.chains[0].routes_evaluated, 7);
                 tonic::Code::Ok
             } else {
-                let error = result.expect_err("an expired backend read must discard all rows");
+                let error = result.expect_err("an expired capture must discard all rows");
                 assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
                 assert_eq!(error.message(), "policy stats aggregate deadline exceeded");
                 error.code()
             };
             assert_eq!(started.elapsed(), Duration::from_millis(elapsed_ms));
-            let export = format!(
-                "stage=export elapsed_ms={elapsed_ms} budget_ms=2000 rpc_elapsed_ms={elapsed_ms} code={code:?}"
+            let summary = audit.summary().unwrap();
+            assert!(
+                summary.as_str().starts_with(&format!(
+                    "stage=import elapsed_ms={elapsed_ms} budget_ms=2000 rpc_elapsed_ms={elapsed_ms} code={code:?} "
+                )),
+                "{summary:?}"
             );
-            let expected = if code == tonic::Code::Ok {
-                format!(
-                    "{export}; stage=datasets elapsed_ms=0 budget_ms=100 rpc_elapsed_ms={elapsed_ms} code=Ok"
-                )
-            } else {
-                export
-            };
-            assert_eq!(audit.summary().unwrap().as_str(), expected);
+            assert_eq!(
+                summary.as_str().contains("stage=datasets"),
+                code == tonic::Code::Ok,
+                "{summary:?}"
+            );
         }
     }
 
     /// LAN-661: explicit-peer validation, export, import, and dataset reads
     /// are sequential but spend one shared RPC budget rather than receiving
-    /// independent timeouts.
+    /// independent timeouts: the dataset stage gets what the import capture
+    /// left.
     #[tokio::test(start_paused = true)]
     async fn get_policy_stats_sequential_stages_share_one_budget() {
-        const STAGE_DELAY: Duration = Duration::from_millis(700);
+        const PENDING: Duration = Duration::from_millis(700);
 
-        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
-        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+        let chain = roster_support::chain("late-in", 1);
+        let (publication, receiver) = tokio::sync::watch::channel(None);
+        let roster = roster_support::publisher(
+            vec![roster_support::peer("10.0.0.2", receiver)],
+            vec![roster_support::dataset("customers", "c.list")],
+        );
+        let publish = roster_support::installed(0, Some(&chain));
         tokio::spawn(async move {
-            while let Some(update) = rib_rx.recv().await {
-                tokio::time::sleep(STAGE_DELAY).await;
-                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } = update
-                else {
-                    panic!("unexpected RIB query");
-                };
-                let _ = reply.send(Vec::new());
-            }
+            tokio::time::sleep(PENDING).await;
+            publication.send_replace(Some(publish));
+            std::future::pending::<()>().await;
         });
-        // Never published: the import capture waits out the shared budget.
-        let (_publication, receiver) = tokio::sync::watch::channel(None);
-        let roster =
-            roster_support::publisher(vec![roster_support::peer("10.0.0.2", receiver)], Vec::new());
+        let export = stats_export_roster(&stats_export_chain());
+        let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_rib_query(rib_tx)
-            .with_import_roster(roster.reader());
-        let started = tokio::time::Instant::now();
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
 
         let audit = GrpcAuditHandle::default();
         audit.set_summary(GrpcRequestSummary::new("existing=safe"));
         let mut request = Request::new(policy_stats_rpc_request("10.0.0.2", "both"));
         request.extensions_mut().insert(audit.clone());
-        let error = PolicyServiceRpc::get_policy_stats(&svc, request)
+        let response = PolicyServiceRpc::get_policy_stats(&svc, request)
             .await
-            .expect_err("the import stage must not receive a fresh budget");
-
-        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
-        assert_eq!(error.message(), "policy stats aggregate deadline exceeded");
+            .expect("every stage completes within the one budget")
+            .into_inner();
+        assert_eq!(response.chains.len(), 2);
         assert_eq!(
             audit.summary().unwrap().as_str(),
             concat!(
                 "existing=safe; ",
                 "stage=peer_validation elapsed_ms=0 budget_ms=2000 rpc_elapsed_ms=0 code=Ok; ",
-                "stage=export elapsed_ms=700 budget_ms=2000 rpc_elapsed_ms=700 code=Ok; ",
-                "stage=import elapsed_ms=1300 budget_ms=1300 rpc_elapsed_ms=2000 code=DeadlineExceeded ",
-                "publications=0/1 yields=1",
+                "stage=export elapsed_ms=0 budget_ms=2000 rpc_elapsed_ms=0 code=Ok; ",
+                "stage=import elapsed_ms=700 budget_ms=2000 rpc_elapsed_ms=700 code=Ok ",
+                "publications=1/1 yields=1; ",
+                "stage=datasets elapsed_ms=0 budget_ms=1300 rpc_elapsed_ms=700 code=Ok",
             )
-        );
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            POLICY_STATS_AGGREGATE_TIMEOUT
         );
     }
 
@@ -4439,102 +4427,9 @@ policy customer-in(peer_lp: u32) {
         );
     }
 
-    async fn assert_policy_stats_deadline(
-        svc: &PolicyService,
-        direction: &str,
-        expected_stage: &str,
-    ) {
-        let started = tokio::time::Instant::now();
-        let error = PolicyServiceRpc::get_policy_stats(
-            svc,
-            Request::new(proto::GetPolicyStatsRequest {
-                peer_address: String::new(),
-                direction: direction.to_string(),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(
-            error.code(),
-            tonic::Code::DeadlineExceeded,
-            "{expected_stage} must be bounded"
-        );
-        assert_eq!(
-            tokio::time::Instant::now() - started,
-            POLICY_STATS_AGGREGATE_TIMEOUT,
-            "{expected_stage} must consume at most the one aggregate budget"
-        );
-    }
-
-    /// LAN-661: both admission to a saturated RIB command channel and an
-    /// admitted query whose reply is retained are bounded by the RPC deadline.
-    #[tokio::test(start_paused = true)]
-    async fn get_policy_stats_saturated_rib_send_and_reply_paths_remain_bounded() {
-        for hold_reply in [false, true] {
-            let (peer_tx, _peer_rx) = mpsc::channel::<PeerManagerCommand>(1);
-            let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
-            if hold_reply {
-                tokio::spawn(async move {
-                    let held = rib_rx.recv().await.expect("RIB query");
-                    std::future::pending::<()>().await;
-                    drop(held);
-                });
-            } else {
-                let (reply, _response) = oneshot::channel();
-                rib_tx
-                    .send(rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer: None, reply })
-                    .await
-                    .unwrap();
-            }
-            let roster = ImportRosterPublisher::new();
-            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-                .with_rib_query(rib_tx)
-                .with_import_roster(roster.reader());
-            assert_policy_stats_deadline(
-                &svc,
-                "export",
-                if hold_reply { "RIB reply" } else { "RIB send" },
-            )
-            .await;
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn get_policy_stats_summary_admission_and_reply_share_rpc_deadline() {
-        for full in [false, true] {
-            let (peer_tx, _peer_rx) = mpsc::channel(1);
-            let (rib_tx, mut rib_rx) = mpsc::channel(1);
-            let (summary_tx, mut summary_rx) = mpsc::channel(1);
-            let (reply, _response) = oneshot::channel();
-            if full {
-                summary_tx
-                    .send(rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
-                    .await
-                    .unwrap();
-            }
-            let roster = ImportRosterPublisher::new();
-            let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-                .with_rib_query(rib_tx)
-                .with_rib_summary_queries(summary_tx)
-                .with_import_roster(roster.reader());
-            assert_policy_stats_deadline(&svc, "export", "RIB summary").await;
-            let rustbgpd_rib::RibSummaryQuery::ExportPolicyTermHits { reply, .. } =
-                summary_rx.try_recv().unwrap()
-            else {
-                panic!("expected summary counters");
-            };
-            assert_eq!(reply.is_closed(), !full);
-            assert!(summary_rx.try_recv().is_err());
-            assert!(matches!(
-                rib_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
-        }
-    }
-
     #[tokio::test]
     async fn get_policy_stats_rejects_bad_direction() {
-        let (svc, _roster, _publication) = stats_service();
+        let (svc, _roster, _publication, _export, _) = stats_service();
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
@@ -4558,36 +4453,21 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
-    /// LAN-661 red proof: deleting the managed-peer validation sends the
-    /// request to the RIB, which returns a global fallback labeled as the
-    /// nonexistent peer and makes this call succeed.
+    /// LAN-661 red proof: deleting the managed-peer validation lets the export
+    /// capture return the global fallback labeled as the nonexistent peer and
+    /// makes this call succeed.
     #[tokio::test]
-    async fn get_policy_stats_rejects_unknown_peer_before_rib_fallback() {
-        let rib_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let rib_calls_task = Arc::clone(&rib_calls);
-        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(4);
-        tokio::spawn(async move {
-            while let Some(update) = rib_rx.recv().await {
-                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply } = update
-                else {
-                    panic!("unexpected RIB query");
-                };
-                rib_calls_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = reply.send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
-                    peer,
-                    evals: 1,
-                    eval_errors: 0,
-                    last_error: None,
-                    terms: Vec::new(),
-                }]);
-            }
-        });
-
+    async fn get_policy_stats_rejects_unknown_peer_before_the_global_fallback() {
+        let mut export = ExportRosterPublisher::new();
+        export.publish(
+            Vec::new(),
+            Some(Arc::clone(stats_export_chain().hit_counters())),
+        );
         let (roster, _publication) = stats_roster();
         let (peer_tx, _) = mpsc::channel::<PeerManagerCommand>(1);
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
-            .with_rib_query(rib_tx)
-            .with_import_roster(roster.reader());
+            .with_import_roster(roster.reader())
+            .with_export_roster(export.reader());
         let err = PolicyServiceRpc::get_policy_stats(
             &svc,
             Request::new(proto::GetPolicyStatsRequest {
@@ -4599,11 +4479,6 @@ policy customer-in(peer_lp: u32) {
         .expect_err("unknown peer must not inherit the global export chain");
         assert_eq!(err.code(), tonic::Code::NotFound);
         assert_eq!(err.message(), "neighbor 192.0.2.99 not found");
-        assert_eq!(
-            rib_calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "validation must reject before querying the RIB"
-        );
     }
 
     async fn staged_policy_delete(

@@ -307,12 +307,14 @@ async fn shutdown_drains_the_roster_and_closes_the_cell() {
     assert_released(&running, "shutdown").await;
 }
 
-/// ADR-0136 held owner: with the peer manager's operator and ordinary lanes
-/// never polled, a `both` request with datasets succeeds from the published
-/// roster. Before the roster, peer validation, import and datasets queued
-/// on the operator lane and this request returned `DEADLINE_EXCEEDED`.
+/// ADR-0136 held owners: with the peer manager's operator and ordinary lanes
+/// never polled, and a real RIB manager never polled with a full mailbox and
+/// query lane, a `both` request with datasets succeeds from the two published
+/// rosters. Before the import roster, peer validation, import and datasets
+/// queued on the operator lane; before the export roster, the export stage
+/// queued on the RIB. Either way this request returned `DEADLINE_EXCEEDED`.
 #[tokio::test(start_paused = true)]
-async fn policy_stats_succeed_while_the_peer_manager_is_never_polled() {
+async fn policy_stats_succeed_while_the_peer_manager_and_rib_are_never_polled() {
     use rustbgpd_api::server::AccessMode;
 
     let dir = tempfile::tempdir().unwrap();
@@ -335,15 +337,21 @@ async fn policy_stats_succeed_while_the_peer_manager_is_never_polled() {
     let chain = named_deny_policy_chain(&[Some("held-in")]);
     insert_test_managed_peer(&mut mgr, peer, published_handle(Some(&chain), 3), false);
 
-    let (query_tx, mut query_rx) = mpsc::channel(4);
-    let rib = tokio::spawn(async move {
-        while let Some(update) = query_rx.recv().await {
-            let RibUpdate::QueryExportPolicyTermHits { reply, .. } = update else {
-                panic!("unexpected RIB query");
-            };
-            let _ = reply.send(Vec::new());
-        }
-    });
+    let (rib_mailbox, rib_rx) = mpsc::channel(1);
+    let (query_tx, query_rx) = mpsc::channel(1);
+    let export_chain = named_deny_policy_chain(&[Some("held-out")]);
+    let rib = rustbgpd_rib::RibManager::new(
+        rib_rx,
+        query_rx,
+        Some(export_chain),
+        None,
+        BgpMetrics::new(),
+    );
+    for lane in [&rib_mailbox, &query_tx] {
+        let (reply, _) = tokio::sync::oneshot::channel();
+        lane.try_send(RibUpdate::QueryLocRibCount { reply })
+            .unwrap();
+    }
     let service = rustbgpd_api::PolicyService::with_runtime_config_coordinator(
         AccessMode::ReadOnly,
         command_tx.clone(),
@@ -352,8 +360,9 @@ async fn policy_stats_succeed_while_the_peer_manager_is_never_polled() {
         rustbgpd_api::server::RuntimeConfigCoordinator::new(),
     )
     .with_operator_queries(operator_tx.clone())
-    .with_rib_query(query_tx)
-    .with_import_roster(mgr.import_roster());
+    .with_rib_query(query_tx.clone())
+    .with_import_roster(mgr.import_roster())
+    .with_export_roster(rib.export_roster());
     let started = tokio::time::Instant::now();
     let response = service
         .get_policy_stats(tonic::Request::new(
@@ -366,17 +375,25 @@ async fn policy_stats_succeed_while_the_peer_manager_is_never_polled() {
         .expect("stats succeed without the peer manager")
         .into_inner();
     assert_eq!(started.elapsed(), Duration::ZERO);
-    assert_eq!(response.chains.len(), 1);
-    assert_eq!(response.chains[0].direction, "import");
-    assert_eq!(response.chains[0].routes_evaluated, 3);
+    let rows: Vec<_> = response
+        .chains
+        .iter()
+        .map(|chain| (chain.peer_address.as_str(), chain.direction.as_str()))
+        .collect();
+    assert_eq!(rows, [("192.0.2.30", "export"), ("192.0.2.30", "import")]);
+    assert_ne!(
+        response.chains[0].policy_generation, 0,
+        "the global fallback's counter instance"
+    );
+    assert_eq!(response.chains[1].routes_evaluated, 3);
     assert_eq!(response.datasets.len(), 1);
     assert_eq!(response.datasets[0].name, "customers");
     assert_eq!(response.datasets[0].records, 1);
-    // Neither lane was ever served or needed.
+    // No lane was ever served or needed.
     assert_eq!(operator_tx.capacity(), operator_tx.max_capacity());
     assert_eq!(command_tx.capacity(), command_tx.max_capacity());
-    drop(service);
-    rib.await.unwrap();
+    assert_eq!((rib_mailbox.capacity(), query_tx.capacity()), (0, 0));
+    drop((service, rib));
     for (_, managed) in mgr.peers.drain() {
         managed.into_parts().0.shutdown().await.unwrap().unwrap();
     }

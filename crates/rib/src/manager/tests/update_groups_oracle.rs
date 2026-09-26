@@ -396,6 +396,7 @@ pub(super) fn fold_vpn(streams: &Streams) -> FoldedVpnState {
 
 pub(super) struct Oracle {
     tx: mpsc::Sender<RibUpdate>,
+    roster: crate::export_roster::ExportRosterReader,
     outs: BTreeMap<IpAddr, mpsc::Receiver<OutboundRouteUpdate>>,
     handle: tokio::task::JoinHandle<()>,
     /// Messages drained so far (incremental collection so the VPN
@@ -424,9 +425,11 @@ impl Oracle {
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
         manager.test_force_ungrouped = force_ungrouped;
+        let roster = manager.export_roster();
         let handle = tokio::spawn(manager.run());
         Self {
             tx,
+            roster,
             outs: BTreeMap::new(),
             handle,
             collected: Streams::new(),
@@ -760,15 +763,11 @@ impl Oracle {
     /// chain since install (ADR-0096 live counters) — the zero-eval
     /// assertion's window.
     async fn export_policy_evals(&mut self) -> u64 {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(RibUpdate::QueryExportPolicyTermHits {
-                peer: None,
-                reply: reply_tx,
-            })
+        published_export_rows(&self.tx, &self.roster, None)
             .await
-            .unwrap();
-        reply_rx.await.unwrap().iter().map(|row| row.evals).sum()
+            .iter()
+            .map(|row| row.evals)
+            .sum()
     }
 
     /// Export-policy evaluations visible through one installed peer handle.
@@ -776,15 +775,11 @@ impl Oracle {
     /// summing every per-peer row would multiply one real evaluation by the
     /// number of members and cannot measure a zero-evaluation delta.
     async fn export_policy_evals_for(&mut self, peer: Ipv4Addr) -> u64 {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(RibUpdate::QueryExportPolicyTermHits {
-                peer: Some(IpAddr::V4(peer)),
-                reply: reply_tx,
-            })
+        published_export_rows(&self.tx, &self.roster, Some(IpAddr::V4(peer)))
             .await
-            .unwrap();
-        reply_rx.await.unwrap().iter().map(|row| row.evals).sum()
+            .iter()
+            .map(|row| row.evals)
+            .sum()
     }
 
     /// Drain every receiver into the collected streams (no await — only

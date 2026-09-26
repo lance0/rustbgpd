@@ -11,7 +11,10 @@
 //! published import roster. Removing `QueryImportPolicyTermHits` removed the
 //! one wait that finished an admitted import collector,
 //! `mod.rs::handle_operator_query` (`finish_admitted_operator_read`), and its
-//! row. One driver runs every
+//! row. The export stage reads the RIB's published export roster; removing
+//! the RIB summary-lane `ExportPolicyTermHits` and the general-lane
+//! `QueryExportPolicyTermHits` left `GetPolicyStats` with no actor wait, and
+//! it never had a row here. One driver runs every
 //! row. [`wait_site_table_covers_every_call_site`] fails when a call site is
 //! added without a row, so an admission decision cannot go unnoticed.
 

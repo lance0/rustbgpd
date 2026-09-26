@@ -281,7 +281,7 @@ Read budgets depend on the operation; there is no server-wide read timeout.
 |-----------|------------------------------|
 | Peer-manager operator reads | 2 s per request to the peer manager, including channel admission and reply |
 | `ListNeighbors` / `GetNeighborState` RIB summaries | A separate 2 s for the RIB summary admission and reply, after the peer-manager read; this is not one 2 s end-to-end RPC budget |
-| `GetPolicyStats` | One absolute 2 s deadline shared by peer validation, export, import and dataset waits; export admission consumes that budget and no stage resets it. Peer validation, import and datasets read the peer manager's published roster and wait only for a Pending session publication or a busy counter or dataset error lock |
+| `GetPolicyStats` | One absolute 2 s deadline shared by peer validation, export, import and dataset waits; no stage resets it. Every stage reads a published roster (peer manager or RIB manager) and waits only for a Pending session publication or a busy counter or dataset error lock |
 | `GetHealth` | One 200 ms internal core-probe budget shared by peer-manager and RIB snapshot queries; failures return `INTERNAL` |
 | General RIB listing and RIB explain reads | No fixed server-side timeout in the shared RIB read helper; callers set their own deadlines and cancel abandoned reads |
 
@@ -1253,7 +1253,7 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `ExplainImportPolicy` | Explain why a prefix was permitted / denied / withdrawn / evicted / stale / not-seen on import for a given neighbor, reading the per-session import-decision cache (ADR-0073). For `.rpol` chain members the statement trace names the deciding term and carries per-term trace lines (ADR-0096). A bounded read timeout returns `DEADLINE_EXCEEDED`, not synthetic `NO_SESSION`. Side-effect-free; IPv4/IPv6 unicast only. `SensitiveRead` tier. |
 | `ListRejectedRoutes` | List every rejected inbound route a peer's session has retained, each tagged with its canonical reject-reason token (`policy_reject`, `otc_route_leak`, `next_hop_ownership`, `as_path_loop`, `rr_loop`, `treat_as_withdraw`), a bounded sub-reason detail, and a best-effort attribute summary. A named `.rpol` deny identifies its deciding `policy:term`; named TOML/default denies retain policy-only detail. The enumeration complement to `ExplainImportPolicy`'s point lookup. Retention is a bounded per-peer LRU (`[policy.reject_retention]`); the response reports `retention_enabled`, `capacity`, and optional `evictions_since_reset` (absent from older daemons) so completeness is explicit. A bounded read timeout returns `DEADLINE_EXCEEDED`, not `NOT_FOUND`. Side-effect-free; IPv4/IPv6 unicast only. CLI: `rbgp rib received <peer> --rejected`. `SensitiveRead` tier. |
 | `TestPolicy` | Dry-run a candidate `.rpol` policy (source sent in the request, compiled before RIB access) read-only over a version-fenced walk of the retained post-policy Adj-RIB-In (import) or Loc-RIB best routes (export). Import sees routes admitted by import policy when they were received or last re-evaluated: retained Adj-RIB-In under an active GR/LLGR window, or not yet re-evaluated after an import-policy change, can hold routes the installed chain would now reject, and routes a candidate would newly admit are not visible (`ListRejectedRoutes` lists recent rejections). Routes are evaluated in canonical `(prefix, peer, path_id)` order in pages capped at 1,000; family, `limit`, `show_changes`, counts, and term hits apply globally. A conservative mutation of the selected Received/Best table returns `ABORTED` with no partial response: retry the whole RPC from the beginning. Paging-generation exhaustion or an unavailable RIB backend returns `UNAVAILABLE`. No route, session, or counter impact; IPv4/IPv6 unicast (ADR-0096). CLI: `rbgp policy test`. `SensitiveRead` tier. |
-| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both` — import chains also report their install generation). Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, not from a peer-manager query, so success does not show that the peer manager is responsive; a request that sees, after its capture, that the peer manager has stopped returns `UNAVAILABLE`. Import reads stop on caller disconnect and return no partial rows on deadline or unavailable errors. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
+| `GetPolicyStats` | Read live per-term hit counters for installed policy chains (since chain install; direction `import`, `export`, or `both`). Each row's `policy_generation` names its counters: the install generation for import chains, the counter-instance id for export chains. Explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline. Peer validation, import counters and dataset status come from the roster the peer manager publishes, and export counters from the roster the RIB manager publishes, not from an actor query, so success does not show that the peer manager or the RIB manager is making progress; readiness and health test that. A request that sees, after its capture, that either owner has stopped returns `UNAVAILABLE`. Reads stop on caller disconnect and return no partial rows on deadline or unavailable errors. Chainless sessions contribute no row; unknown peers return `NOT_FOUND`. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 | `GetValidationPolicyPosture` | Conservatively classifies RPKI-invalid and ASPA-invalid routes as `ENFORCED`, `UNENFORCED`, or `UNKNOWN` for installed static/dynamic peers and one prospective row per accepted dynamic range. The bounded response reports `complete` and `omitted`; an incomplete aggregate is never `ENFORCED`. This proves policy disposition only, not validator readiness, connectivity, configured intent, FIB state, or runtime enforcement. `SensitiveRead` tier; outside the narrow v1-stable surface. |
 
 Import rows use the selected session's actual installed counters, labels and
@@ -1269,18 +1269,31 @@ change) is in progress, a fleet read can select a session that has already
 exited and return `UNAVAILABLE`. Counter availability does not establish
 that the session command loop or the peer manager is responsive, or replace
 the live readiness checks.
-A backend result observed at or after the shared absolute deadline returns
-`DEADLINE_EXCEEDED`, including an otherwise successful final dataset reply. See
+A capture result observed at or after the shared absolute deadline returns
+`DEADLINE_EXCEEDED`, including an otherwise successful final dataset read. See
 [ADR-0133](../adr/0133-installed-import-counter-reads.md).
+
+Export rows use the counter instances the RIB manager's published roster
+designates: a peer's own export chain, or the global fallback when the peer
+has none. The RIB republishes after each completed operation, and a grouped
+policy transition switches its whole cohort once, at its final commit, so
+a read during a long RIB operation reports the live counters of the chains
+installed before it. `policy_generation` on an export row is the
+counter-instance id: nonzero, shared by update-group members that share
+counters, and new whenever the counters restart, including at each session
+registration unless the peer rejoins an update group that other members
+kept; compare it only for equality. The export
+capture does not wait for the RIB; it yields only while a chain's error lock
+is being written.
 
 Sessions continue to service direct transport import-counter queries and
 neighbor-state queries during grouped unicast output, including waits for
 shared encoded chunks. Earlier queued session commands retain their ordering
 for those reads. `GetPolicyStats` bypasses that session command queue for its
-import stage, and reads the peer manager's published roster rather than
-queueing on the peer manager ([ADR-0136](../adr/0136-owner-published-counter-reads.md));
-the export stage and any capture waits still consume the shared two-second
-deadline.
+import stage, and reads the peer manager's and the RIB manager's published
+rosters rather than queueing on either actor
+([ADR-0136](../adr/0136-owner-published-counter-reads.md)); its capture waits
+still consume the shared two-second deadline.
 
 `GetPolicyStats` adds bounded stage timing to the existing `grpc_authz`
 `request_summary`: `peer_validation` (targeted requests only), `export`,

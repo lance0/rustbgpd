@@ -1,14 +1,13 @@
 //! Temporary operator projections held only while synchronous replacement owns
 //! canonical RIB state. These contain values, never routes or shared counters.
 
-use super::queries::MissingExportCounters;
 use super::update_groups::{GroupKey, GroupMembership, compare_update_groups};
 use super::{QUERY_BUDGET_PER_CHUNK, RibManager};
 use crate::update::{
-    EffectiveDistributionMode, ExportPolicyTermHits, NeighborPolicyStats, NeighborRibSnapshot,
-    PeerOutboundState, RibSummaryQuery,
+    EffectiveDistributionMode, NeighborPolicyStats, NeighborRibSnapshot, PeerOutboundState,
+    RibSummaryQuery,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use tokio::sync::mpsc;
 
@@ -21,9 +20,6 @@ pub(super) struct ReplacementSummaries {
 struct SummaryProjection {
     neighbors: HashMap<IpAddr, NeighborRibSnapshot>,
     unknown_outbound: PeerOutboundState,
-    // An explicit None disables the global fallback for that peer.
-    policies: BTreeMap<IpAddr, Option<Result<ExportPolicyTermHits, MissingExportCounters>>>,
-    global_policy: Option<Result<ExportPolicyTermHits, MissingExportCounters>>,
     memberships: HashMap<IpAddr, GroupMembership>,
     group_keys: HashMap<usize, GroupKey>,
 }
@@ -36,38 +32,6 @@ impl ReplacementSummaries {
                 trace.emit("summary");
             }
             match query {
-                RibSummaryQuery::ExportPolicyTermHits { peer, reply } => {
-                    if reply.is_closed() {
-                        continue;
-                    }
-                    let rows = (|| {
-                        let mut rows = Vec::new();
-                        if let Some(peer) = peer {
-                            if let Some(row) = self
-                                .view
-                                .policies
-                                .get(&peer)
-                                .unwrap_or(&self.view.global_policy)
-                            {
-                                let mut row = row.clone()?;
-                                row.peer = Some(peer);
-                                rows.push(row);
-                            }
-                        } else {
-                            for row in self.view.policies.values().flatten() {
-                                if reply.is_closed() {
-                                    break;
-                                }
-                                rows.push(row.clone()?);
-                            }
-                            if let Some(row) = &self.view.global_policy {
-                                rows.push(row.clone()?);
-                            }
-                        }
-                        Ok(rows)
-                    })();
-                    super::queries::reply_export_policy_term_hits(reply, rows);
-                }
                 RibSummaryQuery::NeighborRibSnapshots {
                     peers,
                     comparison,
@@ -165,9 +129,7 @@ impl RibManager {
             let peer_count = view.neighbors.len();
             #[cfg(feature = "bench-internals")]
             tracing::info!(target: "replacement_summary", operation, phase = "captured", capture_us,
-                peer_count, policy_count = view.policies.len(), group_count = view.group_keys.len(),
-                term_count = view.policies.values().flatten().chain(view.global_policy.iter()).filter_map(|row| row.as_ref().ok()).map(|row| row.terms.len()).sum::<usize>(),
-                "replacement summary scope");
+                peer_count, group_count = view.group_keys.len(), "replacement summary scope");
             let context = manager
                 .replacement_readiness
                 .as_ref()
@@ -257,20 +219,6 @@ impl RibManager {
             ),
             outbound_prefix_limits: Vec::new(),
         };
-        let mut policies = BTreeMap::new();
-        for (&peer, chain) in &self.peer_export_policies {
-            policies.insert(
-                peer,
-                chain
-                    .as_ref()
-                    .map(|chain| super::queries::snapshot_export_chain(Some(peer), chain)),
-            );
-            self.replacement_checkpoint(false);
-        }
-        let global_policy = self
-            .export_policy
-            .as_ref()
-            .map(|chain| super::queries::snapshot_export_chain(None, chain));
         let mut memberships = HashMap::with_capacity(self.update_groups.members.len());
         let mut group_keys = HashMap::new();
         for (&peer, membership) in &self.update_groups.members {
@@ -285,8 +233,6 @@ impl RibManager {
         SummaryProjection {
             neighbors,
             unknown_outbound,
-            policies,
-            global_policy,
             memberships,
             group_keys,
         }
@@ -300,15 +246,6 @@ impl SummaryProjection {
             super::retire_vec(&mut row.outbound.outbound_prefix_limits, checkpoint);
             drop(row);
             checkpoint();
-        }
-        while let Some((_, row)) = self.policies.pop_first() {
-            if let Some(Ok(mut row)) = row {
-                super::retire_vec(&mut row.terms, checkpoint);
-            }
-            checkpoint();
-        }
-        if let Some(Ok(mut row)) = self.global_policy.take() {
-            super::retire_vec(&mut row.terms, checkpoint);
         }
         for (_, key) in self.group_keys.drain() {
             drop(key);
@@ -325,7 +262,6 @@ impl SummaryProjection {
 mod tests {
     use super::*;
     use crate::{SelectionDeferralConfig, SelectionDeferralWaiterConfig};
-    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain};
     use rustbgpd_telemetry::BgpMetrics;
     use rustbgpd_wire::{Afi, Safi};
     use tokio::sync::oneshot;
@@ -354,8 +290,12 @@ mod tests {
         };
         let enqueue = || {
             let (reply, response) = oneshot::channel();
-            tx.try_send(RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
-                .unwrap();
+            tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                peers: Vec::new(),
+                comparison: None,
+                reply,
+            })
+            .unwrap();
             response
         };
         let pending_in_scope = |manager: &RibManager| {
@@ -384,7 +324,7 @@ mod tests {
         assert_eq!(trace.primary_updates, 1, "completed owner work is counted");
         let mut response = enqueue();
         manager.drain_summary_queries();
-        assert!(response.try_recv().unwrap().is_empty());
+        assert!(response.try_recv().unwrap().snapshots.is_empty());
         assert!(manager.post_commit_query_trace.is_none());
 
         // Exercise the first checkpoint after capture and an interior one.
@@ -397,11 +337,11 @@ mod tests {
                     assert_eq!(pending_in_scope(manager), !queued_before_capture);
                     let mut response = queued.unwrap_or_else(enqueue);
                     manager.replacement_checkpoint(true);
-                    assert!(response.try_recv().unwrap().is_empty());
+                    assert!(response.try_recv().unwrap().snapshots.is_empty());
                     assert!(!pending_in_scope(manager));
                     let mut second = enqueue();
                     manager.replacement_checkpoint(true);
-                    assert!(second.try_recv().unwrap().is_empty());
+                    assert!(second.try_recv().unwrap().snapshots.is_empty());
                     assert!(!pending_in_scope(manager), "the trace stays consumed");
                 });
             });
@@ -413,67 +353,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn replacement_summaries_preserve_fallback_unknown_roster_and_cancellation() {
-        let known: IpAddr = "192.0.2.1".parse().unwrap();
-        let disabled: IpAddr = "192.0.2.2".parse().unwrap();
+    async fn replacement_summaries_preserve_unknown_roster_and_cancellation() {
         let unknown: IpAddr = "192.0.2.3".parse().unwrap();
         let waiter: IpAddr = "192.0.2.4".parse().unwrap();
-        let chain = PolicyChain::new(vec![Policy {
-            entries: vec![],
-            default_action: PolicyAction::Permit,
-        }]);
         let (_tx, rx) = mpsc::channel(1);
         let (_general_tx, general_rx) = mpsc::channel(1);
         let (tx, rx_summary) = mpsc::channel(16);
-        let mut manager =
-            RibManager::new(rx, general_rx, Some(chain.clone()), None, BgpMetrics::new())
-                .with_summary_queries(rx_summary)
-                .with_selection_deferral(SelectionDeferralConfig {
-                    timeout: std::time::Duration::from_secs(30),
-                    waiters: vec![SelectionDeferralWaiterConfig {
-                        peer: waiter,
-                        families: vec![(Afi::Ipv4, Safi::Unicast)],
-                    }],
-                });
-        // Installed chains own their counters (ADR-0136).
-        let _ = chain.hit_counters();
-        manager.peer_export_policies.insert(known, Some(chain));
-        manager.peer_export_policies.insert(disabled, None);
+        let mut manager = RibManager::new(rx, general_rx, None, None, BgpMetrics::new())
+            .with_summary_queries(rx_summary)
+            .with_selection_deferral(SelectionDeferralConfig {
+                timeout: std::time::Duration::from_secs(30),
+                waiters: vec![SelectionDeferralWaiterConfig {
+                    peer: waiter,
+                    families: vec![(Afi::Ipv4, Safi::Unicast)],
+                }],
+            });
         let expected_neighbors =
             [unknown, waiter, unknown].map(|peer| manager.neighbor_rib_snapshot(peer));
-        let expected_all = format!("{:?}", manager.export_policy_term_hits(None).unwrap());
-        let expected_unknown = format!(
-            "{:?}",
-            manager.export_policy_term_hits(Some(unknown)).unwrap()
-        );
         manager.with_replacement_summary_reads("restore", |manager| {
             // Mutating these canonical inputs cannot change the captured values.
-            manager.peer_export_policies.clear();
-            manager.export_policy = None;
             manager.selection_deferral = None;
             let (reply, mut response) = oneshot::channel();
             tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
                 peers: vec![unknown, waiter, unknown],
                 comparison: Some((unknown, waiter)),
                 reply,
-            })
-            .unwrap();
-            let (all_reply, mut all_response) = oneshot::channel();
-            tx.try_send(RibSummaryQuery::ExportPolicyTermHits {
-                peer: None,
-                reply: all_reply,
-            })
-            .unwrap();
-            let (fallback_reply, mut fallback_response) = oneshot::channel();
-            tx.try_send(RibSummaryQuery::ExportPolicyTermHits {
-                peer: Some(unknown),
-                reply: fallback_reply,
-            })
-            .unwrap();
-            let (disabled_reply, mut disabled_response) = oneshot::channel();
-            tx.try_send(RibSummaryQuery::ExportPolicyTermHits {
-                peer: Some(disabled),
-                reply: disabled_reply,
             })
             .unwrap();
             let (canceled_reply, canceled_response) = oneshot::channel();
@@ -493,23 +397,18 @@ mod tests {
                 response.comparison.unwrap().verdict,
                 crate::UpdateGroupComparisonVerdict::Unknown
             );
-            assert_eq!(
-                format!("{:?}", all_response.try_recv().unwrap()),
-                expected_all
-            );
-            assert_eq!(
-                format!("{:?}", fallback_response.try_recv().unwrap()),
-                expected_unknown
-            );
-            assert!(disabled_response.try_recv().unwrap().is_empty());
             assert_eq!(tx.capacity(), 16);
         });
         let (reply, mut response) = oneshot::channel();
-        tx.try_send(RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
-            .unwrap();
+        tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+            peers: Vec::new(),
+            comparison: None,
+            reply,
+        })
+        .unwrap();
         manager.drain_summary_queries();
         assert!(
-            response.try_recv().unwrap().is_empty(),
+            response.try_recv().unwrap().snapshots.is_empty(),
             "terminal queries use current values"
         );
         assert!(manager.replacement_readiness.is_none());
@@ -527,20 +426,32 @@ mod tests {
             let mut replies = Vec::new();
             for _ in 0..=QUERY_BUDGET_PER_CHUNK {
                 let (reply, response) = oneshot::channel();
-                tx.try_send(RibSummaryQuery::ExportPolicyTermHits { peer: None, reply })
-                    .unwrap();
+                tx.try_send(RibSummaryQuery::NeighborRibSnapshots {
+                    peers: Vec::new(),
+                    comparison: None,
+                    reply,
+                })
+                .unwrap();
                 replies.push(response);
             }
             manager.replacement_checkpoint(true);
             for response in replies.iter_mut().take(QUERY_BUDGET_PER_CHUNK) {
-                assert!(response.try_recv().unwrap().is_empty());
+                assert!(response.try_recv().unwrap().snapshots.is_empty());
             }
             assert!(matches!(
                 replies.last_mut().unwrap().try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
             manager.replacement_checkpoint(true);
-            assert!(replies.last_mut().unwrap().try_recv().unwrap().is_empty());
+            assert!(
+                replies
+                    .last_mut()
+                    .unwrap()
+                    .try_recv()
+                    .unwrap()
+                    .snapshots
+                    .is_empty()
+            );
         });
     }
 }
