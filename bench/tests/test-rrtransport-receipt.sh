@@ -49,6 +49,20 @@ fi
 fixture="$tmp/fixture"
 mkdir -p "$fixture"
 
+if "$runner" --require-quiet-fixture performance 1000000 ''; then
+  echo "false green: high host load" >&2
+  exit 1
+fi
+if "$runner" --require-quiet-fixture powersave 0 ''; then
+  echo "false green: non-performance governor" >&2
+  exit 1
+fi
+if "$runner" --require-quiet-fixture performance 0 cargo; then
+  echo "false green: competing process" >&2
+  exit 1
+fi
+"$runner" --require-quiet-fixture performance 0 ''
+
 python3 - "$fixture" <<'PY'
 import json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
