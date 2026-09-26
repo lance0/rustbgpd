@@ -3,7 +3,12 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.8.3 - Unreleased
+
+- Negotiate RFC 8538 Notification GR from the two advertised N bits,
+  independently of peer GR/LLGR route-retention families. Helper-only peers
+  with an empty GR family list now receive Hard Reset for protective
+  teardown, encapsulating the original NOTIFICATION reason and data.
 
 - OPEN negotiation now treats a received BGP Role capability with an
   unassigned value (5-255) or a length other than 1 as a Role that matches no

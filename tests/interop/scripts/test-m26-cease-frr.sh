@@ -4,7 +4,7 @@
 # Validates:
 #   1. Session establishes initially
 #   2. FRR sends 3 prefixes, exceeding max_prefixes=2
-#   3. rustbgpd sends Cease/1 (Max Prefixes) NOTIFICATION
+#   3. rustbgpd sends Hard Reset encapsulating Cease/1 (Max Prefixes)
 #   4. FRR sees the NOTIFICATION and session tears down
 #   5. Prometheus metric records the max-prefix event
 #   6. The peer stays administratively down beyond two retry intervals
@@ -297,14 +297,15 @@ inject_excess_prefix() {
 test_cease_notification_sent() {
     log "Test 2: Cease NOTIFICATION sent (max_prefixes exceeded)"
 
-    # Wait for FRR to see the notification — session should bounce
+    # FRR helper mode advertises N without any GR families. Both N bits
+    # require Hard Reset; FRR reports the encapsulated reason separately.
     for i in $(seq 1 30); do
         local neighbor
-        neighbor=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1" 2>/dev/null || true)
+        neighbor=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null || true)
 
-        if echo "$neighbor" \
-            | grep -Fq 'Notification received (Cease/Maximum Number of Prefixes Reached)'; then
-            ok "FRR received Cease/Maximum Number of Prefixes Reached"
+        if jq -e '."10.0.0.1" | .lastNotificationHardReset == true
+            and .lastErrorCodeSubcode == "0601"' <<<"$neighbor" >/dev/null 2>&1; then
+            ok "FRR received Hard Reset encapsulating Cease/Maximum Number of Prefixes Reached"
             return 0
         fi
 

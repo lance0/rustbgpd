@@ -1,7 +1,7 @@
 # Containerlab topology: rustbgpd ↔ FRR (M26 — Cease subcode compatibility)
 #
 # Validates: Cease NOTIFICATION handling between rustbgpd and FRR.
-# - rustbgpd sends Cease/1 (Max Prefixes) when limit is exceeded
+# - rustbgpd sends Hard Reset encapsulating Cease/1 when the limit is exceeded
 # - FRR handles the NOTIFICATION and session tears down cleanly
 # - rustbgpd keeps the peer disabled until explicit enable
 # - Session re-establishes only after the excess route is removed and enabled

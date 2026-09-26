@@ -9,7 +9,8 @@
 #      the session as multihop.
 #   2. Failover: cutting the middle hop (mid stops forwarding) makes BFD fail.
 #      the RFC 5882 coupling tears the BGP session down with a Cease / BFD Down NOTIFICATION
-#      (RFC 9384 subcode 10) far under the 90 s hold timer — proving the
+#      (RFC 9384 subcode 10, wrapped in RFC 8538 Hard Reset after N-bit
+#      exchange) far under the 90 s hold timer — proving the
 #      coupling, not a hold-timer expiry. The BFD-down oracle polls every
 #      100 ms and reports the observed latency.
 #   3. Recovery: forwarding is restored; BFD and BGP re-establish on both sides.
@@ -32,9 +33,10 @@ PEER="10.255.0.2"
 FRR_BFD_PEER="10.255.0.1"
 # Bound the BFD-down oracle well below the 90 second BGP hold timer.
 BFD_DOWN_BOUND_MS=3000
+BFD_LOG=/tmp/m108-rustbgpd.log
 
 resolve_grpc_addr
-start_rustbgpd
+start_rustbgpd "/usr/local/bin/start-rustbgpd.sh > $BFD_LOG 2>&1"
 
 grpc_bfd_json() {
     grpcurl_call \
@@ -101,14 +103,23 @@ frr_bfd_multihop() {
     frr_bfd_peer_json | jq -r '.multihop // false'
 }
 
-# Cease / BFD Down (RFC 9384: code 6, subcode 10) NOTIFICATIONs rustbgpd has
-# sent to the peer, from the public Prometheus counter. Label order inside the
-# braces is not part of the contract, so each pair is matched independently.
+# This fixture exchanges the RFC 8538 N bits, including FRR's helper-only
+# GR capability. The public counter records outer Cease / Hard Reset (6/9);
+# the JSON notification log below checks the encapsulated BFD Down cause.
+# Label order is not part of the contract, so match each pair independently.
 bfd_down_notifications_sent() {
     prom_scrape "$RUSTBGPD" | awk -v peer="peer=\"$PEER\"" '
-        /^bgp_notifications_sent_total\{/ && /[{,]code="6"/ && /[{,]subcode="10"/ && index($0, peer) {
+        /^bgp_notifications_sent_total\{/ && /[{,]code="6"/ && /[{,]subcode="9"/ && index($0, peer) {
             print $2; exit
         }'
+}
+
+bfd_down_notification_logs() {
+    docker exec "$RUSTBGPD" cat "$BFD_LOG" \
+        | jq -Rsc --arg peer "$PEER" '[split("\n")[] | fromjson?
+            | .fields | select(.peer == $peer and .direction == "sent"
+                and .code == 6 and .subcode == 9
+                and .description == "Hard Reset: BFD Down")] | length'
 }
 
 mid_forwarding() {
@@ -183,6 +194,7 @@ fi
 
 notifications_before=$(bfd_down_notifications_sent)
 notifications_before=${notifications_before:-0}
+notification_logs_before=$(bfd_down_notification_logs)
 
 # --- 2. Failover: cut the middle hop → BFD down → BGP torn down --------------
 
@@ -235,20 +247,23 @@ else
     dump_state_on_failure
 fi
 
-# RFC 9384: the teardown is a Cease / BFD Down NOTIFICATION, visible on the
-# public counter even though the cut path never delivers it to FRR.
+# The counter records Hard Reset even though the cut path cannot deliver it
+# to FRR. Require a new JSON notification log with the inner BFD Down cause too.
 notifications_after=""
 for _ in $(seq 1 10); do
     notifications_after=$(bfd_down_notifications_sent)
-    if [ -n "$notifications_after" ] && [ "$notifications_after" -gt "$notifications_before" ]; then
+    notification_logs_after=$(bfd_down_notification_logs)
+    if [ -n "$notifications_after" ] && [ "$notifications_after" -gt "$notifications_before" ] \
+        && [ "$notification_logs_after" -gt "$notification_logs_before" ]; then
         break
     fi
     sleep 1
 done
-if [ -n "$notifications_after" ] && [ "$notifications_after" -gt "$notifications_before" ]; then
-    ok "rustbgpd sent a Cease / BFD Down NOTIFICATION (RFC 9384 6/10; counter $notifications_before → $notifications_after)"
+if [ -n "$notifications_after" ] && [ "$notifications_after" -gt "$notifications_before" ] \
+    && [ "$notification_logs_after" -gt "$notification_logs_before" ]; then
+    ok "rustbgpd sent Hard Reset encapsulating BFD Down (6/9 wrapping 6/10; counter $notifications_before → $notifications_after)"
 else
-    fail "no Cease / BFD Down NOTIFICATION counted (before=$notifications_before after=${notifications_after:-absent})"
+    fail "no new Hard Reset with BFD Down cause (counter $notifications_before → ${notifications_after:-absent}; logs $notification_logs_before → $notification_logs_after)"
     dump_state_on_failure
 fi
 
