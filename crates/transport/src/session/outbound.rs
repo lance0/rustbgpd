@@ -56,12 +56,16 @@ type AttrGroupValue = (Arc<Vec<PathAttribute>>, Option<IpAddr>, Option<Ipv6Addr>
 /// UPDATEs. Post-policy attribute `Arc`s are allocated per RIB distribution
 /// pass, so a resync replaying routes stored across many passes would
 /// otherwise emit one UPDATE per original pass and can overrun the bounded
-/// writer queue. Pointer lookups stay the fast path. A pointer that opens a
-/// group is kept alive by that group; one that joins an existing group by
-/// value is pinned here, so a freed allocation cannot alias a later one.
+/// writer queue. Pointer lookups stay the fast path, and the value map is
+/// built only once a second distinct value appears, so the common
+/// one-allocation envelope never hashes an attribute vector. A pointer that
+/// opens a group is kept alive by that group; one that joins an existing
+/// group by value is pinned here, so a freed allocation cannot alias a
+/// later one.
 #[derive(Default)]
 struct AttrGroupIndex {
     by_ptr: HashMap<AttrGroupKey, usize>,
+    first: Option<(AttrGroupValue, usize)>,
     by_value: HashMap<AttrGroupValue, usize>,
     pinned: Vec<Arc<Vec<PathAttribute>>>,
 }
@@ -85,10 +89,29 @@ impl AttrGroupIndex {
         if let Some(&idx) = self.by_ptr.get(&key) {
             return Ok(idx);
         }
-        let idx = *self
-            .by_value
-            .entry((Arc::clone(attrs), next_hop, link_local_next_hop))
-            .or_insert(next);
+        let idx = match &self.first {
+            None => {
+                self.first = Some(((Arc::clone(attrs), next_hop, link_local_next_hop), next));
+                next
+            }
+            Some(((first, first_nh, first_ll), first_idx))
+                if self.by_value.is_empty()
+                    && *first_nh == next_hop
+                    && *first_ll == link_local_next_hop
+                    && **first == **attrs =>
+            {
+                *first_idx
+            }
+            Some((first, first_idx)) => {
+                if self.by_value.is_empty() {
+                    self.by_value.insert(first.clone(), *first_idx);
+                }
+                *self
+                    .by_value
+                    .entry((Arc::clone(attrs), next_hop, link_local_next_hop))
+                    .or_insert(next)
+            }
+        };
         self.by_ptr.insert(key, idx);
         if idx == next {
             Err(next)
@@ -2082,5 +2105,33 @@ mod tests {
                 "Cease/8 must be the final frame"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod attr_group_index_tests {
+    use super::*;
+
+    fn attrs(med: u32) -> Arc<Vec<PathAttribute>> {
+        Arc::new(vec![PathAttribute::Med(med)])
+    }
+
+    /// Equal values rejoin their group by value both before and after the
+    /// value map exists; a different next hop never joins.
+    #[test]
+    fn rejoins_by_value_across_the_lazy_value_map() {
+        let mut index = AttrGroupIndex::default();
+        let nh = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let other_nh = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+        assert_eq!(index.group(&attrs(1), nh, None, 0), Err(0));
+        assert_eq!(index.group(&attrs(1), nh, None, 1), Ok(0));
+        assert_eq!(index.group(&attrs(1), other_nh, None, 1), Err(1));
+        assert_eq!(index.group(&attrs(2), nh, None, 2), Err(2));
+        assert_eq!(index.group(&attrs(1), nh, None, 3), Ok(0));
+        assert_eq!(index.group(&attrs(1), other_nh, None, 3), Ok(1));
+        assert_eq!(index.group(&attrs(2), nh, None, 3), Ok(2));
+        let shared = attrs(3);
+        assert_eq!(index.group(&shared, nh, None, 3), Err(3));
+        assert_eq!(index.group(&shared, nh, None, 4), Ok(3));
     }
 }
