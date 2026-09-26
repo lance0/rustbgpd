@@ -46,7 +46,8 @@ Each result below links to its published, reproducible receipt:
   [same matrix](ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
   **3.6–4.0 s** for v0.72.0 and 3.7–3.9 s for current main, measured
-  2026-09-26 — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). The 2026-08-30 v0.68.0 rows read 3.4 s on the same host
+  2026-09-26; session establishment is consistently about 0.1 s slower on main,
+  unattributed — [v0.72.0 refresh receipt](headline-refresh-v0720-2026-09.md). The 2026-08-30 v0.68.0 rows read 3.4 s on the same host
   (same pending comparison). The dated matrix retains BIRD and OpenBGPD
   comparison rows, [same matrix](ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
@@ -67,7 +68,9 @@ Each result below links to its published, reproducible receipt:
   and container defaults differ.
 
 The rustbgpd figures above are v0.72.0 release-tree rows measured 2026-09-26,
-with current main measured the same day as a no-regression check. The IRR 10%
+with current main measured the same day as a regression check: main is
+within run-to-run spread except for consistently slower session establishment
+(about +0.1 s, unattributed) and small RR1000 shifts. The IRR 10%
 and 50% overlap rows remain v0.68.0 source-equivalent rows measured
 2026-08-30. On this host, the 2026-09-26 rows are slower than the 2026-08-30
 v0.68.0 rows in every re-measured cell; until a same-day v0.68.0/v0.72.0
@@ -141,7 +144,7 @@ records.
 | [`grouped-private-adj-rib-out-late-join-2026-07.md`][grouped-private-adj-rib-out-late-join-2026-07.md] | Unstated | Late join after a preloaded Loc-RIB, measured across client counts | Fresh grouped-join virtual-allocation reduction | A retained-RSS headline |
 | [`grouped-withdrawal-fanout-2026-07.md`][grouped-withdrawal-fanout-2026-07.md] | July 2026 | Grouped withdrawal fanout across the disclosed member fleet | Absolute measurement-only baseline | Writer, socket, network, or end-to-end latency |
 | [`grouped-withdrawal-probe-skip-2026-07.md`][grouped-withdrawal-probe-skip-2026-07.md] | July 2026 | Fixed 64-route withdrawal at 64, 256, and 1,000 members | Exact-probe skip improved measured medians by 6.80–9.33% | A result outside the fixed withdrawal shape |
-| [`headline-refresh-v0720-2026-09.md`](headline-refresh-v0720-2026-09.md) | 2026-09-26 | IXP-700 S1/S2/S3, IRR reload at 0% overlap, and RR1000 on v0.72.0 and current main, alternating, three or more runs per build | Main within run-to-run spread of the same-day v0.72.0 control | IRR 10%/50% overlap, comparator daemons, or attribution of the gap to the August v0.68.0 rows |
+| [`headline-refresh-v0720-2026-09.md`](headline-refresh-v0720-2026-09.md) | 2026-09-26 | IXP-700 S1/S2/S3, IRR reload at 0% overlap, and RR1000 on v0.72.0 and current main, alternating, three or more runs per build | Main within run-to-run spread of the same-day v0.72.0 control, except consistently slower session establishment (about +0.1 s, unattributed) and small RR1000 shifts | IRR 10%/50% overlap, comparator daemons, or attribution of the gap to the August v0.68.0 rows |
 | [`high-n-route-server-v0680-2026-08.md`][high-n-route-server-v0680-2026-08.md] | 2026-08-30 | Exact-source 2,500- and 5,000-peer route-server runs | Both high-N runs completed their session and route-count gates | A scaling law, interpolation, or extrapolation |
 | [`irr-reload-comparison-2026-08.md`][irr-reload-comparison-2026-08.md] | 2026-08 | 320 members, 183,040 routes, 3.2M filter entries, eight reload roots | Same-host rustbgpd, BIRD, and OpenBGPD reload observations | A cause for later-reload growth or exact allocator comparison |
 | [`irr-reload-grouped-per-client-best-2026-08.md`][irr-reload-grouped-per-client-best-2026-08.md] | 2026-08 | 320 members, 183,040 prefixes, four reloads per cell | Historical grouped per-client-best acceptance result | A speedup or the internal mechanism behind later-reload growth |

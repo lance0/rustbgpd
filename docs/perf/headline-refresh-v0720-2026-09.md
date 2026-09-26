@@ -3,9 +3,23 @@
 This same-day, same-host campaign re-measured the headline route-server and
 route-reflector cells on two builds: the v0.72.0 release tree and current main at
 `33f8e7142c4a984812de0ba927b65a842a4db62c`. Runs alternated between the two
-builds, with at least three runs per cell per build. Main shows no regression
-against v0.72.0: every difference sits within run-to-run spread, apart from two
-small, unattributed RR1000 shifts noted below.
+builds, with at least three runs per cell per build. Main shows no regression in
+convergence, reload, flap, IRR, or RR1000 wire timing against v0.72.0. Those
+differences sit within run-to-run spread, with three exceptions:
+
+- **Session establishment is consistently slower on main.** The harness
+  reported 0.8 s on every main leg and 0.7 s on every control leg; it logs at
+  0.1 s resolution, so that reading alone places the delta between just over 0
+  and just under 0.2 s. The daemon's own log narrows it: the span from the first
+  to the 700th "session established" record is 0.758–0.779 s (median 0.775) on
+  main and 0.665–0.686 s (median 0.668) on v0.72.0, about +0.1 s. This is
+  unattributed. The single-command startup roster registration (#2723) landed
+  between the two builds and changes the startup path, so it is the candidate
+  cause, but no measurement here isolates it.
+- **RR1000 staged convergence** is +4.7% at the median.
+- **RR1000 wire-point RSS** is about +3% at the median.
+
+Both RR1000 shifts are small and unattributed.
 
 Both builds are slower on this host than the 2026-08-30 v0.68.0 rows in the
 [IXP matrix](ixp-matrix-2026-07.md), the [IRR reload receipt](irr-reload-v0680-2026-08.md),
@@ -24,7 +38,8 @@ per-reload p50s over three runs of four reloads. RR1000 values are six runs
 
 | Cell | v0.72.0 | main `33f8e7142` | Reading |
 |---|---:|---:|---|
-| S1 sessions established (700) | 0.7 s (all legs) | 0.8 s (all legs) | +0.1 s on every leg; the harness reports 0.1 s resolution |
+| S1 sessions established (700), harness reading | 0.7 s (all legs) | 0.8 s (all legs) | Consistent +0.1 s on every leg, at the harness's 0.1 s resolution |
+| S1 first-to-700th established, daemon log | 0.665–0.686 s (median 0.668) | 0.758–0.779 s (median 0.775) | +0.107 s median; consistent, unattributed |
 | S1 cold convergence, 700 × 400,400 | 3.6–4.0 s (median 3.6) | 3.7–3.9 s (median 3.9) | Within spread |
 | S2 policy-reload completion p50 | 1.37–1.63 s (median 1.50) | 1.42–1.75 s (median 1.52) | Within spread |
 | S2 changed-observer reload stall p50 | 457–646 ms (median 499) | 463–598 ms (median 527) | Within spread |
@@ -152,4 +167,5 @@ The compact bundle is
 [`artifacts/headline-refresh-v0720-2026-09`](artifacts/headline-refresh-v0720-2026-09/README.md):
 logs, per-run status and provenance, RSS samples, IRR rows, RR1000 phase
 records, the campaign progress log, and a machine-readable `summary.csv` of
-every value above.
+every value above. `establishment-span.csv` is derived from the daemon logs,
+which stay outside the repository.
