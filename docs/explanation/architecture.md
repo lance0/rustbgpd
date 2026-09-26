@@ -227,16 +227,16 @@ gRPC request
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
 | Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `rejected_routes.rs`, `export.rs`, `refresh_accounting.rs`, `shared_group.rs`, `replay.rs`, `tests/`) |
 | Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
-| Policy evaluation | `crates/policy/src/engine.rs` |
+| Policy evaluation and runtime administration | `crates/policy/src/engine.rs` (evaluation), `src/policy_admin.rs` (daemon policy catalog and runtime CRUD) |
 | Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
 | Route distribution | `crates/rib/src/manager/distribution/` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
 | FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/queries.rs` — `handle_query_fib_install_candidates` |
-| Unicast Linux FIB install (ECMP, weighted multipath, scoped link-local `dev`) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence) — ADR-0061 / 0066 / 0068 / 0069 |
+| Unicast Linux FIB install and control (ECMP, weighted multipath, scoped link-local `dev`, runtime FIB table CRUD) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence), `src/fib_table_control.rs` (gRPC FIB table CRUD), `src/fib_common.rs` (shared family-membership helpers), `src/kernel_route_notify.rs` (kernel route drift notifications) — ADR-0061 / 0066 / 0068 / 0069 |
 | BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880, ADR-0067) |
 | BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (RFC 5881/5883 UDP encapsulation, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
-| gRPC service handlers | `crates/api/src/` — one file per service |
+| gRPC service handlers and gNMI Set bridge | `crates/api/src/` — one file per service; `src/gnmi_set_bridge.rs` — transaction-backed gNMI Set mutations |
 | RPKI / RTR | `crates/rpki/src/` |
 | BMP export | `crates/bmp/src/` |
 | MRT dump | `crates/mrt/src/` |
@@ -245,10 +245,10 @@ gRPC request
 | EVPN wire codec extras | `crates/wire/src/pmsi.rs` — RFC 6514 §5 PMSI Tunnel attribute (path attr type 22), used on Type 3 IMET routes |
 | EVPN daemon glue | `src/evpn_dataplane.rs` (RIB → reconciler supervisor), `src/evpn_originator/` (kernel local-MAC / MAC+IP observations → Type 2 actors, RIB polling/write, duplicate-MAC coordination), `src/evpn_imet.rs` (Type 3 IMET startup-inject + shutdown-withdraw), `src/evpn_l3_originator.rs` (Type 5 origination), `src/evpn_svi.rs` (SVI-MAC Type 2 origination), `src/evpn_segment.rs` (Ethernet Segment orchestrator — Gate 8), `src/evpn_es_drain.rs` / `src/evpn_es_link_drain.rs` (ADR-0084 / ADR-0085 ES drain), `src/evpn_ack.rs` (ADR-0102 acknowledgement-aware origination), `src/evpn_runtime_converger.rs` + `src/evpn_plan_decomposer.rs` (ADR-0063 runtime mutation apply) |
 | CLI tool | `crates/cli/src/` |
-| Config loading + validation | `src/config/` |
+| Config loading + validation, persistence, history, and migration | `src/config/` (loading and validation), `src/config_persister.rs` (durable transaction persistence), `src/config_history.rs` (accepted snapshots), `src/config_migration.rs` (deprecated-key migration) |
 | Scoped link-local / unnumbered neighbor identity | `src/config/validation.rs` + `src/config/mod.rs` (`interface` / `scope_id` parse + resolve), `crates/api/src/peer_types.rs` (`PeerKey`), `crates/transport/src/config.rs` (`peer_interface` / `peer_scope_id`), `crates/transport/src/socket_opts.rs` (scoped connect, AF-aware GTSM), `src/peer_manager/inbound.rs` (passive scope match) — ADR-0069 |
-| Startup wiring | `src/main.rs` |
-| Prometheus metrics | `crates/telemetry/src/lib.rs` |
+| Startup wiring and systemd notifications | `src/main.rs`, `src/sd_notify.rs` |
+| Prometheus metrics and readiness HTTP server | `crates/telemetry/src/lib.rs` (metrics), `src/metrics_server.rs` (metrics and readiness endpoints) |
 
 ---
 
