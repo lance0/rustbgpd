@@ -102,7 +102,7 @@ async fn post_restart_second_breach_gets_one_fresh_hold_down() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
     assert_eq!(counters.start.load(Ordering::SeqCst), 1);
     let first_generation = mgr.max_prefix_latches[&key(addr)].generation;
 
@@ -111,7 +111,7 @@ async fn post_restart_second_breach_gets_one_fresh_hold_down() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
     assert_eq!(counters.start.load(Ordering::SeqCst), 2);
     let second = &mgr.max_prefix_latches[&key(addr)];
     assert_ne!(second.generation, first_generation);
@@ -129,7 +129,7 @@ async fn post_restart_second_breach_gets_one_fresh_hold_down() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
     assert_eq!(counters.start.load(Ordering::SeqCst), 3);
     assert!(!mgr.max_prefix_latches.contains_key(&key(addr)));
     tokio::time::advance(Duration::from_secs(31)).await;
@@ -698,7 +698,7 @@ async fn peer_presence_retained_max_prefix_emits_no_removed() {
         })
         .unwrap();
 
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
 
     let managed = mgr
         .peers
@@ -909,7 +909,7 @@ async fn local_wins_collision_preserves_candidate_terminal_breach() {
         })
         .unwrap();
 
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
     wait_counter(&primary.stop, 1).await;
 
     let managed = mgr.peers.get(&key(addr)).unwrap();
@@ -967,7 +967,7 @@ async fn remote_wins_collision_preserves_old_primary_terminal_breach() {
         })
         .unwrap();
 
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
     wait_counter(&candidate.stop, 1).await;
 
     let managed = mgr.peers.get(&key(addr)).unwrap();
@@ -1075,7 +1075,7 @@ async fn dynamic_back_to_idle_retains_recovery_target_for_late_terminal_breach()
         })
         .unwrap();
 
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(addr).await;
 
     assert_eq!(old.shutdown.load(Ordering::SeqCst), 1);
     let managed = mgr.peers.get(&key(addr)).expect("disabled recovery target");
@@ -1227,7 +1227,7 @@ async fn max_prefix_latched_gauge_follows_latch_until_enable_or_timed_restart() 
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(enabled_addr).await;
     for peer in ["10.0.0.90", "10.0.0.91"] {
         assert_eq!(latched(&mgr, peer), Some(1.0), "{peer} latched");
         assert_eq!(
@@ -1248,7 +1248,7 @@ async fn max_prefix_latched_gauge_follows_latch_until_enable_or_timed_restart() 
             received: false,
         })
         .unwrap();
-    mgr.drain_ready_session_notifications().await;
+    mgr.drain_ready_session_notifications(enabled_addr).await;
     assert_eq!(
         mgr.max_prefix_latches[&key(enabled_addr)].generation,
         generation

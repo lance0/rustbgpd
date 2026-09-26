@@ -103,18 +103,63 @@ impl PeerManager {
     /// before an inbound-accept command. This closes the cross-channel race in
     /// which a passive reconnect could replace the breached session generation
     /// before its max-prefix latch was applied.
-    pub(super) async fn drain_ready_session_notifications(&mut self) {
-        while let Ok(notification) = self.session_notify_rx.try_recv() {
-            self.drain_ready_session_lifecycle_notifications();
-            self.handle_session_notification(notification).await;
+    ///
+    /// Outside a notification handler this handles every ready notification.
+    /// Inside one (a promotion or retirement fence for `peer`) it handles
+    /// `peer`'s notifications in order and defers the rest to the outermost
+    /// handler, so nesting is bounded by one peer's notices instead of growing
+    /// with every queued collision until the worker stack overflows.
+    pub(super) async fn drain_ready_session_notifications(&mut self, peer: IpAddr) {
+        if self.session_notification_depth == 0 {
+            while let Ok(notification) = self.session_notify_rx.try_recv() {
+                self.drain_ready_session_lifecycle_notifications();
+                self.handle_session_notification(notification).await;
+            }
+            return;
         }
+        loop {
+            // `peer`'s deferred notices are older than anything still queued.
+            let notification = if let Some(index) = self
+                .deferred_session_notifications
+                .iter()
+                .position(|deferred| session_notification_peer(deferred) == peer)
+            {
+                self.deferred_session_notifications.remove(index)
+            } else if let Ok(notification) = self.session_notify_rx.try_recv() {
+                self.drain_ready_session_lifecycle_notifications();
+                if session_notification_peer(&notification) == peer {
+                    Some(notification)
+                } else {
+                    self.deferred_session_notifications.push_back(notification);
+                    None
+                }
+            } else {
+                return;
+            };
+            if let Some(notification) = notification {
+                self.handle_session_notification(notification).await;
+            }
+        }
+    }
+
+    /// Handle one notification; the outermost call then handles whatever
+    /// nested drains deferred, oldest first.
+    pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        self.session_notification_depth += 1;
+        self.handle_one_session_notification(notification).await;
+        if self.session_notification_depth == 1 {
+            while let Some(deferred) = self.deferred_session_notifications.pop_front() {
+                self.handle_one_session_notification(deferred).await;
+            }
+        }
+        self.session_notification_depth -= 1;
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "notification handling keeps collision, dynamic-peer removal, and lifecycle ordering together"
     )]
-    pub(super) async fn handle_session_notification(&mut self, notification: SessionNotification) {
+    async fn handle_one_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::OpenReceived {
                 session_id,
@@ -556,5 +601,14 @@ impl PeerManager {
             managed.transport_config.peer.remote_asn = peer_asn;
             self.publish_peer_info_metric(peer_key);
         }
+    }
+}
+
+fn session_notification_peer(notification: &SessionNotification) -> IpAddr {
+    match notification {
+        SessionNotification::OpenReceived { peer_addr, .. }
+        | SessionNotification::BackToIdle { peer_addr, .. }
+        | SessionNotification::MaxPrefixExceeded { peer_addr, .. }
+        | SessionNotification::MaxPrefixWarning { peer_addr, .. } => *peer_addr,
     }
 }

@@ -17,7 +17,6 @@ use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-#[cfg(test)]
 use rustbgpd_transport::SessionNotification;
 use rustbgpd_transport::{
     PeerHandle, SessionLifecycleNotification,
@@ -490,6 +489,13 @@ pub struct PeerManager {
     validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     session_notify_tx: SessionNotificationSender,
     session_notify_rx: SessionNotificationReceiver,
+    /// Nesting depth of [`Self::handle_session_notification`]. Handling one
+    /// notification can drain the queue again (collision promotion and
+    /// session retirement both do).
+    session_notification_depth: usize,
+    /// Notifications a nested drain left for the outermost handler because
+    /// they belong to a different peer. Empty whenever the depth is zero.
+    deferred_session_notifications: VecDeque<SessionNotification>,
     session_lifecycle_tx: mpsc::Sender<SessionLifecycleNotification>,
     session_lifecycle_rx: mpsc::Receiver<SessionLifecycleNotification>,
     session_notification_event_tx: mpsc::Sender<TransportNotificationEvent>,
@@ -1093,6 +1099,8 @@ impl PeerManager {
             validation_rx,
             session_notify_tx,
             session_notify_rx,
+            session_notification_depth: 0,
+            deferred_session_notifications: VecDeque::new(),
             session_lifecycle_tx,
             session_lifecycle_rx,
             session_notification_event_tx,
@@ -1357,6 +1365,10 @@ impl PeerManager {
             self.peers.settle_abandoned_batches();
             #[cfg(test)]
             self.assert_import_roster_projection();
+            debug_assert!(
+                self.session_notification_depth == 0
+                    && self.deferred_session_notifications.is_empty()
+            );
             let bfd_retry_at = self.bfd_retry_deadline();
             let max_prefix_restart_deadline = self.next_max_prefix_restart_deadline;
             tokio::select! {

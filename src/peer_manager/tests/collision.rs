@@ -2103,3 +2103,89 @@ async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() 
     );
     assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
 }
+
+/// A startup burst queues one collision OPEN per peer while each primary is
+/// still in `Active`. Every promotion drains the queue before it transfers
+/// ownership; that drain must not resolve the other peers' collisions inside
+/// itself, or nesting grows with the burst and overflows the worker stack.
+/// Mutation-red: handling every peer's notification inside a nested drain
+/// aborts this test with a stack overflow.
+#[test]
+fn collision_promotion_burst_does_not_nest_one_level_per_peer() {
+    const PEERS: u8 = 128;
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(async {
+                    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+                    let (rib_tx, _rib_rx) = mpsc::channel(1024);
+                    let mut mgr = PeerManager::new(
+                        cmd_rx,
+                        65001,
+                        Ipv4Addr::new(10, 0, 0, 1),
+                        None,
+                        None,
+                        BgpMetrics::new(),
+                        rib_tx,
+                        None,
+                    );
+                    let addrs: Vec<IpAddr> = (1..=PEERS)
+                        .map(|i| IpAddr::V4(Ipv4Addr::new(10, 1, 0, i)))
+                        .collect();
+                    for (&peer_addr, candidate) in addrs.iter().zip(1001_u64..) {
+                        let counters = Arc::new(FakePeerCounters::default());
+                        insert_test_managed_peer_with_asn(
+                            &mut mgr,
+                            peer_addr,
+                            65002,
+                            fake_peer_handle(
+                                peer_addr,
+                                SessionState::Active,
+                                None,
+                                counters.clone(),
+                            ),
+                            false,
+                        );
+                        attach_test_pending_inbound(
+                            &mut mgr,
+                            peer_addr,
+                            fake_peer_handle(
+                                peer_addr,
+                                SessionState::OpenConfirm,
+                                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                                counters,
+                            ),
+                            candidate,
+                        );
+                        mgr.session_notify_tx
+                            .send(SessionNotification::OpenReceived {
+                                session_id: candidate,
+                                role: rustbgpd_transport::SessionRole::InboundCandidate,
+                                peer_addr,
+                                remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+                                peer_asn: 65002,
+                            })
+                            .expect("notification queued");
+                    }
+
+                    mgr.drain_ready_session_notifications(addrs[0]).await;
+
+                    for (peer_addr, candidate) in addrs.iter().zip(1001_u64..) {
+                        assert!(
+                            mgr.peers.get(&key(*peer_addr)).is_some_and(|m| {
+                                m.pending_inbound.is_none() && m.session_id() == candidate
+                            }),
+                            "every queued candidate must be promoted: {peer_addr}"
+                        );
+                    }
+                    assert!(mgr.deferred_session_notifications.is_empty());
+                });
+        })
+        .expect("spawn burst thread")
+        .join()
+        .expect("burst thread");
+}
