@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 380602e1bc19093003f4bd403f959bf39a3121de55c0a311d456942c37b8f6e9 # shrinks to notif = NotificationMessage { code: Unknown(8), subcode: 0, data: b"" }
+cc f01c23c294793bf8d702236f34bb791bc91ec6487c8f150d4ebdd4aab3d9b1a0 # shrinks to notif = NotificationMessage { code: Unknown(7), subcode: 0, data: b"" }
+cc 290ee4f71e1ca744e14b538665b396512d5055bf0156cd1b56cecaf44cad81a6 # shrinks to msg = Notification(NotificationMessage { code: Unknown(7), subcode: 0, data: b"" })
