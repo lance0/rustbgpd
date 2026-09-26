@@ -478,6 +478,7 @@ impl PeerManager {
                 bound,
                 family,
                 received,
+                path_limit,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
                     debug!(peer = %peer_addr, session_id, ?role, "ignoring max-prefix latch from unknown session");
@@ -502,15 +503,22 @@ impl PeerManager {
                     return;
                 }
 
-                let counted = if received { "received" } else { "accepted" };
-                let error = family.map_or_else(
-                    || format!("max-prefix limit exceeded: {count} accepted, bound {bound}"),
-                    |(afi, safi)| {
-                        format!(
-                            "max-prefix limit exceeded for {afi:?}/{safi:?}: {count} {counted}, bound {bound}"
-                        )
-                    },
-                );
+                let error = if path_limit {
+                    let (afi, safi) = family.expect("Add-Path receive cap has a family");
+                    format!(
+                        "Add-Path receive limit exceeded for {afi:?}/{safi:?}: {count} paths for one prefix, bound {bound}"
+                    )
+                } else {
+                    let counted = if received { "received" } else { "accepted" };
+                    family.map_or_else(
+                        || format!("max-prefix limit exceeded: {count} accepted, bound {bound}"),
+                        |(afi, safi)| {
+                            format!(
+                                "max-prefix limit exceeded for {afi:?}/{safi:?}: {count} {counted}, bound {bound}"
+                            )
+                        },
+                    )
+                };
                 let (pending, restart_seconds) =
                     self.peers
                         .get_mut(&peer_key)

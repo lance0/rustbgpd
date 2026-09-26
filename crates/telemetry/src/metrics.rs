@@ -545,6 +545,7 @@ struct BgpMetricsInner {
     max_prefix_blocking: IntGaugeVec,
     max_prefix_blocked: IntCounterVec,
     max_prefix_warning: IntCounterVec,
+    add_path_receive_limit_attempts: IntCounterVec,
     outbound_prefix_usage: IntGaugeVec,
     outbound_prefix_limit: IntGaugeVec,
     outbound_prefix_headroom: IntGaugeVec,
@@ -1297,6 +1298,15 @@ impl BgpMetrics {
                 "Max-prefix warning-threshold crossings, one per crossing per scope.",
             ),
             &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        let add_path_receive_limit_attempts = IntCounterVec::new(
+            Opts::new(
+                "bgp_add_path_receive_limit_attempts_total",
+                "Over-limit Add-Path receive NLRI attempts per peer, family and action; repeated path IDs count again.",
+            ),
+            &["peer", "family", "action"],
         )
         .expect("valid metric definition");
 
@@ -2827,6 +2837,9 @@ impl BgpMetrics {
             .register(Box::new(max_prefix_warning.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(add_path_receive_limit_attempts.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(outbound_prefix_usage.clone()))
             .expect("metric not already registered");
         registry
@@ -3341,6 +3354,7 @@ impl BgpMetrics {
             max_prefix_blocking,
             max_prefix_blocked,
             max_prefix_warning,
+            add_path_receive_limit_attempts,
             outbound_prefix_usage,
             outbound_prefix_limit,
             outbound_prefix_headroom,
@@ -3623,6 +3637,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.max_prefix_blocking, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_warning, peer);
+        Self::reap_peer_series_from_vec(&self.0.add_path_receive_limit_attempts, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
@@ -4497,6 +4512,17 @@ impl BgpMetrics {
     /// Record a max-prefix-exceeded event for a peer.
     pub fn record_max_prefix_exceeded(&self, peer: &str) {
         self.0.max_prefix_exceeded.with_label_values(&[peer]).inc();
+    }
+
+    /// Count one over-limit Add-Path NLRI attempt. Repeated IDs are attempts,
+    /// not distinct offending identities; labels have a closed vocabulary.
+    pub fn record_add_path_receive_limit_attempt(&self, peer: &str, family: &str, action: &str) {
+        debug_assert!(matches!(family, "ipv4_unicast" | "ipv6_unicast"));
+        debug_assert!(matches!(action, "shutdown" | "block" | "warning"));
+        self.0
+            .add_path_receive_limit_attempts
+            .with_label_values(&[peer, family, action])
+            .inc();
     }
 
     /// Publish one authoritative max-prefix accounting scope.

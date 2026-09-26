@@ -27,7 +27,11 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(len(baseline), 219)
         self.assertEqual(
             added,
-            {"bgp_fib_owned_state_persist_failures_total", "bgp_max_prefix_latched"},
+            {
+                "bgp_add_path_receive_limit_attempts_total",
+                "bgp_fib_owned_state_persist_failures_total",
+                "bgp_max_prefix_latched",
+            },
         )
         self.assertEqual(removed, set())
 

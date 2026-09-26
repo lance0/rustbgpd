@@ -174,6 +174,28 @@ fn diff_neighbors_detects_prefix_orf_receive_only_change() {
 }
 
 #[test]
+fn lowering_add_path_receive_max_rebuilds_for_open_renegotiation() {
+    let mut old_neighbor = test_neighbor("10.0.0.1", 65001);
+    old_neighbor.add_path = Some(AddPathConfig {
+        receive: true,
+        send: false,
+        send_max: None,
+        receive_max: Some(4),
+    });
+    let mut new_neighbor = old_neighbor.clone();
+    new_neighbor.add_path.as_mut().unwrap().receive_max = Some(2);
+    let diff = super::diff_neighbors(&[old_neighbor.clone()], &[new_neighbor.clone()]);
+    assert_eq!(diff.changed.len(), 1);
+    let changes = super::describe_neighbor_changes(&old_neighbor, &new_neighbor);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].field, "add_path");
+    assert_eq!(
+        changes[0].impact,
+        Some(super::ConfigFieldImpact::SessionReset)
+    );
+}
+
+#[test]
 fn diff_neighbors_detects_disable_ipv4_unicast_only_change() {
     // disable_ipv4_unicast is an OPEN-time property like prefix_orf_receive:
     // live config, effective on the next session via ReconcilePeers. A bare

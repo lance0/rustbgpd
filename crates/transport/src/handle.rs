@@ -286,7 +286,8 @@ pub enum SessionNotification {
         role: SessionRole,
         /// IP address of the remote peer.
         peer_addr: IpAddr,
-        /// Accepted route count that crossed the bound.
+        /// Count that crossed the bound: prefixes for ordinary limits, or
+        /// retained identities for one prefix when `path_limit` is true.
         count: usize,
         /// Configured maximum that was crossed.
         bound: u32,
@@ -295,6 +296,10 @@ pub enum SessionNotification {
         /// The crossed bound was the pre-policy `max_prefixes_received_*`
         /// limit, so `count` is announced (accepted plus rejected) prefixes.
         received: bool,
+        /// This was the per-prefix Add-Path receive cap rather than a
+        /// unique-prefix bound. The family and bound remain available for
+        /// the same administrative latch and Cease/1 recovery contract.
+        path_limit: bool,
     },
     /// Usage crossed one scope's max-prefix warning threshold. Emitted once
     /// per crossing; the session keeps running and nothing is latched.
@@ -3041,6 +3046,7 @@ mod tests {
                 bound: 1,
                 family: None,
                 received: false,
+                path_limit: false,
             },
             _ => unreachable!(),
         }

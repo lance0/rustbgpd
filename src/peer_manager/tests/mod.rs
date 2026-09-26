@@ -977,6 +977,7 @@ fn max_prefix_on_command_peer_handle(
                         bound: 500,
                         family: None,
                         received: false,
+                        path_limit: false,
                     })
                     .unwrap();
             }
