@@ -1684,6 +1684,7 @@ async fn received_limit_notification_marks_the_received_bound() {
             bound: 1,
             family: Some((Afi::Ipv4, Safi::Unicast)),
             received: true,
+            path_limit: false,
             ..
         })
     ));
@@ -1699,6 +1700,20 @@ fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> O
                 && labels.get("scope").map(String::as_str) == Some(scope)
         })
         .map(|(_, value)| value)
+}
+
+fn add_path_receive_attempts(session: &PeerSession, family: &str, action: &str) -> f64 {
+    counter_samples(
+        &session.metrics,
+        "bgp_add_path_receive_limit_attempts_total",
+    )
+    .into_iter()
+    .find(|(labels, _)| {
+        labels.get("peer").map(String::as_str) == Some(session.peer_label.as_str())
+            && labels.get("family").map(String::as_str) == Some(family)
+            && labels.get("action").map(String::as_str) == Some(action)
+    })
+    .map_or(0.0, |(_, value)| value)
 }
 
 fn mode_runtime_update(
@@ -2061,6 +2076,356 @@ async fn block_action_add_path_identities_share_the_admitted_slot() {
     assert_eq!(session.known_unicast_v4, 1);
     assert_eq!(session.known_paths.len(), 2);
     assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+}
+
+/// The advertised receive preference also caps locally retained identities.
+/// Path ID zero is a real Add-Path identity, and the unique-prefix count
+/// remains unchanged when the third identity is withheld.
+#[tokio::test]
+async fn add_path_receive_max_blocks_third_path_for_one_prefix() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+
+    assert_eq!(session.known_prefix_count(), 1);
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    assert!(!session.known_paths.contains(&(Prefix::V4(prefix), 2)));
+    let mut admitted = Vec::new();
+    while let Ok(RibUpdate::RoutesReceived { announced, .. }) = rib_rx.try_recv() {
+        admitted.extend(announced.into_iter().map(|route| route.path_id));
+    }
+    assert_eq!(admitted, vec![0, 1]);
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "block") - 2.0).abs() < f64::EPSILON,
+        "the counter counts repeated over-limit NLRI attempts, not distinct IDs"
+    );
+
+    // Replacing an admitted identity consumes no additional slot.
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    session.process_update(ipv4_withdraw(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 3, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    assert!(session.known_paths.contains(&(Prefix::V4(prefix), 3)));
+}
+
+#[tokio::test]
+async fn add_path_receive_max_unset_keeps_existing_unlimited_behavior() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, true);
+    assert!(session.path_receive_admission().is_none());
+    let prefix = v4_prefix(1);
+    for path_id in 0..=3 {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 4);
+}
+
+#[tokio::test]
+async fn add_path_receive_max_does_not_allocate_admission_for_plain_session() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, false);
+    assert!(session.path_receive_admission().is_none());
+}
+
+#[tokio::test]
+async fn add_path_receive_max_bounds_rejected_identity_union() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_received_ipv4 = Some(10);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    install_deny_all_import_policy(&mut session);
+    let prefix = v4_prefix(1);
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+    assert_eq!(session.rejected_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    assert!(!session.rejected_paths.contains(&(Prefix::V4(prefix), 2)));
+    assert!(session.known_paths.is_empty());
+}
+
+#[tokio::test]
+async fn add_path_receive_max_preserves_slots_across_policy_transitions() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_received_ipv4 = Some(10);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    install_deny_all_import_policy(&mut session);
+    session.process_update(ipv4_announce(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 1);
+    assert_eq!(session.rejected_prefix_refcounts[&Prefix::V4(prefix)], 1);
+    assert!(!session.rejected_paths.contains(&(Prefix::V4(prefix), 2)));
+
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    assert!(!session.known_paths.contains(&(Prefix::V4(prefix), 0)));
+    assert_eq!(session.rejected_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    session.import_policy = None;
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 1);
+    assert_eq!(session.rejected_prefix_refcounts[&Prefix::V4(prefix)], 1);
+    session.process_update(ipv4_withdraw(prefix, 1, true)).await;
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+}
+
+#[tokio::test]
+async fn add_path_receive_max_caps_treat_as_withdraw_rejections() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_received_ipv4 = Some(10);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(UpdateMessage::build(
+                &[Ipv4NlriEntry { path_id, prefix }],
+                &[],
+                &[
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65001])],
+                    }),
+                    PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                ],
+                true,
+                true,
+                Ipv4UnicastMode::Body,
+            ))
+            .await;
+    }
+    assert_eq!(session.rejected_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    assert!(!session.rejected_paths.contains(&(Prefix::V4(prefix), 2)));
+}
+
+/// A cap alone must not enable unbounded rejected-identity bookkeeping across
+/// distinct prefixes. Without received-prefix accounting, a denial frees its
+/// would-be slot; only the separately bounded diagnostic cache may retain it.
+#[tokio::test]
+async fn add_path_receive_max_alone_does_not_track_rejected_identities() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.reject_retention_capacity = 8;
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 1;
+    install_dual_stack_session(&mut session, true);
+    install_deny_all_import_policy(&mut session);
+    for index in 1..=64 {
+        session
+            .process_update(ipv4_announce(v4_prefix(index), 0, true))
+            .await;
+    }
+    assert!(session.rejected_paths.is_empty());
+    assert!(session.rejected_prefix_refcounts.is_empty());
+    assert!(session.known_paths.is_empty());
+    assert_eq!(session.rejected_routes.len(), 8);
+}
+
+#[tokio::test]
+async fn add_path_receive_max_warning_observes_but_does_not_bound() {
+    let config = mode_config(crate::config::MaxPrefixAction::Warning);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 3);
+    assert!(session.read_half.is_some());
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 1.0).abs() < f64::EPSILON
+    );
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 1.0).abs() < f64::EPSILON,
+        "an admitted-ID replacement consumes no slot or over-limit attempt"
+    );
+    session.process_update(ipv4_announce(prefix, 3, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 4);
+    assert!(
+        (add_path_receive_attempts(&session, "ipv4_unicast", "warning") - 2.0).abs() < f64::EPSILON,
+        "another new ID beyond the cap records another attempt"
+    );
+}
+
+#[tokio::test]
+async fn add_path_receive_max_shutdown_latches_with_path_count() {
+    let config = mode_config(crate::config::MaxPrefixAction::Shutdown);
+    let (mut session, _rib_rx, mut notify_rx, mut server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+    assert!(session.stop_requested);
+    assert!(session.read_half.is_none());
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixExceeded {
+            count: 3,
+            bound: 2,
+            family: Some((Afi::Ipv4, Safi::Unicast)),
+            path_limit: true,
+            ..
+        })
+    ));
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert!(
+        notif.data.is_empty(),
+        "a path cap is not a prefix upper bound"
+    );
+}
+
+#[tokio::test]
+async fn add_path_receive_max_counts_same_update_after_withdrawal() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    install_dual_stack_session(&mut session, true);
+    let prefix = v4_prefix(1);
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry { path_id: 1, prefix },
+            Ipv4NlriEntry { path_id: 2, prefix },
+            Ipv4NlriEntry { path_id: 3, prefix },
+        ],
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
+    assert!(!session.known_paths.contains(&(Prefix::V4(prefix), 0)));
+    assert!(session.known_paths.contains(&(Prefix::V4(prefix), 1)));
+    assert!(session.known_paths.contains(&(Prefix::V4(prefix), 2)));
+    assert!(!session.known_paths.contains(&(Prefix::V4(prefix), 3)));
+}
+
+#[tokio::test]
+async fn add_path_receive_max_caps_ipv6_mp_nlri() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, _rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .negotiated_families
+        .push((Afi::Ipv6, Safi::Unicast));
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv6, Safi::Unicast), AddPathMode::Receive);
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = v6_prefix(1);
+    for path_id in [0, 1, 2] {
+        session
+            .process_update(UpdateMessage::build(
+                &[],
+                &[],
+                &[
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                    }),
+                    PathAttribute::MpReachNlri(MpReachNlri {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        next_hop: "2001:db8::2".parse().unwrap(),
+                        link_local_next_hop: None,
+                        announced: vec![NlriEntry {
+                            path_id,
+                            prefix: Prefix::V6(prefix),
+                        }],
+                        flowspec_announced: vec![],
+                        evpn_announced: vec![],
+                        bgpls_announced: vec![],
+                        labeled_announced: vec![],
+                        vpn_announced: vec![],
+                        rtc_announced: vec![],
+                    }),
+                ],
+                true,
+                true,
+                Ipv4UnicastMode::Body,
+            ))
+            .await;
+    }
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V6(prefix)], 2);
+    assert!(!session.known_paths.contains(&(Prefix::V6(prefix), 2)));
+}
+
+#[tokio::test]
+async fn add_path_receive_max_eorr_releases_omitted_identity() {
+    let config = mode_config(crate::config::MaxPrefixAction::Block);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    session.config.peer.paths_limit_receive_max = 2;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    negotiated.peer_enhanced_route_refresh = true;
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Receive);
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = v4_prefix(1);
+    for path_id in [0, 1] {
+        session
+            .process_update(ipv4_announce(prefix, path_id, true))
+            .await;
+    }
+    while rib_rx.try_recv().is_ok() {}
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    session.process_update(ipv4_announce(prefix, 0, true)).await;
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::EoRR,
+    );
+    session.process_read_buffer().await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 1);
+    session.process_update(ipv4_announce(prefix, 2, true)).await;
+    assert_eq!(session.known_prefix_refcounts[&Prefix::V4(prefix)], 2);
 }
 
 /// A single UPDATE reserves each net-new prefix before considering its later
@@ -2501,6 +2866,7 @@ async fn block_never_latches_and_switching_to_shutdown_enforces_immediately() {
             count: 3,
             bound: 1,
             received: false,
+            path_limit: false,
             ..
         })
     ));

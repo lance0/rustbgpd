@@ -544,6 +544,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
         bound: 500,
         family: Some((Afi::Ipv4, Safi::Unicast)),
         received: false,
+        path_limit: false,
     })
     .await;
     assert!(!mgr.peers.get(&key(addr)).unwrap().enabled);
@@ -606,6 +607,7 @@ async fn stale_max_prefix_generation_cannot_latch_replacement() {
         bound: 500,
         family: None,
         received: false,
+        path_limit: false,
     })
     .await;
 
@@ -641,6 +643,7 @@ async fn primary_max_prefix_breach_drains_pending_collision_candidate() {
         bound: 500,
         family: None,
         received: false,
+        path_limit: false,
     })
     .await;
 
@@ -688,6 +691,7 @@ async fn peer_presence_retained_max_prefix_emits_no_removed() {
             bound: 500,
             family: None,
             received: false,
+            path_limit: false,
         })
         .unwrap();
     mgr.session_notify_tx
@@ -750,6 +754,7 @@ async fn pending_candidate_max_prefix_breach_stops_primary_and_drains_candidate(
         bound: 500,
         family: Some((Afi::Ipv4, Safi::Unicast)),
         received: false,
+        path_limit: false,
     })
     .await;
 
@@ -1160,6 +1165,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
             bound: 500,
             family: None,
             received: false,
+            path_limit: false,
         }),
     )
     .await
@@ -1246,6 +1252,7 @@ async fn max_prefix_latched_gauge_follows_latch_until_enable_or_timed_restart() 
             bound: 500,
             family: None,
             received: false,
+            path_limit: false,
         })
         .unwrap();
     mgr.drain_ready_session_notifications(None).await;
