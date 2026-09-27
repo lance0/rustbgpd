@@ -10,6 +10,13 @@
 //! - `distinct_values`: a distinct MED per route (a diverse table: one
 //!   UPDATE per route whatever the grouping key).
 //!
+//!
+//! `failover_encode` times one grouped distribution pass across identical
+//! update-group members sharing one encode cell: `announce_only`, and
+//! `mixed` (the same announcements plus withdrawals, the shape of a member
+//! failover where some prefixes have an alternate source and some do not).
+//! Each cell reports the summed session time of all members.
+//!
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench outbound_encode
 
 use std::hint::black_box;
@@ -20,7 +27,7 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rustbgpd_rib::AttrSet;
 use rustbgpd_rib::{Route, RouteOrigin};
-use rustbgpd_transport::OutboundEncodeBench;
+use rustbgpd_transport::{OutboundEncodeBench, OutboundGroupBench};
 use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
 fn attrs(med: Option<u32>) -> Vec<PathAttribute> {
@@ -85,5 +92,58 @@ fn bench(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench);
+/// 50 sources x 40 prefixes, one interned attribute set per source.
+fn failover_announce() -> Arc<[Route]> {
+    let template = routes(1, "shared_arc")[0].clone();
+    (1..=50u8)
+        .flat_map(|s| {
+            let source = Ipv4Addr::new(10, 1, 0, s);
+            let mut source_attrs = attrs(None);
+            source_attrs[1] = PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![64_600 + u32::from(s)])],
+            });
+            source_attrs[2] = PathAttribute::NextHop(source);
+            let shared = AttrSet::new(source_attrs);
+            let template = template.clone();
+            (0..40u32).map(move |j| {
+                let i = u32::from(s - 1) * 40 + j;
+                Route {
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((20 << 24) | (i << 8)), 24)),
+                    peer: IpAddr::V4(source),
+                    next_hop: IpAddr::V4(source),
+                    attributes: Arc::clone(&shared),
+                    ..template.clone()
+                }
+            })
+        })
+        .collect()
+}
+
+fn failover(c: &mut Criterion) {
+    let mut group = c.benchmark_group("failover_encode");
+    let announce = failover_announce();
+    let withdraw: Vec<(Prefix, u32)> = (0..1_000u32)
+        .map(|i| {
+            (
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::from((30 << 24) | (i << 8)), 24)),
+                0,
+            )
+        })
+        .collect();
+    for (shape, withdraw) in [("announce_only", &[][..]), ("mixed", &withdraw[..])] {
+        for members in [8usize, 32] {
+            let mut bench = OutboundGroupBench::new(members, 1 << 16);
+            group.bench_function(BenchmarkId::new(shape, members), |b| {
+                b.iter_custom(|iterations| {
+                    (0..iterations)
+                        .map(|_| bench.send(black_box(&announce), black_box(withdraw)))
+                        .sum()
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, failover);
 criterion_main!(benches);

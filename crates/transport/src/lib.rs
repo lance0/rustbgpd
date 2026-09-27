@@ -26,7 +26,7 @@ pub mod timer;
 // Authoritative export encoding plus inbound attribute handling exposed ONLY
 // for the off-by-default microbenches. Not part of the normal public API.
 #[cfg(feature = "bench-internals")]
-pub use session::bench_outbound::OutboundEncodeBench;
+pub use session::bench_outbound::{OutboundEncodeBench, OutboundGroupBench};
 #[cfg(feature = "bench-internals")]
 pub use session::export::{
     FanoutBenchExportSnapshotEvidence, fanout_bench_add_path_export_encoder,
