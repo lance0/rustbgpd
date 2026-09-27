@@ -5661,6 +5661,10 @@ impl RibManager {
         // passes (the overwhelming majority) keep every
         // `rs_control_communities` member on the shared Arc emission.
         let mut rs_tagged_pass: HashMap<(usize, u32), bool> = HashMap::new();
+        // Benchmark evidence only: clean grouped members of this pass that
+        // took the shared payload versus the per-member delta walk.
+        #[cfg(feature = "bench-internals")]
+        let mut bench_grouped_paths = (0usize, 0usize);
         let metrics = Self::clone_distribution_metrics(
             &self.metrics,
             #[cfg(any(test, feature = "bench-internals"))]
@@ -6378,6 +6382,10 @@ impl RibManager {
                             && stage.shared_applies_with_source_exclusion(peer)
                             && stage.shared_has_payload_after_source_exclusion(peer);
                         if (shared_exact || shared_with_source_exclusion) && !rs_diverges {
+                            #[cfg(feature = "bench-internals")]
+                            {
+                                bench_grouped_paths.0 += 1;
+                            }
                             // Common case: this member's matrix output IS
                             // the shared emission after transport omits any
                             // newly staged own-source routes. Enqueue Arc
@@ -6392,6 +6400,10 @@ impl RibManager {
                                 )));
                             unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
                         } else {
+                            #[cfg(feature = "bench-internals")]
+                            {
+                                bench_grouped_paths.1 += 1;
+                            }
                             super::update_groups::emit_group_deltas_for_member_with_checkpoint(
                                 &stage.deltas,
                                 peer,
@@ -7290,6 +7302,20 @@ impl RibManager {
                 super::retire_hash_set(prefixes, &mut || checkpoint());
             }
             self.replacement_checkpoint(true);
+        }
+        // One line per pass that mixes unicast withdrawals and announcements
+        // in a group (a failover), so a daemon-level benchmark can count the
+        // members on each path without per-pass churn noise.
+        #[cfg(feature = "bench-internals")]
+        if group_stage
+            .values()
+            .any(|stage| !stage.shared_withdraw.is_empty() && !stage.shared_announce.is_empty())
+        {
+            info!(
+                shared_members = bench_grouped_paths.0,
+                per_member_walks = bench_grouped_paths.1,
+                "bench: grouped mixed pass fanout paths"
+            );
         }
         shared_unicast_probe_cache
             .retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
