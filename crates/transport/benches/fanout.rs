@@ -1758,6 +1758,98 @@ fn bench_initial_table_peer_join(c: &mut Criterion) {
     group.finish();
 }
 
+/// Joiners timed per `initial_table_group_join` iteration.
+const GROUP_JOINERS: usize = 4;
+
+/// `sources` eBGP sources each announcing the same `routes` prefixes (a
+/// multi-homed table: one Loc-RIB best, `sources` Adj-RIB-In paths per
+/// prefix) and one RR client already registered, so the group exists and
+/// is converged before the timed joins.
+fn build_group_join(sources: u8, routes: usize) -> RibManager {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(
+        rx,
+        qrx,
+        None,
+        Some(Ipv4Addr::new(10, 255, 255, 255)),
+        BgpMetrics::new(),
+    );
+    let base = policy_regroup_routes(routes);
+    manager.bench_seed_loc_rib(
+        (1..=sources)
+            .flat_map(|source| {
+                base.iter().map(move |route| Route {
+                    peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, source)),
+                    ..route.clone()
+                })
+            })
+            .collect(),
+    );
+    let (sender, mut receiver) = mpsc::channel(2);
+    manager.bench_join_route_reflector_peer(0, sender, fanout_bench_export_encoder());
+    assert_eq!(
+        receiver
+            .try_recv()
+            .expect("founding member dump")
+            .announce
+            .len(),
+        routes
+    );
+    manager
+}
+
+/// `GROUP_JOINERS` RR clients joining one converged update group back to
+/// back, each through production `PeerUp` registration and initial-table
+/// replay. Timed as the sum of the joins; fixture construction, channel
+/// allocation, encoder construction and receipt checks stay outside.
+fn bench_initial_table_group_join(c: &mut Criterion) {
+    let mut group = c.benchmark_group("initial_table_group_join");
+    group.sample_size(10);
+    for sources in [1u8, 8] {
+        let routes = 65_536;
+        group.bench_function(
+            BenchmarkId::new(format!("{sources}_sources"), routes),
+            |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut manager = build_group_join(sources, routes);
+                        let joiners: Vec<_> = (1..=GROUP_JOINERS)
+                            .map(|index| {
+                                let (sender, receiver) = mpsc::channel(2);
+                                (index, sender, receiver, fanout_bench_export_encoder())
+                            })
+                            .collect();
+                        let mut receivers = Vec::with_capacity(GROUP_JOINERS);
+                        for (index, sender, receiver, encoder) in joiners {
+                            let started = Instant::now();
+                            manager.bench_join_route_reflector_peer(index, sender, encoder);
+                            accumulated += started.elapsed();
+                            receivers.push(receiver);
+                        }
+                        for mut receiver in receivers {
+                            let dump = receiver.try_recv().expect("joiner dump");
+                            assert_eq!(dump.announce.len(), routes);
+                            let eor = receiver.try_recv().expect("joiner EoR");
+                            assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+                        }
+                        let receipt = manager.bench_adj_rib_out_fanout_receipt();
+                        assert_eq!(
+                            receipt.update_groups, 1,
+                            "joiners share the founder's group"
+                        );
+                        assert_eq!(receipt.grouped_peers, 1 + GROUP_JOINERS);
+                        assert_eq!(receipt.ungrouped_peers, 0);
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 #[derive(Clone, Copy)]
 enum AddPathPolicy {
     PermitAll,
@@ -2361,6 +2453,7 @@ criterion_group!(
     bench_grouped_withdrawal_fanout,
     bench_grouped_policy_denial_fanout,
     bench_initial_table_peer_join,
+    bench_initial_table_group_join,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync,
