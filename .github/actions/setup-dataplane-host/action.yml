@@ -7,9 +7,6 @@ description: >-
   cache. Each hosted job is isolated, so it builds its own image rather than
   sharing a persistent daemon as the old self-hosted runner did.
 inputs:
-  containerlab-version:
-    required: false
-    default: "0.74.3"
   build-image:
     description: "Build rustbgpd:dev (set 'false' for jobs that build their own)."
     required: false
@@ -29,8 +26,6 @@ runs:
   steps:
     - name: Install containerlab (hardened)
       uses: ./.github/actions/install-containerlab
-      with:
-        version: ${{ inputs.containerlab-version }}
 
     - name: Install exact grpcurl offline
       uses: ./.github/actions/install-grpcurl-artifact

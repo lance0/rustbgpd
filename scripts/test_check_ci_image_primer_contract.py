@@ -211,6 +211,15 @@ class PrimerContractTests(unittest.TestCase):
                     "true",
                 ),
             )
+        with self.subTest("containerlab action drops its checksum"):
+            self.assert_red(
+                ".github/actions/install-containerlab/action.yml:34: fetches without verifying a SHA-256",
+                (
+                    ".github/actions/install-containerlab/action.yml",
+                    "sha256sum --check --status",
+                    "true",
+                ),
+            )
 
     def test_nothing_streams_network_bytes_into_tar(self):
         streamed = (
@@ -236,16 +245,6 @@ class PrimerContractTests(unittest.TestCase):
         self.assert_red(
             f"{INTEROP}:228: streams network bytes into tar or a shell",
             (INTEROP, "      - name: Run M1 (", continued + "      - name: Run M1 ("),
-        )
-
-    def test_unpinned_containerlab_fetch_still_may_not_stream(self):
-        self.assert_red(
-            ".github/actions/install-containerlab/action.yml:34: streams network bytes into tar or a shell",
-            (
-                ".github/actions/install-containerlab/action.yml",
-                "        ok=0\n",
-                '        curl -fsSL "$url" | tar -xz -C /tmp\n        ok=0\n',
-            ),
         )
 
     def test_installer_scripts_verify_what_they_fetch(self):
@@ -380,7 +379,7 @@ class PrimerContractTests(unittest.TestCase):
                 "      - uses: actions/checkout@v7\n      - uses: actions/setup-python@v5\n",
                 "not in the reviewed pin set: actions/setup-python@v5",
             ),
-            (clab, "actions/cache@v4", "actions/cache@main", "not a reviewed version tag: actions/cache@main"),
+            (clab, "actions/cache/restore@v6", "actions/cache/restore@main", "not a reviewed version tag: actions/cache/restore@main"),
         ):
             with self.subTest(relative=relative, ref=new.strip()):
                 self.assert_red(f"{relative}: action ref is {expect}", (relative, old, new))
