@@ -96,8 +96,8 @@ default_action = "permit"
 import_chain = ["lab-permit-all-import"]
 export_chain = ["lab-permit-all-export"]
 
-# Import-decision explain, on. `rbgp policy explain --neighbor 10.0.0.2
-# --prefix <cidr>` then says what import policy did to a route, including
+# Import-decision explain, on. `rbgp policy explain --direction import
+# --neighbor 10.0.0.2 --prefix <cidr>` then says what import policy did to a route, including
 # routes it denied — which is most of what a lab is for. Explain is
 # opt-in daemon-wide because the cache is per session and its cost
 # multiplies by peer count; one peer is a few MiB. Spelled out so the

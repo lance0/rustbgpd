@@ -147,8 +147,8 @@ case "$1" in
         echo 'Why the changed origin is invalid (the VRP authorizes AS65002):'
         rb rpki validate 198.51.100.0/24 65099
         echo 'Import policy decisions:'
-        rb policy explain --neighbor 10.98.0.20 --prefix 198.51.100.0/24
-        rb policy explain --neighbor 10.98.0.20 --prefix 203.0.113.0/25
+        rb policy explain --neighbor 10.98.0.20 --prefix 198.51.100.0/24 --direction import
+        rb policy explain --neighbor 10.98.0.20 --prefix 203.0.113.0/25 --direction import
         echo 'Why member-b cannot receive the rejected route:'
         rb rib --prefix 198.51.100.0/24 advertised 10.98.0.30 --explain
         echo 'Import policy counters:'

@@ -749,6 +749,7 @@ invalid\t''
 unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l page-token -d 'Continue a --limit listing from the next-page token a previous page printed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -809,6 +810,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 invalid\t''
 unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l page-token -d 'Continue a --limit listing from the next-page token a previous page printed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -840,6 +842,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 invalid\t''
 unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l page-token -d 'Continue a --limit listing from the next-page token a previous page printed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -874,6 +877,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 invalid\t''
 unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l page-token -d 'Continue a --limit listing from the next-page token a previous page printed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -909,6 +913,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 invalid\t''
 unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l page-token -d 'Continue a --limit listing from the next-page token a previous page printed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -947,8 +952,8 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l reason -d 'Exact reason-code filter, e.g. owned or route_limit_exceeded' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l neighbor -l peer -d 'Source neighbor-address filter' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l page-size -d 'Maximum FIB status rows to return; omitted returns the full snapshot' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l page-token -d 'Page token returned by a previous paginated FIB status query' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l limit -d 'Maximum FIB status rows in this page; omit for the full snapshot' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l page-token -d 'Page token returned by a previous FIB status page (requires --limit)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1323,7 +1328,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from received advertised explain add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l route-type -d 'Only this route type (1..=5)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l page-size -d 'Maximum rows in this page (1..=1000)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1341,7 +1346,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l route-type -d 'Only this route type (1..=5)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher, e.g. "65000:100"' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l page-size -d 'Maximum rows in this page (1..=1000)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l limit -d 'Maximum rows in this page (1..=1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l page-token -d 'Opaque continuation token from the preceding page; restart after a table change' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1665,7 +1670,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s h -l help -d 'Print 
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s a -l family -d 'Address family filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s l -l limit -d 'Maximum recent route events to return (default 100; route history only)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l limit -d 'Maximum recent route events to return (default 100; route history only)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1676,6 +1681,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l all -d 'Return the daemon\'s full retained route-event window (route history only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l no-color -d 'Disable colored output'
@@ -1708,7 +1714,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l type -d 'Session event type filter: state_changed, established, lost, peer_enabled, peer_disabled' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s l -l limit -d 'Maximum recent session events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l limit -d 'Maximum recent session events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1719,13 +1725,14 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l all -d 'Return the daemon\'s full retained session event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l neighbor -l peer -d 'Neighbor address filter. Only peer-scoped policy events match' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l type -d 'Policy event type filter: policy_changed' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s l -l limit -d 'Maximum recent policy events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l limit -d 'Maximum recent policy events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1736,6 +1743,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l all -d 'Return the daemon\'s full retained policy event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l no-color -d 'Disable colored output'
@@ -1744,7 +1752,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l route-type -d 'EVPN route type filter (1..=5)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l rd -d 'Route Distinguisher filter, e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l type -d 'EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s l -l limit -d 'Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l limit -d 'Maximum recent EVPN events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1755,6 +1763,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l all -d 'Return the daemon\'s full retained EVPN event window'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l no-color -d 'Disable colored output'
@@ -1952,7 +1961,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l direction -d 'Evaluation direction: import (retained post-policy Adj-RIB-In: routes admitted when received or last re-evaluated; newly admitted routes are not visible) or export (Loc-RIB best routes)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l neighbor -l peer -d 'Neighbor address: restricts the import snapshot to one peer\'s retained post-policy Adj-RIB-In, or sets the export evaluation target' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast)' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l limit -d 'Maximum routes to evaluate (0 = all)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l limit -d 'Maximum routes to evaluate (default: every route in the snapshot)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l show-changes -d 'Maximum before/after attribute diffs to show' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1964,6 +1973,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l all -d 'Evaluate every route in the snapshot (the default)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l no-color -d 'Disable colored output'
@@ -2032,7 +2042,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -f -a "clear-export" -d 'Clear the export chain entirely'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l neighbor -l peer -d 'Restrict to one neighbor\'s installed chain' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l direction -d 'Direction: export (default), import, or both' -r -f -a "import\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l direction -d 'Direction: import, export, or both' -r -f -a "import\t''
 export\t''
 both\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2050,7 +2060,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l neighbor -l peer -d 'Restrict to one neighbor\'s installed chain' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l direction -d 'Direction: export (default), import, or both' -r -f -a "import\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l direction -d 'Direction: import, export, or both' -r -f -a "import\t''
 export\t''
 both\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -2070,7 +2080,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l neighbor -l peer -d 'Neighbor (peer) address whose decision to explain' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l prefix -d 'Prefix in CIDR form, e.g. `192.0.2.0/24` or `2001:db8::/32`' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l path-id -d 'Add-Path identifier (import only); omit to show every matching path' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l direction -d 'Direction: import (default) or export' -r -f -a "import\t''
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l direction -d 'Direction: import or export' -r -f -a "import\t''
 export\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r

@@ -84,7 +84,7 @@ case "$1" in
         echo 'Retained rejected routes:'
         rb rib received 10.99.0.20 --rejected
         echo 'Import decision for 192.168.1.0/24:'
-        rb policy explain --neighbor 10.99.0.20 --prefix 192.168.1.0/24
+        rb policy explain --neighbor 10.99.0.20 --prefix 192.168.1.0/24 --direction import
         echo 'Missing import policy (1 means RFC 8212 is blocking imports):'
         rb metrics | grep '^bgp_rfc8212_missing_import_policy{'
         ;;

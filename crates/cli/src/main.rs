@@ -39,6 +39,15 @@ fn parse_route_limit(value: &str) -> Result<u32, String> {
     Ok(limit)
 }
 
+/// `--limit` counts rows; everything is spelled `--all`, never 0.
+fn parse_limit_or_all(value: &str) -> Result<u32, String> {
+    match value.parse::<u32>() {
+        Ok(0) => Err("0 is not a limit; use --all to request everything".to_string()),
+        Ok(limit) => Ok(limit),
+        Err(_) => Err("limit must be a positive integer".to_string()),
+    }
+}
+
 fn parse_nonzero_asn(value: &str) -> Result<u32, String> {
     let asn = value
         .parse::<u32>()
@@ -130,13 +139,13 @@ pub enum RouteAspaState {
 //   `not_found`, `best_changed`); the kebab-case spelling is accepted as
 //   a hidden alias. The few older kebab-case values keep their spelling
 //   and accept snake_case. Never rename a value that output echoes.
-// - Pagination: new paged commands take `--limit N` plus `--page-token`,
-//   and 0 is never a sentinel for "all"; omit `--limit` for the default.
+// - Pagination: a paged read takes `--limit N` plus `--page-token` and
+//   prints the next token. `--limit` never accepts 0 as "all": omit it for
+//   the default, or offer `--all` where a whole-set read exists.
 // - A flag name shared across commands has the same default everywhere,
-//   or is required.
+//   or is required (as `--direction` is on every `policy` subcommand).
 // - `flag_vocabulary_is_consistent` in the tests enforces the short-flag,
-//   neighbor and default rules; its allowlist holds only the exceptions
-//   awaiting a deprecation decision.
+//   neighbor, default and pagination rules with no exceptions.
 // - Next-hop address: use `--next-hop`; `rib add` keeps `--nexthop` as
 //   a visible compatibility alias.
 // - ASNs: a remote AS flag is `--remote-asn` (visible alias
@@ -388,6 +397,10 @@ enum Command {
             conflicts_with_all = ["count", "explain"]
         )]
         limit: Option<u32>,
+
+        /// Continue a --limit listing from the next-page token a previous page printed
+        #[arg(long, value_name = "TOKEN")]
+        page_token: Option<String>,
     },
 
     /// Show the RFC 9107 ORR topology graph derived from BGP-LS
@@ -466,8 +479,12 @@ enum Command {
         prefix: Option<String>,
 
         /// Maximum recent route events to return (default 100; route history only)
-        #[arg(short, long)]
+        #[arg(long, value_parser = parse_limit_or_all)]
         limit: Option<u32>,
+
+        /// Return the daemon's full retained route-event window (route history only)
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
     },
 
     /// Check daemon health
@@ -917,9 +934,12 @@ enum PolicyAction {
         /// Address family filter (ipv4_unicast, ipv6_unicast)
         #[arg(short = 'a', long)]
         family: Option<String>,
-        /// Maximum routes to evaluate (0 = all)
-        #[arg(long, default_value_t = 0)]
-        limit: u32,
+        /// Maximum routes to evaluate (default: every route in the snapshot)
+        #[arg(long, value_parser = parse_limit_or_all)]
+        limit: Option<u32>,
+        /// Evaluate every route in the snapshot (the default)
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
         /// Maximum before/after attribute diffs to show
         #[arg(long, default_value_t = 10)]
         show_changes: u32,
@@ -960,13 +980,13 @@ enum PolicyAction {
         /// Restrict to one neighbor's installed chain
         #[arg(long = "neighbor", visible_alias = "peer")]
         neighbor: Option<String>,
-        /// Direction: export (default), import, or both
-        #[arg(long, default_value = "export", value_parser = ["import", "export", "both"])]
+        /// Direction: import, export, or both
+        #[arg(long, value_parser = ["import", "export", "both"])]
         direction: String,
     },
     /// Explain the policy decision for a prefix on a neighbor
     ///
-    /// Import (the default) explains why a prefix was permitted /
+    /// `--direction import` explains why a prefix was permitted /
     /// denied / withdrawn, or not-seen / evicted / stale (ADR-0073).
     /// Reads the per-session decision cache; requires
     /// `[policy.explain].enabled` on the daemon (errors distinctly
@@ -983,14 +1003,14 @@ enum PolicyAction {
         /// Add-Path identifier (import only); omit to show every matching path
         #[arg(long)]
         path_id: Option<u32>,
-        /// Direction: import (default) or export
+        /// Direction: import or export
         ///
         /// `import` reads the daemon's per-session import-decision
         /// cache and requires `[policy.explain] enabled = true` in the
         /// daemon config. `export` runs the read-only export dry run
         /// (the same answer as `rib --prefix <cidr> advertised
         /// <neighbor> --explain`) and needs no configuration.
-        #[arg(long, default_value = "import", value_parser = ["import", "export"])]
+        #[arg(long, value_parser = ["import", "export"])]
         direction: String,
     },
 }
@@ -1514,6 +1534,10 @@ struct RouteViewArgs {
     /// Filter by exact ASN membership in the represented AS path
     #[arg(long, value_parser = parse_nonzero_asn)]
     as_path_contains: Option<u32>,
+
+    /// Continue a --limit listing from the next-page token a previous page printed
+    #[arg(long, value_name = "TOKEN")]
+    page_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1622,10 +1646,14 @@ enum RibAction {
         /// Source neighbor-address filter
         #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Option<String>,
-        /// Maximum FIB status rows to return; omitted returns the full snapshot
-        #[arg(long)]
+        /// Maximum FIB status rows in this page; omit for the full snapshot
+        #[arg(
+            long = "limit",
+            alias = "page-size",
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
         page_size: Option<u32>,
-        /// Page token returned by a previous paginated FIB status query
+        /// Page token returned by a previous FIB status page (requires --limit)
         #[arg(long)]
         page_token: Option<String>,
     },
@@ -1821,9 +1849,13 @@ enum EventsAction {
         #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
-        /// Maximum recent session events to return (default 100; explicit 0 requests the daemon's full bounded window)
-        #[arg(short, long)]
+        /// Maximum recent session events to return (default 100)
+        #[arg(long, value_parser = parse_limit_or_all)]
         limit: Option<u32>,
+
+        /// Return the daemon's full retained session event window
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
     },
     /// Show recent policy / neighbor-set / peer-group / chain mutation events
     Policy {
@@ -1840,9 +1872,13 @@ enum EventsAction {
         #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
-        /// Maximum recent policy events to return (default 100; explicit 0 requests the daemon's full bounded window)
-        #[arg(short, long)]
+        /// Maximum recent policy events to return (default 100)
+        #[arg(long, value_parser = parse_limit_or_all)]
         limit: Option<u32>,
+
+        /// Return the daemon's full retained policy event window
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
     },
     /// Show recent EVPN route events
     Evpn {
@@ -1867,9 +1903,13 @@ enum EventsAction {
         #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
-        /// Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon's full bounded window)
-        #[arg(short, long)]
+        /// Maximum recent EVPN events to return (default 100)
+        #[arg(long, value_parser = parse_limit_or_all)]
         limit: Option<u32>,
+
+        /// Return the daemon's full retained EVPN event window
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
     },
 }
 
@@ -1884,7 +1924,12 @@ struct EvpnPeerViewArgs {
     #[arg(long)]
     rd: Option<String>,
     /// Maximum rows in this page (1..=1000).
-    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    #[arg(
+        long = "limit",
+        alias = "page-size",
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u32).range(1..=1000)
+    )]
     page_size: u32,
     /// Opaque continuation token from the preceding page; restart after a table change.
     #[arg(long)]
@@ -2328,6 +2373,7 @@ fn merge_route_view_filters(
         view.as_path_contains,
     )?;
     parent.limit = merge_scoped_option("--limit", parent.limit, view_limit)?;
+    parent.page_token = merge_scoped_option("--page-token", parent.page_token, view.page_token)?;
     parent.longer |= view.longer;
     parent.community.extend(
         view.community
@@ -2425,14 +2471,23 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
         aspa_state,
         as_path_contains,
         limit,
+        page_token,
         ..
     } = command
     else {
         return Ok(());
     };
 
+    let page_token_without_limit = || {
+        Err(CliError::Argument(
+            "--page-token requires --limit; pass the same --limit and filters as the page that printed the token".into(),
+        ))
+    };
     match action {
         None => {
+            if page_token.is_some() && limit.is_none() {
+                return page_token_without_limit();
+            }
             if *parent_explain {
                 validate_explain_family(family.as_deref(), prefix.as_deref())?;
             }
@@ -2461,6 +2516,13 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
                 &filters.as_path_contains,
             )?;
             reject_duplicate_route_view_option("--limit", limit, view_limit)?;
+            reject_duplicate_route_view_option("--page-token", page_token, &filters.page_token)?;
+            if (page_token.is_some() || filters.page_token.is_some())
+                && limit.is_none()
+                && view_limit.is_none()
+            {
+                return page_token_without_limit();
+            }
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
                 return Err(CliError::Argument("--longer requires --prefix".into()));
@@ -2516,6 +2578,13 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
                 &filters.as_path_contains,
             )?;
             reject_duplicate_route_view_option("--limit", limit, view_limit)?;
+            reject_duplicate_route_view_option("--page-token", page_token, &filters.page_token)?;
+            if (page_token.is_some() || filters.page_token.is_some())
+                && limit.is_none()
+                && view_limit.is_none()
+            {
+                return page_token_without_limit();
+            }
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
                 return Err(CliError::Argument("--longer requires --prefix".into()));
@@ -2547,6 +2616,11 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
         Some(_) if limit.is_some() => {
             return Err(CliError::Argument(
                 "--limit is only valid for best, received, or advertised routes".into(),
+            ));
+        }
+        Some(_) if page_token.is_some() => {
+            return Err(CliError::Argument(
+                "--page-token is only valid for best, received, or advertised routes".into(),
             ));
         }
         Some(_) => {}
@@ -2653,6 +2727,12 @@ fn validate_rib_age_action(command: &Command) -> Result<(), CliError> {
         )),
         Some(_) => Ok(()),
     }
+}
+
+/// Omitted `--limit` keeps the 100-event default; `--all` asks the daemon for
+/// its whole retained window, which the RPC spells as limit 0.
+fn events_limit(limit: Option<u32>, all: bool) -> u32 {
+    if all { 0 } else { limit.unwrap_or(100) }
 }
 
 fn reject_events_parent_filters_for_subcommand(
@@ -3214,6 +3294,7 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
         count,
         explain,
         age,
+        page_token,
         ..
     } = &cli.command
     else {
@@ -3221,6 +3302,18 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
     };
     if *count || *explain || *age {
         return Err(unsupported());
+    }
+    let view_page_token = match action {
+        Some(RibAction::Received { filters, .. } | RibAction::Advertised { filters, .. }) => {
+            filters.page_token.as_ref()
+        }
+        _ => None,
+    };
+    if page_token.is_some() || view_page_token.is_some() {
+        return Err(CliError::Argument(
+            "--page-token needs the next-page token that --json prints; --json-lines does not carry one"
+                .into(),
+        ));
     }
     let view_family = match action {
         None => None,
@@ -3869,6 +3962,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             aspa_state,
             as_path_contains,
             limit,
+            page_token,
         } => {
             match action {
                 Some(RibAction::Lookup { target }) => {
@@ -4071,6 +4165,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 aspa_state,
                 as_path_contains,
                 limit,
+                page_token,
             };
             match action {
                 None => {
@@ -4340,6 +4435,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             family,
             prefix,
             limit,
+            all,
         } => match action {
             Some(EventsAction::Watch {
                 categories,
@@ -4355,7 +4451,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     &address,
                     &family,
                     &prefix,
-                    limit,
+                    limit.or(all.then_some(0)),
                 )?;
                 let family_val = resolve_family(&watch_family)?;
                 commands::watch::events_watch(
@@ -4377,15 +4473,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 address: session_address,
                 event_types,
                 limit: session_limit,
+                all: session_all,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events sessions",
                     &address,
                     &family,
                     &prefix,
-                    limit,
+                    limit.or(all.then_some(0)),
                 )?;
-                let limit = session_limit.unwrap_or(100);
+                let limit = events_limit(session_limit, session_all);
                 commands::watch::session_history(
                     connection,
                     session_address,
@@ -4399,15 +4496,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 address: policy_address,
                 event_types,
                 limit: policy_limit,
+                all: policy_all,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events policy",
                     &address,
                     &family,
                     &prefix,
-                    limit,
+                    limit.or(all.then_some(0)),
                 )?;
-                let limit = policy_limit.unwrap_or(100);
+                let limit = events_limit(policy_limit, policy_all);
                 commands::watch::policy_history(
                     connection,
                     policy_address,
@@ -4423,15 +4521,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 rd,
                 event_types,
                 limit: evpn_limit,
+                all: evpn_all,
             }) => {
                 reject_events_parent_filters_for_subcommand(
                     "events evpn",
                     &address,
                     &family,
                     &prefix,
-                    limit,
+                    limit.or(all.then_some(0)),
                 )?;
-                let limit = evpn_limit.unwrap_or(100);
+                let limit = events_limit(evpn_limit, evpn_all);
                 commands::watch::evpn_history(
                     connection,
                     evpn_address,
@@ -4445,7 +4544,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             None => {
                 let family_val = resolve_family(&family)?;
-                let limit = limit.unwrap_or(100);
+                let limit = events_limit(limit, all);
                 commands::watch::history(connection, address, family_val, prefix, limit, json).await
             }
         },
@@ -4660,6 +4759,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 neighbor,
                 family,
                 limit,
+                all: _,
                 show_changes,
             } => {
                 commands::policy::test(
@@ -4670,7 +4770,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         direction: &direction,
                         peer: neighbor.as_deref(),
                         family: family.as_deref(),
-                        limit,
+                        // Omitted and `--all` both evaluate the whole snapshot (RPC limit 0).
+                        limit: limit.unwrap_or(0),
                         show_changes,
                     },
                     json,
@@ -6710,6 +6811,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             aspa_state: None,
             as_path_contains: None,
             limit: None,
+            page_token: None,
         };
         let view = RouteViewArgs {
             longer: true,
@@ -7418,7 +7520,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             "203.0.113.0/24",
             "--peer",
             "198.51.100.2",
-            "--page-size",
+            "--limit",
             "50",
             "--page-token",
             "100",
@@ -7562,7 +7664,8 @@ printf '%s\n' "${COMPREPLY[@]}"
 
     #[test]
     fn test_parse_policy_counters_alias() {
-        let cli = Cli::try_parse_from(["rbgp", "policy", "counters"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["rbgp", "policy", "counters", "--direction", "both"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Policy {
@@ -7583,7 +7686,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "3",
                 "--rd",
                 "65000:100",
-                "--page-size",
+                "--limit",
                 "25",
                 "--page-token",
                 "opaque",
@@ -7647,8 +7750,8 @@ printf '%s\n' "${COMPREPLY[@]}"
         for (flag, value) in [
             ("--route-type", "0"),
             ("--route-type", "6"),
-            ("--page-size", "0"),
-            ("--page-size", "1001"),
+            ("--limit", "0"),
+            ("--limit", "1001"),
         ] {
             assert!(
                 Cli::try_parse_from(["rbgp", "evpn", "received", "192.0.2.1", flag, value])
@@ -8316,6 +8419,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                     address: Some(ref address),
                     ref event_types,
                     limit: Some(5),
+                    all: false,
                 }),
                 ..
             } if address == "10.0.0.2" && event_types.len() == 2
@@ -8343,6 +8447,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                     address: Some(ref address),
                     ref event_types,
                     limit: Some(5),
+                    all: false,
                 }),
                 ..
             } if address == "10.0.0.2" && event_types == &vec!["policy_changed".to_string()]
@@ -8376,6 +8481,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                     rd: Some(ref rd),
                     ref event_types,
                     limit: Some(5),
+                    all: false,
                 }),
                 ..
             } if address == "10.0.0.2"
@@ -8418,6 +8524,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                     address: None,
                     ref event_types,
                     limit: None,
+                    all: false,
                 }),
                 address: Some(ref address),
                 limit: Some(5),
@@ -8906,6 +9013,8 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "10.0.0.1",
                 "--prefix",
                 "10.0.0.0/24",
+                "--direction",
+                "import",
             ])
             .unwrap();
             let Command::Policy {
@@ -8916,7 +9025,16 @@ printf '%s\n' "${COMPREPLY[@]}"
             };
             assert_eq!(neighbor, "10.0.0.1", "policy explain {flag}");
 
-            let cli = Cli::try_parse_from(["rbgp", "policy", "stats", flag, "10.0.0.1"]).unwrap();
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "policy",
+                "stats",
+                flag,
+                "10.0.0.1",
+                "--direction",
+                "export",
+            ])
+            .unwrap();
             let Command::Policy {
                 action: PolicyAction::Stats { neighbor, .. },
             } = cli.command
@@ -9102,24 +9220,172 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(event_types, ["state_changed", "peer_enabled"]);
     }
 
+    /// `-l` means only `--longer`; `--limit 0` is a usage error that points
+    /// at `--all`; paged reads spell their size `--limit`; `rib` pairs
+    /// `--limit` with `--page-token`.
+    #[test]
+    fn short_flag_limit_and_page_token_decisions() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied());
+        assert!(parse(&["rbgp", "rib", "-p", "10.0.0.0/8", "-l"]).is_ok());
+        for args in [
+            &["rbgp", "events", "-l", "5"][..],
+            &["rbgp", "events", "sessions", "-l", "5"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+
+        let policy_test = [
+            "policy",
+            "test",
+            "p.rpol",
+            "--policy",
+            "p",
+            "--direction",
+            "import",
+        ];
+        for base in [
+            &["events"][..],
+            &["events", "sessions"],
+            &["events", "policy"],
+            &["events", "evpn"],
+            &policy_test,
+        ] {
+            let with = |extra: &[&str]| {
+                let mut args = vec!["rbgp"];
+                args.extend(base);
+                args.extend(extra);
+                Cli::try_parse_from(args)
+            };
+            let error = with(&["--limit", "0"]).err().expect("--limit 0 must fail");
+            assert!(error.to_string().contains("--all"), "{base:?}: {error}");
+            assert!(with(&["--all"]).is_ok(), "{base:?} --all");
+            assert!(with(&["--limit", "5"]).is_ok(), "{base:?} --limit 5");
+            assert!(with(&["--all", "--limit", "5"]).is_err(), "{base:?}");
+        }
+        assert_eq!(events_limit(None, false), 100);
+        assert_eq!(events_limit(Some(5), false), 5);
+        assert_eq!(events_limit(None, true), 0);
+
+        for flag in ["--limit", "--page-size"] {
+            let Command::Evpn {
+                action: Some(EvpnAction::Received(args)),
+                ..
+            } = parse(&["rbgp", "evpn", "received", "192.0.2.1", flag, "5"])
+                .unwrap()
+                .command
+            else {
+                panic!("expected evpn received");
+            };
+            assert_eq!(args.page_size, 5, "evpn {flag}");
+            let Command::Rib {
+                action: Some(RibAction::Fib { page_size, .. }),
+                ..
+            } = parse(&["rbgp", "rib", "fib", flag, "5"]).unwrap().command
+            else {
+                panic!("expected rib fib");
+            };
+            assert_eq!(page_size, Some(5), "fib {flag}");
+        }
+        let Command::Evpn {
+            action: Some(EvpnAction::Received(args)),
+            ..
+        } = parse(&["rbgp", "evpn", "received", "192.0.2.1"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected evpn received");
+        };
+        assert_eq!(
+            args.page_size, 100,
+            "omitted --limit keeps the 100-row page"
+        );
+        assert!(parse(&["rbgp", "evpn", "received", "192.0.2.1", "--limit", "0"]).is_err());
+        assert!(parse(&["rbgp", "rib", "fib", "--limit", "0"]).is_err());
+
+        let view_check =
+            |args: &[&str]| validate_rib_route_view_action(&parse(args).unwrap().command);
+        for args in [
+            &["rbgp", "rib", "--limit", "5", "--page-token", "t"][..],
+            &[
+                "rbgp",
+                "rib",
+                "received",
+                "192.0.2.1",
+                "--limit",
+                "5",
+                "--page-token",
+                "t",
+            ],
+            &[
+                "rbgp",
+                "rib",
+                "--limit",
+                "5",
+                "advertised",
+                "192.0.2.1",
+                "--page-token",
+                "t",
+            ],
+        ] {
+            view_check(args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        }
+        for (args, message) in [
+            (
+                &["rbgp", "rib", "--page-token", "t"][..],
+                "requires --limit",
+            ),
+            (
+                &["rbgp", "rib", "received", "192.0.2.1", "--page-token", "t"],
+                "requires --limit",
+            ),
+            (
+                &[
+                    "rbgp",
+                    "rib",
+                    "--page-token",
+                    "t",
+                    "advertised",
+                    "192.0.2.1",
+                    "--limit",
+                    "5",
+                    "--page-token",
+                    "u",
+                ],
+                "either before or after",
+            ),
+            (&["rbgp", "rib", "--page-token", "t", "fib"], "only valid"),
+        ] {
+            let error = view_check(args).unwrap_err().to_string();
+            assert!(error.contains(message), "{args:?}: {error}");
+        }
+        let cli = parse(&[
+            "rbgp",
+            "--json-lines",
+            "rib",
+            "--limit",
+            "5",
+            "--page-token",
+            "t",
+        ])
+        .unwrap();
+        assert!(
+            validate_json_lines(&cli)
+                .unwrap_err()
+                .to_string()
+                .contains("--page-token")
+        );
+    }
+
     /// Tree-wide flag vocabulary guard (see the CLI conventions block).
     /// Fails when one short flag maps to two long names, when a
     /// peer-selecting flag (`--neighbor`, `--peer` or `--address` in any
     /// spelling) is not canonical `--neighbor` with the visible `--peer`
-    /// alias, or when one flag name carries two different defaults.
+    /// alias, when one flag name carries two different defaults, when a
+    /// `--limit` accepts 0 (everything is `--all`), or when a
+    /// `--page-token` has no `--limit` beside it.
     #[test]
     fn flag_vocabulary_is_consistent() {
         use std::collections::{BTreeMap, BTreeSet};
-
-        // Known exceptions pending a deprecate-then-change decision. Each
-        // entry must match the tree exactly, so resolving one without
-        // deleting its entry fails as well.
-        //
-        // `-l` is `--longer` on `rib` and `--limit` on `events`.
-        const SHORT_EXCEPTIONS: &[(char, &[&str])] = &[('l', &["limit", "longer"])];
-        // `policy stats --direction` defaults to export and
-        // `policy explain --direction` to import.
-        const DEFAULT_EXCEPTIONS: &[(&str, &[&str])] = &[("direction", &["export", "import"])];
 
         type Seen = BTreeMap<String, BTreeSet<String>>;
         fn walk(
@@ -9129,6 +9395,10 @@ printf '%s\n' "${COMPREPLY[@]}"
             defaults: &mut Seen,
             problems: &mut Vec<String>,
         ) {
+            let has_long = |name: &str| cmd.get_arguments().any(|arg| arg.get_long() == Some(name));
+            if has_long("page-token") && !has_long("limit") {
+                problems.push(format!("`{path} --page-token` must pair with `--limit`"));
+            }
             for arg in cmd.get_arguments() {
                 let Some(long) = arg.get_long() else {
                     continue;
@@ -9166,6 +9436,22 @@ printf '%s\n' "${COMPREPLY[@]}"
                          visible_alias = \"peer\""
                     ));
                 }
+                // Probe this flag's own value parser in isolation.
+                let accepts_zero = || {
+                    clap::Command::new("probe")
+                        .arg(
+                            clap::Arg::new("limit")
+                                .long("limit")
+                                .value_parser(arg.get_value_parser().clone()),
+                        )
+                        .try_get_matches_from(["probe", "--limit", "0"])
+                        .is_ok()
+                };
+                if long == "limit" && accepts_zero() {
+                    problems.push(format!(
+                        "`{path} --limit` accepts 0; spell everything as `--all`"
+                    ));
+                }
             }
             for sub in cmd.get_subcommands() {
                 let sub_path = format!("{path} {}", sub.get_name());
@@ -9173,60 +9459,23 @@ printf '%s\n' "${COMPREPLY[@]}"
             }
         }
 
-        fn compare(kind: &str, seen: &Seen, allowed: Seen, problems: &mut Vec<String>) {
-            let conflicts: Seen = seen
-                .iter()
-                .filter(|(_, values)| values.len() > 1)
-                .map(|(name, values)| (name.clone(), values.clone()))
-                .collect();
-            for (name, values) in &conflicts {
-                if allowed.get(name) != Some(values) {
-                    problems.push(format!("{kind} `{name}` has conflicting values {values:?}"));
-                }
-            }
-            for (name, values) in &allowed {
-                if conflicts.get(name) != Some(values) {
-                    problems.push(format!(
-                        "allowlisted {kind} `{name}` {values:?} no longer matches the tree; \
-                         update or remove the entry"
-                    ));
-                }
-            }
-        }
-        fn allowlist<K: ToString>(entries: &[(K, &[&str])]) -> Seen {
-            entries
-                .iter()
-                .map(|(name, values)| {
-                    let values = values.iter().map(ToString::to_string).collect();
-                    (name.to_string(), values)
-                })
-                .collect()
-        }
-
         let mut cmd = cli_command(BINARY_NAME);
         cmd.build();
         let (mut shorts, mut defaults, mut problems) = (Seen::new(), Seen::new(), Vec::new());
         walk(&cmd, BINARY_NAME, &mut shorts, &mut defaults, &mut problems);
-        compare(
-            "short flag",
-            &shorts,
-            allowlist(SHORT_EXCEPTIONS),
-            &mut problems,
-        );
-        compare(
-            "default of",
-            &defaults,
-            allowlist(DEFAULT_EXCEPTIONS),
-            &mut problems,
-        );
+        for (kind, seen) in [("short flag", &shorts), ("default of", &defaults)] {
+            for (name, values) in seen.iter().filter(|(_, values)| values.len() > 1) {
+                problems.push(format!("{kind} `{name}` has conflicting values {values:?}"));
+            }
+        }
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 
-    /// `policy explain` has always been import-only, so omitting
-    /// `--direction` must keep that answer; `export` is the only other
-    /// value (`both` is a `policy stats` notion, not an explain one).
+    /// `policy stats` and `policy explain` used to default to opposite
+    /// directions, so both now require `--direction`; `both` stays a
+    /// `policy stats` value only.
     #[test]
-    fn policy_explain_direction_parses_and_defaults_to_import() {
+    fn policy_direction_is_required_and_keeps_its_values() {
         let base = [
             "rbgp",
             "policy",
@@ -9245,7 +9494,20 @@ printf '%s\n' "${COMPREPLY[@]}"
             };
             direction
         };
-        assert_eq!(direction_of(Cli::try_parse_from(base).unwrap()), "import");
+        for command in [&base[..], &["rbgp", "policy", "stats"][..]] {
+            let error = Cli::try_parse_from(command)
+                .err()
+                .expect("--direction is required");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            assert!(error.to_string().contains("--direction"), "{error}");
+        }
+        for direction in ["import", "export", "both"] {
+            Cli::try_parse_from(["rbgp", "policy", "stats", "--direction", direction])
+                .unwrap_or_else(|error| panic!("stats --direction {direction}: {error}"));
+        }
         for direction in ["import", "export"] {
             let cli = Cli::try_parse_from(base.into_iter().chain(["--direction", direction]))
                 .unwrap_or_else(|error| panic!("--direction {direction}: {error}"));

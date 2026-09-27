@@ -3042,10 +3042,10 @@ Answer "why didn't this prefix come in?" — or "what did the chain do to
 it when it did?" — from the per-session import-decision cache:
 
 ```bash
-rbgp policy explain --neighbor 10.0.0.2 --prefix 198.51.100.0/24
-rbgp policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --json
+rbgp policy explain --neighbor 10.0.0.2 --prefix 198.51.100.0/24 --direction import
+rbgp policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --direction import --json
 # Add-Path peer: omit --path-id to see every path, or pin one:
-rbgp policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --path-id 3
+rbgp policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --direction import --path-id 3
 ```
 
 `--direction export` runs the
@@ -3367,14 +3367,14 @@ For recent route history without a live tail, use
 `rbgp events --prefix <PREFIX>`. For recent session lifecycle history,
 use `rbgp events sessions`; it reads the peer manager's bounded
 process-local history and resets on daemon restart. The CLI returns 100
-history entries by default. The session-history API uses `limit = 0` as a
-daemon-default sentinel, so `rbgp events sessions --limit 0` requests
-the full bounded in-memory window rather than zero rows.
+history entries by default; `rbgp events sessions --all` requests the full
+bounded in-memory window (the API spells it `limit = 0`). `--limit 0` is a
+usage error.
 For recent runtime policy / neighbor-set / peer-group / chain mutation history,
 use `rbgp events policy`; it reads a separate bounded 4096-event
 process-local history from the peer manager. `--neighbor` matches only
 peer-scoped policy events, so global policy and peer-group changes disappear
-from an address-filtered query. `rbgp events policy --limit 0` requests
+from an address-filtered query. `rbgp events policy --all` requests
 the full bounded in-memory window.
 For recent EVPN route history, use `rbgp events evpn`; it reads the RIB's
 bounded 4096-event process-local EVPN route-event history. `--neighbor` matches
@@ -3450,6 +3450,8 @@ their effective send value is explicitly `inactive`, `unlimited`, or finite.
 rbgp rib received 10.0.0.2
 rbgp rib received 10.0.0.2 --prefix 203.0.113.0/24
 rbgp rib received 10.0.0.2 --origin-asn 64496 --limit 100
+# next page: pass the token the previous page printed, with the same filters
+rbgp rib received 10.0.0.2 --origin-asn 64496 --limit 100 --page-token '<token>'
 rbgp rib received 10.0.0.2 --age
 rbgp rib received 10.0.0.2 --count
 ```
@@ -3528,14 +3530,14 @@ rbgp rib fib
 rbgp -j rib fib
 rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
 rbgp rib fib --prefix 203.0.113.0/24 --neighbor 198.51.100.2
-rbgp rib fib --page-size 100
+rbgp rib fib --limit 100
 ```
 
 This reports only the ADR-0061 configured-table runtime, not the ordinary
 Loc-RIB. Rows are `installed`, `rejected`, `failed`, or `unresolved`. The filters compose
 with AND semantics. The `--prefix` filter is exact prefix+length matching, not
-longest-prefix or containment matching. Use `--page-size` and the returned
-next-page token to page through large surfaced status snapshots. Pagination is
+longest-prefix or containment matching. Use `--limit` and the returned
+next-page token (`--page-token`) to page through large surfaced status snapshots. Pagination is
 over rows visible to `ListFibRoutes`; it does not add suppressed-route counts
 for sampled `route_limit_exceeded` rows.
 

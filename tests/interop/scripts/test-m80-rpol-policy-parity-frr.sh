@@ -376,7 +376,7 @@ fi
 # ---------------------------------------------------------------------------
 
 log "Test 6: rbgp policy stats shows nonzero live term hits for edge-out"
-stats_json=$(rbgp --json policy stats --peer "$DOWN_PEER")
+stats_json=$(rbgp --json policy stats --peer "$DOWN_PEER" --direction export)
 noleak_hits=$(echo "$stats_json" | jq -r '
     [.chains[] | select(.peer_address == "'"$DOWN_PEER"'") | .terms[]
      | select(.policy == "edge-out" and .term == "no-leak")][0].hits // 0')
@@ -424,14 +424,14 @@ else
 fi
 
 log "Test 6c: import terms and export chain-default attribution are exact"
-explain_v6=$(rbgp policy explain --neighbor "$SRC_PEER" --prefix 2001:db8:64::/48)
+explain_v6=$(rbgp policy explain --neighbor "$SRC_PEER" --prefix 2001:db8:64::/48 --direction import)
 if echo "$explain_v6" | grep -q "partner-v6"; then
     ok "import explain for 2001:db8:64::/48 names deciding term partner-v6"
 else
     fail "import explain for 2001:db8:64::/48 does not name partner-v6"
     echo "$explain_v6" >&2
 fi
-explain_v4=$(rbgp policy explain --neighbor "$SRC_PEER" --prefix 10.20.1.0/24)
+explain_v4=$(rbgp policy explain --neighbor "$SRC_PEER" --prefix 10.20.1.0/24 --direction import)
 if echo "$explain_v4" | grep -q "partner-v4"; then
     ok "import explain for 10.20.1.0/24 names deciding term partner-v4"
 else

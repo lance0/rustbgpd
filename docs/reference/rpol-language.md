@@ -1591,14 +1591,14 @@ IOS-XR `show pcl` idea); a term lowered to several IR steps reports as
 `.rpol` policies are first-class citizens of the daemon's explain
 surfaces (ADR-0073 / ADR-0096 Decision 3.3):
 
-- **`rbgp policy explain --neighbor A --prefix P`** (import): when the
+- **`rbgp policy explain --neighbor A --prefix P --direction import`** (import): when the
   deciding chain member is an `.rpol` policy, the statement trace
   names the deciding **term** and lists every evaluated term with its
   guard rendered back to `.rpol` syntax and a matched / not-matched
   verdict:
 
   ```console
-  $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
+  $ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24 --direction import
   import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3)
     permit
       decision: no policy rejected; chain default permit

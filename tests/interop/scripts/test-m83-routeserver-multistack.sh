@@ -1291,7 +1291,7 @@ assert_rov() {
         ok "GoBGP lacks RPKI-invalid 100.68.0.0/24"
     fi
     local explain
-    explain=$(rs_ctl policy explain --neighbor "$FRR_ADDR" --prefix 100.68.0.0/24)
+    explain=$(rs_ctl policy explain --neighbor "$FRR_ADDR" --prefix 100.68.0.0/24 --direction import)
     if echo "$explain" | grep -q "reject-rpki-invalid"; then
         ok "import explain names reject-rpki-invalid for 100.68.0.0/24"
     else

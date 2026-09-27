@@ -228,6 +228,7 @@ rbgp --json rib lookup 2001:db8::7/128      # same best-path explanation as JSON
 rbgp rib received <addr>
 rbgp rib received <addr> --prefix 203.0.113.0/24
 rbgp rib received <addr> --origin-asn 64496 --limit 100
+rbgp rib received <addr> --origin-asn 64496 --limit 100 --page-token '<token>'
 rbgp rib received <addr> --rpki-state invalid --aspa-state unknown
 rbgp rib received <addr> --as-path-contains 64496
 rbgp rib received <addr> --age
@@ -261,13 +262,13 @@ rbgp policy chain set-import (--global | --neighbor <addr>) [--yes] <names...>
 rbgp policy chain set-export (--global | --neighbor <addr>) [--yes] <names...>
 rbgp policy chain clear-import (--global | --neighbor <addr>) [--yes]
 rbgp policy chain clear-export (--global | --neighbor <addr>) [--yes]
-rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
+rbgp policy explain --neighbor <addr> --prefix <cidr> --direction import|export [--path-id <n>]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
 rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
-rbgp policy stats [--neighbor <addr>]                     # live per-term hit counters
-rbgp policy counters [--neighbor <addr>]                  # alias
+rbgp policy stats --direction import|export|both [--neighbor <addr>]  # live per-term hit counters
+rbgp policy counters --direction both                     # alias
 
 rbgp flowspec
 rbgp flowspec received 192.0.2.1 -a ipv4_flowspec
@@ -363,8 +364,9 @@ incomplete. A `null` value means the daemon did not report completeness; it is
 compatibility evidence from an older or otherwise unreporting daemon, not the
 normal output from a current server.
 
-`policy explain` requires the daemon's import-decision cache, which is
-opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
+`policy explain` and `policy stats` require `--direction`; neither has a
+default. `policy explain --direction import` requires the daemon's
+import-decision cache, which is opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
 stock daemon the command exits nonzero with that hint. `--direction export`
 is the `rib --prefix <cidr> advertised <addr> --explain` dry run under the
 same verb; it needs no configuration and does not take `--path-id` (use the
@@ -405,8 +407,14 @@ inspection filter only sees path forms already represented in the RIB.
 
 `--limit N` returns one server-fenced page, with `N` from 1 through the
 server's 1000-row page cap. Human output says whether it is showing the first
-N of the exact matching total. JSON uses
-`{"routes": [...], "returned_count": N, "total_count": T, "complete": false}`.
+N of the exact matching total and prints `Next page token: <token>` when more
+routes match. JSON uses
+`{"routes": [...], "returned_count": N, "total_count": T, "complete": false, "next_page_token": "<token>"}`;
+the token is empty when `complete` is true. Pass it back with
+`--page-token <token>` and the same view, `--limit` and filters for the next
+page; a table change between pages makes the daemon refuse the stale token, so
+restart without it. `--page-token` requires `--limit` and is not available
+with `--json-lines`.
 This is the bounded inspection path for a live full table. Without `--limit`,
 the CLI still follows every page and fails closed if the table changes; it
 never labels a torn multi-page walk complete.
@@ -455,7 +463,7 @@ the flag and always includes the raw `received_at_epoch_seconds` field.
 ```bash
 rbgp evpn
 rbgp evpn received <addr> --route-type 2 --rd 65000:100
-rbgp evpn advertised <addr> --page-size 100 --page-token '<token>'
+rbgp evpn advertised <addr> --limit 100 --page-token '<token>'
 
 rbgp evpn explain mac-ip --rd 65000:100 --mac aa:bb:cc:dd:ee:ff --advertised-to 192.0.2.2
 rbgp evpn explain ip-prefix --rd 65000:100 --prefix 198.51.100.0/24 --received-from 192.0.2.1
@@ -637,8 +645,8 @@ a non-TTY.
 | Longest-prefix match for an address or CIDR | `rbgp rib lookup <IP|CIDR>` |
 | Explain best path | `rbgp rib --prefix <cidr> --explain` |
 | Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
-| Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
-| Policy hit counters | `rbgp policy stats` or `rbgp policy counters` |
+| Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction import` |
+| Policy hit counters | `rbgp policy stats --direction both` or `rbgp policy counters --direction both` |
 | Route-server clients | `rbgp summary`, then `rbgp neighbor <peer>` for distribution mode |
 | Bounce one session (`clear bgp <peer>`, `bgpctl neighbor <peer> clear`) | `rbgp neighbor <peer> reset [--reason <text>]` |
 | Support bundle + triage checks | `rbgp doctor --output ./support.tar.gz` |

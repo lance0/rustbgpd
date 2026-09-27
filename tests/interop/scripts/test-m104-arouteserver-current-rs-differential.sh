@@ -504,7 +504,7 @@ assert_rejects() {
         else
             fail "rejected $prefix from $client leaked into accepted view"
         fi
-        explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" || true)
+        explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" --direction import || true)
         if grep -qF -- "$policy" <<<"$explain" && grep -qw -- "$term" <<<"$explain"; then
             ok "explain names $policy / $term for $prefix"
         else

@@ -111,7 +111,7 @@ From the repository root, using the shipped [route-server policy](examples/route
 rbgp policy check examples/route-server/hygiene.rpol
 rbgp policy test examples/route-server/hygiene.rpol --policy ixp-hygiene --direction import
 rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.7 --explain
-rbgp policy stats
+rbgp policy stats --direction both
 ```
 
 The live commands use your installed daemon's local socket by default;

@@ -361,7 +361,7 @@ assert_accepts() {
         fi
         # An accept row may pin the accepting policy and term too.
         if [ -n "$term" ]; then
-            explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" || true)
+            explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" --direction import || true)
             if grep -qF -- "$policy" <<<"$explain" && grep -qw -- "$term" <<<"$explain"; then
                 ok "explain names $policy / $term for accepted $prefix"
             else
@@ -400,7 +400,7 @@ assert_rejects() {
         fi
 
         # The explain surface must name the generated policy and term.
-        explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" || true)
+        explain=$(rs_ctl policy explain --neighbor "$ip" --prefix "$prefix" --direction import || true)
         if grep -qF -- "$policy" <<<"$explain" && grep -qw -- "$term" <<<"$explain"; then
             ok "explain names $policy / $term for $prefix"
         else

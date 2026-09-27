@@ -2008,8 +2008,8 @@ O(page size) retained route references/copies. Pagination bounds response memory
 it does not provide an index or a snapshot retained across mutations.
 
 ```bash
-rbgp evpn received 192.0.2.1 --route-type 2 --rd 65000:100 --page-size 100
-rbgp evpn advertised 192.0.2.2 --rd 65000:100 --page-size 100
+rbgp evpn received 192.0.2.1 --route-type 2 --rd 65000:100 --limit 100
+rbgp evpn advertised 192.0.2.2 --rd 65000:100 --limit 100
 
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"neighbor_address":"192.0.2.2","route_type_filter":2,"rd_filter":"65000:100","page_size":100}' \
@@ -2191,7 +2191,7 @@ rbgp rib fib          # human table
 rbgp rib fib --json   # JSON array for scripts
 rbgp rib fib --table edge --state rejected --reason route_limit_exceeded
 rbgp rib fib --prefix 203.0.113.0/24 --neighbor 198.51.100.2
-rbgp rib fib --page-size 100
+rbgp rib fib --limit 100
 ```
 
 Returns one row per desired route, daemon-owned route, or one-pass
@@ -2219,8 +2219,8 @@ empty. `rbgp rib fib` exposes the same filters as `--table`, `--state`,
 optional pagination over the filtered status rows; `page_size = 0` keeps the
 legacy full-snapshot response, and `page_token` is valid only when
 `page_size > 0`. The response includes `next_page_token` and `total_count`;
-CLI JSON output remains a route array unless `--page-size` is greater than
-`0`, in which case it emits an object with `routes`,
+CLI JSON output remains a route array unless `--limit` is given (1 or
+more; omit it for the full snapshot), in which case it emits an object with `routes`,
 `next_page_token`, `total_count`, and optional `sampling` metadata.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, `next_hop`, and `next_hops`

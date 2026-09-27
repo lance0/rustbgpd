@@ -35,6 +35,8 @@ pub struct RouteFilterOpts {
     pub as_path_contains: Option<u32>,
     /// Maximum rows returned by a bounded single-page query.
     pub limit: Option<u32>,
+    /// Continuation token from a previous bounded page.
+    pub page_token: Option<String>,
 }
 
 /// Parsed general FIB status filter options from CLI flags.
@@ -67,7 +69,7 @@ fn make_route_request(
             .to_string(),
         afi_safi: family.unwrap_or(0),
         page_size: 0,
-        page_token: String::new(),
+        page_token: filters.page_token.clone().unwrap_or_default(),
         prefix_filter,
         prefix_filter_length,
         longer_prefixes: filters.longer,
@@ -206,7 +208,9 @@ const ROUTE_PAGE_SIZE: u32 = 1000;
 struct RouteListing {
     routes: Vec<Route>,
     total_count: u64,
-    complete: bool,
+    next_page_token: String,
+    /// The first request carried a `--page-token`, so this is a later page.
+    continued: bool,
     limit: Option<u32>,
 }
 
@@ -223,7 +227,8 @@ async fn fetch_route_listing(
     limit: Option<u32>,
 ) -> Result<RouteListing, CliError> {
     let mut routes = Vec::new();
-    let (total_count, complete) = walk_route_pages(client, rpc, req, limit, |page| {
+    let continued = !req.page_token.is_empty();
+    let (total_count, next_page_token) = walk_route_pages(client, rpc, req, limit, |page| {
         routes.extend(page);
         Ok(())
     })
@@ -231,20 +236,22 @@ async fn fetch_route_listing(
     Ok(RouteListing {
         routes,
         total_count,
-        complete,
+        next_page_token,
+        continued,
         limit,
     })
 }
 
 /// Consume each page before requesting its continuation. A failed consumer or
-/// RPC stops the walk without retrying an opaque continuation token.
+/// RPC stops the walk without retrying an opaque continuation token. Returns
+/// the total and the next-page token, which is empty once the walk is complete.
 async fn walk_route_pages(
     client: &mut RibClient,
     rpc: &RouteListRpc,
     mut req: ListRoutesRequest,
     limit: Option<u32>,
     mut consume: impl FnMut(Vec<Route>) -> Result<(), CliError>,
-) -> Result<(u64, bool), CliError> {
+) -> Result<(u64, String), CliError> {
     req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
     loop {
         let resp = match rpc {
@@ -269,9 +276,8 @@ async fn walk_route_pages(
         .into_inner();
         let total_count = resp.total_count;
         consume(resp.routes)?;
-        let complete = resp.next_page_token.is_empty();
-        if limit.is_some() || complete {
-            return Ok((total_count, complete));
+        if limit.is_some() || resp.next_page_token.is_empty() {
+            return Ok((total_count, resp.next_page_token));
         }
         req.page_token = resp.next_page_token;
     }
@@ -321,7 +327,7 @@ async fn write_route_json_lines(
         },
     )?;
     let mut returned_count = 0;
-    let (total_count, complete) = walk_route_pages(client, &rpc, request, limit, |page| {
+    let (total_count, next_page_token) = walk_route_pages(client, &rpc, request, limit, |page| {
         for mut route in page {
             restore_matching_scoped_address(peer, &mut route.peer_address);
             output::write_json_line(
@@ -342,7 +348,7 @@ async fn write_route_json_lines(
             r#type: "end",
             returned_count,
             total_count,
-            complete,
+            complete: next_page_token.is_empty(),
         },
     )
 }
@@ -450,7 +456,7 @@ fn make_fib_request(filters: &FibRouteFilterOpts) -> Result<ListFibRoutesRequest
         && page_size == 0
     {
         return Err(CliError::Argument(
-            "--page-token requires --page-size greater than 0".to_string(),
+            "--page-token requires --limit".to_string(),
         ));
     }
 
@@ -604,6 +610,8 @@ struct JsonBoundedRoutes<'a> {
     returned_count: u64,
     total_count: u64,
     complete: bool,
+    /// Pass to `--page-token` with the same `--limit` and filters; empty when complete.
+    next_page_token: &'a str,
 }
 
 fn print_route_listing(
@@ -620,7 +628,8 @@ fn print_route_listing(
             routes: JsonRoutes(&listing.routes),
             returned_count: listing.routes.len() as u64,
             total_count: listing.total_count,
-            complete: listing.complete,
+            complete: listing.next_page_token.is_empty(),
+            next_page_token: &listing.next_page_token,
         });
     }
 
@@ -641,18 +650,22 @@ fn render_human_route_listing(listing: &RouteListing, show_age: bool) -> String 
     }
 
     let mut payload = output::render_route_table_text(&listing.routes, show_age);
-    if listing.complete {
-        payload.push_str(&format!(
-            "Showing all {} matching routes.\n",
-            listing.total_count
-        ));
-    } else {
-        payload.push_str(&format!(
-            "Showing first {} of {} matching routes (--limit {}).\n",
-            listing.routes.len(),
-            listing.total_count,
-            limit
-        ));
+    let returned = listing.routes.len();
+    let total = listing.total_count;
+    payload.push_str(
+        &match (listing.continued, listing.next_page_token.is_empty()) {
+            (false, true) => format!("Showing all {total} matching routes.\n"),
+            (false, false) => {
+                format!("Showing first {returned} of {total} matching routes (--limit {limit}).\n")
+            }
+            (true, true) => format!("Showing the last {returned} of {total} matching routes.\n"),
+            (true, false) => {
+                format!("Showing {returned} more of {total} matching routes (--limit {limit}).\n")
+            }
+        },
+    );
+    if !listing.next_page_token.is_empty() {
+        payload.push_str(&format!("Next page token: {}\n", listing.next_page_token));
     }
     payload
 }
@@ -3620,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn fib_request_rejects_page_token_without_nonzero_page_size() {
+    fn fib_request_rejects_page_token_without_limit() {
         let err = make_fib_request(&FibRouteFilterOpts {
             table: None,
             state: None,
@@ -3631,7 +3644,7 @@ mod tests {
             page_token: Some("100".to_string()),
         })
         .unwrap_err();
-        assert!(err.to_string().contains("--page-size"));
+        assert!(err.to_string().contains("--page-token requires --limit"));
 
         let err = make_fib_request(&FibRouteFilterOpts {
             table: None,
@@ -3643,7 +3656,7 @@ mod tests {
             page_token: Some("100".to_string()),
         })
         .unwrap_err();
-        assert!(err.to_string().contains("--page-size"));
+        assert!(err.to_string().contains("--page-token requires --limit"));
     }
 
     #[test]
@@ -4783,6 +4796,7 @@ mod tests {
             aspa_state: None,
             as_path_contains: None,
             limit: None,
+            page_token: None,
         }
     }
 
@@ -4813,6 +4827,7 @@ mod tests {
             aspa_state: Some(crate::RouteAspaState::Unknown),
             as_path_contains: Some(64496),
             limit: None,
+            page_token: None,
         }
     }
 
@@ -5099,6 +5114,56 @@ mod tests {
         assert!(requests[0].page_token.is_empty());
     }
 
+    /// `--limit` + `--page-token` round trip: the first page prints the
+    /// server's continuation, and passing it back resumes from it.
+    #[tokio::test]
+    async fn bounded_listing_round_trips_the_page_token() {
+        let server = spawn_mock_server(None).await;
+        server.state.list_route_pages.lock().await.extend([
+            mock_route_page("10.0.0.0", "opaque-2"),
+            mock_route_page("10.0.1.0", ""),
+        ]);
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut client =
+            RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let mut filters = no_route_filters();
+        filters.limit = Some(1);
+
+        let first = fetch_route_listing(
+            &mut client,
+            &RouteListRpc::Best,
+            make_route_request(None, None, &filters).unwrap(),
+            filters.limit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.next_page_token, "opaque-2");
+        assert!(render_human_route_listing(&first, false).ends_with(
+            "Showing first 1 of 2 matching routes (--limit 1).\nNext page token: opaque-2\n"
+        ));
+
+        filters.page_token = Some(first.next_page_token);
+        let second = fetch_route_listing(
+            &mut client,
+            &RouteListRpc::Best,
+            make_route_request(None, None, &filters).unwrap(),
+            filters.limit,
+        )
+        .await
+        .unwrap();
+        assert!(second.next_page_token.is_empty());
+        assert!(
+            render_human_route_listing(&second, false)
+                .ends_with("Showing the last 1 of 2 matching routes.\n")
+        );
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].page_token.is_empty());
+        assert_eq!(requests[1].page_token, "opaque-2");
+        assert!(requests.iter().all(|request| request.page_size == 1));
+    }
+
     #[test]
     fn bounded_route_json_exposes_completeness() {
         let listing = RouteListing {
@@ -5108,20 +5173,23 @@ mod tests {
                 ..Default::default()
             }],
             total_count: 42,
-            complete: false,
+            next_page_token: "opaque-next".to_string(),
+            continued: false,
             limit: Some(1),
         };
         let value = serde_json::to_value(JsonBoundedRoutes {
             routes: JsonRoutes(&listing.routes),
             returned_count: listing.routes.len() as u64,
             total_count: listing.total_count,
-            complete: listing.complete,
+            complete: listing.next_page_token.is_empty(),
+            next_page_token: &listing.next_page_token,
         })
         .unwrap();
         assert_eq!(
             value,
             serde_json::json!({
                 "returned_count": 1, "total_count": 42, "complete": false,
+                "next_page_token": "opaque-next",
                 "routes": [serde_json::to_value(JsonRouteRef(&listing.routes[0])).unwrap()]
             })
         );
@@ -5136,13 +5204,17 @@ mod tests {
                 ..Default::default()
             }],
             total_count: 42,
-            complete: false,
+            next_page_token: "opaque-next".to_string(),
+            continued: false,
             limit: Some(1),
         };
         let table = output::render_route_table_text(&listing.routes, false);
         assert_eq!(
             render_human_route_listing(&listing, false),
-            format!("{table}Showing first 1 of 42 matching routes (--limit 1).\n")
+            format!(
+                "{table}Showing first 1 of 42 matching routes (--limit 1).\n\
+                 Next page token: opaque-next\n"
+            )
         );
     }
 

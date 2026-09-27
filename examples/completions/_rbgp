@@ -1131,6 +1131,7 @@ _arguments "${_arguments_options[@]}" : \
 '--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
 '--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
+'--page-token=[Continue a --limit listing from the next-page token a previous page printed]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1195,6 +1196,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
 '--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
 '--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
+'--page-token=[Continue a --limit listing from the next-page token a previous page printed]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1232,6 +1234,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
 '--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
 '--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
+'--page-token=[Continue a --limit listing from the next-page token a previous page printed]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1272,6 +1275,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
 '--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
 '--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
+'--page-token=[Continue a --limit listing from the next-page token a previous page printed]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1313,6 +1317,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
 '--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
 '--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
+'--page-token=[Continue a --limit listing from the next-page token a previous page printed]:TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -1364,8 +1369,8 @@ _arguments "${_arguments_options[@]}" : \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
 '--neighbor=[Source neighbor-address filter]:NEIGHBOR:_default' \
 '--peer=[Source neighbor-address filter]:NEIGHBOR:_default' \
-'--page-size=[Maximum FIB status rows to return; omitted returns the full snapshot]:PAGE_SIZE:_default' \
-'--page-token=[Page token returned by a previous paginated FIB status query]:PAGE_TOKEN:_default' \
+'--limit=[Maximum FIB status rows in this page; omit for the full snapshot]:PAGE_SIZE:_default' \
+'--page-token=[Page token returned by a previous FIB status page (requires --limit)]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2116,7 +2121,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
-'--page-size=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
+'--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2140,7 +2145,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
-'--page-size=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
+'--limit=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
 '--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2992,7 +2997,6 @@ _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
-'-l+[Maximum recent route events to return (default 100; route history only)]:LIMIT:_default' \
 '--limit=[Maximum recent route events to return (default 100; route history only)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -3003,6 +3007,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--limit)--all[Return the daemon'\''s full retained route-event window (route history only)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3052,8 +3057,7 @@ _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor address filter]:NEIGHBOR:_default' \
 '--peer=[Neighbor address filter]:NEIGHBOR:_default' \
 '*--type=[Session event type filter\: state_changed, established, lost, peer_enabled, peer_disabled]:EVENT_TYPES:_default' \
-'-l+[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
-'--limit=[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent session events to return (default 100)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3063,6 +3067,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--limit)--all[Return the daemon'\''s full retained session event window]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3076,8 +3081,7 @@ _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Neighbor address filter. Only peer-scoped policy events match]:NEIGHBOR:_default' \
 '--peer=[Neighbor address filter. Only peer-scoped policy events match]:NEIGHBOR:_default' \
 '*--type=[Policy event type filter\: policy_changed]:EVENT_TYPES:_default' \
-'-l+[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
-'--limit=[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent policy events to return (default 100)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3087,6 +3091,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--limit)--all[Return the daemon'\''s full retained policy event window]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3102,8 +3107,7 @@ _arguments "${_arguments_options[@]}" : \
 '--route-type=[EVPN route type filter (1..=5)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher filter, e.g. "65000\:100"]:RD:_default' \
 '*--type=[EVPN event type filter\: evpn_added, evpn_withdrawn, evpn_best_changed]:EVENT_TYPES:_default' \
-'-l+[Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
-'--limit=[Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
+'--limit=[Maximum recent EVPN events to return (default 100)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3113,6 +3117,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--limit)--all[Return the daemon'\''s full retained EVPN event window]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3410,7 +3415,7 @@ _arguments "${_arguments_options[@]}" : \
 '--peer=[Neighbor address\: restricts the import snapshot to one peer'\''s retained post-policy Adj-RIB-In, or sets the export evaluation target]:NEIGHBOR:_default' \
 '-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
-'--limit=[Maximum routes to evaluate (0 = all)]:LIMIT:_default' \
+'--limit=[Maximum routes to evaluate (default\: every route in the snapshot)]:LIMIT:_default' \
 '--show-changes=[Maximum before/after attribute diffs to show]:SHOW_CHANGES:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -3421,6 +3426,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--limit)--all[Evaluate every route in the snapshot (the default)]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
@@ -3685,7 +3691,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
 '--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
-'--direction=[Direction\: export (default), import, or both]:DIRECTION:(import export both)' \
+'--direction=[Direction\: import, export, or both]:DIRECTION:(import export both)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3707,7 +3713,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--neighbor=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
 '--peer=[Restrict to one neighbor'\''s installed chain]:NEIGHBOR:_default' \
-'--direction=[Direction\: export (default), import, or both]:DIRECTION:(import export both)' \
+'--direction=[Direction\: import, export, or both]:DIRECTION:(import export both)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -3731,7 +3737,7 @@ _arguments "${_arguments_options[@]}" : \
 '--peer=[Neighbor (peer) address whose decision to explain]:NEIGHBOR:_default' \
 '--prefix=[Prefix in CIDR form, e.g. \`192.0.2.0/24\` or \`2001\:db8\:\:/32\`]:PREFIX:_default' \
 '--path-id=[Add-Path identifier (import only); omit to show every matching path]:PATH_ID:_default' \
-'--direction=[Direction\: import (default) or export]:DIRECTION:(import export)' \
+'--direction=[Direction\: import or export]:DIRECTION:(import export)' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
