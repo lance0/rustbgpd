@@ -27,7 +27,7 @@ series in `rbgp metrics` output for the same signal without Prometheus.
 ## 2. Read the session event history
 
 ```bash
-rbgp events sessions --address 10.0.0.2
+rbgp events sessions --neighbor 10.0.0.2
 rbgp events watch --category session --type established,lost   # live tail
 ```
 

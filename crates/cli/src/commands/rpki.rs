@@ -296,7 +296,9 @@ pub enum LocalRole {
     Provider,
     Customer,
     Peer,
+    #[value(alias = "route_server")]
     RouteServer,
+    #[value(alias = "rs_client")]
     RsClient,
 }
 

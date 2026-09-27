@@ -3301,8 +3301,8 @@ rbgp events watch --category dataplane --type dataplane_route_failed --prefix 20
 rbgp events watch --prefix 203.0.113.0/24 --type policy_filtered
 rbgp events watch --category evpn --type evpn_added,evpn_withdrawn,evpn_best_changed
 rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
-rbgp events sessions --address 10.0.0.2 --type established,lost --limit 20
-rbgp events policy --address 10.0.0.2 --type policy_changed --limit 20
+rbgp events sessions --neighbor 10.0.0.2 --type established,lost --limit 20
+rbgp events policy --neighbor 10.0.0.2 --type policy_changed --limit 20
 rbgp events evpn --route-type 2 --rd 65000:100 --limit 20
 ```
 
@@ -3324,11 +3324,11 @@ filters when watching session events, `--category policy` to watch policy /
 neighbor-set / peer-group / chain mutations accepted by the runtime, or
 `--category evpn` when watching EVPN route changes. Use `--category bfd` for
 BFD up/down/state-change events. Dataplane summary events are peerless and do
-not match `--address`, `--family`, or `--prefix`. FIB rejected counts reflect
+not match `--neighbor`, `--family`, or `--prefix`. FIB rejected counts reflect
 surfaced status rows; sampled `route_limit_exceeded` rows are not a global
 suppressed-route total. Policy-filtered route events are target-peer
 scoped: `peer_address` remains the source route peer, `target_peer_address` is
-the outbound peer whose export policy denied the route, and `--address` matches
+the outbound peer whose export policy denied the route, and `--neighbor` matches
 either side for route history and live route filtering. Policy events describe
 runtime apply success;
 config-file persistence is separate. Session state-change events use a bounded
@@ -3372,12 +3372,12 @@ daemon-default sentinel, so `rbgp events sessions --limit 0` requests
 the full bounded in-memory window rather than zero rows.
 For recent runtime policy / neighbor-set / peer-group / chain mutation history,
 use `rbgp events policy`; it reads a separate bounded 4096-event
-process-local history from the peer manager. `--address` matches only
+process-local history from the peer manager. `--neighbor` matches only
 peer-scoped policy events, so global policy and peer-group changes disappear
 from an address-filtered query. `rbgp events policy --limit 0` requests
 the full bounded in-memory window.
 For recent EVPN route history, use `rbgp events evpn`; it reads the RIB's
-bounded 4096-event process-local EVPN route-event history. `--address` matches
+bounded 4096-event process-local EVPN route-event history. `--neighbor` matches
 both the current and previous best-path peer, `--route-type` accepts route types
 1 through 5, and `--rd` uses the same Route Distinguisher display format as
 `rbgp evpn`.
@@ -3390,7 +3390,7 @@ Use the narrowest surface for the question you are asking:
 |----------|---------------|-------|
 | "What is changing right now?" | `rbgp events watch` / `EventService.WatchEvents` | Default live route + session stream. Policy, EVPN, dataplane, and BFD streams are opt-in with `--category` or matching `--type`. No replay after reconnect. |
 | "What just changed for this prefix?" | `rbgp events --prefix 203.0.113.0/24` / `ListRouteEvents` | Exact-prefix route history from the bounded in-memory RIB ring. |
-| "Why did this prefix not reach a peer?" | `rbgp events watch --address 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
+| "Why did this prefix not reach a peer?" | `rbgp events watch --neighbor 10.0.0.2 --type policy_filtered --prefix 203.0.113.0/24` / `ListRouteEvents` | Export-policy denials where the peer is the denied outbound target. |
 | "Did FIB apply fail for this prefix?" | `rbgp events watch --category dataplane --type dataplane_route_failed --prefix 203.0.113.0/24` / `EventService.WatchEvents` | Live ADR-0061 route apply outcome; replayable through `SubscribeFromEvent` when `[event_history].enabled = true`. |
 | "What policy changed recently?" | `rbgp events policy` / `ListPolicyEvents` | Recent policy / neighbor-set / peer-group / chain mutation summaries from the bounded peer-manager ring. |
 | "What EVPN route changed recently?" | `rbgp events evpn --route-type 2 --rd 65000:100` / `ListEvpnEvents` | Recent EVPN route add / withdraw / best-change history from the bounded RIB ring. |

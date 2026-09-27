@@ -1502,7 +1502,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--next-hop=[Next hop address]:NEXT_HOP:_default' \
 '--nexthop=[Next hop address]:NEXT_HOP:_default' \
-'--origin=[Origin (0=igp, 1=egp, 2=incomplete)]:ORIGIN:_default' \
+'--origin=[Origin\: igp, egp, incomplete (or 0, 1, 2)]:ORIGIN:_default' \
 '--local-pref=[Local preference]:LOCAL_PREF:_default' \
 '--med=[MED]:MED:_default' \
 '*--as-path=[AS path (space-separated)]:AS_PATH:_default' \
@@ -1818,7 +1818,8 @@ _arguments "${_arguments_options[@]}" : \
             (from-mrt)
 _arguments "${_arguments_options[@]}" : \
 '--view=[Attestation of what the dump is\: adj-rib-out-capture (a per-client post-policy capture; accepted), loc-rib, or adj-rib-in (both refused as non-comparable)]:VIEW:_default' \
-'--peer=[Peer address the captured routes were advertised to]:PEER:_default' \
+'--neighbor=[Neighbor address the captured routes were advertised to]:NEIGHBOR:_default' \
+'--peer=[Neighbor address the captured routes were advertised to]:NEIGHBOR:_default' \
 '--peer-asn=[ASN of that peer]:PEER_ASN:_default' \
 '--source=[Free-form provenance label appended to the header \`source\`]:SOURCE:_default' \
 '--generation=[Capture-round generation stamped into the header]:GENERATION:_default' \
@@ -1842,7 +1843,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (from-bmp)
 _arguments "${_arguments_options[@]}" : \
-'*--peer=[Peer address to emit; may be repeated. Omit to emit every complete global-instance peer (all of which must then be complete)]:PEER:_default' \
+'*--neighbor=[Neighbor address to emit; may be repeated. Omit to emit every complete global-instance peer (all of which must then be complete)]:NEIGHBOR:_default' \
+'*--peer=[Neighbor address to emit; may be repeated. Omit to emit every complete global-instance peer (all of which must then be complete)]:NEIGHBOR:_default' \
 '--source=[Free-form provenance label appended to the header \`source\`]:SOURCE:_default' \
 '--generation=[Capture-round generation stamped into the header]:GENERATION:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2410,6 +2412,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rd=[]:RD:_default' \
 '--ethernet-tag=[]:ETHERNET_TAG:_default' \
 '--ip=[Originator IP (required for Type 3)]:IP:_default' \
+'--originator-ip=[Originator IP (required for Type 3)]:IP:_default' \
 '--next-hop=[VTEP loopback IP (next-hop)]:NEXT_HOP:_default' \
 '*--rt=[]:RT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -2485,7 +2488,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--rd=[]:RD:_default' \
 '--ethernet-tag=[]:ETHERNET_TAG:_default' \
-'--ip=[]:IP:_default' \
+'--ip=[Originator IP]:IP:_default' \
+'--originator-ip=[Originator IP]:IP:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -2983,7 +2987,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (events)
 _arguments "${_arguments_options[@]}" : \
-'--address=[Neighbor address filter]:ADDRESS:_default' \
+'--neighbor=[Neighbor address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor address filter]:NEIGHBOR:_default' \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
@@ -3017,7 +3022,8 @@ _arguments "${_arguments_options[@]}" : \
             (watch)
 _arguments "${_arguments_options[@]}" : \
 '*--category=[Event category filter\: route, session, policy, dataplane, evpn, bfd]:CATEGORIES:_default' \
-'--address=[Neighbor address filter]:ADDRESS:_default' \
+'--neighbor=[Neighbor address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor address filter]:NEIGHBOR:_default' \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
 '--prefix=[Exact prefix filter, e.g. 203.0.113.0/24]:PREFIX:_default' \
@@ -3043,7 +3049,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (sessions)
 _arguments "${_arguments_options[@]}" : \
-'--address=[Neighbor address filter]:ADDRESS:_default' \
+'--neighbor=[Neighbor address filter]:NEIGHBOR:_default' \
+'--peer=[Neighbor address filter]:NEIGHBOR:_default' \
 '*--type=[Session event type filter\: state_changed, established, lost, peer_enabled, peer_disabled]:EVENT_TYPES:_default' \
 '-l+[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
 '--limit=[Maximum recent session events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
@@ -3066,7 +3073,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (policy)
 _arguments "${_arguments_options[@]}" : \
-'--address=[Neighbor address filter. Only peer-scoped policy events match]:ADDRESS:_default' \
+'--neighbor=[Neighbor address filter. Only peer-scoped policy events match]:NEIGHBOR:_default' \
+'--peer=[Neighbor address filter. Only peer-scoped policy events match]:NEIGHBOR:_default' \
 '*--type=[Policy event type filter\: policy_changed]:EVENT_TYPES:_default' \
 '-l+[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
 '--limit=[Maximum recent policy events to return (default 100; explicit 0 requests the daemon'\''s full bounded window)]:LIMIT:_default' \
@@ -3089,7 +3097,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (evpn)
 _arguments "${_arguments_options[@]}" : \
-'--address=[Neighbor address filter. Matches current and previous best-path peer]:ADDRESS:_default' \
+'--neighbor=[Neighbor address filter. Matches current and previous best-path peer]:NEIGHBOR:_default' \
+'--peer=[Neighbor address filter. Matches current and previous best-path peer]:NEIGHBOR:_default' \
 '--route-type=[EVPN route type filter (1..=5)]:ROUTE_TYPE:_default' \
 '--rd=[Route Distinguisher filter, e.g. "65000\:100"]:RD:_default' \
 '*--type=[EVPN event type filter\: evpn_added, evpn_withdrawn, evpn_best_changed]:EVENT_TYPES:_default' \

@@ -121,7 +121,7 @@ Route churn is the fabric health signal on an EVPN RR. EVPN route events
 have their own category, which a default event stream does not include: watch
 `rbgp events watch --category evpn` (or the EVPN history,
 `rbgp events evpn --limit 200`, filterable with `--route-type 2`, `--rd`, and
-`--address`) during rollouts. MAC-mobility wars show up as a tight
+`--neighbor`) during rollouts. MAC-mobility wars show up as a tight
 add/withdraw loop on one MAC key with a climbing sequence number.
 
 ## Failure modes

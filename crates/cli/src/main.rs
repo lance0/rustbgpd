@@ -66,6 +66,29 @@ fn parse_lookup_target(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+/// `rib add --origin` takes the names every output prints; the numeric codes
+/// stay accepted as-is and the daemon validates their range.
+fn parse_origin(value: &str) -> Result<u32, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "igp" => Ok(0),
+        "egp" => Ok(1),
+        "incomplete" => Ok(2),
+        _ => value
+            .parse()
+            .map_err(|_| "origin must be igp, egp, incomplete, or a number".to_string()),
+    }
+}
+
+/// Canonical multi-word values are snake_case; accept the kebab-case spelling.
+fn snake_case_value(value: &str) -> Result<String, std::convert::Infallible> {
+    Ok(value.replace('-', "_"))
+}
+
+/// The inverse of `snake_case_value` for the few older kebab-case values.
+fn kebab_case_value(value: &str) -> Result<String, std::convert::Infallible> {
+    Ok(value.replace('_', "-"))
+}
+
 fn parse_coverage_percentage(value: &str) -> Result<f64, String> {
     let percentage = value
         .parse::<f64>()
@@ -80,7 +103,7 @@ fn parse_coverage_percentage(value: &str) -> Result<f64, String> {
 pub enum RouteRpkiState {
     Valid,
     Invalid,
-    #[value(name = "not_found")]
+    #[value(name = "not_found", alias = "not-found")]
     NotFound,
 }
 
@@ -98,7 +121,22 @@ pub enum RouteAspaState {
 //   `--neighbor` (the proto and product language). Always add
 //   `visible_alias = "peer"` so both spellings work; commands that
 //   take the address as a positional (`rbgp neighbor <ADDRESS>`)
-//   keep it positional.
+//   keep it positional. A legacy selector spelling (`--address`) stays
+//   as a hidden alias.
+// - One short flag has one meaning across the whole tree. Add a short
+//   form only when it maps to the same long name everywhere it appears.
+// - Enum values: multi-word values are snake_case, matching what JSON
+//   output, the proto and the config echo back (`ipv4_unicast`,
+//   `not_found`, `best_changed`); the kebab-case spelling is accepted as
+//   a hidden alias. The few older kebab-case values keep their spelling
+//   and accept snake_case. Never rename a value that output echoes.
+// - Pagination: new paged commands take `--limit N` plus `--page-token`,
+//   and 0 is never a sentinel for "all"; omit `--limit` for the default.
+// - A flag name shared across commands has the same default everywhere,
+//   or is required.
+// - `flag_vocabulary_is_consistent` in the tests enforces the short-flag,
+//   neighbor and default rules; its allowlist holds only the exceptions
+//   awaiting a deprecation decision.
 // - Next-hop address: use `--next-hop`; `rib add` keeps `--nexthop` as
 //   a visible compatibility alias.
 // - ASNs: a remote AS flag is `--remote-asn` (visible alias
@@ -411,7 +449,12 @@ enum Command {
         action: Option<EventsAction>,
 
         /// Neighbor address filter
-        #[arg(long)]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            alias = "address",
+            value_name = "NEIGHBOR"
+        )]
         address: Option<String>,
 
         /// Address family filter
@@ -1288,7 +1331,7 @@ enum DiffAction {
         /// as_path, next_hop, med, local_pref, communities,
         /// extended_communities, large_communities, unknown); may be
         /// repeated
-        #[arg(long)]
+        #[arg(long, value_parser = snake_case_value)]
         ignore_attribute: Vec<String>,
 
         /// Maximum detailed difference rows in human output (--json is
@@ -1339,11 +1382,11 @@ enum SnapshotAction {
         /// Attestation of what the dump is: adj-rib-out-capture (a
         /// per-client post-policy capture; accepted), loc-rib, or
         /// adj-rib-in (both refused as non-comparable)
-        #[arg(long, value_name = "VIEW")]
+        #[arg(long, value_name = "VIEW", value_parser = kebab_case_value)]
         view: String,
 
-        /// Peer address the captured routes were advertised to
-        #[arg(long)]
+        /// Neighbor address the captured routes were advertised to
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: String,
 
         /// ASN of that peer
@@ -1383,10 +1426,10 @@ enum SnapshotAction {
         #[arg(value_hint = clap::ValueHint::FilePath)]
         file: PathBuf,
 
-        /// Peer address to emit; may be repeated. Omit to emit every
+        /// Neighbor address to emit; may be repeated. Omit to emit every
         /// complete global-instance peer (all of which must then be
         /// complete)
-        #[arg(long)]
+        #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: Vec<String>,
 
         /// Free-form provenance label appended to the header `source`
@@ -1636,8 +1679,8 @@ enum RibAction {
         /// Next hop address
         #[arg(long = "next-hop", visible_alias = "nexthop", value_name = "NEXT_HOP")]
         nexthop: String,
-        /// Origin (0=igp, 1=egp, 2=incomplete)
-        #[arg(long)]
+        /// Origin: igp, egp, incomplete (or 0, 1, 2)
+        #[arg(long, value_parser = parse_origin)]
         origin: Option<u32>,
         /// Local preference
         #[arg(long)]
@@ -1718,7 +1761,12 @@ enum EventsAction {
         categories: Vec<String>,
 
         /// Neighbor address filter
-        #[arg(long)]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            alias = "address",
+            value_name = "NEIGHBOR"
+        )]
         address: Option<String>,
 
         /// Address family filter
@@ -1736,7 +1784,7 @@ enum EventsAction {
         /// dataplane_route_withdrawn, dataplane_route_failed, evpn_added,
         /// evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down,
         /// bfd_state_changed
-        #[arg(long = "type", value_delimiter = ',')]
+        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
@@ -1760,12 +1808,17 @@ enum EventsAction {
     /// Show recent session lifecycle events
     Sessions {
         /// Neighbor address filter
-        #[arg(long)]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            alias = "address",
+            value_name = "NEIGHBOR"
+        )]
         address: Option<String>,
 
         /// Session event type filter: state_changed, established, lost,
         /// peer_enabled, peer_disabled
-        #[arg(long = "type", value_delimiter = ',')]
+        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
         /// Maximum recent session events to return (default 100; explicit 0 requests the daemon's full bounded window)
@@ -1775,11 +1828,16 @@ enum EventsAction {
     /// Show recent policy / neighbor-set / peer-group / chain mutation events
     Policy {
         /// Neighbor address filter. Only peer-scoped policy events match.
-        #[arg(long)]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            alias = "address",
+            value_name = "NEIGHBOR"
+        )]
         address: Option<String>,
 
         /// Policy event type filter: policy_changed
-        #[arg(long = "type", value_delimiter = ',')]
+        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
         /// Maximum recent policy events to return (default 100; explicit 0 requests the daemon's full bounded window)
@@ -1789,7 +1847,12 @@ enum EventsAction {
     /// Show recent EVPN route events
     Evpn {
         /// Neighbor address filter. Matches current and previous best-path peer.
-        #[arg(long)]
+        #[arg(
+            long = "neighbor",
+            visible_alias = "peer",
+            alias = "address",
+            value_name = "NEIGHBOR"
+        )]
         address: Option<String>,
 
         /// EVPN route type filter (1..=5)
@@ -1801,7 +1864,7 @@ enum EventsAction {
         rd: Option<String>,
 
         /// EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed
-        #[arg(long = "type", value_delimiter = ',')]
+        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
         event_types: Vec<String>,
 
         /// Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon's full bounded window)
@@ -1888,7 +1951,7 @@ enum EvpnAction {
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// Originator IP (required for Type 3).
-        #[arg(long)]
+        #[arg(long, visible_alias = "originator-ip")]
         ip: String,
         /// VTEP loopback IP (next-hop).
         #[arg(long)]
@@ -1942,7 +2005,8 @@ enum EvpnAction {
         rd: String,
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
-        #[arg(long)]
+        /// Originator IP.
+        #[arg(long, visible_alias = "originator-ip")]
         ip: String,
     },
     /// Withdraw a Type 5 IP Prefix route by its key fields.
@@ -8877,6 +8941,285 @@ printf '%s\n' "${COMPREPLY[@]}"
             };
             assert_eq!(peer.as_deref(), Some("10.0.0.1"), "evpn {flag}");
         }
+    }
+
+    /// Additive spellings: `events` and `diff snapshot` take `--neighbor`
+    /// (legacy `--address`/`--peer` still parse), IMET mutations take
+    /// `--originator-ip`, `rib add --origin` takes names, and multi-word
+    /// enum values accept the other separator.
+    #[test]
+    fn flag_vocabulary_aliases_parse() {
+        for flag in ["--neighbor", "--peer", "--address"] {
+            let cli = Cli::try_parse_from(["rbgp", "events", flag, "10.0.0.1"]).unwrap();
+            let Command::Events { address, .. } = cli.command else {
+                panic!("expected Events");
+            };
+            assert_eq!(address.as_deref(), Some("10.0.0.1"), "events {flag}");
+            for sub in ["watch", "sessions", "policy", "evpn"] {
+                Cli::try_parse_from(["rbgp", "events", sub, flag, "10.0.0.1"])
+                    .unwrap_or_else(|error| panic!("events {sub} {flag}: {error}"));
+            }
+        }
+        for flag in ["--neighbor", "--peer"] {
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "diff",
+                "snapshot",
+                "from-mrt",
+                "dump.mrt",
+                "--view",
+                "adj_rib_out_capture",
+                flag,
+                "192.0.2.1",
+                "--peer-asn",
+                "64500",
+            ])
+            .unwrap();
+            let Command::Diff {
+                action:
+                    DiffAction::Snapshot {
+                        action: SnapshotAction::FromMrt { peer, view, .. },
+                    },
+            } = cli.command
+            else {
+                panic!("expected from-mrt");
+            };
+            assert_eq!(
+                (peer.as_str(), view.as_str()),
+                ("192.0.2.1", "adj-rib-out-capture")
+            );
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "diff",
+                "snapshot",
+                "from-bmp",
+                "cap.bmp",
+                flag,
+                "192.0.2.1",
+            ])
+            .unwrap();
+            let Command::Diff {
+                action:
+                    DiffAction::Snapshot {
+                        action: SnapshotAction::FromBmp { peer, .. },
+                    },
+            } = cli.command
+            else {
+                panic!("expected from-bmp");
+            };
+            assert_eq!(peer, ["192.0.2.1"], "from-bmp {flag}");
+        }
+        for verb in ["add-imet", "delete-imet"] {
+            for flag in ["--ip", "--originator-ip"] {
+                let mut args = vec!["rbgp", "evpn", verb, "--rd", "65000:1", flag, "192.0.2.9"];
+                if verb == "add-imet" {
+                    args.extend(["--next-hop", "192.0.2.9"]);
+                }
+                let cli = Cli::try_parse_from(args).unwrap();
+                let (Command::Evpn {
+                    action: Some(EvpnAction::AddImet { ip, .. }),
+                    ..
+                }
+                | Command::Evpn {
+                    action: Some(EvpnAction::DeleteImet { ip, .. }),
+                    ..
+                }) = cli.command
+                else {
+                    panic!("expected {verb}");
+                };
+                assert_eq!(ip, "192.0.2.9", "{verb} {flag}");
+            }
+        }
+        for (value, expected) in [("igp", 0), ("EGP", 1), ("incomplete", 2), ("2", 2)] {
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "rib",
+                "add",
+                "10.9.0.0/24",
+                "--next-hop",
+                "192.0.2.1",
+                "--origin",
+                value,
+            ])
+            .unwrap();
+            let Command::Rib {
+                action: Some(RibAction::Add { origin, .. }),
+                ..
+            } = cli.command
+            else {
+                panic!("expected Rib Add");
+            };
+            assert_eq!(origin, Some(expected), "--origin {value}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rbgp",
+                "rib",
+                "add",
+                "10.9.0.0/24",
+                "--next-hop",
+                "192.0.2.1",
+                "--origin",
+                "bogus",
+            ])
+            .is_err()
+        );
+        for value in ["not_found", "not-found"] {
+            let cli = Cli::try_parse_from(["rbgp", "rib", "--rpki-state", value]).unwrap();
+            let Command::Rib { rpki_state, .. } = cli.command else {
+                panic!("expected Rib");
+            };
+            assert_eq!(rpki_state, Some(RouteRpkiState::NotFound), "{value}");
+        }
+        for value in ["rs-client", "rs_client", "route-server", "route_server"] {
+            Cli::try_parse_from([
+                "rbgp",
+                "rpki",
+                "verify-path",
+                "64500",
+                "--neighbor-asn",
+                "64500",
+                "--role",
+                value,
+            ])
+            .unwrap_or_else(|error| panic!("--role {value}: {error}"));
+        }
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "events",
+            "sessions",
+            "--type",
+            "state-changed,peer_enabled",
+        ])
+        .unwrap();
+        let Command::Events {
+            action: Some(EventsAction::Sessions { event_types, .. }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected Events Sessions");
+        };
+        assert_eq!(event_types, ["state_changed", "peer_enabled"]);
+    }
+
+    /// Tree-wide flag vocabulary guard (see the CLI conventions block).
+    /// Fails when one short flag maps to two long names, when a
+    /// peer-selecting flag (`--neighbor`, `--peer` or `--address` in any
+    /// spelling) is not canonical `--neighbor` with the visible `--peer`
+    /// alias, or when one flag name carries two different defaults.
+    #[test]
+    fn flag_vocabulary_is_consistent() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Known exceptions pending a deprecate-then-change decision. Each
+        // entry must match the tree exactly, so resolving one without
+        // deleting its entry fails as well.
+        //
+        // `-l` is `--longer` on `rib` and `--limit` on `events`.
+        const SHORT_EXCEPTIONS: &[(char, &[&str])] = &[('l', &["limit", "longer"])];
+        // `policy stats --direction` defaults to export and
+        // `policy explain --direction` to import.
+        const DEFAULT_EXCEPTIONS: &[(&str, &[&str])] = &[("direction", &["export", "import"])];
+
+        type Seen = BTreeMap<String, BTreeSet<String>>;
+        fn walk(
+            cmd: &clap::Command,
+            path: &str,
+            shorts: &mut Seen,
+            defaults: &mut Seen,
+            problems: &mut Vec<String>,
+        ) {
+            for arg in cmd.get_arguments() {
+                let Some(long) = arg.get_long() else {
+                    continue;
+                };
+                if let Some(short) = arg.get_short() {
+                    shorts
+                        .entry(short.to_string())
+                        .or_default()
+                        .insert(long.to_string());
+                }
+                let default = arg
+                    .get_default_values()
+                    .iter()
+                    .map(|value| value.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                if !default.is_empty() {
+                    defaults
+                        .entry(long.to_string())
+                        .or_default()
+                        .insert(default);
+                }
+                let aliases = arg.get_all_aliases().unwrap_or_default();
+                let selects_peer = std::iter::once(long)
+                    .chain(aliases)
+                    .any(|name| matches!(name, "neighbor" | "peer" | "address"));
+                let canonical = long == "neighbor"
+                    && arg
+                        .get_visible_aliases()
+                        .unwrap_or_default()
+                        .contains(&"peer");
+                if selects_peer && !canonical {
+                    problems.push(format!(
+                        "`{path} --{long}` selects a peer: use long = \"neighbor\", \
+                         visible_alias = \"peer\""
+                    ));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                let sub_path = format!("{path} {}", sub.get_name());
+                walk(sub, &sub_path, shorts, defaults, problems);
+            }
+        }
+
+        fn compare(kind: &str, seen: &Seen, allowed: Seen, problems: &mut Vec<String>) {
+            let conflicts: Seen = seen
+                .iter()
+                .filter(|(_, values)| values.len() > 1)
+                .map(|(name, values)| (name.clone(), values.clone()))
+                .collect();
+            for (name, values) in &conflicts {
+                if allowed.get(name) != Some(values) {
+                    problems.push(format!("{kind} `{name}` has conflicting values {values:?}"));
+                }
+            }
+            for (name, values) in &allowed {
+                if conflicts.get(name) != Some(values) {
+                    problems.push(format!(
+                        "allowlisted {kind} `{name}` {values:?} no longer matches the tree; \
+                         update or remove the entry"
+                    ));
+                }
+            }
+        }
+        fn allowlist<K: ToString>(entries: &[(K, &[&str])]) -> Seen {
+            entries
+                .iter()
+                .map(|(name, values)| {
+                    let values = values.iter().map(ToString::to_string).collect();
+                    (name.to_string(), values)
+                })
+                .collect()
+        }
+
+        let mut cmd = cli_command(BINARY_NAME);
+        cmd.build();
+        let (mut shorts, mut defaults, mut problems) = (Seen::new(), Seen::new(), Vec::new());
+        walk(&cmd, BINARY_NAME, &mut shorts, &mut defaults, &mut problems);
+        compare(
+            "short flag",
+            &shorts,
+            allowlist(SHORT_EXCEPTIONS),
+            &mut problems,
+        );
+        compare(
+            "default of",
+            &defaults,
+            allowlist(DEFAULT_EXCEPTIONS),
+            &mut problems,
+        );
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 
     /// `policy explain` has always been import-only, so omitting
