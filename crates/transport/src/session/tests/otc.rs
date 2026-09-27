@@ -264,7 +264,7 @@ async fn otc_replacements_withdraw_accepted_classic_and_mp_routes_only() {
         if blocked {
             attrs.push(otc(65002));
         }
-        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: "2001:db8::2".parse().unwrap(),
@@ -276,7 +276,7 @@ async fn otc_replacements_withdraw_accepted_classic_and_mp_routes_only() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }));
+        })));
         attrs
     };
     session
@@ -864,7 +864,7 @@ async fn otc_ingress_event_collects_mp_reach_v6_prefixes() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         otc(65002),
-        PathAttribute::MpReachNlri(mp_reach),
+        PathAttribute::MpReachNlri(Box::new(mp_reach)),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
@@ -910,7 +910,7 @@ async fn otc_ingress_event_excludes_unnegotiated_mp_unicast() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         otc(65002),
-        PathAttribute::MpReachNlri(mp_reach),
+        PathAttribute::MpReachNlri(Box::new(mp_reach)),
     ];
     let blocked_before = session.otc_routes_blocked;
     let otc_counter_before = otc_routes_blocked_count(&session, "ingress_from_customer_rsclient");
@@ -1181,7 +1181,7 @@ fn otc_test_vpn_update(with_otc: Option<u32>) -> UpdateMessage {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::MplsVpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
@@ -1200,7 +1200,7 @@ fn otc_test_vpn_update(with_otc: Option<u32>) -> UpdateMessage {
                 },
             }],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     attrs.extend(with_otc.map(otc));
     UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body)

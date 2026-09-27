@@ -352,7 +352,70 @@ fn bench_update_parse_revised(c: &mut Criterion) {
                 .unwrap()
         });
     });
+
+    // The IPv6 counterpart of `typical/6`: the same five non-next-hop
+    // attributes plus one MP_REACH_NLRI announcing `count` prefixes, with no
+    // withdrawals and no Add-Path. Built on the wire so the fixture does not
+    // depend on how the MP variant stores its payload.
+    for count in [1, 100] {
+        let msg = ipv6_typical_update(count);
+        let decoded = msg
+            .parse_revised(true, false, false, &[])
+            .expect("clean IPv6 typical UPDATE must parse");
+        assert!(
+            decoded.malformed.is_empty(),
+            "clean fixture must not exercise malformed recovery"
+        );
+        assert_eq!(decoded.update.attributes.len(), 6);
+        let reach = decoded
+            .update
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .expect("fixture must decode MP_REACH_NLRI");
+        assert_eq!(reach.announced.len(), count);
+
+        group.bench_with_input(BenchmarkId::new("ipv6_typical", count), &msg, |b, msg| {
+            b.iter(|| msg.parse_revised(true, false, false, &[]).unwrap());
+        });
+    }
     group.finish();
+}
+
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+fn ipv6_typical_update(count: usize) -> UpdateMessage {
+    let attrs: Vec<PathAttribute> = typical_attributes()
+        .into_iter()
+        .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
+        .collect();
+    let mut wire = Vec::new();
+    encode_path_attributes(&attrs, &mut wire, true, false)
+        .expect("typical attributes without NEXT_HOP must encode");
+
+    // AFI 2, SAFI 1, 16-byte next hop 2001:db8::1, reserved byte, then
+    // `count` distinct /48s under 2001:db8::/32.
+    let mut value = vec![0x00, 0x02, 0x01, 0x10];
+    value.extend_from_slice(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
+    value.push(0x00);
+    for index in 0..count {
+        let index = u16::try_from(index).expect("fixture count fits in u16");
+        value.push(48);
+        value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8]);
+        value.extend_from_slice(&index.to_be_bytes());
+    }
+    let len = u16::try_from(value.len()).expect("fixture MP_REACH fits extended length");
+    wire.extend_from_slice(&[0x90, 0x0e]);
+    wire.extend_from_slice(&len.to_be_bytes());
+    wire.extend_from_slice(&value);
+
+    UpdateMessage {
+        withdrawn_routes: Bytes::new(),
+        path_attributes: Bytes::from(wire),
+        nlri: Bytes::new(),
+    }
 }
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
@@ -932,7 +995,10 @@ fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
             allocation.allocation_calls,
             allocation.requested_bytes,
         ),
-        (40_000, 0, 10_000, 50_000, 26_440_000),
+        // The attribute Vec grows 4 -> 8 slots per decode, so its requested
+        // bytes track `size_of::<PathAttribute>()` (48 B since the MP
+        // payloads are boxed; 208 B before, at 26,440,000 total).
+        (40_000, 0, 10_000, 50_000, 7_240_000),
         "the fixed duplicate table must remove one 48-byte allocation per revised decode"
     );
 

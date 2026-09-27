@@ -1006,7 +1006,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::L2Vpn,
                 safi: Safi::Evpn,
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1018,7 +1018,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
     };
@@ -1073,7 +1073,7 @@ async fn rtc_routes_counted_toward_max_prefix() {
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::RtConstrain,
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1085,7 +1085,7 @@ async fn rtc_routes_counted_toward_max_prefix() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: nlris,
-            }),
+            })),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
     };
@@ -2362,7 +2362,7 @@ async fn add_path_receive_max_caps_ipv6_mp_nlri() {
                     PathAttribute::AsPath(AsPath {
                         segments: vec![AsPathSegment::AsSequence(vec![65002])],
                     }),
-                    PathAttribute::MpReachNlri(MpReachNlri {
+                    PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                         afi: Afi::Ipv6,
                         safi: Safi::Unicast,
                         next_hop: "2001:db8::2".parse().unwrap(),
@@ -2377,7 +2377,7 @@ async fn add_path_receive_max_caps_ipv6_mp_nlri() {
                         labeled_announced: vec![],
                         vpn_announced: vec![],
                         rtc_announced: vec![],
-                    }),
+                    })),
                 ],
                 true,
                 true,

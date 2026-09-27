@@ -13,7 +13,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6(next_hop),
@@ -28,7 +28,7 @@ async fn process_update_accepts_ipv4_mp_link_local_for_scoped_unnumbered_peer() 
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -88,7 +88,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6(received_next_hop),
@@ -103,7 +103,7 @@ async fn import_policy_next_hop_rewrite_clears_ipv4_mp_link_local_companion() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -136,7 +136,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6(next_hop),
@@ -151,7 +151,7 @@ async fn process_update_rejects_ipv4_mp_link_local_without_extended_nexthop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -187,7 +187,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_mp_without_extended_nexthop()
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 next_hop: IpAddr::V4(next_hop),
@@ -202,7 +202,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv4_mp_without_extended_nexthop()
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
     };
@@ -968,7 +968,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement(
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: next_hop.parse().unwrap(),
@@ -980,7 +980,7 @@ async fn strict_peer_next_hop_rejects_foreign_ipv6_mp_and_withdraws_replacement(
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ]
     };
     session
@@ -1083,7 +1083,7 @@ async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: "2001:db8::2".parse().unwrap(),
@@ -1095,7 +1095,7 @@ async fn strict_peer_ipv4_session_rejects_ipv6_mp_replacement() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     session
         .process_update(UpdateMessage::build(
@@ -1161,7 +1161,7 @@ async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             // Global component matches the session; the link-local
@@ -1178,7 +1178,7 @@ async fn strict_peer_next_hop_rejects_link_local_companion_pair() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     session
         .process_update(UpdateMessage::build(

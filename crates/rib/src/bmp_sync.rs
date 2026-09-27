@@ -269,7 +269,7 @@ pub fn synthesize_unicast_announce(route: &Route) -> Option<Bytes> {
                 &[],
                 attrs,
                 attrs.len(),
-                &PathAttribute::MpReachNlri(mp_reach),
+                &PathAttribute::MpReachNlri(Box::new(mp_reach)),
                 "unicast mp announce",
             )
         }
@@ -296,7 +296,7 @@ pub fn synthesize_unicast_withdraw(prefix: Prefix) -> Option<Bytes> {
             build_update(
                 &[],
                 &[],
-                &[PathAttribute::MpUnreachNlri(mp_unreach)],
+                &[PathAttribute::MpUnreachNlri(Box::new(mp_unreach))],
                 "unicast v6 withdraw",
             )
         }
@@ -331,7 +331,7 @@ pub fn synthesize_vpn_announce(route: &VpnRibRoute) -> Option<Bytes> {
         &[],
         attrs,
         attrs.len(),
-        &PathAttribute::MpReachNlri(mp_reach),
+        &PathAttribute::MpReachNlri(Box::new(mp_reach)),
         "vpn announce",
     )
 }
@@ -350,7 +350,7 @@ pub fn synthesize_vpn_withdraw(nlri: &VpnNlri) -> Option<Bytes> {
     build_update(
         &[],
         &[],
-        &[PathAttribute::MpUnreachNlri(mp_unreach)],
+        &[PathAttribute::MpUnreachNlri(Box::new(mp_unreach))],
         "vpn withdraw",
     )
 }
@@ -365,7 +365,9 @@ pub fn synthesize_end_of_rib(afi: Afi, safi: Safi) -> Option<Bytes> {
         build_update(
             &[],
             &[],
-            &[PathAttribute::MpUnreachNlri(empty_mp_unreach(afi, safi))],
+            &[PathAttribute::MpUnreachNlri(Box::new(empty_mp_unreach(
+                afi, safi,
+            )))],
             "eor mp",
         )
     }
@@ -719,7 +721,7 @@ mod tests {
                 &[],
                 &rich_attrs(),
                 rich_attrs().len(),
-                PathAttribute::MpReachNlri(mp_reach),
+                PathAttribute::MpReachNlri(Box::new(mp_reach)),
             );
             assert_eq!(synthesize_unicast_announce(&route).unwrap(), expected);
         }
@@ -738,7 +740,7 @@ mod tests {
             &[],
             &rich_attrs(),
             rich_attrs().len(),
-            PathAttribute::MpReachNlri(mp_reach),
+            PathAttribute::MpReachNlri(Box::new(mp_reach)),
         );
         assert_eq!(synthesize_vpn_announce(&route).unwrap(), expected);
     }
@@ -777,7 +779,7 @@ mod tests {
             &[],
             &rich_attrs(),
             rich_attrs().len(),
-            PathAttribute::MpReachNlri(mp_reach),
+            PathAttribute::MpReachNlri(Box::new(mp_reach)),
         );
         assert_eq!(synthesize_vpn_announce(&route).unwrap(), expected);
     }

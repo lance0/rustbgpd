@@ -336,7 +336,7 @@ async fn ibgp_import_policy_sees_unknown_aspa_for_ipv4_and_ipv6() {
             segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(rustbgpd_wire::MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -351,7 +351,7 @@ async fn ibgp_import_policy_sees_unknown_aspa_for_ipv4_and_ipv6() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     session
         .process_update(UpdateMessage::build(
@@ -614,7 +614,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
                     segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
                 }),
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-                PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
+                PathAttribute::MpReachNlri(Box::new(rustbgpd_wire::MpReachNlri {
                     afi: Afi::Ipv6,
                     safi: Safi::Unicast,
                     next_hop: "2001:db8::1".parse().unwrap(),
@@ -629,7 +629,7 @@ async fn received_aspa_path_survives_import_self_prepend_and_cache_updates() {
                     labeled_announced: vec![],
                     vpn_announced: vec![],
                     rtc_announced: vec![],
-                }),
+                })),
             ],
             true,
             false,

@@ -209,7 +209,7 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            PathAttribute::MpReachNlri(mp),
+            PathAttribute::MpReachNlri(Box::new(mp)),
         ]
     };
     let v4_update = rustbgpd_wire::UpdateMessage::build(
@@ -1063,7 +1063,7 @@ async fn import_decision_cache_records_ipv6_mp_reach() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(mp_reach),
+        PathAttribute::MpReachNlri(Box::new(mp_reach)),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;

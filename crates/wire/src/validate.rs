@@ -650,7 +650,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -665,7 +665,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
         assert!(validate_update_attributes(&attrs, true, false, true).is_ok());
@@ -681,7 +681,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -696,7 +696,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true
         // → should require NEXT_HOP for the body NLRI
@@ -713,7 +713,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
@@ -725,7 +725,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
@@ -739,7 +739,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("fe80::1".parse().unwrap()),
@@ -751,7 +751,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
@@ -765,7 +765,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("fe80::1".parse().unwrap()),
@@ -777,7 +777,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         assert!(validate_update_attributes(&attrs, true, false, true).is_err());
         assert!(
@@ -818,7 +818,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
@@ -830,7 +830,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
@@ -870,7 +870,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 // ff02::1 is multicast
@@ -883,7 +883,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
@@ -907,7 +907,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::FlowSpec,
                 // RFC 8955 §4 recommends 0.0.0.0 for FlowSpec
@@ -922,7 +922,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         // Empty announced + empty body — FlowSpec EoR-equivalent
         // shape FRR sends post-handshake. Must pass validation.
@@ -952,7 +952,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -966,7 +966,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
@@ -983,7 +983,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -995,7 +995,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         assert!(validate_update_attributes(&attrs, false, false, true).is_ok());
     }

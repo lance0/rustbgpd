@@ -871,7 +871,7 @@ async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
         prefix_sid.clone(),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop,
@@ -883,7 +883,7 @@ async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     receiver
         .process_update(UpdateMessage::build(
@@ -960,7 +960,7 @@ async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
         });
         let mut attrs = route.attributes.to_vec();
         attrs.push(prefix_sid.clone());
-        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi,
             safi: Safi::MplsVpn,
             next_hop: route.next_hop,
@@ -975,7 +975,7 @@ async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
                 nlri: route.nlri.clone(),
             }],
             rtc_announced: vec![],
-        }));
+        })));
         receiver
             .process_update(UpdateMessage::build(
                 &[],

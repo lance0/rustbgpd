@@ -383,7 +383,7 @@ fn build_update(
         // negotiated by the session and does not alter UPDATE construction.
         attrs.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
         attrs.push(PathAttribute::LocalPref(100));
-        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: v4_next_hop(route_params.router_id),
@@ -395,10 +395,10 @@ fn build_update(
             vpn_announced: vec![],
             labeled_announced: vec![],
             rtc_announced: vec![],
-        }));
+        })));
     }
     if !withdraws.is_empty() {
-        attrs.push(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        attrs.push(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             withdrawn: vec![],
@@ -408,7 +408,7 @@ fn build_update(
             vpn_withdrawn: vec![],
             labeled_withdrawn: vec![],
             rtc_withdrawn: vec![],
-        }));
+        })));
     }
     let update = UpdateMessage::build(
         &[],

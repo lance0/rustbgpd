@@ -154,7 +154,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
     };
 
     let mut attrs = base_attrs();
-    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+    attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         next_hop: "2001:db8::2".parse().unwrap(),
@@ -166,7 +166,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
-    }));
+    })));
     session
         .process_update(UpdateMessage::build(
             &[],
@@ -190,7 +190,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
     }])));
 
     let mut replacement_attrs = base_attrs();
-    replacement_attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+    replacement_attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         next_hop: "2001:db8::3".parse().unwrap(),
@@ -202,8 +202,8 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
-    }));
-    replacement_attrs.push(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+    })));
+    replacement_attrs.push(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         withdrawn: vec![nlri(22)],
@@ -213,7 +213,7 @@ async fn denied_mp_add_path_replacements_preserve_sibling_and_deduplicate_overla
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
-    }));
+    })));
     session
         .process_update(UpdateMessage::build(
             &[],

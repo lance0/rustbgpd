@@ -62,7 +62,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -77,7 +77,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -484,7 +484,7 @@ async fn ebgp_local_pref_is_ignored_for_ipv6_mp_reach() {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
         PathAttribute::LocalPref(500),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -499,7 +499,7 @@ async fn ebgp_local_pref_is_ignored_for_ipv6_mp_reach() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
     session.process_update(update).await;
@@ -606,7 +606,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -621,7 +621,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     // Build with Add-Path enabled and MP encoding
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::MpReach);

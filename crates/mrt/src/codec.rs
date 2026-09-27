@@ -605,7 +605,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 IpAddr::V6(_) => {
                     // RFC 8950: IPv4 NLRI can carry IPv6 next-hop via MP_REACH_NLRI.
                     use rustbgpd_wire::{Afi, MpReachNlri, Safi};
-                    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                    attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
                         next_hop: route.next_hop,
@@ -617,7 +617,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                         labeled_announced: vec![],
                         vpn_announced: vec![],
                         rtc_announced: vec![],
-                    }));
+                    })));
                 }
             }
         }
@@ -625,7 +625,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
             // Synthesize MP_REACH_NLRI for IPv6 with `next_hop` only (no NLRI —
             // the prefix is in the RIB entry header per `TABLE_DUMP_V2` spec).
             use rustbgpd_wire::{Afi, MpReachNlri, Safi};
-            let mp_reach = PathAttribute::MpReachNlri(MpReachNlri {
+            let mp_reach = PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: route.next_hop,
@@ -637,7 +637,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            });
+            }));
             attrs.push(mp_reach);
         }
     }
@@ -656,7 +656,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 #[must_use]
 pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
     let mut attrs = route.attributes.to_vec();
-    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+    attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
         next_hop: route.next_hop,
@@ -668,7 +668,7 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
         labeled_announced: vec![],
         vpn_announced: vec![],
         rtc_announced: vec![],
-    }));
+    })));
     attrs
 }
 /// Encode a single EVPN route as a `RIB_GENERIC` (subtype 6) record.
