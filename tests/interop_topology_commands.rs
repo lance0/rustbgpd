@@ -1062,6 +1062,45 @@ fn interop_captures_do_not_gate_on_tshark_capturing_on_line() {
 }
 
 #[test]
+fn m105_capture_refuses_stale_resources_before_arming() {
+    let script = fs::read_to_string(interop_path("scripts/test-m105-live-as-set.sh"))
+        .expect("read M105 driver");
+    let start_capture = script
+        .split_once("start_capture() {")
+        .expect("M105 start capture helper")
+        .1
+        .split_once("\n}")
+        .expect("M105 start capture helper is bounded")
+        .0;
+    let cleanup = start_capture
+        .find("cleanup_capture")
+        .expect("M105 cleans up earlier capture resources");
+    let stale_container = start_capture
+        .find("docker container inspect \"$CAPTURE_CONTAINER\"")
+        .expect("M105 refuses a surviving capture container");
+    let stale_volume = start_capture
+        .find("docker volume inspect \"$CAPTURE_VOLUME\"")
+        .expect("M105 refuses a surviving capture volume");
+    let refuse = start_capture
+        .find("return 1")
+        .expect("M105 stops when stale capture resources survive");
+    let create_volume = start_capture
+        .find("docker volume create --label rustbgpd.interop.milestone=M105")
+        .expect("M105 creates its capture volume");
+    let ready = start_capture
+        .find("wait_capture_ready \"$CAPTURE_CONTAINER\" /capture/m105.pcap -")
+        .expect("M105 readiness waits for the capture file");
+    assert!(
+        cleanup < stale_container
+            && stale_container < stale_volume
+            && stale_volume < refuse
+            && refuse < create_volume
+            && create_volume < ready,
+        "M105 must refuse surviving capture resources before creating and arming the capture"
+    );
+}
+
+#[test]
 fn m102_pins_openbgpd92_route_server_member_contract() {
     const OPENBGPD_IMAGE: &str =
         "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9";
