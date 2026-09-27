@@ -1,6 +1,6 @@
 # ADR-0136: Owner-Published Counter Reads
 
-**Status:** Accepted (qualification evidence-gated)
+**Status:** Accepted
 **Date:** 2026-09-25
 
 This record makes the owners of policy hit counters publish which counter
@@ -355,7 +355,8 @@ Each slice ships independently with its own proof.
 4. **Qualification.** Run the isolated cell and the next flagship soak with
    the management gate unchanged, update the known-issue entry to its
    qualified scope, record the qualification evidence here, and drop the
-   gate from the status.
+   gate from the status. Completed 2026-09-27; see
+   [Qualification evidence](#qualification-evidence).
 
 ## Proof plan
 
@@ -392,7 +393,7 @@ be retained.
   50 ms. Record slice 0 and the final slice with the same placement, and keep
   every call, offset and audit line. Co-pinned runs remain diagnostic.
 - **Soak.** The next flagship soak passes `management_failures` with the gate
-  unchanged. A soak covers only the tag it ran on.
+  unchanged. A soak covers only the revision it ran on.
 
 ## Qualification evidence
 
@@ -422,9 +423,27 @@ across all rows. The runs and their limits are in the
 [retained receipt](../perf/artifacts/policy-stats-owner-published-2026-09-26/README.md).
 
 This passes the isolated-cell half of slice 4 at that shape only. Full
-qualification still waits on the next route-server flagship soak passing
-`management_failures` with the gate unchanged, so the status keeps its
-evidence gate until then.
+qualification still waited on the next route-server flagship soak passing
+`management_failures` with the gate unchanged, so the status kept its
+evidence gate until then; the 2026-09-27 entry below records that soak.
+
+**2026-09-27, route-server flagship soak: PASS.** The 24-hour flagship soak
+ran on the same merged main `292c32b39`, untagged, with the gates, analyzer,
+runner and management-load driver unchanged from the v0.72.0 run. Its
+on-host verdict passes all 20 gates, including `management_failures`: all
+17,551 `rbgp policy stats --direction both` calls through 48 SIGHUP reloads
+returned `ok`, where the v0.72.0 run had one `DEADLINE_EXCEEDED`. Every
+audit record reports the handler's staged collection at 25 ms or less, with
+all 1,000 import publications read and no yields. The slowest end-to-end
+call took 1,099 ms, against 229 ms in the isolated cell; the soak shares an
+8 vCPU virtualized guest between the daemon, the churn engine and the
+management load, and the gap lies outside the recorded handler stages. The
+run also retained two isolated readiness breaches, one of them a 503 from
+the unchanged readiness probe, and three missed 1 s metrics slots inside
+reload windows, all within their gates. The
+[receipt](../soaks/soak-rs-flagship-24h-2026-09-26.md) covers this IPv4-only
+shape on this SHA and host, and no release tag. With both halves recorded,
+the status drops its evidence gate.
 
 ## Consequences
 

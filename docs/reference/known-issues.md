@@ -21,29 +21,27 @@ resolved.
   permits isolated breaches while retaining them as evidence; they do not
   automatically block release when all agreed acceptance gates pass.
 
-- **Fleet policy stats can time out during reload.** The daemon's
-  `GetPolicyStats` RPC shares one absolute 2 s deadline across peer validation,
-  export counters, import counters, and dataset reads. A fleet call such as
-  `rbgp policy stats --direction both` that exhausts it returns
-  `DEADLINE_EXCEEDED` with no partial rows. Check reload settlement before
-  retrying the read. Peer validation, import counters and dataset status
-  are read from the roster the peer manager publishes, and export counters
-  from the roster the RIB manager publishes
-  ([ADR-0136](../adr/0136-owner-published-counter-reads.md)), so no stage
-  waits for either actor. A read can still wait for a Pending session
-  publication, a busy counter or dataset error lock, runtime scheduling, or
-  response delivery.
-  The [isolated reload cell](../perf/artifacts/policy-stats-owner-published-2026-09-26/README.md)
-  now shows the capture flat through reloads: on main `292c32b39`, with 1,000
-  route-server peers of 400 IPv4 prefixes each, 12 changed-policy reloads and
-  the daemon on two dedicated cores, every capture stage took under 1 ms,
-  including calls inside the reload commit window, against up to 469 ms
-  before ADR-0136. The slowest statistics call took 229 ms end to end. That
-  result covers this shape and placement only; it is not evidence for larger
-  fleets, other placements or a loaded host.
-  The route-server flagship soak, which runs `rbgp policy stats --direction both`
-  every 5 s through serialized SIGHUP reloads, has not yet completed on a
-  build with ADR-0136. On earlier builds it passed on v0.70.0
+## Resolved
+
+- **Fleet policy stats can time out during reload (resolved).** The
+  route-server flagship soak, which runs `rbgp policy stats --direction both`
+  every 5 s through 48 serialized SIGHUP reloads, passed `management_failures`
+  with the gate unchanged on main `292c32b39`
+  ([2026-09-26](../soaks/soak-rs-flagship-24h-2026-09-26.md)), the first build
+  with owner-published counter reads
+  ([ADR-0136](../adr/0136-owner-published-counter-reads.md)). All 17,551
+  `policy stats` calls returned `ok`; the slowest took 1,099 ms end to end,
+  and the daemon's staged collection took at most 25 ms. Peer validation,
+  import counters and dataset status are read from the roster the peer
+  manager publishes, and export counters from the roster the RIB manager
+  publishes, so no stage waits for either actor. The
+  [isolated reload cell](../perf/artifacts/policy-stats-owner-published-2026-09-26/README.md)
+  on the same SHA, with 1,000 route-server peers of 400 IPv4 prefixes each,
+  12 changed-policy reloads and the daemon on two dedicated cores, measured
+  every capture stage under 1 ms, including calls inside the reload commit
+  window, against up to 469 ms before ADR-0136; its slowest call took 229 ms
+  end to end.
+  Earlier builds: the soak passed on v0.70.0
   ([2026-09-14](../soaks/soak-rs-flagship-24h-2026-09-14.md), a pass under
   the current gates on reanalysis; the original on-host verdict failed a
   since-superseded metrics-cadence rule) and on the v0.71.0 tag
@@ -52,13 +50,19 @@ resolved.
   the v0.72.0 tag ([2026-09-24](../soaks/soak-rs-flagship-24h-2026-09-24.md))
   one of 17,556 `policy stats` calls returned `DEADLINE_EXCEEDED` inside a
   reload commit, its import stage exhausting the remainder of the deadline.
-  All three runs are IPv4-only; no dual-stack soak has run, and a soak covers
-  only the tag it ran on. This issue stays open until the next flagship soak
-  passes `management_failures` with the gate unchanged. Retrying an operator
+  The resolution is scoped to that evidence: one soak on one untagged main
+  SHA, IPv4-only, at 1,000 peers × 400 prefixes on one virtualized host,
+  plus the isolated cell at the same shape. It covers no release tag, no
+  dual-stack soak has run, and it is not evidence for larger fleets, other
+  placements or a more heavily loaded host. The contract is unchanged:
+  `GetPolicyStats` shares one absolute 2 s deadline across peer validation,
+  export counters, import counters, and dataset reads, and a call that
+  exhausts it returns `DEADLINE_EXCEEDED` with no partial rows. A read can
+  still wait for a Pending session publication, a busy counter or dataset
+  error lock, runtime scheduling, or response delivery. If a fleet read does
+  time out, check reload settlement before retrying it. Retrying an operator
   command does not turn a failed management-soak sample into a pass. See the
   [policy stats contract](api.md#policyservice).
-
-## Resolved
 
 - **700-member dual-stack reload acceptance completed (resolved).** All 13
   cells in the [final campaign](../perf/ixp-dualstack-final-campaign-2026-09.md)
