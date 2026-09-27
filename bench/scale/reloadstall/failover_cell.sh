@@ -39,6 +39,33 @@ python3 "$HERE/gen-scenario.py" "$N_PEERS" "$RUN" "$PORT" >/dev/null || exit 1
 python3 "$HERE/gen-failover-overlap.py" "$N_PEERS" "$TOTAL" "$FLAPSTORM" \
     "$PERCENT" "$SOURCES" "$RUN/overlap.tsv" || exit 1
 
+# The harness's fixed flap round count (FLAP_ROUNDS in src/main.rs).
+ROUNDS=3
+daemon_pid="" harness_pid="" daemon_rc=""
+
+# Idempotent: signal the daemon by its exact PID, wait up to 60 s, then
+# SIGKILL, and reap it once. Sets daemon_rc on the first call only.
+stop_daemon() {
+    [ -n "$daemon_pid" ] || return 0
+    kill "$daemon_pid" 2>/dev/null
+    for _ in $(seq 600); do
+        kill -0 "$daemon_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -KILL "$daemon_pid" 2>/dev/null
+    wait "$daemon_pid"
+    daemon_rc=$?
+    daemon_pid=""
+}
+interrupted() {
+    [ -z "$harness_pid" ] || kill "$harness_pid" 2>/dev/null
+    stop_daemon
+    echo "cell interrupted; daemon stopped (rc=$daemon_rc)" >&2
+    exit 130
+}
+trap interrupted INT TERM
+trap stop_daemon EXIT
+
 taskset -c "$CORES" "$DAEMON" "$RUN/config.toml" >"$OUT/daemon.log" 2>&1 &
 daemon_pid=$!
 sleep 3
@@ -51,23 +78,21 @@ RELOADSTALL_OVERLAP_FILE="$RUN/overlap.tsv" \
     RELOADSTALL_FAILOVER_METRICS_ADDR=127.0.0.1:9179 \
     taskset -c "$CORES" "$HARNESS" "$N_PEERS" "$TOTAL" "$PORT" "$daemon_pid" \
     "$RUN/member.rpol" "$RUN/gen-a.rpol" "$RUN/gen-b.rpol" 0 "$CONTROL_SECS" \
-    --flapstorm "$FLAPSTORM" >"$OUT/reloadstall.log" 2>&1
+    --flapstorm "$FLAPSTORM" >"$OUT/reloadstall.log" 2>&1 &
+# A background harness keeps `wait` interruptible, so the INT/TERM trap runs
+# promptly instead of after the harness exits on its own.
+harness_pid=$!
+wait "$harness_pid"
 harness_rc=$?
+harness_pid=""
 
-kill "$daemon_pid" 2>/dev/null
-for _ in $(seq 600); do
-    kill -0 "$daemon_pid" 2>/dev/null || break
-    sleep 0.1
-done
-kill -KILL "$daemon_pid" 2>/dev/null
-wait "$daemon_pid"
-daemon_rc=$?
+stop_daemon
 cp "$RUN/overlap.tsv" "$OUT/overlap.tsv" || exit 1
 
 # The cell passes only when the harness, the daemon's shutdown and this
 # summary all succeed; a malformed log or missing row fails it.
 summary_rc=0
-python3 - "$OUT" <<'PY' || summary_rc=$?
+python3 - "$OUT" "$ROUNDS" <<'PY' || summary_rc=$?
 import json
 import pathlib
 import sys
@@ -81,11 +106,12 @@ for line in (out / "daemon.log").read_text(errors="replace").splitlines():
     passes += 1
     shared += int(fields["shared_members"])
     walks += int(fields["per_member_walks"])
-rows = [line for line in (out / "reloadstall.log").read_text().splitlines()
-        if line.startswith("flapstorm_failover_csv")]
-if len(rows) < 2:
-    sys.exit("no flapstorm_failover_csv rounds in reloadstall.log")
-print("\n".join(rows))
+lines = (out / "reloadstall.log").read_text().splitlines()
+rows = [line for line in lines if line.startswith("flapstorm_failover_csv,")]
+rounds = [int(row.split(",")[1]) for row in rows]
+if rounds != list(range(1, int(sys.argv[2]) + 1)):
+    sys.exit(f"flapstorm_failover_csv rounds {rounds}, want 1..{sys.argv[2]}")
+print("\n".join(line for line in lines if line.startswith("flapstorm_failover_csv")))
 print(f"mixed_passes={passes} shared_members={shared} per_member_walks={walks}")
 PY
 echo "harness_rc=$harness_rc daemon_rc=$daemon_rc summary_rc=$summary_rc"
