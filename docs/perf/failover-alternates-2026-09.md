@@ -32,7 +32,7 @@ Daemons were built with `cargo build --release --locked -p rustbgpd --features r
 - **Down-pass evidence per round:**
   - daemon user+system CPU-seconds from `/proc/<pid>/stat`, all threads, read just before the simultaneous close and again when the harness's 100 ms poll detects the last survivor's completion. The window therefore also contains the churners' steady background work; see [Measurement window](#measurement-window);
   - survivor completion p50/max, where each flapped prefix completes on the alternate's announcement, or on a withdrawal at the alternate itself and for prefixes without one;
-  - `bgp_rib_actor_work_duration_seconds{work_unit="distribute_flush"}` sum and count over the same window, with metrics scrapes outside the CPU window.
+  - `bgp_rib_actor_work_duration_seconds{work_unit="distribute_flush"}` sum and count between two metrics scrapes. In the campaign harness, the opening scrape ran before completion tracking was armed and before the opening CPU read, and the closing scrape ran after the closing CPU read. The flush interval therefore contains the CPU window plus the arming step and both scrapes, and is not the same interval. The current harness mirrors the two boundaries (scrape, then CPU read; CPU read, then scrape) and labels these columns `scrape_bracketed_flush_*`. Exact alignment is not possible, because a scrape costs daemon CPU and must stay outside the CPU window.
 
 ## Host discipline and commands
 
@@ -77,7 +77,7 @@ Main's run 2, round 3 (2.92 s CPU, .874 s p50) is an outlier against every other
 
 **Session-side mixed-pass shared encode (pre2771 → main).** Down-pass daemon CPU fell 59.6% on the median of run means (3.077 s → 1.243 s) and 61.1% on the median of run medians (3.24 s → 1.26 s). Completion p50 did not move outside the run spread: .392–.448 s against .403–.546 s. This is observed daemon CPU for one shape, not an encode-count model.
 
-`distribute_flush` actor-work sums over the down pass were 0.06–0.23 s in every arm. The per-round values are in the artifacts. Most down-pass CPU is therefore outside the coalesced RIB distribution pass, consistent with session-side encode dominating. This is an observation from these runs, not an attribution profile.
+Scrape-bracketed `distribute_flush` actor-work sums (old bracketing, above) were 0.06–0.23 s in every arm. The per-round values are in the artifacts. Most window CPU is therefore outside the coalesced RIB distribution pass, consistent with session-side encode dominating. This is an observation from these runs, not an attribution profile. These flush figures are supporting data, not inputs to any decision in this receipt.
 
 ## Secondary cells, main vs pr2782
 
