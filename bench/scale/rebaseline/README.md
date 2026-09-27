@@ -136,6 +136,26 @@ its root `Cargo.lock`, with cache disabled. Record the exact image-build argv,
 the resulting immutable image digest, and the bgperf2 `git rev-parse HEAD` (or
 an exact packaged version). A mutable image tag is not artifact identity.
 
+Use the maintained fork `https://github.com/lance0/bgperf2` at
+`<BGPERF2_FORK_COMMIT: set to the merged sync commit before publishing>` or a
+later commit. Older adapter pins, including the one named in dated receipts,
+render the retired `enforcement = "legacy"` gRPC setting, which rustbgpd v0.63
+and later refuse at boot. From the bgperf2 checkout, with `RUSTBGPD_SOURCE`
+pointing at the clean measured checkout:
+
+```text
+python3 bgperf2.py update rustbgpd -c <source sha> -n --profile dhat \
+  --tag bgperf/rustbgpd:<receipt>-dhat
+python3 bgperf2.py bench -t rustbgpd -i bgperf/rustbgpd:<receipt>-dhat \
+  -n 2 -p 100000 --results-dir <results dir>
+```
+
+After the result row and versions are recorded, bench sends the daemon SIGTERM,
+waits for it to exit, and saves the profile as
+`<results dir>/rustbgpd_bird_100000_2.dhat-heap.json`. It prints
+`rustbgpd: exited` and the saved path. A run that prints a warning instead
+wrote no profile and is not a receipt.
+
 Run each CPU shape twice:
 
 ```text
@@ -179,13 +199,16 @@ The sanitizer accepts exactly one header and one result row (16 KiB input,
 4 KiB output), the pinned rustbgpd 2x100k shape, convergence with zero tester
 errors/timeouts, and an allowlisted set of numeric metrics. It rejects schema
 drift, extra fields, paths, process/container-like IDs, filters, and failed
-runs. The sanitizer accepts two exact bgperf2 schemas. The historical shape
+runs. The sanitizer accepts three exact bgperf2 schemas. The historical shape
 from `jauderho/bgperf2` commit
 `17216483e779f1484ef38562fb8f6b5ea6ad4d8f` emits an unlabeled
 `tester_timeouts` data column, so its 24-label/25-value row remains pinned
 explicitly. The row-local provenance adapter labels that column and appends
 bounded target-image, tester-version, and monitor-version fields; those fields
-are validated and omitted from the stable receipt. Any other schema still
+are validated and omitted from the stable receipt. The maintained fork adds a
+`max foreign cpu %` count before the provenance fields, and its `required` is
+the monitor's 99% check-point (198000 for this shape), so that schema must also
+report the full 200000-route table as `received`. Any other schema still
 fails closed. Never commit the unsanitized temporary CSV.
 Review the committed artifact without the raw capture using:
 
@@ -228,8 +251,8 @@ The manifest records at least:
     "id": "rib-memory-YYYYMMDDTHHMMSSZ",
     "started_utc": "YYYY-MM-DDTHH:MM:SSZ",
     "bgperf_launch_argv": ["python", "bgperf2.py", "bench", "-t", "rustbgpd", "-n", "2", "-p", "100000"],
-    "sigterm_argv": ["exact argv using the stable target name, never a PID/container ID"],
-    "copy_argv": ["exact argv used to extract dhat-heap.json"],
+    "sigterm_argv": ["exact argv using the stable target name, never a PID/container ID; the bench argv when bgperf2 stops the daemon itself"],
+    "copy_argv": ["exact argv used to extract dhat-heap.json; the bench argv when bgperf2 saves the profile itself"],
     "classify_argv": ["exact classify_dhat.py argv"],
     "csv_sanitize_argv": ["exact sanitize_bgperf_csv.py argv"]
   },
