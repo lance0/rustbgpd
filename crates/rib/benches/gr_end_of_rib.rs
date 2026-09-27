@@ -13,7 +13,13 @@
 //! - `dual`: 1,000,000 IPv4 + 200,000 IPv6 routes; GR families IPv4, IPv6
 //!   and VPNv4 (no VPN routes, so its End-of-RIB changes no unicast input);
 //!   two plain grouped route-server clients.
-//! - `pcb`: `dual` with the two clients in a per-client-best group.
+//! - `pcb-group`: `dual` with the two clients negotiating per-client-best
+//!   on unicast only, so they form one per-client-best update group (the
+//!   group stages the whole affected set, and each member's pass scope
+//!   widens to it).
+//! - `pcb-fallback`: `dual` with per-client-best clients that also negotiate
+//!   VPNv4, which keeps them ungrouped on the per-peer per-client-best path
+//!   (each peer scans the whole affected set).
 //! - `ipv4`: 1,000,000 IPv4 routes, IPv4 as the only GR family.
 //! - `--self-test`: every mode at 2,000 / 400 routes.
 //!
@@ -45,7 +51,8 @@ const SOURCE: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Dual,
-    PerClientBest,
+    PerClientBestGroup,
+    PerClientBestFallback,
     Ipv4,
 }
 
@@ -53,28 +60,32 @@ impl Mode {
     const fn name(self) -> &'static str {
         match self {
             Self::Dual => "dual",
-            Self::PerClientBest => "pcb",
+            Self::PerClientBestGroup => "pcb-group",
+            Self::PerClientBestFallback => "pcb-fallback",
             Self::Ipv4 => "ipv4",
         }
     }
 
     const fn gr_families(self) -> &'static [(Afi, Safi)] {
         match self {
-            Self::Dual | Self::PerClientBest => &[VPNV4, IPV4_UNICAST, IPV6_UNICAST],
+            Self::Dual | Self::PerClientBestGroup | Self::PerClientBestFallback => {
+                &[VPNV4, IPV4_UNICAST, IPV6_UNICAST]
+            }
             Self::Ipv4 => &[IPV4_UNICAST],
         }
     }
 
     const fn client_families(self) -> &'static [(Afi, Safi)] {
         match self {
-            Self::Dual | Self::PerClientBest => &[IPV4_UNICAST, IPV6_UNICAST],
+            Self::Dual | Self::PerClientBestGroup => &[IPV4_UNICAST, IPV6_UNICAST],
+            Self::PerClientBestFallback => &[IPV4_UNICAST, IPV6_UNICAST, VPNV4],
             Self::Ipv4 => &[IPV4_UNICAST],
         }
     }
 
     const fn ipv6_routes(self, full: usize) -> usize {
         match self {
-            Self::Dual | Self::PerClientBest => full,
+            Self::Dual | Self::PerClientBestGroup | Self::PerClientBestFallback => full,
             Self::Ipv4 => 0,
         }
     }
@@ -186,12 +197,24 @@ fn run(mode: Mode, ipv4: usize, ipv6_full: usize) {
     let mut receivers = manager.bench_register_unicast_route_server_peers(
         2,
         mode.client_families(),
-        mode == Mode::PerClientBest,
+        matches!(mode, Mode::PerClientBestGroup | Mode::PerClientBestFallback),
         1 << 20,
         |_| Arc::new(PermissiveExactExport),
     );
     manager.bench_seed_loc_rib(table(ipv4, ipv6));
     drain(&mut receivers);
+    let receipt = manager.bench_adj_rib_out_fanout_receipt();
+    let grouped = mode != Mode::PerClientBestFallback;
+    assert_eq!(
+        (
+            receipt.update_groups,
+            receipt.grouped_peers,
+            receipt.ungrouped_peers
+        ),
+        if grouped { (1, 2, 0) } else { (0, 0, 2) },
+        "{} clients must take the intended distribution path",
+        mode.name()
+    );
     manager.bench_gr_restart(SOURCE, mode.gr_families());
     manager.bench_seed_loc_rib(table(ipv4, ipv6));
     drain(&mut receivers);
@@ -237,7 +260,8 @@ fn main() {
                 let value = args.next().expect("--mode requires a value");
                 modes.push(match value.as_str() {
                     "dual" => Mode::Dual,
-                    "pcb" => Mode::PerClientBest,
+                    "pcb-group" => Mode::PerClientBestGroup,
+                    "pcb-fallback" => Mode::PerClientBestFallback,
                     "ipv4" => Mode::Ipv4,
                     other => panic!("unknown mode {other}"),
                 });
@@ -246,7 +270,12 @@ fn main() {
         }
     }
     if modes.is_empty() {
-        modes = vec![Mode::Dual, Mode::PerClientBest, Mode::Ipv4];
+        modes = vec![
+            Mode::Dual,
+            Mode::PerClientBestGroup,
+            Mode::PerClientBestFallback,
+            Mode::Ipv4,
+        ];
     }
     let (ipv4, ipv6) = if self_test {
         (2_000, 400)

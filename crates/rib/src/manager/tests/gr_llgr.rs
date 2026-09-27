@@ -2934,9 +2934,9 @@ fn eor_oracle_route(prefix: Prefix, source: Ipv4Addr, asns: Vec<u32>, med: Optio
 /// After each End-of-RIB, a full recompute and distribution over every
 /// unicast prefix must find nothing left to change: the family-scoped pass
 /// did all the work the whole-peer pass used to do. Covers a GR peer with
-/// IPv4, IPv6 and a route-less `VPNv4` family (swept and changed routes in
-/// both unicast families) and an LLGR peer, against plain, per-client-best
-/// and Add-Path receivers.
+/// IPv4, IPv6 and a route-less `VPNv4` family (a swept and a MED-changed
+/// route in each unicast family) and an LLGR peer, against plain,
+/// per-client-best (grouped and ungrouped) and Add-Path receivers.
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -2946,12 +2946,16 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     let (_tx, mut manager) = direct_manager(None);
     let dual = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
     let mut receivers = Vec::new();
-    for (index, (per_client_best, add_path)) in [
-        (false, false),
-        (false, false),
-        (true, false),
-        (true, false),
-        (false, true),
+    // (per-client-best, Add-Path send, also negotiates VPNv4). The two
+    // unicast-only per-client-best peers form a per-client-best group; the
+    // VPNv4 one stays on the ungrouped per-client-best path.
+    for (index, (per_client_best, add_path, vpn)) in [
+        (false, false, false),
+        (false, false, false),
+        (true, false, false),
+        (true, false, false),
+        (true, false, true),
+        (false, true, false),
     ]
     .into_iter()
     .enumerate()
@@ -2966,7 +2970,11 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
             peer_router_id: Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1),
             outbound_tx: out_tx,
             export_policy: None,
-            sendable_families: dual.clone(),
+            sendable_families: if vpn {
+                [dual.as_slice(), &[(Afi::Ipv4, Safi::MplsVpn)]].concat()
+            } else {
+                dual.clone()
+            },
             is_ebgp: true,
             route_reflector_client: false,
             orr_vantage: None,
@@ -3007,12 +3015,15 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
         });
         while manager.process_next_route_chunk() {}
     };
-    let gr_table = |med: bool| -> Vec<Route> {
-        (0..6)
-            .map(|i| eor_oracle_route(v4(i), gr, vec![65_001], (med && i == 4).then_some(7)))
-            .chain((0..4).map(|i| eor_oracle_route(v6(i), gr, vec![65_001], None)))
-            .collect()
-    };
+    let gr_table =
+        |med: bool| -> Vec<Route> {
+            (0..6)
+                .map(|i| eor_oracle_route(v4(i), gr, vec![65_001], (med && i == 4).then_some(7)))
+                .chain((0..4).map(|i| {
+                    eor_oracle_route(v6(i), gr, vec![65_001], (med && i == 1).then_some(9))
+                }))
+                .collect()
+        };
     announce(&mut manager, gr, gr_table(false));
     announce(
         &mut manager,
@@ -3061,7 +3072,7 @@ async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
     };
 
     // GR arm: IPv4 + IPv6 + a route-less VPNv4 family. Re-advertise all but
-    // one prefix per family, one IPv4 route with a new MED.
+    // one prefix per family, and one route per unicast family with a new MED.
     manager.handle_update(RibUpdate::PeerGracefulRestart {
         session_id: 0,
         peer: IpAddr::V4(gr),
