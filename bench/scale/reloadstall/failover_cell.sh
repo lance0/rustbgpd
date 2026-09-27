@@ -15,8 +15,62 @@
 # also logs one `bench: grouped mixed pass fanout paths` line per mixed
 # pass (members on the shared payload vs the per-member walk); the summary
 # totals them as `mixed_passes shared_members per_member_walks`.
+#
+# `failover_cell.sh --summarize <out dir>` re-runs only the summary over an
+# existing cell's logs (exit 0 = a complete, well-formed cell).
 set -u
 
+# The harness's fixed flap round count (FLAP_ROUNDS in src/main.rs).
+ROUNDS=3
+
+# Fail closed unless reloadstall.log carries the harness's CSV header and
+# exactly ROUNDS rows numbered 1..ROUNDS, each with the header's column count
+# and a finite value in every column, and every daemon mixed-pass line
+# parses.
+summarize() {
+    python3 - "$1" "$ROUNDS" <<'PY'
+import json
+import math
+import pathlib
+import sys
+
+out, want = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+passes = shared = walks = 0
+for line in (out / "daemon.log").read_text(errors="replace").splitlines():
+    if "bench: grouped mixed pass fanout paths" not in line:
+        continue
+    fields = json.loads(line).get("fields", {})
+    passes += 1
+    shared += int(fields["shared_members"])
+    walks += int(fields["per_member_walks"])
+lines = (out / "reloadstall.log").read_text().splitlines()
+headers = [line.split(",") for line in lines if line.startswith("flapstorm_failover_csv_header,")]
+if len(headers) != 1:
+    sys.exit(f"want one flapstorm_failover_csv_header, found {len(headers)}")
+columns = headers[0][1:]
+rows = [line.split(",")[1:] for line in lines if line.startswith("flapstorm_failover_csv,")]
+for row in rows:
+    if len(row) != len(columns):
+        sys.exit(f"row has {len(row)} columns, header has {len(columns)}: {row}")
+    for name, value in zip(columns, row):
+        try:
+            number = float(value)
+        except ValueError:
+            sys.exit(f"column {name} is not numeric: {value!r}")
+        if not math.isfinite(number):
+            sys.exit(f"column {name} is not finite: {value!r}")
+rounds = [int(row[0]) for row in rows]
+if rounds != list(range(1, want + 1)):
+    sys.exit(f"flapstorm_failover_csv rounds {rounds}, want 1..{want}")
+print("\n".join(line for line in lines if line.startswith("flapstorm_failover_csv")))
+print(f"mixed_passes={passes} shared_members={shared} per_member_walks={walks}")
+PY
+}
+
+if [ "${1:-}" = --summarize ] && [ "$#" -eq 2 ]; then
+    summarize "$2"
+    exit
+fi
 [ "$#" -eq 4 ] || { sed -n '2,8p' "$0" >&2; exit 2; }
 DAEMON=$(realpath "$1") OUT=$2 PERCENT=$3 SOURCES=$4
 N_PEERS="${N_PEERS:-700}"
@@ -39,8 +93,6 @@ python3 "$HERE/gen-scenario.py" "$N_PEERS" "$RUN" "$PORT" >/dev/null || exit 1
 python3 "$HERE/gen-failover-overlap.py" "$N_PEERS" "$TOTAL" "$FLAPSTORM" \
     "$PERCENT" "$SOURCES" "$RUN/overlap.tsv" || exit 1
 
-# The harness's fixed flap round count (FLAP_ROUNDS in src/main.rs).
-ROUNDS=3
 daemon_pid="" harness_pid="" daemon_rc=""
 
 # Idempotent: signal the daemon by its exact PID, wait up to 60 s, then
@@ -92,27 +144,6 @@ cp "$RUN/overlap.tsv" "$OUT/overlap.tsv" || exit 1
 # The cell passes only when the harness, the daemon's shutdown and this
 # summary all succeed; a malformed log or missing row fails it.
 summary_rc=0
-python3 - "$OUT" "$ROUNDS" <<'PY' || summary_rc=$?
-import json
-import pathlib
-import sys
-
-out = pathlib.Path(sys.argv[1])
-passes = shared = walks = 0
-for line in (out / "daemon.log").read_text(errors="replace").splitlines():
-    if "bench: grouped mixed pass fanout paths" not in line:
-        continue
-    fields = json.loads(line).get("fields", {})
-    passes += 1
-    shared += int(fields["shared_members"])
-    walks += int(fields["per_member_walks"])
-lines = (out / "reloadstall.log").read_text().splitlines()
-rows = [line for line in lines if line.startswith("flapstorm_failover_csv,")]
-rounds = [int(row.split(",")[1]) for row in rows]
-if rounds != list(range(1, int(sys.argv[2]) + 1)):
-    sys.exit(f"flapstorm_failover_csv rounds {rounds}, want 1..{sys.argv[2]}")
-print("\n".join(line for line in lines if line.startswith("flapstorm_failover_csv")))
-print(f"mixed_passes={passes} shared_members={shared} per_member_walks={walks}")
-PY
+summarize "$OUT" || summary_rc=$?
 echo "harness_rc=$harness_rc daemon_rc=$daemon_rc summary_rc=$summary_rc"
 [ "$harness_rc" -eq 0 ] && [ "$daemon_rc" -eq 0 ] && [ "$summary_rc" -eq 0 ]
