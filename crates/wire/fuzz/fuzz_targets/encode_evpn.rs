@@ -13,9 +13,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_wire::evpn::{
-    EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs,
-    EvpnImet, EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, MacAddress,
-    MplsLabel, RouteDistinguisher, decode_evpn_nlri, encode_evpn_nlri,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
+    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+    RouteDistinguisher, decode_evpn_nlri, encode_evpn_nlri,
 };
 use rustbgpd_wire::nlri::{Ipv4Prefix, Ipv6Prefix};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -43,7 +43,8 @@ impl<'a> ByteCursor<'a> {
     }
 
     fn take_u32(&mut self) -> Option<u32> {
-        self.take(4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+        self.take(4)
+            .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
     }
 }
 

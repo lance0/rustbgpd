@@ -137,6 +137,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ripgrep
       - run: cargo fmt --check
+      # Each fuzz crate is its own workspace, so the root check skips it.
+      - run: rustfmt --check --edition 2024 crates/*/fuzz/fuzz_targets/*.rs
       - name: Check clippy suppression reasons
         run: |
           python3 -m unittest -v scripts/test_check_clippy_reasons.py

@@ -62,8 +62,7 @@ WIRE_HOSTED_CONTRACTS = {
     "decode_open": (
         4_077,
         "if data.len()\n"
-        "        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)\n"
-        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN) - rustbgpd_wire::constants::HEADER_LEN\n"
         "    {\n"
         "        return;\n"
         "    }",
