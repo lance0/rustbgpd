@@ -307,9 +307,9 @@ The JSON-lines format starts with a header, contains one nested `route`
 record per path (including Add-Path identities), and ends with counts:
 
 ```json
-{"type":"header","format":"rbgp-rib","format_version":"1.0","view":"best"}
+{"type":"header","format":"rbgp-rib","format_version":"1.1","view":"best"}
 {"type":"route","route":{"prefix":"203.0.113.0/24","path_id":7}}
-{"type":"end","returned_count":1,"total_count":42,"complete":false}
+{"type":"end","returned_count":1,"total_count":42,"complete":false,"next_page_token":"<opaque>"}
 ```
 
 The route above is abbreviated; real records use the same curated fields
@@ -318,10 +318,18 @@ as ordinary route JSON. This is a daemon RIB view, not a wire-complete
 protobuf versions: additive optional fields increment the minor version;
 incompatible field types, meaning, or removal require a major version.
 Consumers must ignore unknown fields within a supported major version.
+Version 1.1 adds `next_page_token` to the `end` record; version 1.0
+streams have no such field.
 
 An `end` record means the requested walk succeeded. With `--limit`,
 `complete: false` means more matching routes exist; `total_count` counts
 all matching routes and `returned_count` counts emitted route records.
+`next_page_token` is the opaque token for the next page, and is empty
+when the walk is complete. Pass it back with `--page-token` and the same
+`--limit` and filters to continue. A token is not a durable checkpoint:
+once the route table has changed, the daemon can reject the continuation.
+The command then fails like any other failed continuation (below); start
+again from the first page, without a token.
 An empty successful view emits a header and an end with zero counts.
 A failed continuation or timeout exits 1 without an end record: previously
 emitted routes do not constitute a completed result. The CLI does not
@@ -329,7 +337,8 @@ restart the walk or retry stale tokens. A closed pipe exits 1 quietly and
 stops fetching. Check both process status and the end record before
 accepting a complete result.
 
-JSON-lines supports the existing accepted-unicast filters and `--limit`.
+JSON-lines supports the existing accepted-unicast filters, `--limit`, and
+`--page-token`.
 It cannot be combined with `--json`, `--count`, `--explain`, `--age`,
 `--rejected`, other RIB families, or `--pager always`.
 

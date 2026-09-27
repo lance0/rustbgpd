@@ -297,6 +297,103 @@ async fn json_lines_emits_route_before_stalled_page_and_omits_end_on_timeout() {
     assert_eq!(server.state.list_route_requests.lock().await.len(), 2);
 }
 
+fn json_lines(output: &Output) -> Vec<serde_json::Value> {
+    std::str::from_utf8(&output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// A limited JSON-lines walk ends with the token that continues it; feeding
+/// that token back yields the next page, and an exhausted walk ends with an
+/// empty token. An invalidated continuation fails without an end record.
+#[tokio::test]
+async fn json_lines_end_token_continues_a_limited_walk() {
+    for view in [
+        vec!["rib"],
+        vec!["rib", "received", "192.0.2.1"],
+        vec!["rib", "advertised", "192.0.2.1"],
+    ] {
+        let server = test_support::spawn_mock_server(None).await;
+        seed_first_route_page(&server).await;
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(proto::ListRoutesResponse {
+                routes: vec![proto::Route {
+                    prefix: "198.51.100.0".into(),
+                    prefix_length: 24,
+                    peer_address: "192.0.2.1".into(),
+                    path_id: 8,
+                    ..Default::default()
+                }],
+                next_page_token: String::new(),
+                total_count: 2,
+                page_version: None,
+            });
+        let run = |token: Option<&str>| {
+            let mut args = vec!["--json-lines"];
+            args.extend(view.iter().copied());
+            args.extend(["--limit", "1"]);
+            if let Some(token) = token {
+                args.extend(["--page-token", token]);
+            }
+            start(&server.addr, &args)
+        };
+
+        let first = finish(run(None)).await;
+        assert_eq!(first.status.code(), Some(0), "{view:?}: {first:?}");
+        let first = json_lines(&first);
+        assert_eq!(first[0]["format_version"], "1.1");
+        assert_eq!(first[1]["route"]["prefix"], "203.0.113.0/24");
+        assert_eq!(
+            first[2],
+            serde_json::json!({
+                "type": "end", "returned_count": 1, "total_count": 2,
+                "complete": false, "next_page_token": "second-page",
+            }),
+            "{view:?}"
+        );
+        let token = first[2]["next_page_token"].as_str().unwrap();
+
+        let second = finish(run(Some(token))).await;
+        assert_eq!(second.status.code(), Some(0), "{view:?}: {second:?}");
+        let second = json_lines(&second);
+        assert_eq!(second[1]["route"]["prefix"], "198.51.100.0/24");
+        assert_eq!(
+            second[2],
+            serde_json::json!({
+                "type": "end", "returned_count": 1, "total_count": 2,
+                "complete": true, "next_page_token": "",
+            }),
+            "{view:?}"
+        );
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].page_token.is_empty());
+        assert_eq!(requests[1].page_token, token);
+        assert!(requests.iter().all(|request| request.page_size == 1));
+        drop(requests);
+
+        *server.state.list_route_continuation_error.lock().await =
+            Some((tonic::Code::Aborted, "RIB changed".into()));
+        let stale = finish(run(Some(token))).await;
+        assert_eq!(stale.status.code(), Some(1), "{view:?}: {stale:?}");
+        assert!(String::from_utf8_lossy(&stale.stderr).contains("RIB changed"));
+        let stale = json_lines(&stale);
+        assert_eq!(stale.len(), 1, "header only, no end record: {stale:?}");
+        assert_eq!(stale[0]["type"], "header");
+        assert_eq!(
+            server.state.list_route_requests.lock().await.len(),
+            3,
+            "no restart or retry"
+        );
+    }
+}
+
 #[tokio::test]
 async fn later_page_abort_preserves_legacy_atomicity_and_leaves_stream_unfinished() {
     for view in [

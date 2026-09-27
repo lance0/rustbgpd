@@ -3294,7 +3294,6 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
         count,
         explain,
         age,
-        page_token,
         ..
     } = &cli.command
     else {
@@ -3302,18 +3301,6 @@ fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
     };
     if *count || *explain || *age {
         return Err(unsupported());
-    }
-    let view_page_token = match action {
-        Some(RibAction::Received { filters, .. } | RibAction::Advertised { filters, .. }) => {
-            filters.page_token.as_ref()
-        }
-        _ => None,
-    };
-    if page_token.is_some() || view_page_token.is_some() {
-        return Err(CliError::Argument(
-            "--page-token needs the next-page token that --json prints; --json-lines does not carry one"
-                .into(),
-        ));
     }
     let view_family = match action {
         None => None,
@@ -9358,22 +9345,24 @@ printf '%s\n' "${COMPREPLY[@]}"
             let error = view_check(args).unwrap_err().to_string();
             assert!(error.contains(message), "{args:?}: {error}");
         }
-        let cli = parse(&[
-            "rbgp",
-            "--json-lines",
-            "rib",
-            "--limit",
-            "5",
-            "--page-token",
-            "t",
-        ])
-        .unwrap();
-        assert!(
-            validate_json_lines(&cli)
-                .unwrap_err()
-                .to_string()
-                .contains("--page-token")
-        );
+        // JSON-lines continues a limited walk from its end record's token.
+        for view in [
+            &[][..],
+            &["received", "192.0.2.1"],
+            &["advertised", "192.0.2.1"],
+        ] {
+            let mut args = vec!["rbgp", "--json-lines", "rib"];
+            args.extend(view);
+            args.extend(["--limit", "5", "--page-token", "t"]);
+            let cli = parse(&args).unwrap();
+            validate_json_lines(&cli).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+            validate_rib_route_view_action(&cli.command)
+                .unwrap_or_else(|error| panic!("{args:?}: {error}"));
+            args.truncate(args.len() - 4);
+            args.extend(["--page-token", "t"]);
+            let error = view_check(&args).unwrap_err().to_string();
+            assert!(error.contains("requires --limit"), "{args:?}: {error}");
+        }
     }
 
     /// Tree-wide flag vocabulary guard (see the CLI conventions block).
