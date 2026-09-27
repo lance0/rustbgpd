@@ -26,7 +26,7 @@ topology:
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
-        - ip -6 addr add fd00::1/64 dev eth1
+        - ip -6 addr add fd00::1/64 dev eth1 nodad
         - ip link set eth1 up
       env:
         RUST_LOG: info
@@ -43,7 +43,8 @@ topology:
         - /dev/null:/etc/frr/vtysh.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
-        - ip -6 addr add fd00::2/64 dev eth1
+        # nodad: a DAD-tentative fd00::2 makes FRR send a link-local global next hop, which rustbgpd treats as withdraw
+        - ip -6 addr add fd00::2/64 dev eth1 nodad
         - ip link set eth1 up
 
   links:
