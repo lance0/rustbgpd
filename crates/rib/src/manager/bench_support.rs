@@ -541,7 +541,7 @@ impl RibManager {
         snapshot_peer: IpAddr,
         expire: bool,
     ) -> [u64; 14] {
-        let primary_depth_before = self.rx.len();
+        let primary_depth_before = self.primary_backlog();
         assert_eq!(primary_depth_before, 0, "primary update lane must be empty");
         assert_eq!(
             self.query_rx.len(),
@@ -959,6 +959,23 @@ impl RibManager {
             evpn_withdrawn: Vec::new(),
         });
         while self.process_next_route_chunk() {}
+    }
+
+    /// Drain every update already queued on the primary channel in the
+    /// production actor order: finish the pending route batch one chunk at a
+    /// time, and admit the next queued update only when no chunk remains.
+    /// This is the synchronous core of the actor's ready-update drain without
+    /// its query seams or Tokio yields.
+    pub fn bench_drain_primary_updates(&mut self) {
+        loop {
+            if self.process_next_route_chunk() {
+                continue;
+            }
+            let Some(update) = self.try_recv_primary() else {
+                return;
+            };
+            self.handle_update(update);
+        }
     }
 
     /// Inventory for production-path attribute-intern churn measurements:

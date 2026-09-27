@@ -41,6 +41,16 @@
 //! outside accumulated time. Its synthetic, unregistered source uses the
 //! production legacy-producer `session_id = 0` compatibility branch.
 //!
+//! `queued_announce_fanout` is the small-UPDATE input shape. It queues 64
+//! prefixes on the manager's primary channel either packed into one
+//! `RoutesReceived` per source or as 64 one-prefix messages, then times the
+//! production drain (route chunks, admission of the next queued message,
+//! recompute, distribution, commit, enqueue) at 256 and 1,000 members of a
+//! plain group, a per-client-best group, and a per-client-best group whose
+//! two sources displace each other's best. Message construction and queueing,
+//! receipt checks, envelope folding and the untimed table restore stay
+//! outside accumulated time.
+//!
 //! `add_path_export_staging` measures one negotiated IPv4-unicast Add-Path
 //! peer's production top-N selection, policy evaluation, private Adj-RIB-Out
 //! staging, exact transport probe, commit, and enqueue. Its 12 rows cross
@@ -73,7 +83,7 @@
 //! Historical first-advertise A/B receipt:
 //! `docs/perf/exact-export-fanout-2026-07.md`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2443,6 +2453,301 @@ fn bench_mp_exact_export_probe(c: &mut Criterion) {
     group.finish();
 }
 
+/// Route-server fleets for the queued small-message announcement measurement.
+const QUEUED_ANNOUNCE_PEER_COUNTS: [usize; 2] = [256, 1_000];
+/// Primary-channel capacity for the queued-announcement fixture: one
+/// measured input of `CHANGED` one-prefix messages fits without blocking.
+const QUEUED_ANNOUNCE_PRIMARY_CAP: usize = 2 * CHANGED;
+
+#[derive(Clone, Copy)]
+enum QueuedAnnounceFleet {
+    /// One plain homogeneous update group.
+    Plain,
+    /// One grouped per-client-best route-server group, the rendered
+    /// route-server default.
+    PerClientBest,
+    /// The per-client-best group with two sources alternately displacing
+    /// each other's best path.
+    MultiSource,
+}
+
+impl QueuedAnnounceFleet {
+    const ALL: [Self; 3] = [Self::Plain, Self::PerClientBest, Self::MultiSource];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::PerClientBest => "per_client_best",
+            Self::MultiSource => "multi_source",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QueuedAnnouncePacking {
+    /// Each source's share of the input in one `RoutesReceived`.
+    Packed,
+    /// One prefix per `RoutesReceived`, every message queued before the drain.
+    OnePerMessage,
+}
+
+impl QueuedAnnouncePacking {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Packed => "packed",
+            Self::OnePerMessage => "one_per_message",
+        }
+    }
+}
+
+const QUEUED_SOURCE_A: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 1);
+const QUEUED_SOURCE_B: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
+
+fn queued_route(prefix: Prefix, source: Ipv4Addr, med: u32) -> Route {
+    let mut route = make_route_with_med(prefix, med);
+    route.peer = IpAddr::V4(source);
+    route.peer_router_id = source;
+    route
+}
+
+/// One `RoutesReceived` message: `(source, announced, withdrawn)`.
+type QueuedMessage = (Ipv4Addr, Vec<Route>, Vec<(Prefix, u32)>);
+
+struct QueuedAnnounceState {
+    manager: RibManager,
+    tx: mpsc::Sender<RibUpdate>,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    fleet: QueuedAnnounceFleet,
+    prefixes: Vec<Prefix>,
+}
+
+fn queue_messages(tx: &mpsc::Sender<RibUpdate>, messages: Vec<QueuedMessage>) {
+    for (source, announced, withdrawn) in messages {
+        tx.try_send(RibUpdate::RoutesReceived {
+            peer: IpAddr::V4(source),
+            session_id: 0,
+            announced,
+            withdrawn,
+            flowspec_announced: Vec::new(),
+            flowspec_withdrawn: Vec::new(),
+            evpn_announced: Vec::new(),
+            evpn_withdrawn: Vec::new(),
+        })
+        .expect("queued-announcement input fits the primary channel");
+    }
+}
+
+/// Fold every queued envelope into each member's advertised view and return
+/// the envelope count observed at the first member.
+fn fold_queued_envelopes(
+    receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>],
+    expected: &HashMap<Prefix, u32>,
+) -> usize {
+    let mut first_member_envelopes = 0;
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        let mut advertised = HashMap::new();
+        let mut envelopes = 0;
+        while let Ok(update) = receiver.try_recv() {
+            envelopes += 1;
+            assert_unicast_only_envelope(&update);
+            for (prefix, _) in &update.withdraw {
+                advertised.remove(prefix);
+            }
+            for route in update.announce.iter() {
+                advertised.insert(route.prefix, route_med(route));
+            }
+        }
+        assert!(
+            envelopes > 0,
+            "every member must receive the measured input"
+        );
+        assert!(
+            envelopes <= CHANGED,
+            "at most one envelope per input message"
+        );
+        if index == 0 {
+            first_member_envelopes = envelopes;
+        }
+        // Withdraw-then-reannounce folding: a member's view of every
+        // measured prefix must end on the expected MED.
+        for (prefix, med) in expected {
+            assert_eq!(
+                advertised.get(prefix),
+                Some(med),
+                "member {index} must end on the expected best for {prefix}"
+            );
+        }
+    }
+    first_member_envelopes
+}
+
+fn drain_queued_restore(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>]) {
+    for receiver in receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+}
+
+fn build_queued_announce(peers: usize, fleet: QueuedAnnounceFleet) -> QueuedAnnounceState {
+    let (tx, rx) = mpsc::channel::<RibUpdate>(QUEUED_ANNOUNCE_PRIMARY_CAP);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
+    let receivers = manager.bench_register_unicast_route_server_peers(
+        peers,
+        &[(Afi::Ipv4, Safi::Unicast)],
+        !matches!(fleet, QueuedAnnounceFleet::Plain),
+        CHANNEL_CAP,
+        fanout_bench_route_server_export_encoder,
+    );
+    let mut state = QueuedAnnounceState {
+        manager,
+        tx,
+        receivers,
+        fleet,
+        prefixes: changed_prefixes(),
+    };
+    queued_announce_restore(&mut state);
+    let receipt = state.manager.bench_adj_rib_out_fanout_receipt();
+    assert_eq!(receipt.update_groups, 1, "fleet must form one update group");
+    assert_eq!(receipt.grouped_peers, peers);
+    assert_eq!(receipt.ungrouped_peers, 0);
+    state
+}
+
+/// Return the fixture to its pre-measurement table outside timing: no
+/// measured prefix for the single-source fleets, source A best (MED 50) over
+/// source B (MED 60) for the multi-source fleet.
+fn queued_announce_restore(state: &mut QueuedAnnounceState) {
+    let all = |source, med| -> Vec<Route> {
+        state
+            .prefixes
+            .iter()
+            .map(|&prefix| queued_route(prefix, source, med))
+            .collect()
+    };
+    let messages = match state.fleet {
+        QueuedAnnounceFleet::Plain | QueuedAnnounceFleet::PerClientBest => vec![(
+            QUEUED_SOURCE_A,
+            Vec::new(),
+            state.prefixes.iter().map(|&prefix| (prefix, 0)).collect(),
+        )],
+        QueuedAnnounceFleet::MultiSource => vec![
+            (QUEUED_SOURCE_A, all(QUEUED_SOURCE_A, 50), Vec::new()),
+            (QUEUED_SOURCE_B, all(QUEUED_SOURCE_B, 60), Vec::new()),
+        ],
+    };
+    queue_messages(&state.tx, messages);
+    state.manager.bench_drain_primary_updates();
+    drain_queued_restore(&mut state.receivers);
+}
+
+/// Build the measured input and each member's expected final MED per prefix.
+///
+/// Single-source fleets announce every prefix from source A. The
+/// multi-source fleet alternates: even prefixes are withdrawn by source A
+/// (source B's MED-60 path becomes best), odd prefixes are re-announced by
+/// source B at MED 40 (displacing source A).
+fn queued_announce_input(
+    state: &QueuedAnnounceState,
+    packing: QueuedAnnouncePacking,
+) -> (Vec<QueuedMessage>, HashMap<Prefix, u32>) {
+    let mut per_prefix = Vec::with_capacity(CHANGED);
+    let mut expected = HashMap::new();
+    for (index, &prefix) in state.prefixes.iter().enumerate() {
+        match state.fleet {
+            QueuedAnnounceFleet::Plain | QueuedAnnounceFleet::PerClientBest => {
+                per_prefix.push((
+                    QUEUED_SOURCE_A,
+                    vec![queued_route(prefix, QUEUED_SOURCE_A, 50)],
+                    Vec::new(),
+                ));
+                expected.insert(prefix, 50);
+            }
+            QueuedAnnounceFleet::MultiSource if index % 2 == 0 => {
+                per_prefix.push((QUEUED_SOURCE_A, Vec::new(), vec![(prefix, 0)]));
+                expected.insert(prefix, 60);
+            }
+            QueuedAnnounceFleet::MultiSource => {
+                per_prefix.push((
+                    QUEUED_SOURCE_B,
+                    vec![queued_route(prefix, QUEUED_SOURCE_B, 40)],
+                    Vec::new(),
+                ));
+                expected.insert(prefix, 40);
+            }
+        }
+    }
+    let messages = match packing {
+        QueuedAnnouncePacking::OnePerMessage => per_prefix,
+        QueuedAnnouncePacking::Packed => {
+            let mut packed: Vec<QueuedMessage> = Vec::new();
+            for (source, announced, withdrawn) in per_prefix {
+                if let Some(message) = packed.iter_mut().find(|message| message.0 == source) {
+                    message.1.extend(announced);
+                    message.2.extend(withdrawn);
+                } else {
+                    packed.push((source, announced, withdrawn));
+                }
+            }
+            packed
+        }
+    };
+    (messages, expected)
+}
+
+fn bench_queued_announce_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("queued_announce_fanout");
+    group.sample_size(10);
+    for fleet in QueuedAnnounceFleet::ALL {
+        for &peers in &QUEUED_ANNOUNCE_PEER_COUNTS {
+            for packing in [
+                QueuedAnnouncePacking::Packed,
+                QueuedAnnouncePacking::OnePerMessage,
+            ] {
+                let id = BenchmarkId::new(
+                    format!("{}/{}", fleet.label(), packing.label()),
+                    format!("{CHANGED}/{peers}"),
+                );
+                let mut reported = false;
+                group.bench_with_input(id, &peers, |bench, &peers| {
+                    let mut state = build_queued_announce(peers, fleet);
+                    bench.iter_custom(|iterations| {
+                        let mut accumulated = Duration::ZERO;
+                        for _ in 0..iterations {
+                            let (messages, expected) = queued_announce_input(&state, packing);
+                            let dispatches = messages.len();
+                            queue_messages(&state.tx, messages);
+                            state.manager.bench_reset_adj_rib_out_fanout_receipt();
+                            let started = Instant::now();
+                            state.manager.bench_drain_primary_updates();
+                            accumulated += started.elapsed();
+                            let receipt = state.manager.bench_adj_rib_out_fanout_receipt();
+                            assert_eq!(receipt.routes_received_dispatches, dispatches);
+                            assert_eq!(
+                                receipt.dirty_peers, 0,
+                                "dirty resync invalidates the shape"
+                            );
+                            assert_eq!(receipt.grouped_peers, peers);
+                            let envelopes = fold_queued_envelopes(&mut state.receivers, &expected);
+                            if !reported {
+                                eprintln!(
+                                    "queued_announce_fanout {}/{}/{peers}: {dispatches} messages, \
+                                     {envelopes} envelopes per member",
+                                    fleet.label(),
+                                    packing.label(),
+                                );
+                                reported = true;
+                            }
+                            queued_announce_restore(&mut state);
+                        }
+                        accumulated
+                    });
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fanout,
@@ -2451,6 +2756,7 @@ criterion_group!(
     bench_ixp_exact_export_fanout,
     bench_adj_rib_out_family_gauge,
     bench_grouped_withdrawal_fanout,
+    bench_queued_announce_fanout,
     bench_grouped_policy_denial_fanout,
     bench_initial_table_peer_join,
     bench_initial_table_group_join,

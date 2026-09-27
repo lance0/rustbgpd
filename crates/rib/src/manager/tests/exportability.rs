@@ -17,14 +17,14 @@ struct MockExportConfig {
     rejected: HashSet<ExactExportKey>,
 }
 
-struct MockExactExportEncoder {
+pub(super) struct MockExactExportEncoder {
     config: RwLock<MockExportConfig>,
     probed: Arc<Mutex<Vec<ExactExportKey>>>,
     probe_batches: Arc<AtomicUsize>,
 }
 
 impl MockExactExportEncoder {
-    fn accepting(generation: u64) -> Arc<Self> {
+    pub(super) fn accepting(generation: u64) -> Arc<Self> {
         Arc::new(Self {
             config: RwLock::new(MockExportConfig {
                 generation,
@@ -35,7 +35,11 @@ impl MockExactExportEncoder {
         })
     }
 
-    fn set_profile(&self, generation: u64, rejected: impl IntoIterator<Item = ExactExportKey>) {
+    pub(super) fn set_profile(
+        &self,
+        generation: u64,
+        rejected: impl IntoIterator<Item = ExactExportKey>,
+    ) {
         *self.config.write().unwrap() = MockExportConfig {
             generation,
             rejected: rejected.into_iter().collect(),

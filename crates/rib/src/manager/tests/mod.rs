@@ -1393,6 +1393,7 @@ mod attr_intern;
 mod bgpls;
 mod bmp;
 mod dataplane_paging;
+mod distribution_window;
 mod events_metrics;
 mod evpn;
 mod evpn_dataplane_query;
