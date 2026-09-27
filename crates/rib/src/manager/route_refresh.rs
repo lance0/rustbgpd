@@ -128,6 +128,25 @@ impl RibManager {
         }
     }
 
+    fn recompute_and_distribute_end_of_rib_unicast(&mut self, affected: &HashSet<Prefix>) {
+        #[cfg(any(test, feature = "bench-internals"))]
+        let started = std::time::Instant::now();
+        let changed = self.recompute_best(affected);
+        #[cfg(any(test, feature = "bench-internals"))]
+        let recomputed = std::time::Instant::now();
+        self.distribute_changes(&changed, affected);
+        #[cfg(any(test, feature = "bench-internals"))]
+        {
+            let stats = &mut self.adj_rib_out_commit_stats;
+            stats.eor_unicast_affected = affected.len();
+            stats.eor_unicast_changed = changed.len();
+            stats.eor_unicast_recompute_ns =
+                u64::try_from((recomputed - started).as_nanos()).unwrap_or(u64::MAX);
+            stats.eor_unicast_distribute_ns =
+                u64::try_from(recomputed.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        }
+    }
+
     pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "received End-of-RIB");
         self.remove_unrefreshed_stale_family(peer, afi, safi);
@@ -287,8 +306,7 @@ impl RibManager {
                 .map(|rib| rib.iter().map(|r| r.prefix).collect())
                 .unwrap_or_default();
             affected.extend(swept_prefixes);
-            let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            self.recompute_and_distribute_end_of_rib_unicast(&affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
             }
@@ -458,8 +476,7 @@ impl RibManager {
                 .map(|rib| rib.iter().map(|r| r.prefix).collect())
                 .unwrap_or_default();
             affected.extend(swept_prefixes);
-            let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            self.recompute_and_distribute_end_of_rib_unicast(&affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
             }

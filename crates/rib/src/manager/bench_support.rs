@@ -993,6 +993,112 @@ impl RibManager {
         assert_eq!(best.attributes, expected.attributes);
     }
 
+    /// Register `n_peers` eBGP route-server clients negotiating only the
+    /// given unicast families, so plain and per-client-best peers both group.
+    /// The initial-table output is drained; the receivers must stay alive.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the peer count exceeds `u32::MAX`.
+    #[must_use]
+    pub fn bench_register_unicast_route_server_peers<F>(
+        &mut self,
+        n_peers: usize,
+        families: &[(Afi, Safi)],
+        per_client_best: bool,
+        channel_capacity: usize,
+        mut make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        F: FnMut(u32) -> Arc<dyn ExactExportEncoder>,
+    {
+        (0..n_peers)
+            .map(|index| {
+                let idx = u32::try_from(index).expect("bench peer count fits in u32");
+                let peer = Self::bench_peer_address(index);
+                let session_id = u64::from(idx) + 1;
+                let peer_asn = 65_100 + idx;
+                let (tx, mut rx) = mpsc::channel(channel_capacity);
+                self.pending_peer_export_encoders
+                    .insert((peer, session_id), make_exact_export_encoder(peer_asn));
+                self.handle_peer_up(
+                    peer,
+                    session_id,
+                    peer_asn,
+                    Ipv4Addr::new(192, 0, 2, 1),
+                    tx,
+                    None,
+                    families.to_vec(),
+                    true,
+                    false,
+                    None,
+                    per_client_best,
+                    true,
+                    Vec::new(),
+                    0,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                while rx.try_recv().is_ok() {}
+                rx
+            })
+            .collect()
+    }
+
+    /// Enter Graceful Restart for an unregistered synthetic source through the
+    /// production `PeerGracefulRestart` path: its routes in `families` are
+    /// retained and marked stale.
+    pub fn bench_gr_restart(&mut self, peer: IpAddr, families: &[(Afi, Safi)]) {
+        self.handle_update(RibUpdate::PeerGracefulRestart {
+            peer,
+            session_id: 0,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: families.to_vec(),
+            peer_llgr_capable: false,
+            peer_llgr_families: Vec::new(),
+            llgr_stale_time: 0,
+        });
+    }
+
+    /// Deliver one End-of-RIB through the production `EndOfRib` dispatch and
+    /// return `[total_ns, unicast_recompute_ns, unicast_distribute_ns,
+    /// unicast_affected, unicast_changed, retained_stale_routes,
+    /// gr_complete]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a duration or count exceeds `u64`.
+    #[must_use]
+    pub fn bench_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) -> [u64; 7] {
+        self.adj_rib_out_commit_stats.eor_unicast_affected = 0;
+        self.adj_rib_out_commit_stats.eor_unicast_changed = 0;
+        self.adj_rib_out_commit_stats.eor_unicast_recompute_ns = 0;
+        self.adj_rib_out_commit_stats.eor_unicast_distribute_ns = 0;
+        let started = std::time::Instant::now();
+        self.handle_update(RibUpdate::EndOfRib {
+            peer,
+            session_id: 0,
+            afi,
+            safi,
+        });
+        let total = u64::try_from(started.elapsed().as_nanos()).expect("duration fits u64");
+        let stats = self.adj_rib_out_commit_stats;
+        let stale = self
+            .ribs
+            .get(&peer)
+            .map_or(0, super::graceful_restart::retained_stale_count);
+        [
+            total,
+            stats.eor_unicast_recompute_ns,
+            stats.eor_unicast_distribute_ns,
+            u64::try_from(stats.eor_unicast_affected).expect("count fits u64"),
+            u64::try_from(stats.eor_unicast_changed).expect("count fits u64"),
+            u64::try_from(stale).expect("count fits u64"),
+            u64::from(!self.gr_peers.contains_key(&peer)),
+        ]
+    }
+
     /// Seed the Loc-RIB through the production dispatcher/chunk path, grouped
     /// into one envelope per synthetic source peer. A source without an
     /// outbound registration uses the production legacy-unregistered

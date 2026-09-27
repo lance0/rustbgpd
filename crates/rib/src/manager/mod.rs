@@ -222,6 +222,12 @@ struct AdjRibOutCommitStats {
     last_family_gauge_write_mask: u8,
     pristine_otc_reconcile_candidates: usize,
     private_extra_prefix_scans: usize,
+    /// Last End-of-RIB unicast pass: prefixes recomputed, best changes,
+    /// and the recompute / distribution split in nanoseconds.
+    eor_unicast_affected: usize,
+    eor_unicast_changed: usize,
+    eor_unicast_recompute_ns: u64,
+    eor_unicast_distribute_ns: u64,
     #[cfg(test)]
     metrics_handle_clones: usize,
     #[cfg(test)]
