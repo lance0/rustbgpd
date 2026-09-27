@@ -146,7 +146,10 @@ CI. The [2026-09-24 run](../soaks/soak-rs-flagship-24h-2026-09-24.md) on the
 v0.72.0 tag failed one gate, management correctness: one of 17,556
 `policy stats` reads returned `DEADLINE_EXCEEDED` at its 2 s deadline inside a
 reload commit, and every other gate passed. The last passing flagship receipt
-therefore still describes v0.71.0. The
+on a tag therefore still describes v0.71.0. The
+[2026-09-26 run](../soaks/soak-rs-flagship-24h-2026-09-26.md) on untagged
+main `292c32b39`, with owner-published counter reads, passed every gate; it
+covers that SHA and qualifies no release. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

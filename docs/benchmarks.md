@@ -1457,7 +1457,9 @@ release commit, on the same host shape, passed its RSS gates (peak 725.8 MB,
 tag (peak 759.8 MB, 5th–95th percentile 505.7–566.1 MB) and the
 [2026-09-24 run](soaks/soak-rs-flagship-24h-2026-09-24.md) on the v0.72.0
 tag (peak 735.2 MB, 5th–95th percentile 499.8–560.5 MB; that run failed its
-management-correctness gate). Different hosts
+management-correctness gate) and the
+[2026-09-26 run](soaks/soak-rs-flagship-24h-2026-09-26.md) on untagged main
+`292c32b39` (peak 756.4 MB, 5th–95th percentile 504.9–561.8 MB). Different hosts
 and revisions make these observations, not a comparison with the band above.
 
 Receipts, gates, and artifacts:

@@ -1,0 +1,238 @@
+{
+  "verdict": "pass",
+  "samples": 2925,
+  "reloads_issued": 48,
+  "reloads_complete": 48,
+  "trips_executed": 6,
+  "trips_planned": 6,
+  "peak_rss_mb": 756.4,
+  "rss_late_slope_per_hour": 0.22344157201842138,
+  "intern_late_slope_per_hour": -0.003420215605681555,
+  "slope_window_evaluated": true,
+  "gates": {
+    "min_samples": {
+      "value": 2925,
+      "limit": 2592.0,
+      "pass": true
+    },
+    "session_floor": {
+      "value": {
+        "violations": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "reload_accounting": {
+      "value": {
+        "issued": 48,
+        "complete": 48,
+        "planned": 48
+      },
+      "pass": true
+    },
+    "trip_accounting": {
+      "value": {
+        "executed": 6,
+        "planned": 6,
+        "defects": {}
+      },
+      "pass": true
+    },
+    "exceeded_exact": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "flap_budget": {
+      "value": 6,
+      "limit": 6,
+      "pass": true
+    },
+    "msgs_sent_monotone": {
+      "value": {
+        "breaks": 0
+      },
+      "pass": true
+    },
+    "readyz": {
+      "value": {
+        "bad_samples": 2,
+        "status_failures": 1,
+        "latency_failures": 1,
+        "longest_consecutive": 1,
+        "first": [
+          {
+            "elapsed_sec": 21876.0,
+            "code": 503,
+            "latency_ms": 276.5,
+            "kind": "status"
+          },
+          {
+            "elapsed_sec": 85706.0,
+            "code": 200,
+            "latency_ms": 259.2,
+            "kind": "latency"
+          }
+        ],
+        "limit_ms": 250.0,
+        "limit_consecutive": 3,
+        "sample_scrape_failures": 0,
+        "observation_gaps": [],
+        "observation_gap_count": 0
+      },
+      "pass": true
+    },
+    "rss_peak_mb": {
+      "value": 756.4,
+      "limit": 3072.0,
+      "pass": true
+    },
+    "rss_late_slope_per_hour": {
+      "value": 0.22344157201842138,
+      "limit": 10.0,
+      "pass": true,
+      "note": null
+    },
+    "intern_late_slope_per_hour": {
+      "value": -0.003420215605681555,
+      "limit": 100.0,
+      "pass": true,
+      "note": null
+    },
+    "no_abort": {
+      "value": [],
+      "pass": true
+    },
+    "daemon_log": {
+      "value": {
+        "records": 77940,
+        "errors": 0,
+        "defects": 0,
+        "warnings_by_message": {
+          "TCP connect failed": 6,
+          "inbound connection from unknown peer, dropping": 294,
+          "max prefix exceeded": 6,
+          "readiness probe failed": 1,
+          "rfc8212_secure_default_ready: RFC 8212 policy mode is inherited from legacy omission. The retained posture is source=legacy_omission, effective=false: RFC 8212 enforcement remains disabled and missing chains remain permit-all. Choose exactly one explicit posture: set root config_epoch = 1 and [global].ebgp_requires_policy = false, or set root config_epoch = 2 and [global].ebgp_requires_policy = true.": 1
+        },
+        "first_administrative_shutdown_unix": 1790473676.436354,
+        "examples": []
+      },
+      "pass": true
+    },
+    "management_evidence": {
+      "value": {
+        "errors": [],
+        "count_mismatches": []
+      },
+      "pass": true
+    },
+    "management_lifetime": {
+      "value": {
+        "load_start": 449551.131896,
+        "measured_start": 449551.175458372,
+        "measured_end": 537301.804655268,
+        "stop_requested": 537301.834879,
+        "load_end": 537301.83697,
+        "last_operation_completed": 537301.294212,
+        "engine_finish_release": 537301.963515709,
+        "load_end_unix": 1790473676.224062,
+        "engine_first_shutdown_unix": 1790473676.436354
+      },
+      "pass": true
+    },
+    "management_operations": {
+      "value": {
+        "metrics": 87748,
+        "neighbor": 17551,
+        "policy_stats": 17551,
+        "rib_prefix": 17551,
+        "doctor": 147
+      },
+      "pass": true
+    },
+    "management_completion": {
+      "value": {
+        "metrics": {
+          "scheduled": 87751,
+          "completed": 87748,
+          "ratio": 0.9999658123554147
+        },
+        "neighbor": {
+          "scheduled": 17551,
+          "completed": 17551,
+          "ratio": 1.0
+        },
+        "policy_stats": {
+          "scheduled": 17551,
+          "completed": 17551,
+          "ratio": 1.0
+        },
+        "rib_prefix": {
+          "scheduled": 17551,
+          "completed": 17551,
+          "ratio": 1.0
+        },
+        "doctor": {
+          "scheduled": 147,
+          "completed": 147,
+          "ratio": 1.0
+        }
+      },
+      "limit": 0.9,
+      "pass": true
+    },
+    "management_cadence": {
+      "value": {
+        "defects": [],
+        "operations": {
+          "metrics": {
+            "missed": 3,
+            "per_reload": {
+              "18": 1,
+              "34": 1,
+              "36": 1
+            },
+            "outside_windows": []
+          },
+          "neighbor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "policy_stats": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "rib_prefix": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          },
+          "doctor": {
+            "missed": 0,
+            "per_reload": {},
+            "outside_windows": []
+          }
+        }
+      },
+      "limit": 2,
+      "pass": true
+    },
+    "management_failures": {
+      "value": {
+        "count": 0,
+        "first": []
+      },
+      "pass": true
+    },
+    "management_doctor": {
+      "value": {
+        "attempts": 147,
+        "failures": []
+      },
+      "pass": true
+    }
+  }
+}
