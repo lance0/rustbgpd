@@ -1096,7 +1096,7 @@ counts. The summary repeats the mode and result beside the row table.
 
 | Type | Size |
 |------|------|
-| `Route` | 128 bytes |
+| `Route` | 136 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 208 bytes |
 | `AsPath` | 24 bytes |

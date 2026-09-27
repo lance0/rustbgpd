@@ -1543,11 +1543,14 @@ mod tests {
     /// edit in their own files, and the documented figures went stale
     /// silently (LAN-957). Fence the two rows the harness JSON cannot
     /// see, the same include-the-doc pattern as the gRPC method
-    /// inventory fence in `crates/api/src/authz.rs`.
+    /// inventory fence in `crates/api/src/authz.rs`. The `Route` row is
+    /// fenced too: the harness prints it but nothing compared it, and it
+    /// went stale (128 → 136 bytes) when `received_as_path` was added.
     #[test]
     fn benchmarks_doc_type_size_rows_match_compiler() {
         let doc = include_str!("../../../docs/benchmarks.md");
         for (name, size) in [
+            ("Route", size_of::<Route>()),
             ("AdjRibIn", size_of::<crate::adj_rib_in::AdjRibIn>()),
             ("LocRib", size_of::<LocRib>()),
         ] {
