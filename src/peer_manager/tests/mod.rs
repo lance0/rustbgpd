@@ -369,7 +369,7 @@ fn policy_route_counter(
                         .iter()
                         .any(|label| label.name() == *name && label.value() == *value)
                 })
-                .then(|| metric.get_counter().value())
+                .then(|| metric.get_counter().get_value())
             })
         })
 }
@@ -1330,9 +1330,9 @@ fn process_global_metric(metrics: &BgpMetrics, family_name: &str) -> Option<f64>
                 "{family_name} must remain label-free"
             );
             if family_name.ends_with("_total") {
-                metric.get_counter().value()
+                metric.get_counter().get_value()
             } else {
-                metric.get_gauge().value()
+                metric.get_gauge().get_value()
             }
         })
 }
@@ -1369,7 +1369,7 @@ fn inbound_drop_metric(metrics: &BgpMetrics, reason: &str) -> Option<f64> {
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "reason" && label.value() == reason)
-                    .then(|| metric.get_counter().value())
+                    .then(|| metric.get_counter().get_value())
             })
         })
 }
@@ -1395,7 +1395,7 @@ fn peer_identity_gauge(
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "interface" && label.value() == interface);
-                (has_peer && has_interface).then(|| metric.get_gauge().value())
+                (has_peer && has_interface).then(|| metric.get_gauge().get_value())
             })
         })
 }

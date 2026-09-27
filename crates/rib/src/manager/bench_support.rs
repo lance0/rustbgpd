@@ -262,7 +262,7 @@ fn selection_deferral_counter_total(metrics: &rustbgpd_telemetry::BgpMetrics, na
             family
                 .get_metric()
                 .iter()
-                .map(|metric| metric.get_counter().value() as u64)
+                .map(|metric| metric.get_counter().get_value() as u64)
                 .sum()
         })
 }
@@ -1282,7 +1282,7 @@ impl RibManager {
         };
         std::array::from_fn(|index| {
             gauge
-                .metric
+                .get_metric()
                 .iter()
                 .find(|metric| {
                     metric
@@ -1293,7 +1293,7 @@ impl RibManager {
                             label.name() == "afi_safi" && label.value() == FAMILIES[index]
                         })
                 })
-                .map_or(0, |metric| metric.get_gauge().value() as i64)
+                .map_or(0, |metric| metric.get_gauge().get_value() as i64)
         })
     }
 

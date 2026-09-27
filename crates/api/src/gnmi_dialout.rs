@@ -864,7 +864,7 @@ mod tests {
                     .iter()
                     .any(|label| label.name() == "target" && label.value() == target)
             })
-            .map(|metric| metric.get_gauge().value() as i64)
+            .map(|metric| metric.get_gauge().get_value() as i64)
     }
 
     fn gauge_value(metrics: &BgpMetrics, target: &str) -> Option<i64> {
@@ -897,7 +897,7 @@ mod tests {
                     .iter()
                     .any(|label| label.name() == "target" && label.value() == target)
             })
-            .map(|metric| metric.get_counter().value())
+            .map(|metric| metric.get_counter().get_value())
     }
 
     async fn wait_for_gauge(metrics: &BgpMetrics, target: &str, expected: i64) {

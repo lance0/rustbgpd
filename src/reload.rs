@@ -9010,7 +9010,7 @@ tcp_ao = [
             assert!(outcomes.insert(outcome), "duplicate {outcome} row");
             let expected = if outcome == "known_partial" { 1.0 } else { 0.0 };
             assert!(
-                (metric.get_counter().value() - expected).abs() < f64::EPSILON,
+                (metric.get_counter().get_value() - expected).abs() < f64::EPSILON,
                 "unexpected {outcome} SIGHUP outcome count"
             );
         }

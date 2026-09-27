@@ -1019,7 +1019,7 @@ fn as_path_loop_detected_count(session: &PeerSession) -> u64 {
                 clippy::cast_sign_loss,
                 reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
             )]
-            let v = m.get_counter().value() as u64;
+            let v = m.get_counter().get_value() as u64;
             v
         })
         .sum()

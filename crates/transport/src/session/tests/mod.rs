@@ -43,7 +43,7 @@ fn counter_samples(metrics: &BgpMetrics, name: &str) -> Vec<(HashMap<String, Str
                         .iter()
                         .map(|label| (label.name().to_string(), label.value().to_string()))
                         .collect();
-                    (labels, metric.get_counter().value())
+                    (labels, metric.get_counter().get_value())
                 })
                 .collect()
         })
@@ -537,7 +537,7 @@ fn max_prefix_gauge(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "scope" && label.value() == scope);
-                (has_peer && has_scope).then(|| metric.get_gauge().value())
+                (has_peer && has_scope).then(|| metric.get_gauge().get_value())
             })
         })
 }
@@ -558,7 +558,7 @@ fn peer_truth_gauge(metrics: &BgpMetrics, name: &str, peer: &str, interface: &st
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "interface" && label.value() == interface);
-                (has_peer && has_interface).then(|| metric.get_gauge().value())
+                (has_peer && has_interface).then(|| metric.get_gauge().get_value())
             })
         })
 }
@@ -1675,12 +1675,7 @@ fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str) -> f64 {
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "peer" && label.value() == peer)
-                    .then(|| {
-                        metric
-                            .get_counter()
-                            .as_ref()
-                            .map_or(0.0, prometheus::proto::Counter::value)
-                    })
+                    .then(|| metric.get_counter().get_value())
             })
         })
         .unwrap_or(0.0)
@@ -1829,7 +1824,7 @@ fn update_malformed_count(session: &PeerSession, disposition: &str) -> u64 {
                 clippy::cast_sign_loss,
                 reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
             )]
-            let v = m.get_counter().value() as u64;
+            let v = m.get_counter().get_value() as u64;
             v
         })
         .sum()

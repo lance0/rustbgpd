@@ -2333,7 +2333,10 @@ mod tests {
             .iter()
             .find(|f| f.name() == name)
             .map_or(0, |f| {
-                f.metric.iter().map(|m| m.counter.value() as u64).sum()
+                f.get_metric()
+                    .iter()
+                    .map(|m| m.get_counter().get_value() as u64)
+                    .sum()
             })
     }
 
@@ -2356,12 +2359,14 @@ mod tests {
             .find(|f| f.name() == name)
             .and_then(|mut f| {
                 f.take_metric().into_iter().find(|m| {
-                    match_labels
-                        .iter()
-                        .all(|(k, v)| m.label.iter().any(|l| l.name() == *k && l.value() == *v))
+                    match_labels.iter().all(|(k, v)| {
+                        m.get_label()
+                            .iter()
+                            .any(|l| l.name() == *k && l.value() == *v)
+                    })
                 })
             })
-            .map_or(0, |m| m.counter.value() as u64)
+            .map_or(0, |m| m.get_counter().get_value() as u64)
     }
 
     #[expect(
@@ -2376,19 +2381,19 @@ mod tests {
             .find(|f| f.name() == name)
             .and_then(|mut f| {
                 f.take_metric().into_iter().find(|m| {
-                    m.label
+                    m.get_label()
                         .iter()
                         .any(|l| l.name() == "collector" && l.value() == collector.to_string())
                 })
             })
-            .map_or(0, |m| m.gauge.value() as i64)
+            .map_or(0, |m| m.get_gauge().get_value() as i64)
     }
 
     fn collector_series_exists(metrics: &BgpMetrics, name: &str, collector: SocketAddr) -> bool {
         metrics.registry().gather().into_iter().any(|f| {
             f.name() == name
-                && f.metric.iter().any(|m| {
-                    m.label
+                && f.get_metric().iter().any(|m| {
+                    m.get_label()
                         .iter()
                         .any(|l| l.name() == "collector" && l.value() == collector.to_string())
                 })

@@ -30,7 +30,7 @@ fn counter_value(metrics: &BgpMetrics, name: &str) -> f64 {
             family
                 .get_metric()
                 .iter()
-                .map(|metric| metric.get_counter().value())
+                .map(|metric| metric.get_counter().get_value())
                 .sum()
         })
 }
@@ -63,7 +63,7 @@ fn counter_values_by_label(
                         .iter()
                         .find(|label| label.name() == label_name)
                         .unwrap_or_else(|| panic!("{name} sample lacks {label_name}"));
-                    (label.value().to_string(), metric.get_counter().value())
+                    (label.value().to_string(), metric.get_counter().get_value())
                 })
                 .collect()
         })
@@ -2208,7 +2208,7 @@ fn zero_byte_limit_overflows_all_real_recorders_once_per_family() {
         overflow
             .get_metric()
             .iter()
-            .all(|metric| (metric.get_counter().value() - 1.0).abs() < f64::EPSILON),
+            .all(|metric| (metric.get_counter().get_value() - 1.0).abs() < f64::EPSILON),
         "sticky overflow must increment each family exactly once"
     );
 }
@@ -2425,7 +2425,7 @@ async fn timer_releases_never_established_waiter_and_records_reason() {
         .iter()
         .find(|family| family.name() == "bgp_selection_deferral_timeouts_total")
         .unwrap();
-    assert!((timeout.get_metric()[0].get_counter().value() - 1.0).abs() < f64::EPSILON);
+    assert!((timeout.get_metric()[0].get_counter().get_value() - 1.0).abs() < f64::EPSILON);
 
     drop(tx);
     handle.await.unwrap();

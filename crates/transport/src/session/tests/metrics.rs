@@ -31,7 +31,7 @@ fn gauge_rows(metrics: &BgpMetrics, family_name: &str) -> HashMap<String, f64> {
                     .then(|| {
                         (
                             labels.get("state").copied().unwrap_or("").to_string(),
-                            metric.get_gauge().value(),
+                            metric.get_gauge().get_value(),
                         )
                     })
                 })

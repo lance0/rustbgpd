@@ -596,14 +596,14 @@ async fn rib_out_tap_full_channel_increments_source_drop_counter() {
         .gather()
         .iter()
         .filter(|f| f.name() == "bmp_source_drops_total")
-        .flat_map(|f| f.metric.iter())
+        .flat_map(|f| f.get_metric().iter())
         .map(|m| {
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
             )]
-            let v = m.counter.value() as u64;
+            let v = m.get_counter().get_value() as u64;
             v
         })
         .sum();

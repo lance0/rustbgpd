@@ -291,7 +291,7 @@ fn bmp_drop_count(metrics: &BgpMetrics, family_name: &str, labels: &[(&str, &str
                     .iter()
                     .any(|label| label.name() == *name && label.value() == *value)
             }) {
-                return metric.get_counter().value();
+                return metric.get_counter().get_value();
             }
         }
     }

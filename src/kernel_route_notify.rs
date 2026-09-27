@@ -411,14 +411,14 @@ mod tests {
                 .find(|family| family.name() == "bgp_netlink_subscription_overruns_total")
                 .expect("netlink overrun metric registered");
             let observed: std::collections::BTreeMap<_, _> = family
-                .metric
+                .get_metric()
                 .iter()
                 .map(|metric| {
                     assert_eq!(metric.get_label().len(), 1, "only actor label");
                     assert_eq!(metric.get_label()[0].name(), "actor");
                     (
                         metric.get_label()[0].value().to_owned(),
-                        metric.get_counter().value(),
+                        metric.get_counter().get_value(),
                     )
                 })
                 .collect();

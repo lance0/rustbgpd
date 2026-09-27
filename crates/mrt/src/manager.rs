@@ -257,14 +257,19 @@ mod tests {
             .and_then(|mut f| {
                 f.take_metric().into_iter().find(|m| match label {
                     None => true,
-                    Some((k, v)) => m.label.iter().any(|l| l.name() == k && l.value() == v),
+                    Some((k, v)) => m
+                        .get_label()
+                        .iter()
+                        .any(|l| l.name() == k && l.value() == v),
                 })
             })
             .map_or(0, |m| {
-                if m.gauge.is_some() {
-                    m.gauge.value() as i64
+                // Counter families follow the `_total` naming convention;
+                // everything else sampled here is a gauge.
+                if name.ends_with("_total") {
+                    m.get_counter().get_value() as i64
                 } else {
-                    m.counter.value() as i64
+                    m.get_gauge().get_value() as i64
                 }
             })
     }

@@ -4113,7 +4113,7 @@ mod tests {
             .find(|family| family.name() == name)
             .and_then(|family| family.get_metric().first().cloned())
             .map_or(0.0_f64.to_bits(), |metric| {
-                metric.get_gauge().value().to_bits()
+                metric.get_gauge().get_value().to_bits()
             })
     }
 
@@ -4137,13 +4137,7 @@ mod tests {
                     })
                     .cloned()
             })
-            .and_then(|metric| {
-                metric
-                    .get_counter()
-                    .as_ref()
-                    .map(prometheus::proto::Counter::value)
-            })
-            .unwrap_or(0.0)
+            .map_or(0.0, |metric| metric.get_counter().get_value())
     }
 
     fn assert_planning_failure_value(
@@ -5374,7 +5368,7 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == "bgp_fib_owned_state_persist_failures_total")
             .and_then(|family| family.get_metric().first().cloned())
-            .map_or(0.0, |metric| metric.get_counter().value())
+            .map_or(0.0, |metric| metric.get_counter().get_value())
     }
 
     #[tokio::test]

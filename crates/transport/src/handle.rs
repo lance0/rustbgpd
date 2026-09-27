@@ -3013,7 +3013,7 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == name)
             .and_then(|family| family.get_metric().first().cloned())
-            .map(|metric| metric.get_gauge().value())
+            .map(|metric| metric.get_gauge().get_value())
             .unwrap()
     }
 

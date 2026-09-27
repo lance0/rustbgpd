@@ -636,9 +636,9 @@ async fn route_event_history_gauges_track_depth_and_capacity() {
         .iter()
         .find(|family| family.name() == "bgp_route_event_history_capacity")
         .expect("capacity gauge registered")
-        .metric[0]
-        .gauge
-        .value();
+        .get_metric()[0]
+        .get_gauge()
+        .get_value();
     assert_eq!(
         capacity as i64,
         i64::try_from(ROUTE_EVENT_HISTORY_CAPACITY).unwrap()
@@ -668,9 +668,9 @@ async fn route_event_history_gauges_track_depth_and_capacity() {
         .iter()
         .find(|family| family.name() == "bgp_route_event_history_depth")
         .expect("depth gauge registered")
-        .metric[0]
-        .gauge
-        .value();
+        .get_metric()[0]
+        .get_gauge()
+        .get_value();
     assert_eq!(depth as i64, 3);
 
     drop(tx);
@@ -1047,7 +1047,7 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
         .expect("Adj-RIB-Out gauge family remains registered");
     for family in ADJ_RIB_OUT_FAMILIES {
         let observed = gauge
-            .metric
+            .get_metric()
             .iter()
             .find(|metric| {
                 metric
@@ -1061,7 +1061,7 @@ fn peer_up_initializes_every_adj_rib_out_family_series() {
             })
             .unwrap_or_else(|| panic!("PeerUp omitted the {family} Adj-RIB-Out series"))
             .get_gauge()
-            .value();
+            .get_value();
         assert!(
             observed.abs() < f64::EPSILON,
             "PeerUp initialized {family} to {observed}"
@@ -1110,7 +1110,7 @@ fn commit_family_gauge_fixture(
         .expect("Adj-RIB-Out gauge family remains registered");
     let values = std::array::from_fn(|index| {
         gauge
-            .metric
+            .get_metric()
             .iter()
             .find(|metric| {
                 metric
@@ -1128,7 +1128,7 @@ fn commit_family_gauge_fixture(
                 )
             })
             .get_gauge()
-            .value() as i64
+            .get_value() as i64
     });
     (manager.adj_rib_out_commit_stats, values)
 }
@@ -1198,7 +1198,7 @@ fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
         .expect("Adj-RIB-Out gauge family remains registered");
     for family in families {
         let observed = gauge
-            .metric
+            .get_metric()
             .iter()
             .find(|metric| {
                 metric
@@ -1212,7 +1212,7 @@ fn peer_down_zeroes_all_adj_rib_out_family_gauges() {
             })
             .unwrap_or_else(|| panic!("PeerDown removed the {family} Adj-RIB-Out series"))
             .get_gauge()
-            .value();
+            .get_value();
         assert!(
             observed.abs() < f64::EPSILON,
             "PeerDown left the {family} Adj-RIB-Out gauge at {observed}"
@@ -1273,7 +1273,7 @@ fn graceful_restart_zeroes_all_adj_rib_out_family_gauges() {
         .expect("Adj-RIB-Out gauge family remains registered");
     for family in families {
         let observed = gauge
-            .metric
+            .get_metric()
             .iter()
             .find(|metric| {
                 metric
@@ -1287,7 +1287,7 @@ fn graceful_restart_zeroes_all_adj_rib_out_family_gauges() {
             })
             .unwrap_or_else(|| panic!("graceful restart removed the {family} Adj-RIB-Out series"))
             .get_gauge()
-            .value();
+            .get_value();
         assert!(
             observed.abs() < f64::EPSILON,
             "graceful restart left the {family} Adj-RIB-Out gauge at {observed}"
@@ -1336,7 +1336,7 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
         .iter()
         .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.metric[0].gauge.value();
+    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
     assert_eq!(sample as i64, 1);
 
     // PeerDown should zero the gauge
@@ -1360,7 +1360,7 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
         .iter()
         .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.metric[0].gauge.value();
+    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
     assert_eq!(sample as i64, 0);
 
     drop(tx);
@@ -1407,7 +1407,7 @@ async fn loc_rib_gauge_tracks_best() {
         .iter()
         .find(|f| f.name() == "bgp_rib_loc_prefixes")
         .expect("bgp_loc_rib_prefixes metric not found");
-    let sample = loc_gauge.metric[0].gauge.value();
+    let sample = loc_gauge.get_metric()[0].get_gauge().get_value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);
@@ -1478,7 +1478,7 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         .iter()
         .find(|f| f.name() == "bgp_rib_adj_out_prefixes")
         .expect("bgp_adj_rib_out_prefixes metric not found");
-    let sample = out_gauge.metric[0].gauge.value();
+    let sample = out_gauge.get_metric()[0].get_gauge().get_value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);

@@ -7,8 +7,8 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str) -> f64 {
         .gather()
         .iter()
         .find(|family| family.name() == name)
-        .and_then(|family| family.metric.first())
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .and_then(|family| family.get_metric().first())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 /// A still-gated BGP-LS family must not influence already-released unicast
@@ -126,7 +126,7 @@ async fn peer_up_registers_orr_vantage_and_teardown_clears() {
         .find(|family| family.name() == "bgp_orr_input_objects")
         .expect("ORR input diagnostic metric registered");
     let classifications: std::collections::BTreeSet<_> = input_family
-        .metric
+        .get_metric()
         .iter()
         .map(|metric| {
             assert_eq!(metric.get_label().len(), 1, "only classification label");

@@ -1639,7 +1639,9 @@ fn regroups_total(metrics: &BgpMetrics) -> f64 {
         .gather()
         .iter()
         .find(|family| family.name() == "bgp_update_group_regroups_total")
-        .map_or(0.0, |family| family.metric[0].get_counter().value())
+        .map_or(0.0, |family| {
+            family.get_metric()[0].get_counter().get_value()
+        })
 }
 
 fn policy_transition_outcome_total(metrics: &BgpMetrics, outcome: &str) -> f64 {
@@ -1649,14 +1651,14 @@ fn policy_transition_outcome_total(metrics: &BgpMetrics, outcome: &str) -> f64 {
         .iter()
         .find(|family| family.name() == "bgp_rib_policy_transition_total")
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 metric
-                    .label
+                    .get_label()
                     .iter()
                     .any(|label| label.name() == "outcome" && label.value() == outcome)
             })
         })
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 /// Epsilon-compare a gauge/counter reading (clippy `float_cmp`).
@@ -8075,16 +8077,16 @@ fn readiness_wait_records_elapsed_time_at_both_serving_seams() {
         .into_iter()
         .find(|family| family.name() == "bgp_rib_readiness_query_wait_seconds")
         .unwrap();
-    assert_eq!(family.metric.len(), 3);
-    for metric in &family.metric {
+    assert_eq!(family.get_metric().len(), 3);
+    for metric in family.get_metric() {
         let histogram = metric.get_histogram();
         let seam = metric.get_label()[0].value();
         if seam == "selection_release" {
-            assert_eq!(histogram.sample_count(), 0, "no selection release ran");
+            assert_eq!(histogram.get_sample_count(), 0, "no selection release ran");
             continue;
         }
-        assert_eq!(histogram.sample_count(), 1, "{seam} served one query");
-        assert!(histogram.sample_sum() >= 0.250);
+        assert_eq!(histogram.get_sample_count(), 1, "{seam} served one query");
+        assert!(histogram.get_sample_sum() >= 0.250);
         assert_eq!(
             histogram
                 .get_bucket()

@@ -1089,7 +1089,7 @@ fn config_transaction_lifecycle_metric(
         .iter()
         .find(|family| family.name() == "bgp_config_transaction_lifecycle_total")
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 let label_value = |name| {
                     metric
                         .get_label()
@@ -1101,7 +1101,7 @@ fn config_transaction_lifecycle_metric(
                     && label_value("outcome") == Some(outcome)
             })
         })
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 fn assert_config_transaction_lifecycle_metric(

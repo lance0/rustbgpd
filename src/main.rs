@@ -6797,7 +6797,7 @@ mod tests {
                     .iter()
                     .any(|label| label.value() == cache)
             })
-            .map(|metric| metric.get_gauge().value())
+            .map(|metric| metric.get_gauge().get_value())
     }
 
     async fn read_rtr_pdu(stream: &mut tokio::net::TcpStream) -> rustbgpd_rpki::rtr_codec::RtrPdu {
@@ -7521,7 +7521,7 @@ mod tests {
                 0.0
             };
             assert!(
-                (metric.get_counter().value() - expected).abs() < f64::EPSILON,
+                (metric.get_counter().get_value() - expected).abs() < f64::EPSILON,
                 "unexpected {outcome} SIGHUP outcome count"
             );
         }
