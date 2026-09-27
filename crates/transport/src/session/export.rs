@@ -16,12 +16,12 @@ use super::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::fast_hash::{FastMap, FastState};
 use rustbgpd_rib::{
     ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
     ExactExportResult, ExactExportSnapshot,
 };
 use rustbgpd_wire::EncodeError;
-use rustc_hash::FxHashMap;
 
 /// Immutable inputs that determine one established session's outbound wire
 /// representation. A complete replacement is published for runtime changes;
@@ -1079,7 +1079,7 @@ impl SessionExportProfile {
         route: &Route,
         next_hop_override: Option<&rustbgpd_policy::NextHopAction>,
         attrs: PreparedUnicastAttributes,
-        length_cache: &mut FxHashMap<UnicastProbeShapeKey, ExactExportResult>,
+        length_cache: &mut FastMap<UnicastProbeShapeKey, ExactExportResult>,
     ) -> Result<ExactExportResult, ExactExportError> {
         let candidate = match self.finish_unicast_candidate(route, next_hop_override, attrs) {
             Ok(candidate) => candidate,
@@ -1632,7 +1632,7 @@ pub(super) struct PreparedAttrCacheKey {
 
 #[derive(Default)]
 pub(super) struct PreparedAttrCache {
-    entries: FxHashMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
+    entries: FastMap<PreparedAttrCacheKey, PreparedUnicastAttributes>,
     #[cfg(debug_assertions)]
     snapshot: Option<(u64, u64)>,
 }
@@ -2036,8 +2036,8 @@ impl ExactExportSnapshot for SessionExportProfile {
         // real message build; equal-shape candidates reuse its exact
         // result. Errors are never cached: they are the rare aborting case
         // and stay on the fully built path.
-        let mut length_cache: FxHashMap<UnicastProbeShapeKey, ExactExportResult> =
-            FxHashMap::with_capacity_and_hasher(candidates.len(), rustc_hash::FxBuildHasher);
+        let mut length_cache: FastMap<UnicastProbeShapeKey, ExactExportResult> =
+            FastMap::with_capacity_and_hasher(candidates.len(), FastState::default());
         checkpoint();
         let local_ipv4 = self.local_ipv4();
         let results = candidates

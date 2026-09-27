@@ -38,11 +38,11 @@ use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, PolicyAction, PolicyChain, chain_default_permit_label};
 use rustbgpd_wire::{Afi, BgpRole, LargeCommunity, Prefix, Safi, VpnAddressFamily, VpnRouteKey};
-use rustc_hash::FxHashMap;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
 use crate::attr_set::AttrSet;
+use crate::fast_hash::{FastMap, FastState};
 
 #[cfg(test)]
 use rustbgpd_wire::ExtendedCommunity;
@@ -422,8 +422,8 @@ impl UpdateGroupRegistry {
 /// for a member whose VPN state is group-owned — the VPN view.
 #[derive(Debug, Default)]
 pub(in crate::manager) struct RegroupBaseline {
-    pub(in crate::manager) unicast: FxHashMap<(Prefix, u32), Route>,
-    pub(in crate::manager) vpn: FxHashMap<VpnRouteKey, VpnRibRoute>,
+    pub(in crate::manager) unicast: FastMap<(Prefix, u32), Route>,
+    pub(in crate::manager) vpn: FastMap<VpnRouteKey, VpnRibRoute>,
 }
 
 /// Preserve existing wire values on overlap without growing a populated bucket
@@ -510,7 +510,7 @@ pub(in crate::manager) struct GroupRibOut {
     pub(in crate::manager) table: AdjRibOut,
     /// Next-hop-override flags for staged entries (`Some` values only)
     /// so joins/replays don't re-run policy to recover them.
-    nh_overrides: FxHashMap<(Prefix, u32), NextHopAction>,
+    nh_overrides: FastMap<(Prefix, u32), NextHopAction>,
     /// Captured pre-policy SOURCE attributes per staged entry for a policy
     /// that can modify source-control communities (entries only for sources
     /// carrying communities; the `Arc` is shared with the Adj-RIB-In/Loc-RIB
@@ -518,7 +518,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// staged route: policy may have stripped a control community (deciding
     /// post-policy leaks a source-prohibited route) or added one (spurious
     /// steering). Proven passthrough groups leave this map empty.
-    source_attrs: FxHashMap<(Prefix, u32), Arc<AttrSet>>,
+    source_attrs: FastMap<(Prefix, u32), Arc<AttrSet>>,
     /// Group-uniform proof that export policy preserves the standard and
     /// large communities used by RFC 7947 control. Such groups derive the
     /// control input from their staged route and keep `source_attrs` empty.
@@ -527,7 +527,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// count synthesis (`len − own`), one slot per staged family
     /// (v4-unicast, v6-unicast, vpnv4, vpnv6) for the BMP stat-17
     /// family counts.
-    source_counts: FxHashMap<IpAddr, [usize; 4]>,
+    source_counts: FastMap<IpAddr, [usize; 4]>,
     /// Running column sums of `source_counts`, so a per-family count stays
     /// O(1) instead of walking every source. Maintained at the only two
     /// sites that move a slot.
@@ -552,7 +552,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// readers restamp the concrete member. Inner maps are never left
     /// empty ([`Self::record_policy_filtered`] removes whole prefixes),
     /// so outer emptiness remains "no denials".
-    policy_filtered: FxHashMap<Prefix, FxHashMap<(IpAddr, u32), Option<PolicyLabel>>>,
+    policy_filtered: FastMap<Prefix, FastMap<(IpAddr, u32), Option<PolicyLabel>>>,
     /// Default-Permit label for every staged unicast and VPN entry.
     /// Export-chain identity is group-uniform and immutable, and a chain
     /// Permit is always attributed to the shared chain sentinel, so retaining
@@ -567,9 +567,9 @@ pub(in crate::manager) struct GroupRibOut {
     /// parity. The extended communities let an RTC member's replay skip
     /// denials its Φ would have RT-gated before the eval (the per-peer
     /// path's RT gate precedes the policy evaluation).
-    vpn_policy_denied: FxHashMap<VpnRouteKey, VpnDenialRecord>,
+    vpn_policy_denied: FastMap<VpnRouteKey, VpnDenialRecord>,
     /// Persistent RFC 9234 denial residue for join/resync diagnostics.
-    otc_blocked: FxHashMap<(Prefix, u32), Route>,
+    otc_blocked: FastMap<(Prefix, u32), Route>,
     /// Count aggregates beside `otc_blocked`, per unicast family
     /// `[v4, v6]`: total blocked staged winners plus their per-source
     /// split — the winner term of the Decision 4 count synthesis's
@@ -580,28 +580,28 @@ pub(in crate::manager) struct GroupRibOut {
     /// the table — their residue names never-staged routes, so
     /// subtracting it would double-count.
     otc_blocked_totals: [usize; 2],
-    otc_blocked_sources: FxHashMap<IpAddr, [usize; 2]>,
+    otc_blocked_sources: FastMap<IpAddr, [usize; 2]>,
     /// Lane sibling of `otc_blocked_sources`: per-winner-source counts
     /// of lane entries whose runner-up is OTC-blocked toward this
     /// group — the substitution term of the same subtraction (the
     /// member sourcing the winner receives the runner-up, so ITS
     /// suppressed slot is the lane's, never the winner's). Maintained
     /// entirely by [`Self::apply_lane`], exactly like `lane_counts`.
-    lane_otc_blocked_counts: FxHashMap<IpAddr, [usize; 2]>,
+    lane_otc_blocked_counts: FastMap<IpAddr, [usize; 2]>,
     /// Per-member advertised VPN counts `[vpnv4, vpnv6]`, maintained
     /// ONLY for RTC-negotiated groups (Φ makes the counts non-derivable
     /// from `source_counts`; design §2.4) at the emit seams: staging
     /// emit, membership delta, join, and resync recompute-by-walk. A
     /// dirty window may drift them; the member's resync recompute
     /// restores exactness. Non-RTC groups keep the O(1) synthesis.
-    vpn_member_counts: FxHashMap<IpAddr, [i64; 2]>,
+    vpn_member_counts: FastMap<IpAddr, [i64; 2]>,
     /// ADR-0126 Decision 3 exception lane: the per-prefix runner-up
     /// sidecar of a per-client-best group. Populated only where a
     /// distinct-source permitted runner-up exists — O(overlapped
     /// prefixes), never per member — and recomputed alongside the
     /// winner on every staging of the prefix. Always empty for plain
     /// groups.
-    runner_up: FxHashMap<Prefix, RunnerUp>,
+    runner_up: FastMap<Prefix, RunnerUp>,
     /// ADR-0126 Decision 4 count residue: per-winner-source lane-entry
     /// counts `[v4, v6]` — how many lane entries currently substitute
     /// for member m (m receives the runner-up exactly where it sourced
@@ -612,7 +612,7 @@ pub(in crate::manager) struct GroupRibOut {
     /// by [`Self::apply_lane`], zeroed rows dropped (the
     /// `inc_source`/`dec_source` hygiene). Always empty for plain
     /// groups.
-    pub(in crate::manager) lane_counts: FxHashMap<IpAddr, [usize; 2]>,
+    pub(in crate::manager) lane_counts: FastMap<IpAddr, [usize; 2]>,
     // Group-uniform staging inputs, snapshot at group creation from the
     // first member (all members are key-equal by construction; a key
     // change moves peers to a different group, so these never mutate).
@@ -714,25 +714,25 @@ impl GroupRibOut {
             .map(|_| chain_default_permit_label());
         Self {
             table: AdjRibOut::with_capacity(GROUP_FILTERED_PLACEHOLDER, capacity),
-            nh_overrides: FxHashMap::default(),
-            source_attrs: FxHashMap::default(),
+            nh_overrides: FastMap::default(),
+            source_attrs: FastMap::default(),
             source_control_passthrough,
-            source_counts: FxHashMap::default(),
+            source_counts: FastMap::default(),
             family_totals: [0; 4],
             tombstones: HashSet::new(),
             vpn_tombstones: HashSet::new(),
             members: HashSet::new(),
             dirty_members: HashSet::new(),
-            policy_filtered: FxHashMap::default(),
+            policy_filtered: FastMap::default(),
             permit_policy_label,
-            vpn_policy_denied: FxHashMap::default(),
-            otc_blocked: FxHashMap::default(),
+            vpn_policy_denied: FastMap::default(),
+            otc_blocked: FastMap::default(),
             otc_blocked_totals: [0; 2],
-            otc_blocked_sources: FxHashMap::default(),
-            lane_otc_blocked_counts: FxHashMap::default(),
-            vpn_member_counts: FxHashMap::default(),
-            runner_up: FxHashMap::default(),
-            lane_counts: FxHashMap::default(),
+            otc_blocked_sources: FastMap::default(),
+            lane_otc_blocked_counts: FastMap::default(),
+            vpn_member_counts: FastMap::default(),
+            runner_up: FastMap::default(),
+            lane_counts: FastMap::default(),
             export_chain,
             is_ebgp,
             interpret_rfc1997,
@@ -774,8 +774,7 @@ impl GroupRibOut {
         });
         // Reserve a fresh table before moving entries: in-place growth
         // rehashes the complete route map without an actor checkpoint.
-        let mut incoming =
-            FxHashMap::with_capacity_and_hasher(blocked.len(), rustc_hash::FxBuildHasher);
+        let mut incoming = FastMap::with_capacity_and_hasher(blocked.len(), FastState::default());
         checkpoint();
         for route in blocked {
             checkpoint();
@@ -1374,7 +1373,7 @@ impl GroupRibOut {
         member: IpAddr,
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
-    ) -> FxHashMap<(Prefix, u32), Route> {
+    ) -> FastMap<(Prefix, u32), Route> {
         self.member_view_snapshot_with_checkpoint(member, rs_control, rejected, &mut |_| {})
     }
 
@@ -1384,11 +1383,11 @@ impl GroupRibOut {
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
-    ) -> FxHashMap<(Prefix, u32), Route> {
+    ) -> FastMap<(Prefix, u32), Route> {
         use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
         checkpoint(true);
         let mut snapshot =
-            FxHashMap::with_capacity_and_hasher(self.table.len(), rustc_hash::FxBuildHasher);
+            FastMap::with_capacity_and_hasher(self.table.len(), FastState::default());
         for entry in self.table.iter().filter_map(|staged| {
             checkpoint(false);
             let key = (staged.prefix, staged.path_id);
@@ -1427,7 +1426,7 @@ impl GroupRibOut {
         member: IpAddr,
         filter: Option<&RtcMembership>,
         rejected: &HashSet<ExactExportKey>,
-    ) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
+    ) -> FastMap<VpnRouteKey, VpnRibRoute> {
         self.member_vpn_view_snapshot_with_checkpoint(member, filter, rejected, &mut |_| {})
     }
 
@@ -1437,10 +1436,10 @@ impl GroupRibOut {
         filter: Option<&RtcMembership>,
         rejected: &HashSet<ExactExportKey>,
         checkpoint: &mut impl FnMut(bool),
-    ) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
+    ) -> FastMap<VpnRouteKey, VpnRibRoute> {
         checkpoint(true);
         let mut snapshot =
-            FxHashMap::with_capacity_and_hasher(self.table.vpn_len(), rustc_hash::FxBuildHasher);
+            FastMap::with_capacity_and_hasher(self.table.vpn_len(), FastState::default());
         for route in self.table.iter_vpn().filter(|route| {
             checkpoint(false);
             route.peer != member
@@ -1514,7 +1513,7 @@ impl GroupRibOut {
                 .iter()
                 .map(|prefix| {
                     checkpoint();
-                    self.policy_filtered.get(prefix).map_or(0, FxHashMap::len)
+                    self.policy_filtered.get(prefix).map_or(0, FastMap::len)
                 })
                 .sum()
         } else {
@@ -1532,7 +1531,7 @@ impl GroupRibOut {
         };
         let mut restamped = Vec::with_capacity(capacity);
         let mut collect = |prefix: Prefix,
-                           denials: &FxHashMap<(IpAddr, u32), Option<PolicyLabel>>,
+                           denials: &FastMap<(IpAddr, u32), Option<PolicyLabel>>,
                            checkpoint: &mut dyn FnMut()| {
             checkpoint();
             restamped.extend(

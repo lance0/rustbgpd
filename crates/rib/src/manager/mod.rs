@@ -300,11 +300,11 @@ enum PrefixAnnouncers {
 
 #[derive(Default)]
 struct UnicastPrefixPeers {
-    prefixes: rustc_hash::FxHashMap<Prefix, PrefixAnnouncers>,
+    prefixes: crate::fast_hash::FastMap<Prefix, PrefixAnnouncers>,
     spills: Vec<smallvec::SmallVec<[AdjRibInEpoch; 2]>>,
     free_spills: Vec<u32>,
     peer_epochs: HashMap<IpAddr, AdjRibInEpoch>,
-    epoch_peers: rustc_hash::FxHashMap<AdjRibInEpoch, IpAddr>,
+    epoch_peers: crate::fast_hash::FastMap<AdjRibInEpoch, IpAddr>,
     next_epoch: u32,
 }
 

@@ -32,6 +32,8 @@ pub mod event;
 pub mod event_sink;
 /// The RIB's published export-policy counter roster (ADR-0136).
 pub mod export_roster;
+/// The route-bearing maps' hasher aliases.
+mod fast_hash;
 /// Received `FlowSpec` feasibility against the unicast RIB.
 mod flowspec_validation;
 /// Loc-RIB: best route per prefix.

@@ -2773,7 +2773,7 @@ pub enum RibUpdate {
         /// scope usable only when a prior distributed ASPA baseline exists.
         /// `None` requests full revalidation. The first installed table always
         /// revalidates fully regardless of this payload.
-        changed_customer_asns: Option<rustc_hash::FxHashSet<u32>>,
+        changed_customer_asns: Option<crate::fast_hash::AspaAsnSet>,
     },
     /// Inject a locally-originated `FlowSpec` route.
     InjectFlowSpec {

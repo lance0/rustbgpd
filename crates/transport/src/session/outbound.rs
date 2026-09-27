@@ -435,7 +435,7 @@ impl PeerSession {
 // enforced `max_prefixes` — so a collision chain is short-lived and
 // capped. A peer able to craft colliding attribute sets already has
 // strictly higher-impact vectors (churn flood, hijack).
-use rustc_hash::FxHashMap as HashMap;
+use crate::fast_hash::FastMap as HashMap;
 
 fn has_route_payload(update: &OutboundRouteUpdate) -> bool {
     !update.announce.is_empty()
@@ -472,9 +472,12 @@ struct HashedAttrGroupValue {
 }
 
 impl HashedAttrGroupValue {
-    fn new(value: AttrGroupValue) -> Self {
+    /// `hasher` must be the value map's own hasher. A seeded hasher gives
+    /// each instance its own seed, so a hash from any other instance would
+    /// never match a stored key and equal values would stop grouping.
+    fn new(value: AttrGroupValue, hasher: &impl std::hash::BuildHasher) -> Self {
         Self {
-            hash: std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, &value),
+            hash: hasher.hash_one(&value),
             value,
         }
     }
@@ -547,17 +550,14 @@ impl AttrGroupIndex {
             }
             Some((first, first_idx)) => {
                 if self.by_value.is_empty() {
-                    self.by_value
-                        .insert(HashedAttrGroupValue::new(first.clone()), *first_idx);
+                    let key = HashedAttrGroupValue::new(first.clone(), self.by_value.hasher());
+                    self.by_value.insert(key, *first_idx);
                 }
-                *self
-                    .by_value
-                    .entry(HashedAttrGroupValue::new((
-                        Arc::clone(attrs),
-                        next_hop,
-                        link_local_next_hop,
-                    )))
-                    .or_insert(next)
+                let key = HashedAttrGroupValue::new(
+                    (Arc::clone(attrs), next_hop, link_local_next_hop),
+                    self.by_value.hasher(),
+                );
+                *self.by_value.entry(key).or_insert(next)
             }
         };
         self.by_ptr.insert(key, idx);
