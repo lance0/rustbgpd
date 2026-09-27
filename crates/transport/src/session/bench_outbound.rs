@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rustbgpd_fsm::NegotiatedSession;
-use rustbgpd_rib::{OutboundRouteUpdate, Route};
+use rustbgpd_rib::{OutboundRouteUpdate, Route, SharedGroupEncode};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::mpsc;
 
 use super::{PeerSession, SessionIdentity};
@@ -98,5 +98,75 @@ impl OutboundEncodeBench {
         );
         while self.bulk_rx.try_recv().is_ok() {}
         elapsed
+    }
+}
+
+impl OutboundEncodeBench {
+    /// Deliver one envelope through the session's real outbound cursor
+    /// (shared-encode election included) and return the time spent in the
+    /// session alone; the writer queue is drained between admission steps,
+    /// outside the returned duration.
+    fn deliver(&mut self, update: OutboundRouteUpdate) -> std::time::Duration {
+        let start = std::time::Instant::now();
+        self.session.handle_outbound_route_update(update);
+        let mut elapsed = start.elapsed();
+        while self.session.pending_outbound.is_some() {
+            while self.bulk_rx.try_recv().is_ok() {}
+            let start = std::time::Instant::now();
+            self.session.advance_pending_outbound();
+            elapsed += start.elapsed();
+        }
+        assert!(
+            self.session.writer_bulk_tx.is_some(),
+            "bench writer queue saturated"
+        );
+        while self.bulk_rx.try_recv().is_ok() {}
+        elapsed
+    }
+}
+
+/// Identical update-group members receiving one grouped distribution pass:
+/// the same announce inventory behind one shared-encode cell, plus the
+/// same unicast withdrawals.
+pub struct OutboundGroupBench {
+    members: Vec<OutboundEncodeBench>,
+}
+
+impl OutboundGroupBench {
+    /// Build `members` sessions, each with a `queue`-deep writer queue.
+    #[must_use]
+    pub fn new(members: usize, queue: usize) -> Self {
+        Self {
+            members: (0..members)
+                .map(|_| OutboundEncodeBench::new(queue))
+                .collect(),
+        }
+    }
+
+    /// Deliver one pass to every member and return the summed session time.
+    ///
+    /// # Panics
+    ///
+    /// If a member's writer queue saturated and the session tore down.
+    pub fn send(
+        &mut self,
+        announce: &Arc<[Route]>,
+        withdraw: &[(Prefix, u32)],
+    ) -> std::time::Duration {
+        let shared = Arc::new(SharedGroupEncode::default());
+        self.members
+            .iter_mut()
+            .map(|member| {
+                let update = OutboundRouteUpdate {
+                    exact_export_snapshot: Some(member.session.publish_export_profile()),
+                    announce: Arc::clone(announce),
+                    next_hop_override: vec![None; announce.len()].into(),
+                    withdraw: withdraw.to_vec(),
+                    shared_group_encode: Some(Arc::clone(&shared)),
+                    ..OutboundRouteUpdate::default()
+                };
+                member.deliver(update)
+            })
+            .sum()
     }
 }

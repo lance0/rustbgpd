@@ -201,13 +201,15 @@ impl Drop for EncoderGuard<'_> {
     }
 }
 
-/// Whether an envelope is shaped like a clean group-transition fanout:
-/// unicast announcements only, everything else empty. Anything richer keeps
-/// the ordinary path, which handles every payload kind.
+/// Whether an envelope is shaped like a grouped unicast fanout: unicast
+/// announcements, optionally preceded by unicast withdrawals, everything
+/// else empty. Withdrawals stay per member and go out first through the
+/// ordinary cursor (a failover pass mixes them with displacing
+/// announcements); only the announce inventory is shared. Anything richer
+/// keeps the ordinary path, which handles every payload kind.
 fn shared_encode_eligible(update: &OutboundRouteUpdate) -> bool {
     update.shared_group_encode.is_some()
         && !update.announce.is_empty()
-        && update.withdraw.is_empty()
         && update.end_of_rib.is_empty()
         && update.refresh_markers.is_empty()
         && update.flowspec_announce.is_empty()
@@ -538,8 +540,11 @@ impl PeerSession {
         order.sort_unstable_by_key(|&i| update.announce[i].peer);
         // Keep publishing after this member runs out of writer capacity.
         // Its first unsent chunk becomes the same pending cursor consumers use;
-        // the group's publication cannot depend on one member's reader.
-        let mut own_send_healthy = true;
+        // the group's publication cannot depend on one member's reader. A
+        // member with its own withdrawals sends none of its copy here: they
+        // must precede its announcements, so it streams from chunk 0 once
+        // the ordinary cursor has admitted them.
+        let mut own_send_healthy = update.withdraw.is_empty();
         let mut next = 0;
         let mut sent: u64 = 0;
         let mut idx = 0;
