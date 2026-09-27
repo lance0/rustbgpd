@@ -31,13 +31,40 @@ snapshot_allocation diagnostic --candidate --shape <shape> --commit <sha> --outp
 taskset -c <core> snapshot_allocation timing --candidate --shape <shape> --commit <sha> --output <file>
 ```
 
-`--candidate` selects the instrument's bounded top-level growth assertion,
-which both arms satisfy. It does not name the arm under test. The arm is the
-`arm` field added to each row of `timing.jsonl` and `diagnostic.jsonl`.
+## Recorded fields
+
+The instrument writes one JSON object per sample (`schema_version` 2) with
+these fields: `schema_version`, `variant`, `commit`, `mode`, `shape`, `smoke`,
+`warmup_count`, `sample_index`, `path_count`, `prefix_count`, `source_count`,
+`output_len_bytes`, `output_capacity_bytes`, `decoded_entry_count`,
+`elapsed_ns`, `raw_sha256`, `semantic_sha256`, `allocator`, `growth` and
+`growth_path_assertion`.
+
+Both arms ran with `--candidate`, so every row records `"variant":"candidate"`.
+That flag selects the instrument's bounded top-level growth assertion, which
+both arms satisfy; it does not identify the arm. **The arm is identified by
+`commit`:** `660a2388af25ea4122f7efcc4214f5807ef4a4aa` is the control and
+`573db05e055538067a0a0459a3989105a67ca188` is the candidate.
+
+The committed files are the instrument's rows, post-processed as follows.
+Every instrument field and value is unchanged:
+
+- **`timing.jsonl`:** the 32 per-run output files (4 blocks × 4 slots × 2
+  shapes), concatenated in execution order. Three fields were added to each
+  row:
+  - `run_order`: 1–32, the position of the run in execution order;
+  - `block`: 1–4, the ABBA block;
+  - `arm`: `control` or `candidate`, derived from `commit`.
+- **`diagnostic.jsonl`:** the four diagnostic output files (control then
+  candidate, `ixp-700` then `dual-full-feed`), concatenated. An `arm` field
+  derived from `commit` was added to each row.
+- Rows were rewritten with sorted keys and compact separators, so key order
+  differs from the instrument's output.
 
 ## Results
 
-**Allocator activity** (`diagnostic.jsonl`, one run per arm and shape):
+**Allocator activity** (`diagnostic.jsonl`, one run per arm and shape; the
+tables use the `arm` column derived from `commit`):
 
 | Shape | Counter | Control | Candidate | Change |
 | --- | --- | ---: | ---: | ---: |
