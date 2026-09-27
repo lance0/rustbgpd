@@ -137,7 +137,7 @@ the resulting immutable image digest, and the bgperf2 `git rev-parse HEAD` (or
 an exact packaged version). A mutable image tag is not artifact identity.
 
 Use the maintained fork `https://github.com/lance0/bgperf2` at
-`<BGPERF2_FORK_COMMIT: set to the merged sync commit before publishing>` or a
+`642a17746e7313deee6895f9ed57c685f9ecb019` or a
 later commit. Older adapter pins, including the one named in dated receipts,
 render the retired `enforcement = "legacy"` gRPC setting, which rustbgpd v0.63
 and later refuse at boot. From the bgperf2 checkout, with `RUSTBGPD_SOURCE`
