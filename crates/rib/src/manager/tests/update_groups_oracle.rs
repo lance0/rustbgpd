@@ -290,10 +290,13 @@ pub(super) struct NormMsg {
 }
 
 fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
+    // Transport drops the receiving member's own routes from a shared payload
+    // before encoding; the normalized stream is what reaches the wire.
     let mut announce: Vec<_> = update
         .announce
         .iter()
         .enumerate()
+        .filter(|(_, r)| update.announce_source_exclusion != Some(r.peer))
         .map(|(i, r)| {
             (
                 r.prefix,
@@ -343,6 +346,52 @@ fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
 }
 
 pub(super) type Streams = BTreeMap<IpAddr, Vec<NormMsg>>;
+
+/// `normalize` models transport's own-source exclusion: the excluded
+/// member's routes vanish, and every surviving route keeps the next-hop
+/// override at its original index, including an override on a route
+/// that sits next to an excluded one.
+#[test]
+fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
+    let own = ibgp_route(pfx(1, 0), A, 100, vec![]);
+    let other = ibgp_route(pfx(2, 0), B, 100, vec![]);
+    let third = ibgp_route(pfx(3, 0), C, 100, vec![]);
+    let own_after = ibgp_route(pfx(4, 0), A, 100, vec![]);
+    let override_nh = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
+    let mut update = OutboundRouteUpdate {
+        announce: vec![own, other.clone(), third.clone(), own_after].into(),
+        next_hop_override: vec![
+            Some(NextHopAction::Self_),
+            Some(override_nh.clone()),
+            None,
+            Some(NextHopAction::Self_),
+        ]
+        .into(),
+        announce_source_exclusion: Some(IpAddr::V4(A)),
+        ..Default::default()
+    };
+    let expect = |route: &Route, nh: Option<NextHopAction>| {
+        (
+            route.prefix,
+            route.path_id,
+            route.next_hop,
+            route.peer,
+            route.attributes.to_vec(),
+            nh,
+        )
+    };
+    assert_eq!(
+        normalize(&update).announce,
+        vec![expect(&other, Some(override_nh)), expect(&third, None)],
+        "own-source routes dropped, overrides stay with their routes"
+    );
+    update.announce_source_exclusion = None;
+    assert_eq!(
+        normalize(&update).announce.len(),
+        4,
+        "no exclusion keeps every route"
+    );
+}
 
 /// Fold a stream into the final advertised state (announce replaces,
 /// withdraw removes; unknown withdraws are RFC 4271 no-ops).

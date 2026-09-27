@@ -1587,3 +1587,66 @@ async fn shared_group_withdrawals_do_not_wait_for_the_first_shared_chunk() {
     }
     assert_eq!(announcements, 1);
 }
+
+/// Two members stream the group's shared chunks after their own
+/// withdrawals: one is the source of a shared route (excluded from its own
+/// stream), the other sources nothing in the pass. With the rib-out tap on,
+/// every BMP `RouteMonitoring` PDU is byte-identical to the frame that
+/// reached the wire, in wire order: the withdrawal frame each member encoded
+/// locally and the shared chunks it streamed, whatever the frame partition.
+#[tokio::test]
+async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
+    let (announce, withdraw) = mixed_failover_pass();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let members = [
+        (Ipv4Addr::new(10, 44, 0, 2), true),
+        (Ipv4Addr::new(10, 44, 0, 9), false),
+    ];
+    for (excluded, sources_a_route) in members {
+        let (mut member, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        member.config.bmp_rib_out = true;
+        member.config.route_server_client = true;
+        let (client, mut wire) = connected_stream_pair().await;
+        member.test_install_stream(client);
+        member.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+        update.withdraw.clone_from(&withdraw);
+        member.test_drain_outbound(update).await;
+        assert!(
+            shared.cell.get().is_some(),
+            "the pass keeps a shared encoder"
+        );
+
+        let announced_frames = if sources_a_route { 2 } else { 3 };
+        let frames = read_raw_frames(&mut wire, 1 + announced_frames).await;
+        let first = parse_frame(&frames[0], false);
+        assert_eq!(
+            first.withdrawn.len(),
+            withdraw.len(),
+            "withdrawals go first"
+        );
+        assert!(first.announced.is_empty());
+        let announced: Vec<_> = frames[1..]
+            .iter()
+            .flat_map(|frame| parse_frame(frame, false).announced)
+            .map(|nlri| nlri.prefix)
+            .collect();
+        assert_eq!(announced.len(), announced_frames);
+        assert!(
+            announce
+                .iter()
+                .filter(|route| route.peer == IpAddr::V4(excluded))
+                .all(|route| !announced
+                    .iter()
+                    .any(|prefix| Prefix::V4(*prefix) == route.prefix)),
+            "a member never receives its own route from the shared stream"
+        );
+        let mirrored: Vec<Vec<u8>> = std::iter::from_fn(|| bmp_rx.try_recv().ok())
+            .map(|event| expect_rib_out_rm(event).to_vec())
+            .collect();
+        assert_eq!(
+            mirrored, frames,
+            "BMP rib-out must mirror the emitted frames byte for byte"
+        );
+    }
+}
