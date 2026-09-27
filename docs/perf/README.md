@@ -272,6 +272,9 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md`](artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md) | Unstated | Preflight-invalid and threshold-crossing attempts | Why those attempts were excluded | A retained result |
 | [`artifacts/attribute-layout-2026-08/README.md`](artifacts/attribute-layout-2026-08/README.md) | Unstated | 100k, 500k, and 900k structural rows plus a 200k-route bgperf2 result | The container-layout migration was rejected before a prototype | A live-byte A/B or throughput result |
 | [`artifacts/boxed-mp-path-attributes-2026-09/README.md`](artifacts/boxed-mp-path-attributes-2026-09/README.md) | Unstated | Structural rows, Criterion estimates, allocation counts, and DHAT owner summaries for the linked receipt | The retained evidence inventory | Unstated |
+| [`artifacts/boxed-mp-path-attributes-2026-09/codec-summary.md`](artifacts/boxed-mp-path-attributes-2026-09/codec-summary.md) | Unstated | Six-attempt wire-codec Criterion comparison summary | 12 improvements, 16 noise rows, and one confident regression (`update_parse_revised/ipv6_mp_add_path`) under the configured rule | Unstated |
+| [`artifacts/boxed-mp-path-attributes-2026-09/export-probe-summary.md`](artifacts/boxed-mp-path-attributes-2026-09/export-probe-summary.md) | Unstated | Six-attempt `mp_exact_export_probe` Criterion comparison summary | No confident regressions under the configured rule | Unstated |
+| [`artifacts/boxed-mp-path-attributes-2026-09/parse-ipv6-summary.md`](artifacts/boxed-mp-path-attributes-2026-09/parse-ipv6-summary.md) | Unstated | Six-attempt revised-parse follow-up comparison including the IPv6 typical rows | No confident regressions under the configured rule | Unstated |
 | [`artifacts/competitive-bgperf2-2026-07/README.md`](artifacts/competitive-bgperf2-2026-07/README.md) | 2026-07 | Four daemons, five fleet shapes, and three runs per shape | The retained inputs can recompute the linked receipt | Unstated |
 | [`artifacts/competitive-bgperf2-v0680-2026-08/README.md`](artifacts/competitive-bgperf2-v0680-2026-08/README.md) | Unstated | Eighty rows across five fixed import shapes | The retained row and image inventory | A full-table campaign |
 | [`artifacts/controller-injection-2026-09/README.md`](artifacts/controller-injection-2026-09/README.md) | Unstated | Eight completed controller-injection cells with passive-receiver counts, paginated reconciliation, and metrics snapshots | The retained result and evidence inventory for the linked receipt | Unstated |
@@ -312,6 +315,8 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/ixp-membership-churn-qualified-2026-09/README.md`](artifacts/ixp-membership-churn-qualified-2026-09/README.md) | Unstated | Fresh 702-member cell with initial-export readiness service and the corrected terminal lifecycle | The original passing qualification and its provenance | Unstated |
 | [`artifacts/known-path-accounting-2026-07/README.md`](artifacts/known-path-accounting-2026-07/README.md) | July 2026 | Eight admitted bgperf2 rows with sixteen BIRD logs | The manifest, route-count rows, and zero `RMT` log scan | Independent timeout evidence from bgperf2's structural field |
 | [`artifacts/memory-attribution-2026-08/README.md`](artifacts/memory-attribution-2026-08/README.md) | 2026-08 | Seven sealed coarse-to-single-commit campaigns | Preregistered manifests, result tables, verdicts, and identity seals | Unstated |
+| [`artifacts/mrt-attribute-scratch-2026-09/README.md`](artifacts/mrt-attribute-scratch-2026-09/README.md) | 2026-09 | `snapshot_allocation` encoder bench at `ixp-700` and `dual-full-feed`, control against one reused attribute buffer | Allocation calls halved and encode time 12.86% / 14.09% lower with byte-identical output | Daemon dump wall time, which also covers RIB collection and file I/O |
+| [`artifacts/mrt-ipv6-mp-reach-2026-09/README.md`](artifacts/mrt-ipv6-mp-reach-2026-09/README.md) | 2026-09 | `snapshot_allocation` encoder bench at `ipv6-full-feed`, `ixp-700`, and `dual-full-feed` across control, scratch, and stack-built MP_REACH arms | The stack-built MP_REACH removed 800,800 allocation calls and 3.36% of encode time on `ipv6-full-feed` over the scratch arm, with byte-identical output | Daemon dump wall time |
 | [`artifacts/mrt-snapshot-allocation-2026-07/README.md`](artifacts/mrt-snapshot-allocation-2026-07/README.md) | Unstated | Two-shape ordinary and warm-checkpoint allocation control | Feasibility evidence for a separately measured candidate | A future candidate's speedup or timing comparator |
 | [`artifacts/operator-query-wait-2026-09-12/README.md`](artifacts/operator-query-wait-2026-09-12/README.md) | 2026-09-12 | Two reloads of a 1,000-peer route server with 16 timed CLI calls | The exported operator query wait histogram reconciles with the observed calls | Soak qualification or a general operator deadline guarantee |
 | [`artifacts/outbound-prefix-limit-admission-compaction-2026-07/README.md`](artifacts/outbound-prefix-limit-admission-compaction-2026-07/README.md) | Unstated | One cell per revision and fleet size through 100 members and 400,000 IPv4 routes | The acceptance allocator delta and behavior summary | Exact retained-heap ownership, run variance, or larger-shape extrapolation |
@@ -362,10 +367,16 @@ from that file; a directory name does not fill a missing date.
 
 ## Metadata gaps
 
-The index covers all 133 pre-existing Markdown files: 60 primary records and
-73 supporting records. Supporting artifacts often rely on their parent receipt
-for context; this index deliberately leaves their own missing metadata as
-`Unstated` instead of copying it down.
+The index covers 166 of the 170 Markdown files: 70 primary records and 96
+supporting records. Four older files are not indexed yet:
+[`ixp-initial-export-readiness-2026-09.md`](ixp-initial-export-readiness-2026-09.md),
+[`ixp-membership-churn-2026-09.md`](ixp-membership-churn-2026-09.md),
+[`ixp-membership-churn-qualified-2026-09.md`](ixp-membership-churn-qualified-2026-09.md),
+and
+[`artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md`](artifacts/ixp-dualstack-2026-09-08/200-validation-50-P/warning-review.md).
+Supporting artifacts often rely on their parent receipt for context; this
+index deliberately leaves their own missing metadata as `Unstated` instead of
+copying it down.
 
 Among primary records, every file states a workload or shape. Three do not
 state a date:
@@ -375,8 +386,8 @@ state a date:
 - [`vpn-rib-query-occupancy-method.md`][vpn-rib-query-occupancy-method.md]
 
 Every primary record states a claim and claim boundary. In the supporting
-table, 55 files do not state their own date, four do not state an independent
-claim, and 47 do not state an independent claim boundary. Those gaps appear as
+table, 66 files do not state their own date, four do not state an independent
+claim, and 55 do not state an independent claim boundary. Those gaps appear as
 `Unstated` in the affected row; every supporting file states at least its role
 or workload.
 

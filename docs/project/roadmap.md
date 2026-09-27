@@ -1518,7 +1518,15 @@ branch is between features.
   originators, BFD socket setup. A `DistributionContext` parameter struct
   would absorb the metric / policy threading; same trick fits the EVPN
   originators.
-- [ ] **Measurement-gated hash-map hasher audit.** The durable unicast RIB
+- [x] **Measurement-gated hash-map hasher audit.** Settled 2026-09-27:
+  FxHash stays. A same-host A/B of seeded `foldhash` against FxHash on the
+  RIB and outbound Criterion cells found seeded foldhash slower on almost
+  every hot cell (for example `adj_rib_in_insert` +8 to +16%,
+  `loc_rib_recompute` +14 to +23%, `rib_pipeline` +7 to +9%), so the
+  collision-hardening upside does not justify the cost. What shipped is the
+  hasher alias: the rib and transport hot maps now name their hasher once per
+  crate (`FastMap` / `FastSet` / `FastState`), so a future hasher change is a
+  one-line edit. The original scope note follows. The durable unicast RIB
   storage now uses `FxHashMap` / trie-backed prefix indexes, but manager,
   route-refresh, EVPN, RPKI, config, and API support paths still contain
   ordinary `std::collections::HashMap` / `HashSet` sites. Do **not** bulk-convert

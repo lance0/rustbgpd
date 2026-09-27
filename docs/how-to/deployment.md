@@ -1200,7 +1200,7 @@ error rail (ADR-0103 Decision 4: checked-arithmetic failure, absent
 operand, fuel/loop-cap exhaustion, ...). These denies also appear in
 `bgp_policy_routes_total` as `action="deny"`; this counter separates
 "the policy said no" from "the policy is broken". Any nonzero rate
-deserves a look — `rbgp policy stats` names the failing chain, policy,
+deserves a look — `rbgp policy stats --direction both` names the failing chain, policy,
 and term (`eval_errors` count + `last_error` per chain), and the
 rate-limited daemon WARN carries the same blame line.
 
@@ -1228,8 +1228,8 @@ block:
 
 ```
 Policy Stats:
-  Import — permitted: 1,247  denied: 31
-  Export — permitted: 892    denied: 0
+  Import:                 permitted=1247 denied=31
+  Export:                 permitted=892 denied=0
 ```
 
 JSON output (`rbgp --json neighbor <peer>`) carries the same
@@ -1356,9 +1356,12 @@ therefore own the graceful stop and the verification that follows it.
    ```
 
    The coordinated stop writes the GR restart marker. With GR enabled, the new
-   process can advertise `R=1` while sessions rebuild, but it advertises
-   `forwarding_preserved = false`; use a drained route-server pair when traffic
-   continuity matters.
+   process can advertise `R=1` while sessions rebuild. Families with configured
+   kernel installers (FIB, blackhole discard, EVPN) still advertise
+   `forwarding_preserved = false`, while control-plane-only families advertise
+   F=1 under the [role rules](../reference/rfc-notes.md#3--graceful-restart-capability).
+   This is not a forwarding-continuity guarantee; use a drained route-server
+   pair when traffic continuity matters.
 
    With the daemon inactive, repeat the checks that only a stopped daemon can
    make authoritative: verify the absence of a config-adjacent

@@ -162,13 +162,17 @@ full gate ladder.
   callers wait instead of commands being dropped or an unbounded queue growing.
   Under a slow configuration operation this can increase concurrent management
   request latency even though routing-session work continues on its own actor
-  paths. Live operator reads such as neighbor snapshots, policy statistics, and
-  RIB queries use a separate bounded read lane and are admitted at defined
-  points during policy and reload generations
-  ([ADR-0132](../adr/0132-operator-read-path.md)), but they keep their
-  deadlines and can still time out behind an individual synchronous work unit.
-  See [configuration reload](operations.md#configuration-reload-sighup) for the
-  admission points.
+  paths. Live operator reads such as neighbor snapshots and RIB queries use a
+  separate bounded read lane and are admitted at defined points during policy
+  and reload generations ([ADR-0132](../adr/0132-operator-read-path.md)), but
+  they keep their deadlines and can still time out behind an individual
+  synchronous work unit. See
+  [configuration reload](operations.md#configuration-reload-sighup) for the
+  admission points. `GetPolicyStats` (`rbgp policy stats`) instead reads
+  counter rosters published by the peer manager and RIB manager
+  ([ADR-0136](../adr/0136-owner-published-counter-reads.md)) and does not
+  queue on either actor; it can still wait for a pending session publication
+  or busy counter state under its two-second deadline.
 
 ## Operational proof
 

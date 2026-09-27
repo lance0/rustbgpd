@@ -585,9 +585,10 @@ studying for a certification. You need a BGP speaker that's easy to set up,
 has a clean API, and provides good visibility into what's happening.
 
 **Why rustbgpd for labs:**
-- Single binary — `cargo build && ./target/release/rustbgpd config.toml`
-- Structured JSON logging — see every BGP message, FSM transition, and policy
-  decision
+- Single binary — `cargo build --release -p rustbgpd && ./target/release/rustbgpd config.toml`
+- Structured logging (JSON, or human-readable text with
+  `log_format = "text"`, the `lab` profile's default) — see every BGP
+  message, FSM transition, and policy decision
 - gRPC API — script interactions in Python, Go, or any gRPC-capable language
 - Docker support — `docker compose up` for multi-node topologies
 - Containerlab interop — tested topologies with FRR and BIRD included

@@ -16,6 +16,29 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.22.0 compatibility note
+
+The prepared 0.22.0 minor release pairs with FSM 0.9 and RPKI 0.4 when sharing
+public wire types.
+
+- **Breaking:** `PathAttribute::MpReachNlri` and `PathAttribute::MpUnreachNlri`
+  now hold `Box<MpReachNlri>` and `Box<MpUnreachNlri>`, shrinking
+  `PathAttribute` from 208 to 48 bytes. Construct the variants with
+  `Box::new(..)`. A pattern that binds the payload, such as
+  `PathAttribute::MpReachNlri(mp)`, still reads fields through `mp`; a pattern
+  that destructures the struct inside the variant must bind it first, and
+  moving the payload out takes `*mp`.
+- **Breaking:** the `keepalive` module is private. Encode and validate
+  KEEPALIVE through `Message::Keepalive` with `encode_message`,
+  `decode_message`, or `BgpCodec`.
+- `NotificationCode::RouteRefreshMessage` and
+  `notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH` cover RFC 7313
+  error 7/1. Code 7 now decodes to the named variant instead of `Unknown(7)`;
+  encoding preserves the same byte.
+- A zero-length `CLUSTER_LIST` is rejected on decode. Under RFC 7606 section
+  7.10, revised decoding treats the UPDATE as withdrawn for an internal
+  neighbor and discards the attribute for an external neighbor.
+
 ### 0.21.0 compatibility note
 
 `rustbgpd-wire` 0.21.0 is released and pairs with FSM 0.8 and RPKI 0.3.
@@ -28,18 +51,6 @@ it corrects the `FlowSpecAction::TrafficAction::terminal` field documentation.
 `encode_shutdown_communication` now documents its deliberate 128-byte sender
 cap against the 255-byte RFC 9003 section 3 receive limit. Neither patch
 changes a public item, an encoding, or a decoding.
-
-The prepared 0.22.0 minor release adds `NotificationCode::RouteRefreshMessage`
-and the Invalid Message Length subcode for RFC 7313 error 7/1. Code 7 now
-decodes to the named variant instead of `Unknown(7)`; encoding preserves the
-same byte. It pairs with FSM 0.9 and RPKI 0.4 when sharing public wire types.
-The `keepalive` module is private in 0.22.0; encode and validate KEEPALIVE
-through `Message::Keepalive` with `encode_message`, `decode_message`, or
-`BgpCodec`.
-
-The prepared release also rejects a zero-length `CLUSTER_LIST` on decode. Under
-RFC 7606 section 7.10, revised decoding treats the UPDATE as withdrawn for
-an internal neighbor and discards the attribute for an external neighbor.
 
 - `UpdateMessage::parse_revised_observed_with_error_context` and
   `validate::validate_update_attributes_with_context` retain offending
@@ -163,67 +174,6 @@ are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
   and ATTR_SET class conflicts now produce their registered RFC 7606 outcomes
   instead of being silently ignored or retained opaquely.
 
-## Supported RFCs
-
-| RFC | Feature |
-|-----|---------|
-| 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants. Canonical/local values use `PathAttribute::Communities`; received Partial-bearing values use `CommunitiesPartial` and retain Partial through propagation and policy changes |
-| 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
-| 2918 | Route Refresh capability |
-| 3032 | MPLS label: 3-byte label field as carried in EVPN NLRI |
-| 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
-| 4360 | Extended communities (route target, route origin, 4-byte AS), represented by `ExtendedCommunities` or the received Partial-preserving `ExtendedCommunitiesPartial` variant |
-| 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
-| 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
-| 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
-| 4486 | NOTIFICATION subcodes: Cease subcode constants, and `notification::description` labels for registered and deprecated code/subcode pairs, with explicit fallbacks for reserved or unassigned values |
-| 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
-| 4724 | Graceful restart capability |
-| 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
-| 5291 | Outbound Route Filtering (ORF) capability (code 3) + ORF-carrying Route Refresh |
-| 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
-| 5492 | BGP capabilities |
-| 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
-| 6396 §4.3.4 | MRT `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (`mrt` module): accepts the reduced next-hop-only form and the full RFC 4760 form collectors also write; rejects malformed next-hop lengths, truncation, AFI/length mismatches, and trailing octets. Codec only — record framing and the peer index table live in the reader |
-| 6514 §5 | PMSI Tunnel attribute (path attribute type 22): base tunnel-type and identifier semantics, with canonical `PmsiTunnel` and received Partial-preserving `PmsiTunnelPartial` variants. The EVPN-VXLAN ingress-replication form encodes the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
-| 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
-| 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
-| 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
-| 7385 | PMSI Tunnel Type IANA registry — assigned unsupported and experimental values round-trip opaquely through `PmsiTunnelType::Other`; unassigned values and invalid composite encodings are rejected |
-| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including the MAC Mobility extended community (§7.7) and the flag-only Default Gateway extended community (§7.8, type 0x03 / subtype 0x0D, decode + construct) |
-| 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; `parse_revised_observed` additionally returns sparse per-type EVPN NLRI discard observations from §5.4 without changing the established result structs; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
-| 7607 | AS 0 rejection in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and `AS4_AGGREGATOR`, including revised-error dispositions and canonical encoder rejection |
-| 7674 | FlowSpec Redirect Extended Community formatting (obsoleted by RFC 8955, whose §7.4 carries the same encodings): redirect-to-IPv4 type 0x8108 and redirect-to-4-octet-AS type 0x8208 in `FlowSpecAction` |
-| 7911 | Add-Path: path ID in NLRI encode/decode |
-| 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
-| 8092 | Large communities (3× u32), represented by `LargeCommunities` or the received Partial-preserving `LargeCommunitiesPartial` variant; duplicate values normalize in first-seen order |
-| 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
-| 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
-| 8317 | PMSI Tunnel composite tunnel-type encoding: valid composites use an assigned base tunnel type other than 0 or 6 and require the 3-octet receiver-label prefix |
-| 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
-| 8365 | EVPN over VXLAN encapsulation |
-| 8538 | Notification GR (N-bit) |
-| 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
-| 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
-| 8669 | BGP Prefix-SID attribute (type 40): generic TLV framing validation with attribute-discard on malformed framing; values are retained opaquely |
-| 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes; `FlowSpecAction::TrafficAction::terminal` is the §7.3 Terminal Action bit as carried on the wire, so `true` means later FlowSpec rules are still evaluated and `false` means evaluation stops at this rule (the field documentation through `0.21.0` stated the reverse; encoding and decoding never changed) |
-| 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
-| 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
-| 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
-| 9135 | EVPN integrated routing for IRB |
-| 9136 | EVPN Type 5: IP Prefix advertisement |
-| 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer(u32)` and `PathAttribute::OnlyToCustomerPartial(u32)`). Valid OTC stays typed and preserves Partial; Extended Length input canonicalizes on emission. The legacy decoder reports malformed flags/length with the RFC 4271 subcode and offending attribute data, while revised decoding omits the attribute and records RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
-| 9252 §7 | SRv6 L3/L2 Service TLV framing inside Prefix-SID, with treat-as-withdraw for recognized service malformation; `decode_prefix_sid_services` returns the first L3/L2 services, advertised SIDs, behavior codes, flags, and SID Structure fields. No SID reconstruction, eligibility decision, origination, or forwarding |
-| 9384 | Cease subcode 10, BFD Down (`cease_subcode::BFD_DOWN`) |
-| 9494 | Long-lived graceful restart capability |
-| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
-| 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
-| 9774 | AS_SET / AS_CONFED_SET deprecation: prohibited segment types in `AS_PATH` / `AS4_PATH` are rejected on decode with RFC 7606 treat-as-withdraw disposition, and an `AS_PATH` containing an AS_SET refuses to encode (`EncodeError::ValueOutOfRange`) |
-| 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
-| 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
-| draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
-
 ### 0.17.2 compatibility note
 
 `rustbgpd-wire` 0.17.2 is **additive**. `PathAttribute` (a `#[non_exhaustive]`
@@ -335,6 +285,67 @@ six-item binary decoder list above.
 `constants::capability_code::PATHS_LIMIT`. `Capability` is
 `#[non_exhaustive]` (see [Enum exhaustiveness](#enum-exhaustiveness)), so
 later registry additions land without a breaking release.
+
+## Supported RFCs
+
+| RFC | Feature |
+|-----|---------|
+| 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants. Canonical/local values use `PathAttribute::Communities`; received Partial-bearing values use `CommunitiesPartial` and retain Partial through propagation and policy changes |
+| 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
+| 2918 | Route Refresh capability |
+| 3032 | MPLS label: 3-byte label field as carried in EVPN NLRI |
+| 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
+| 4360 | Extended communities (route target, route origin, 4-byte AS), represented by `ExtendedCommunities` or the received Partial-preserving `ExtendedCommunitiesPartial` variant |
+| 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
+| 4364 / 4659 | VPNv4/VPNv6 labeled NLRI substrate: label-stack + RD + IPv4/IPv6 prefix encode/decode. No daemon AFI/SAFI negotiation or RIB support by itself |
+| 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
+| 4486 | NOTIFICATION subcodes: Cease subcode constants, and `notification::description` labels for registered and deprecated code/subcode pairs, with explicit fallbacks for reserved or unassigned values |
+| 4684 | Route Target Constrain (RTC) NLRI codec (SAFI 132): `RtcNlri` encode/decode with default-route and prefix-bit bounds. Inert codec substrate — negotiation/distribution live in the daemon |
+| 4724 | Graceful restart capability |
+| 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
+| 5291 | Outbound Route Filtering (ORF) capability (code 3) + ORF-carrying Route Refresh |
+| 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
+| 5492 | BGP capabilities |
+| 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
+| 6396 §4.3.4 | MRT `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (`mrt` module): accepts the reduced next-hop-only form and the full RFC 4760 form collectors also write; rejects malformed next-hop lengths, truncation, AFI/length mismatches, and trailing octets. Codec only — record framing and the peer index table live in the reader |
+| 6514 §5 | PMSI Tunnel attribute (path attribute type 22): base tunnel-type and identifier semantics, with canonical `PmsiTunnel` and received Partial-preserving `PmsiTunnelPartial` variants. The EVPN-VXLAN ingress-replication form encodes the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
+| 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
+| 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
+| 7313 | Enhanced Route Refresh (BoRR / EoRR markers) and the ROUTE-REFRESH Message Error NOTIFICATION code 7 (`NotificationCode::RouteRefreshMessage`) with the Invalid Message Length subcode (`notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH`, §5) |
+| 7385 | PMSI Tunnel Type IANA registry — assigned unsupported and experimental values round-trip opaquely through `PmsiTunnelType::Other`; unassigned values and invalid composite encodings are rejected |
+| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including the MAC Mobility extended community (§7.7) and the flag-only Default Gateway extended community (§7.8, type 0x03 / subtype 0x0D, decode + construct) |
+| 7606 | Revised UPDATE error handling: `UpdateMessage::parse_revised` recovers malformed path attributes without aborting the parse, each carrying its §7 per-attribute disposition (treat-as-withdraw / attribute-discard / session-reset) from `malformed_attr_disposition`; `parse_revised_observed` additionally returns sparse per-type EVPN NLRI discard observations from §5.4 without changing the established result structs; an attribute that decodes but fails validation may be retained in `update.attributes` for observation alongside its disposition; malformed or duplicated `MP_REACH_NLRI` / `MP_UNREACH_NLRI` and unparseable NLRI stay session-reset (§5.3, §7.11) |
+| 7607 | AS 0 rejection in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and `AS4_AGGREGATOR`, including revised-error dispositions and canonical encoder rejection |
+| 7674 | FlowSpec Redirect Extended Community formatting (obsoleted by RFC 8955, whose §7.4 carries the same encodings): redirect-to-IPv4 type 0x8108 and redirect-to-4-octet-AS type 0x8208 in `FlowSpecAction` |
+| 7911 | Add-Path: path ID in NLRI encode/decode |
+| 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
+| 8092 | Large communities (3× u32), represented by `LargeCommunities` or the received Partial-preserving `LargeCommunitiesPartial` variant; duplicate values normalize in first-seen order |
+| 8097 | Origin Validation State Extended Community (type 0x43): `ORIGIN_VALIDATION_{VALID,NOT_FOUND,INVALID}` `ExtendedCommunity` constants with `OV_*` textual rendering. Codec only — RPKI-to-community stamping lives in the daemon |
+| 8277 | IPv4/IPv6 labeled-unicast NLRI codec (SAFI 4): label-stack + prefix encode/decode, Add-Path and withdraw forms. Inert codec substrate |
+| 8317 | PMSI Tunnel composite tunnel-type encoding: valid composites use an assigned base tunnel type other than 0 or 6 and require the 3-octet receiver-label prefix |
+| 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
+| 8365 | EVPN over VXLAN encapsulation |
+| 8538 | Notification GR (N-bit) |
+| 8584 §2.2 | DF Election Extended Community (type 0x06, subtype 0x06): decode + construct of the algorithm / capabilities / DF-preference fields |
+| 8654 | Extended messages (up to 65535 bytes). `encode_message_with_limit()` and the per-message `encode_with_limit()` helpers (on `NotificationMessage` / `RouteRefreshMessage`) encode against a caller-supplied size ceiling; the default `encode()` keeps the 4096-byte base limit |
+| 8669 | BGP Prefix-SID attribute (type 40): generic TLV framing validation with attribute-discard on malformed framing; values are retained opaquely |
+| 8950 | Extended next hop (IPv4 NLRI over IPv6 NH); optional acceptance of a link-local-primary `MP_REACH_NLRI` next-hop for unnumbered peers via `UpdateValidationOptions` |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §4-compliant `NEXT_HOP` handling (the irrelevant-next-hop case is accepted, not rejected); `FlowSpecRule::validate_encoded_len` rejects rules above the 12-bit `MAX_FLOWSPEC_NLRI_RULE_LEN` (4095 bytes) before they reach the wire; the traffic-rate action helpers read negative, negative-zero, and NaN rates as zero without changing raw attribute bytes; `FlowSpecAction::TrafficAction::terminal` is the §7.3 Terminal Action bit as carried on the wire, so `true` means later FlowSpec rules are still evaluated and `false` means evaluation stops at this rule (the field documentation through `0.21.0` stated the reverse; encoding and decoding never changed) |
+| 9003 | Administrative Shutdown Communication (obsoletes RFC 8203) |
+| 9012 | BGP Encapsulation extended community (§4.1) — VXLAN sub-type used by EVPN encap |
+| 9072 | Extended Optional Parameters Length for BGP OPEN: classic encoding through 255 optional-parameter octets, extended aggregate and per-parameter lengths above that boundary, and permissive extended-format receive at smaller lengths |
+| 9135 | EVPN integrated routing for IRB |
+| 9136 | EVPN Type 5: IP Prefix advertisement |
+| 9234 | BGP Roles (OPEN capability code 9, `BgpRole`) + Only-to-Customer path attribute (type 35, `PathAttribute::OnlyToCustomer(u32)` and `PathAttribute::OnlyToCustomerPartial(u32)`). Valid OTC stays typed and preserves Partial; Extended Length input canonicalizes on emission. The legacy decoder reports malformed flags/length with the RFC 4271 subcode and offending attribute data, while revised decoding omits the attribute and records RFC 7606 treat-as-withdraw. Negotiation + ingress/egress rules live in the daemon (ADR-0071) |
+| 9252 §7 | SRv6 L3/L2 Service TLV framing inside Prefix-SID, with treat-as-withdraw for recognized service malformation; `decode_prefix_sid_services` returns the first L3/L2 services, advertised SIDs, behavior codes, flags, and SID Structure fields. No SID reconstruction, eligibility decision, origination, or forwarding |
+| 9384 | Cease subcode 10, BFD Down (`cease_subcode::BFD_DOWN`) |
+| 9494 | Long-lived graceful restart capability |
+| 9552 | BGP-LS and BGP-LS-VPN NLRI/TLV codec with opaque preservation of unknown NLRI types and TLVs. Attribute 29 enforces optional non-transitive flags and structural TLV framing; malformed contained framing uses RFC 9552 whole-attribute discard while retaining the NLRI. The daemon consumes the codec for the ADR-0077 receive/API tranche. Typed topology read accessors live in `bgpls_topo`; local topology production remains outside the wire crate |
+| 9687 | Send Hold Timer: NOTIFICATION code 8 (`NotificationCode::SendHoldTimerExpired`, subcode always 0 per §6). Codec only — the timer itself lives in the daemon |
+| 9774 | AS_SET / AS_CONFED_SET deprecation: prohibited segment types in `AS_PATH` / `AS4_PATH` are rejected on decode with RFC 7606 treat-as-withdraw disposition, and an `AS_PATH` containing an AS_SET refuses to encode (`EncodeError::ValueOutOfRange`) |
+| 9785 §3 | DF Election preference algorithms + Don't-Preempt bit, extending the RFC 8584 DF Election Extended Community |
+| 10005 | Link Bandwidth Extended Community receiver subset: decode exact transitive/non-transitive types 0x00/0x40, subtype 0x04, as raw AS + IEEE-754 bytes/second; the constructor remains non-transitive type 0x40 |
+| draft-abraitis-idr-addpath-paths-limit-04 | Experimental Paths-Limit capability (`PathsLimitFamily`, IANA-assigned capability code 76). The draft is expired and archived; interoperability and behavior remain experimental |
 
 ## Usage
 

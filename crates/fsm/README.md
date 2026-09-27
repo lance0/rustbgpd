@@ -141,8 +141,13 @@ application, not to this crate.
 `rustbgpd-fsm 0.9.0` is prepared with the wire 0.22 dependency upgrade.
 Notification GR follows the two advertised N bits even when the peer's GR
 family list is empty, so protective teardown sends Hard Reset to helper-only
-peers. It also includes the pending malformed BGP Role negotiation correction;
-see the [changelog](CHANGELOG.md).
+peers. A received BGP Role capability with an unassigned value (5-255) or a
+length other than 1 now matches no RFC 9234 role pair: with
+`PeerConfig::local_role` set, `validate_open` rejects it with Role Mismatch
+(2/11). **Breaking:** `Action::RoleMismatchObserved::remote_role` is now the
+`#[non_exhaustive]` enum `ReceivedRole` (`Absent`, `Assigned(BgpRole)`, or
+`Unrecognized(Bytes)`) instead of `Option<BgpRole>`, so matches need a
+wildcard arm. See the [changelog](CHANGELOG.md).
 
 `rustbgpd-fsm 0.9.0` also narrows the public API to what embedders use. The
 `action`, `config`, `event`, `session`, and `state` modules are private; import
@@ -163,6 +168,10 @@ helpers `local_capabilities`, `add_path_capabilities`,
 - **`SessionState`** — `Idle`, `Connect`, `Active`, `OpenSent`, `OpenConfirm`, `Established`
 - **`Event`** — `ManualStart`, `TcpConnectionConfirmed`, `OpenReceived`, `KeepaliveTimerExpires`, etc.
 - **`Action`** — `SendOpen`, `SendKeepalive`, `SendNotification`, `StartTimer`, `StopTimer`, etc.
+- **`ReceivedRole`** — the peer's BGP Role as `Action::RoleMismatchObserved`
+  reports it: `Absent` (no Role capability), `Assigned(BgpRole)` (the first
+  assigned value), or `Unrecognized(Bytes)` (only unassigned or wrong-length
+  values; holds the first one's raw bytes). `#[non_exhaustive]`
 - **`NegotiatedSession`** — post-OPEN capabilities: families, Add-Path modes,
   `peer_paths_limits` / `effective_add_path_send_limits`, GR state, extended
   message support, and `negotiated_orf_recv`, the negotiated families where

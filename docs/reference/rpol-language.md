@@ -1576,8 +1576,9 @@ Changes (up to 2):
   `peer.group`).
 - `--family ipv4_unicast|ipv6_unicast` filters the snapshot; V1 scope
   is IPv4/IPv6 unicast routes (other families are not walked).
-- `--limit N` caps how many routes are evaluated; `--show-changes N`
-  caps the before/after attribute diff samples.
+- `--limit N` caps how many routes are evaluated (`N` ≥ 1; `--limit 0` is
+  a usage error); `--all`, the default, evaluates every route.
+  `--show-changes N` caps the before/after attribute diff samples.
 - Compile diagnostics come back rendered exactly as `policy check`
   prints them (exit code 1); a clean run exits 0.
 - `--json` emits the counts, per-term hits, and diffs structurally.
@@ -1657,7 +1658,7 @@ $ rbgp policy stats --neighbor 10.0.0.2 --direction both
   whose session task survives keeps the import counters.
 - TOML chain members count too; their unnamed statements report by
   `term_index` (`statement 0`, `statement 1`, ...).
-- `--direction` selects **export** (the default), **import**, or
+- `--direction` is required and selects **export**, **import**, or
   **both**. Export chains are read from the roster the RIB manager
   publishes; import chains are read from each session's published
   installed-counter state.

@@ -104,6 +104,13 @@ Expected signals:
 
 ## Remote Type 2 visible, but FDB is not programmed
 
+When several Type 2 routes for the same MAC tie, the programmed one follows
+RFC 7432 §15 (higher mobility sequence number, then lower next hop) and then
+a fixed order: RD, ESI, Ethernet Tag, host IP, and label. The winner, and so
+the programmed VTEP, sticky bit, and ESI, does not depend on RIB iteration
+order. A remote PE that advertises one Ethernet Segment under several RDs
+contributes its DF candidate from the route with the lowest RD.
+
 1. Confirm the Type 2 is in the EVPN RIB:
 
    ```bash

@@ -155,8 +155,8 @@ gRPC does not expose it; without the flag every route reports as
 attribute-changed. This flag excludes **all** unknown/opaque attributes, not
 just OTC: the verdict covers the remaining attributes and is not full wire
 attribute equivalence. A refused conversion names the first peer and family
-whose End-of-RIB is missing and writes no snapshot; `--peer` narrows the
-snapshot to the members that did complete.
+whose End-of-RIB is missing and writes no snapshot; `--neighbor` (alias
+`--peer`) narrows the snapshot to the members that did complete.
 
 Run it after every staggered rollout completes, and on a schedule
 between rollouts from the still-running capture; archive the `--json`

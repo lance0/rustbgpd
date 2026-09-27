@@ -2880,9 +2880,9 @@ import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
   True no-ops and pure `[[fib_tables]]` transactions with unchanged external
   inputs remain available because the FIB executor substitutes only its
   targeted table set.
-  `rbgp policy explain` statement
+  `rbgp policy explain --direction import|export` statement
   traces cover `.rpol` chain members at term granularity, and
-  `rbgp policy stats` reads the installed chains' live per-term hit
+  `rbgp policy stats --direction import|export|both` reads the installed chains' live per-term hit
   counters (see [`rpol-language.md`](rpol-language.md)).
 
 Test `.rpol` policies without touching the daemon
@@ -2949,7 +2949,7 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
 ### Import-decision explain (`[policy.explain]`)
 
 **Opt-in.** Controls the per-session import-decision cache that backs
-`PolicyService.ExplainImportPolicy` and `rbgp policy explain`
+`PolicyService.ExplainImportPolicy` and `rbgp policy explain --direction import`
 (ADR-0073). Every import evaluation — permit **and** deny — is recorded
 at the transport eval site keyed by `(AFI, SAFI, prefix, path_id)`, so a
 prefix that was denied and never reached the RIB stays explainable.
@@ -4733,11 +4733,16 @@ equivalent canonical rendering:
 - **Formatting and key order are not preserved.** Blank lines, spacing, table
   order, and inline-vs-expanded table style are all re-derived.
 - **Defaults are canonicalized.** Most fields you left out appear with their
-  default values (`dynamic_neighbors = []`, `evpn_instances = []`, and so on),
-  so the file grows sections you never typed. Selected default-empty
-  collections are omitted, including inline-policy `match_community`,
-  `set_community_add`, and `set_community_remove`; omission and `[]` decode
-  identically.
+  default values (`dynamic_neighbors = []`, `evpn_instances = []`, and the
+  full `[global]` field set). Optional sections still at their defaults
+  (`[security]`, `[policy]`, `[flowspec]`, `[managed_netdevs]`,
+  `[event_history]`, `[inbound_admission]`) are omitted, so a routine runtime
+  change does not add unused feature tables; once you configure one it is
+  kept. Selected default-empty collections are also omitted, including
+  inline-policy `match_community`, `set_community_add`, and
+  `set_community_remove`; omission and `[]` decode identically.
+  `rbgp config effective` still shows every section with its resolved
+  defaults.
 - **Ownership and mode change.** The rename installs a fresh file owned by the
   daemon user at mode `0600`, whatever the previous file's owner and mode were.
 

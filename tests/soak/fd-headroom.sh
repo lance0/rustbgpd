@@ -4,8 +4,9 @@
 # A scaled daemon holds one socket per peer plus the gRPC/metrics listeners,
 # their accepted connections, the event-history store, and the MRT/journal
 # files. Launched from a bare shell it inherits the caller's `RLIMIT_NOFILE`
-# soft limit, which on a stock login session is 1024 — under the 1000-peer
-# flagship shape the last few descriptors are consumed by peer sockets and
+# and raises its soft limit to the inherited hard limit at startup, so the
+# hard limit is the ceiling. With a hard limit near 1024, the 1000-peer
+# flagship shape consumes the last few descriptors with peer sockets and
 # every subsequent `accept()` on the metrics listener fails with EMFILE. That
 # state is invisible to a client-side gate: the scrapes that do get served
 # still return 200, so the run reports green while measuring a crippled
@@ -18,7 +19,7 @@
 # must not run.
 #
 #   - Target: ${SOAK_NOFILE_SOFT:-65536}, matching the soft limit the
-#     shipped systemd and container units pin
+#     shipped container unit and compose files pin
 #     (examples/systemd/rustbgpd-container.service,
 #     scripts/check_release_install_contract.py). The soak measures the
 #     configuration the project ships, not whatever the invoking shell had.

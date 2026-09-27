@@ -223,8 +223,8 @@ $ rbgp rib --prefix 203.0.113.0/26 --explain
 ```
 
 And the live counters — which terms are actually doing work since the
-chain was installed (counters reset on chain replace). The command reports
-export chains unless you pick a direction, so ask for both to see
+chain was installed (counters reset on chain replace). `--direction` is
+required (`import`, `export`, or `both`); ask for `both` to see
 `customer-in(200)` beside `edge-out`:
 
 ```console

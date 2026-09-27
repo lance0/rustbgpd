@@ -74,8 +74,9 @@ Prometheus metrics, gNMI / OpenConfig BGP telemetry (`Capabilities` /
 `Set` subset for static numbered-neighbor config, BMP export to
 collectors (all three RIB views), MRT TABLE_DUMP_V2 snapshots, a
 Birdwatcher-shaped status/peer/accepted/filtered/noexport REST subset
-via the external `examples/birdwatcher-adapter`, structured JSON logging, and
-per-peer counters. The explain surfaces have their own catalog:
+via the external `examples/birdwatcher-adapter`, structured JSON logging (or
+human-readable text via `[global.telemetry] log_format = "text"`, the `lab`
+starter profile's default), and per-peer counters. The explain surfaces have their own catalog:
 [explain.md](../how-to/explain.md). gNMI operator guide: [gNMI / OpenConfig telemetry](../reference/gnmi.md);
 Grafana dashboard: [setup guide](../how-to/grafana.md).
 
@@ -83,17 +84,19 @@ Grafana dashboard: [setup guide](../how-to/grafana.md).
 
 Peers whose staged output is provably identical automatically share one
 outbound staging pass and one Arc-shared announce payload (ADR-0098,
-ADR-0099); measured ~28x faster 100k-route convergence at 256 uniform
-RR clients (15.1 s to 0.54 s), and 1.8 s wire-measured convergence /
-419 MiB process RSS at 1,000 uniform RR clients x 100k routes
-([scale receipt](../perf/scale-receipt-2026-07.md)), with a structural
-per-peer fallback (no knob) and a differential oracle pinning identical
-wire behavior. v2 extends the sharing to VPNv4/VPNv6 with the RFC 4684
-RT filter applied per member at emit: 1,000 clients x 100k VPNv4
-converge in 12.6 s / 625 MiB uniform and 3.9 s / 636 MiB with
+ADR-0099), with a structural per-peer fallback (no knob) and a
+differential oracle pinning identical wire behavior. The
+[2026-07-03 scale receipt](../perf/scale-receipt-2026-07.md) (commit
+`b26ff11c`, in-process harness) measured ~27x faster 100k-route convergence
+at 256 uniform RR clients (15.1 s to 0.56 s), and 1.82 s wire-measured
+convergence at 419 MiB whole-process RSS (the reflector plus all 1,000
+client stubs in one process) at 1,000 uniform RR clients x 100k routes.
+v2 extends the sharing to VPNv4/VPNv6 with the RFC 4684 RT filter applied
+per member at emit; in the same dated receipt, 1,000 clients x 100k VPNv4
+converged in 12.6 s / 625 MiB uniform and 3.9 s / 636 MiB with
 heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB and
 ~12.5 s / ~5.7 GiB extrapolated per-peer), and a member's RT-membership
-flip at 100k staged routes hits the wire in ~15 ms with zero policy
+flip at 100k staged routes reached the wire in ~15 ms with zero policy
 evaluations.
 
 ## Route-reflector families beyond unicast

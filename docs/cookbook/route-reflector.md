@@ -151,9 +151,9 @@ instead:
 ```console
 $ rbgp neighbor 10.0.0.11
 ...
-Send Hold Time:        480
+Send Hold Time:           480
 ...
-Update Group:          group:0
+Update Group:             group:0
 ```
 
 Routes and reflection:

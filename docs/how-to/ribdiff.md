@@ -380,8 +380,8 @@ Down discards it. **A peer/family is complete only after its End-of-RIB
 in the current generation** — a capture cut before End-of-RIB is
 refused (exit 2, nothing emitted), because `rbgp-ribsnap/1`'s counted
 trailer would otherwise present a truncated view as complete and the
-downstream diff could assert a false "in sync". Use `--peer` to emit a
-complete subset when an uninteresting peer never finished. RFC 8671
+downstream diff could assert a false "in sync". Use `--neighbor` (alias
+`--peer`) to emit a complete subset when an uninteresting peer never finished. RFC 8671
 stat types 15/17 arriving after End-of-RIB are cross-checked against
 the folded counts (a mismatch means a decode gap and refuses);
 completeness never requires them.

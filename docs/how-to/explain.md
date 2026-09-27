@@ -308,7 +308,7 @@ comparison to look at next.
 |---------|-----------------|
 | `rbgp policy test <file> --policy <p> --direction <d>` | Read-only dry run of a *candidate* policy against the live RIB: accepted/rejected/modified counts, term hits, per-attribute before/after diffs ([rpol-language.md](../reference/rpol-language.md)) |
 | `rbgp policy check <file>` | Offline parse/typecheck plus the file's in-language `test` blocks — no daemon needed |
-| `rbgp policy stats` (alias `counters`) | Live per-term hit counters: which policy terms actually fire |
+| `rbgp policy stats --direction import\|export\|both` (alias `counters`) | Live per-term hit counters: which policy terms actually fire |
 | `rbgp config diff <candidate>` / `rbgp config plan <candidate>` | What a config change would touch, each field annotated hot-applied / session reset / restart required ([OPERATIONS.md](../reference/operations.md#config-diff-dry-run-reload)) |
 | `rbgp diff advertised --against <snapshot>` | Live Adj-RIB-Out vs a recorded snapshot — the shadow-cutover gate ([ribdiff.md](ribdiff.md)) |
 | `rbgp doctor` | Red/green triage checks plus a redacted support bundle ([OPERATIONS.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor)) |

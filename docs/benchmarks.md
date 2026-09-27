@@ -1100,19 +1100,23 @@ counts. The summary repeats the mode and result beside the row table.
 |------|------|
 | `Route` | 136 bytes |
 | `Prefix` | 18 bytes |
-| `PathAttribute` | 208 bytes |
+| `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
 | `AdjRibIn` | 1384 bytes |
 | `LocRib` | 1040 bytes |
 
-`PathAttribute` grew from 112 to 208 bytes since the last figures in this
+`PathAttribute` grew from 112 to 208 bytes after the earlier figures in this
 doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
 `OnlyToCustomer`) plus larger payloads on the existing variants that now
 carry the newer RIB families (VPN, labeled-unicast, RT-Constrain, EVPN,
-BGP-LS). It is interned globally, across all peers, so the
-per-route impact is amortized to near zero (see below), but it does raise
-the per-unique-attribute-set heap cost.
+BGP-LS). The largest payload was the inline `MP_REACH_NLRI`, which the RIB
+never stores; boxing the `MP_REACH_NLRI` and `MP_UNREACH_NLRI` payloads
+brought the enum down to 48 bytes
+([receipt](perf/boxed-mp-path-attributes-2026-09.md)). Attribute sets are
+interned globally, across all peers, so the per-route impact is amortized to
+near zero (see below), but the enum size sets the per-unique-attribute-set
+heap cost.
 
 `AdjRibIn` (1032 → 1384 bytes) and `LocRib` (96 → 1040 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
@@ -1144,7 +1148,7 @@ allocation instead of one copy per route or per peer.
 
 ### Per-Route Heap Allocation
 
-> **Not re-measured this pass.** `PathAttribute` grew 112 → 208 bytes
+> **Not re-measured this pass.** `PathAttribute` went 112 → 208 → 48 bytes
 > (confirmed above), which changes the per-attribute-set heap totals below,
 > but the nested-allocation breakdown (the `AsPath` segment `Vec`, the
 > `Communities` `Vec<u32>`, etc.) needs a fresh dhat pass to attribute
@@ -1326,8 +1330,8 @@ RIB-only figure, and are
 improved ~9% — see above). Since the ~257–260 MB era the daemon gained
 substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
 roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
-`PathAttribute` grew 72→112 B over that era (it is 208 B on HEAD — see the
-Type Sizes table above). The single
+`PathAttribute` grew 72→112 B over that era (it later reached 208 B and is
+48 B on HEAD — see the Type Sizes table above). The single
 biggest contributor is the durable **event-history outbox** (ADR-0072), which
 persists every route event to SQLite: enabling it
 (`[event_history].enabled = true`) adds **~62 MB** raw cgroup usage (~284 →
