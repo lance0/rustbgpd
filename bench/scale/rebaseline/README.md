@@ -144,7 +144,7 @@ checkout's `git rev-parse HEAD` as `bgperf2.revision_or_version` in the
 manifest; it must equal the pinned commit.
 
 Dated receipts keep the bgperf2 pins they name. Those pins reproduce only
-those receipts: they render the retired `enforcement = "legacy"` gRPC setting,
+those receipts: they render the retired legacy gRPC enforcement mode,
 which rustbgpd v0.63 and later refuse at boot, so do not use them for a new
 campaign.
 
