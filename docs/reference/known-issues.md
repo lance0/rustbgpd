@@ -360,9 +360,9 @@ resolved.
   rustbgpd-specific; FRR and BIRD can install indistinguishable rows in the
   same table and metric. rustbgpd now persists daemon-owned rows to
   `<runtime_state_dir>/fib-owned.json` and reloads that file after crash,
-  `SIGKILL`, or OOM. Recovery is deliberately conservative: the
-  `[[fib_tables]]` declaration must be unchanged and the live kernel row must
-  still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
+  `SIGKILL`, or OOM. Recovery is deliberately conservative: the row's
+  `[[fib_tables]]` entry must have an unchanged signature and the live kernel
+  row must still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
   from the file and rows with changed config are preserved and reported as
   `foreign_route_exists` rather than adopted by protocol alone. Rows with
   persisted owned-state that drifted are reported once as `owned_route_drifted`.
@@ -467,11 +467,13 @@ resolved.
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,
   `forwarding_preserved` stays false for families with configured kernel
-  installers because rustbgpd does not persist route/FIB ownership across
-  restart or verify that forwarding state survived. Control-plane-only
-  families advertise F=1 under the [role rules](rfc-notes.md#3--graceful-restart-capability).
-  ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
-  as foreign rather than adopted.
+  installers because rustbgpd does not verify that kernel forwarding state
+  survived the restart. Control-plane-only families advertise F=1 under the
+  [role rules](rfc-notes.md#3--graceful-restart-capability).
+  ADR-0061 FIB programming is opt-in and scoped; crash recovery re-owns only
+  exact-match rows recorded in `fib-owned.json` (see the ADR-0061 entry
+  above), and other crash-left rows are reported as foreign rather than
+  adopted.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.

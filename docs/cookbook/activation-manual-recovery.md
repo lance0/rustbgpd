@@ -380,7 +380,7 @@ never prints `No changes.` here; `rc=0` is the settlement signal.
 the diff lists exactly what the daemon is missing:
 
 ```text
-Status:  healthy
+Status:            healthy
 Reload-applied changes:
 
   Neighbors:

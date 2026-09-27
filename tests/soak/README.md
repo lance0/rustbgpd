@@ -1159,20 +1159,22 @@ and fresh-per-run rules as the route-server flagship soak apply.
 
 # File-descriptor headroom (both bare-host flagship soaks)
 
-Both flagship runners launch the daemon from the invoking shell, so it
-inherits that shell's `RLIMIT_NOFILE` soft limit. At the 1000-peer shape a
-stock 1024 limit is exhausted by peer sockets alone: the sessions establish,
-but every later `accept()` on the metrics listener fails with EMFILE. Nothing
+Both flagship runners launch the daemon from the invoking shell. The daemon
+raises its soft `RLIMIT_NOFILE` to the inherited hard limit at startup, so the
+hard limit is the effective ceiling. At the 1000-peer shape a hard limit near
+1024 is exhausted by peer sockets alone: the sessions establish, but every
+later `accept()` on the metrics listener fails with EMFILE. Nothing
 client-side notices — the scrapes that do get served still return 200, sessions
 stay up, `/readyz` stays green — so the whole gate battery passes while the run
 measures a crippled daemon. The only evidence is in the daemon's own log.
 
-`fd-headroom.sh` closes that. Both runners raise the soft limit to
-`SOAK_NOFILE_SOFT` (default 65536, the same value the shipped systemd and
-container units pin) before any daemon starts, and abort with exit 2 if the
+`fd-headroom.sh` closes that. Both runners still raise the soft limit to
+`SOAK_NOFILE_SOFT` (default 65536, the soft value the shipped container unit
+and compose files pin) before any daemon starts, and abort with exit 2 if the
 inherited hard limit will not allow it — a soak that cannot get descriptor
-headroom must not run. The achieved limit is recorded as `nofile_soft` in
-`run.json`, so the receipt states the configuration it measured. On the
+headroom must not run, and a hard limit below the target aborts before launch.
+The runner's achieved soft limit is recorded as `nofile_soft` in `run.json`,
+so the receipt states the configuration it launched with explicitly. On the
 route-server flagship the periodic `rbgp doctor` assertion re-checks the same
 condition against the live daemon for the whole window.
 

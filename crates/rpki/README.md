@@ -168,7 +168,9 @@ This is an alpha `0.x` crate. Backward-compatible fixes and additions use patch
 releases within a compatibility line. Breaking public API changes or an
 incompatible public wire-type dependency require the next `0.x` minor version.
 The first `0.1.x` line used wire `0.19`; `0.2.x` used wire `0.20`. The
-published `0.3.x` line uses wire `0.21` and adopts the enum policy below.
+published `0.3.x` line uses wire `0.21` and adopts the enum policy below. The
+prepared `0.4.x` line moves the public wire dependency to `0.22`, with verifier
+and RTR method signatures unchanged.
 
 ## Enum exhaustiveness
 

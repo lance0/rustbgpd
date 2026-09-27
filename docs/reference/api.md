@@ -1835,11 +1835,17 @@ count fails with `NOT_FOUND` rather than reporting zero
 
 The same contract backs `rbgp rib --limit N`,
 `rbgp rib received PEER --limit N`, and
-`rbgp rib advertised PEER --limit N` for `N` from 1 through 1000. A limited
-query issues one RPC and exposes the exact `total_count` plus whether the
-returned page is complete; it never follows a continuation into a potentially
-changing table. Unbounded CLI listings retain the version-fenced full-walk
-behavior described above.
+`rbgp rib advertised PEER --limit N` for `N` from 1 through 1000
+(`--limit 0` is a usage error). A limited query issues one RPC and exposes the
+exact `total_count` plus whether the returned page is complete; it never
+follows a continuation into a potentially changing table on its own. When more
+routes match, human output prints `Next page token: <token>`, `--json` adds
+`next_page_token` to its envelope, and the `rbgp-rib/1.1` JSON-lines `end`
+record carries the same field. Pass it back with `--page-token` and the same
+view, `--limit`, and filters for the next page; a table change between pages
+makes the daemon refuse the continuation with `ABORTED`, so restart without the
+token. Unbounded CLI listings retain the version-fenced full-walk behavior
+described above.
 
 `Route.validation_state` is the route's recorded RPKI origin-validation
 verdict, not a configuration/readiness sentinel. `not_found` means the

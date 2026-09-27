@@ -174,9 +174,9 @@ the span: the TCP listener, the peer manager (lifecycle, inbound
 connections, policy apply, snapshots), reload, the RIB, BFD, and the
 blackhole route installer.
 `tracing` filter directives cannot match an event field's value, so select
-those events in the JSON log instead. Daemon events about a BGP peer name
-its address in the `peer` event field, and session-span events also carry
-the span's `peer_addr`:
+those events in the JSON log instead (this needs `log_format = "json"`).
+Daemon events about a BGP peer name its address in the `peer` event field, and
+session-span events also carry the span's `peer_addr`:
 
 ```bash
 jq -c 'select(.fields.peer == "10.0.0.1"
@@ -248,8 +248,9 @@ transaction with an optimistic runtime snapshot token:
 
 > **Before the first runtime change.** Any mutation that persists rewrites the
 > config file in canonical form: comments and formatting are not preserved,
-> defaults are canonicalized (selected default-empty collections may be
-> omitted), and the file ends up owned by the daemon user at mode `0600`. See
+> defaults are canonicalized (default-valued optional sections and selected
+> default-empty collections are omitted), and the file ends up owned by the
+> daemon user at mode `0600`. See
 > [Runtime changes rewrite the config file](#runtime-changes-rewrite-the-config-file).
 
 ```bash
@@ -974,9 +975,12 @@ daemon's whole config snapshot and replaces the file with it. On the **first**
 such change, expect all of the following:
 
 - comments are gone, and formatting and key order are re-derived;
-- most fields you left at their defaults are written out explicitly, so the
-  file gains sections you never typed; selected default-empty inline-policy
-  community lists are omitted because omission and `[]` decode identically;
+- fields inside the sections the file keeps are written out with their
+  resolved values, but optional feature sections still at their defaults
+  (`[security]`, an all-default `[policy]`, `[flowspec]`, `[managed_netdevs]`,
+  `[event_history]`, `[inbound_admission]`) are omitted, and selected
+  default-empty inline-policy community lists are omitted because omission
+  and `[]` decode identically;
 - the temp-file + rename leaves the file owned by the daemon user at mode
   `0600`.
 
@@ -2081,7 +2085,7 @@ is no per-client expiry metric or client certificate inventory.
 <a id="grpc-authorization-audit-and-resource-guardrails"></a>
 ## gRPC audit and resource guardrails
 
-ADR-0064 v1 uses the daemon's structured JSON log path plus Prometheus metrics
+ADR-0064 v1 uses the daemon's structured log path plus Prometheus metrics
 as the operational gRPC authorization audit and resource-guardrail surface.
 rustbgpd does not run a separate in-daemon audit file writer or remote audit
 sink in this release. That keeps audit emission on the existing non-blocking
@@ -2108,9 +2112,11 @@ of choice and apply retention outside the daemon:
 Useful local queries follow. `operator_only` decisions log at WARN and most
 others at INFO, but a successful `read`-tier call (`CheckLiveness`) logs at
 DEBUG, so these queries omit such calls unless debug logging is enabled;
-`bgp_grpc_authz_decisions_total` still counts every request. The JSON log
-nests event fields under `.fields`, so `tier`, `result` and `principal` are
-read as `.fields.tier` and so on. The unit's journal also holds the plain-text
+`bgp_grpc_authz_decisions_total` still counts every request. The queries
+below need `log_format = "json"` (the `edge` and `route-server` profile
+default; the `lab` profile writes text). The JSON log nests event fields
+under `.fields`, so `tier`, `result` and `principal` are read as
+`.fields.tier` and so on. The unit's journal also holds the plain-text
 startup banner from stderr, so the queries read raw lines (`jq -R`) and skip
 any line that is not JSON (`fromjson?`).
 
@@ -2291,11 +2297,16 @@ ownership of the live row; `owned_route_drifted` means rustbgpd previously
 owned the key but another writer changed the live kernel row. In both cases,
 rustbgpd preserves the row instead of overwriting or deleting it. After an
 ungraceful restart, rustbgpd only recovers rows that also appear in
-`<runtime_state_dir>/fib-owned.json`, match the unchanged `[[fib_tables]]`
-declaration, and still have the exact kernel next-hop value the previous
-instance owned. If the persisted file has an unsupported version or stale table
-signature, rustbgpd renames it to `fib-owned.json.stale` and starts with empty
-owned-state.
+`<runtime_state_dir>/fib-owned.json`, belong to a table whose
+`[[fib_tables]]` signature is unchanged, and still have the exact kernel
+next-hop value the previous instance owned. An owned-state file with an
+unsupported (newer) version, or a payload whose shape contradicts its version,
+is renamed to `fib-owned.json.stale` and the daemon starts owning nothing. A
+changed `[[fib_tables]]` signature is handled per table: the receipt is copied
+(not renamed) to `fib-owned.json.stale`, only the changed table's rows drop
+out of ownership, and unchanged tables keep their owned routes. Rows of a
+table recorded during an interrupted runtime table change but absent from the
+booted config are withdrawn by the first reconcile.
 
 ### Route-safety alerts
 
@@ -2504,7 +2515,9 @@ same values as `readiness`, `not_ready_reason`, and
 
 ## Key log messages
 
-rustbgpd uses structured JSON logging. Key messages to watch for:
+rustbgpd uses structured logging: JSON under `log_format = "json"` (the
+`edge` and `route-server` profile default) or human-readable text under
+`log_format = "text"` (the `lab` profile default). Key messages to watch for:
 
 | Message | Level | Meaning |
 |---------|-------|---------|
@@ -2842,9 +2855,9 @@ the daemon's own secret-redacted effective dump — the same document as
 text, peer descriptions, crash reports, and log lines are additionally
 scrubbed for password/secret/token/bearer lines client-side.
 
-Logs: the daemon logs JSON to stdout (journald under systemd), so no log
-file is collected by default — the manifest records that instead. If stdout
-is redirected to a file, pass it explicitly:
+Logs: the daemon logs to stdout (journald under systemd), as JSON or text
+per `log_format`, so no log file is collected by default — the manifest
+records that instead. If stdout is redirected to a file, pass it explicitly:
 
 ```bash
 rbgp doctor --log-file /var/log/rustbgpd.jsonl   # tails the last 1000 lines

@@ -455,7 +455,7 @@ rs-config-render: activation: recovery required; inspect private activation stat
 $ echo $?
 5
 $ rbgp -s unix:///var/lib/rustbgpd/b2-rs1-lan1-ipv4/grpc.sock health
-Status:  healthy                            # the daemon itself is untouched
+Status:            healthy                  # the daemon itself is untouched
 ```
 
 ## 4. Let IXP Manager drive it
@@ -490,7 +490,10 @@ file (never argv or environment; it appears only in the
 `X-IXP-Manager-API-Key` header and is never journaled); HTTPS with platform
 roots, redirects and proxies disabled, bounded deadlines and body sizes.
 Lifecycle intent is written and synced before every upstream request. On
-success the command prints `IXP Manager lifecycle updated`.
+success `run` prints `IXP Manager lifecycle activated` (or `IXP Manager
+lifecycle noop` when the rendered candidate equals `current`) after delivering
+the `updated` callback; `resume` prints `IXP Manager lifecycle updated` once it
+replays a pending callback.
 
 | Exit | Meaning |
 |---|---|

@@ -9,6 +9,12 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
   exchange wire types together; verifier and RTR method signatures are
   unchanged.
 
+- Documented `RtrClientConfig::max_expire_interval` when unset: it adds no
+  ceiling of its own, so the configured expire interval is limited only by
+  the RFC 8210 section 6 bounds and a cache-advertised value only by the
+  protocol ceiling. The previous wording said the configured interval was left
+  unchanged. No public item or runtime behavior changed.
+
 ## 0.3.2 - 2026-09-23
 
 - `RtrClient::new` now clamps a `RtrClientConfig::retry_interval` above

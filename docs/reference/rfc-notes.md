@@ -322,10 +322,12 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
 
 ### §4.5 — NOTIFICATION Message
 
-- Error codes are the typed `NotificationCode` enum: codes 1-6 and 8 have
-  named variants, and `Unknown(u8)` preserves any other byte (including 7
-  and 9). Subcodes are named `u8` constants per code, such as
-  `cease_subcode::OUT_OF_RESOURCES`.
+- Error codes are the typed `NotificationCode` enum: codes 1-8 have named
+  variants (code 7 is `RouteRefreshMessage` for RFC 7313 errors, from wire
+  0.22.0), and `Unknown(u8)` preserves any other byte, including 9. Subcodes
+  are named `u8` constants per code, such as
+  `cease_subcode::OUT_OF_RESOURCES` and
+  `route_refresh_subcode::INVALID_MESSAGE_LENGTH`.
 - On send: log structured event, then close the TCP connection.
 - On receive: log structured event, transition FSM to Idle.
 
@@ -738,6 +740,9 @@ Interpretation decisions:
   inconsistent flags among what makes the MP attribute itself incorrect).
 - Zero-length Communities / Extended Communities are malformed (§7.8 /
   §7.14 require a non-zero multiple of 4 / 8) — treat-as-withdraw.
+- A zero-length CLUSTER_LIST is malformed (Attribute Length Error) —
+  attribute-discard from an external neighbor and treat-as-withdraw from an
+  internal one (§7.10).
 - An UPDATE whose only attributes were discarded as malformed is not
   mistaken for an End-of-RIB marker (RFC 4724 §2 detection requires a clean
   decode).
@@ -1995,7 +2000,10 @@ carries inactive (absent), unlimited (zero), or finite.
   broadcast (Gate 7c), re-runs election on every Type 4 event,
   and updates the Prometheus surface
   (`evpn_df_role{esi,vni,role}` gauge,
-  `evpn_df_role_changes_total{esi,vni}` counter).
+  `evpn_df_role_changes_total{esi,vni}` counter). When one originator
+  advertises a segment under several RDs, the route with the lowest RD
+  supplies its DF candidate, so election does not depend on RIB iteration
+  order.
 - **Gate 8 scope was observation only; Gate 8b is now alpha and default-on
   with explicit opt-out flags.**
   The follow-up Gate 8b slices add ESI Label / ES-Import RT

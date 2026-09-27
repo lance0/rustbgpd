@@ -301,8 +301,11 @@ to stream the full route table.
 
 A concrete keyed-neighbor subscription whose successful peer snapshot does not
 contain that neighbor emits no update for the cycle; sync still completes and
-POLL/STREAM remain live for later appearances. Concrete neighbor `Get` remains
-strictly `NOT_FOUND`, and peer-snapshot failures remain `UNAVAILABLE`.
+POLL/STREAM remain live for later appearances. Concrete neighbor `Get` returns
+`NOT_FOUND` for an unknown neighbor, except during startup: until the
+configured-peer roster is installed it returns retryable `UNAVAILABLE` (see
+[API.md](api.md#unknown-peers-in-peer-scoped-views)). Peer-snapshot failures
+remain `UNAVAILABLE`.
 
 ## Dial-out (device-initiated push)
 
@@ -524,6 +527,7 @@ TARGET_DEFINED remains unsupported.
 | `UNIMPLEMENTED` for a path | The path is valid OpenConfig but outside rustbgpd's supported whitelist. This is expected for per-AFI counters, negotiated capabilities, `last-established`, and unsupported subtrees. |
 | `INVALID_ARGUMENT` | The path is malformed, uses unsupported key syntax, or omits required keys such as `network-instance`, `protocol`, or `neighbor-address`. |
 | `NOT_FOUND` | The requested keyed object does not exist, such as a neighbor address that is not configured. |
+| `UNAVAILABLE` | The daemon is starting and the configured-peer roster is not installed yet (retry), or the peer snapshot failed. |
 | `Set` returns `UNIMPLEMENTED` | The path or extension is outside the supported Set subset, such as unsupported neighbor leaves, `union_replace`, or a non-Commit extension. |
 
 ## Interop Proof

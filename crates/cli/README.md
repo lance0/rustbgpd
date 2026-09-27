@@ -17,9 +17,11 @@ change every session at once. When stdin and stdout are both terminals, they
 name the target endpoint and scope and ask `[y/N]` first; any answer other than
 `y` or `yes` aborts with exit code `1` and changes nothing. `-y`/`--yes` skips
 the prompt. Non-interactive runs, such as scripts and pipelines, never prompt.
-These commands require an explicit scope: `--global` or `--all` for the
-daemon-wide scope, or `--neighbor` for one peer. Omitting both is a usage error
-(exit code `2`) and nothing is sent to the daemon.
+The policy-chain and `gshut` commands require an explicit scope: `--global`
+(policy chains) or `--all` (`gshut`) for the daemon-wide scope, or `--neighbor`
+for one peer. Omitting both is a usage error (exit code `2`) and nothing is
+sent to the daemon. `rbgp shutdown` is always daemon-wide and takes no scope
+flag.
 
 ## Connection and authentication
 
@@ -244,11 +246,12 @@ rbgp rib --prefix <prefix> --explain
 rbgp rib --prefix <prefix> --explain --explain-peer <peer>   # scope the explain to one peer's Add-Path send view
 rbgp rib blackholes
 rbgp rib fib
+rbgp rib fib --limit 500 [--page-token <token>]   # one bounded page; the older --page-size spelling still parses
 rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
 rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
 rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
-rbgp rib add <prefix> --next-hop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
+rbgp rib add <prefix> --next-hop <ip> [--origin <igp|egp|incomplete>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]   # --origin also accepts 0/1/2
 rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised --against <snapshot.ndjson>   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --neighbor <addr> --neighbor-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
@@ -422,8 +425,9 @@ routes match. JSON uses
 the token is empty when `complete` is true. Pass it back with
 `--page-token <token>` and the same view, `--limit` and filters for the next
 page; a table change between pages makes the daemon refuse the stale token, so
-restart without it. `--page-token` requires `--limit` and is not available
-with `--json-lines`.
+restart without it. `--page-token` requires `--limit`; it works with human,
+`--json`, and `--json-lines` output (the JSON-lines `end` record carries
+`next_page_token`).
 This is the bounded inspection path for a live full table. Without `--limit`,
 the CLI still follows every page and fails closed if the table changes; it
 never labels a torn multi-page walk complete.
@@ -448,15 +452,16 @@ with configured and ready sources, the same value is a real uncovered-route
 verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
 route field alone cannot prove it.
 
-The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes|fib`,
-`flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
+The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes`, `rib fib`
+without `--limit`, `flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
 0.7-1.3 million rows). A response above the ceiling still fails closed,
 currently as `out of range`. The ceiling is client-side compatibility headroom
 only: it does not add pagination, reduce daemon snapshot work, make filters
 cheaper, guarantee arbitrary table sizes, or change third-party gRPC clients.
 Paginated unicast listings, streams, and control RPCs keep tonic's 4 MiB
-default.
+default. `rib fib --limit N [--page-token T]` returns one bounded page instead;
+the older `--page-size` spelling remains a hidden alias.
 
 `--age` appends an `Age` column to the human best, received, or advertised
 route table. It is the age of the original RIB receive event, including in the
@@ -529,11 +534,13 @@ Older daemons fail explicitly when the explain RPC is unavailable.
 ### Events and Control
 
 ```bash
+rbgp events --limit 500    # recent route events (default 100; there is no -l short form)
+rbgp events --all          # the full retained route-event window
 rbgp events watch
 rbgp events watch --backfill 50
 rbgp events watch --from-event-id 41236
 rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
-rbgp events sessions
+rbgp events sessions --neighbor 192.0.2.1   # --peer is an accepted alias
 rbgp events policy
 rbgp events evpn
 rbgp watch              # legacy route-update stream

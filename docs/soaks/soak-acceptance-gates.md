@@ -239,11 +239,12 @@ trip/timed-restart cycle every `TRIP_INTERVAL_SEC` (default 14 400 s →
 `max_prefixes = routes + 50`, `max_prefix_restart_seconds = 120`).
 
 Both bare-host flagship runners raise their own `RLIMIT_NOFILE` soft limit to
-`SOAK_NOFILE_SOFT` (default 65536, the value the shipped systemd and container
-units pin) before the daemon is launched, and refuse to run if the inherited
-hard limit will not allow it. The daemon is forked from the runner's shell and
-inherits whatever it finds there: at the 1000-peer shape a stock 1024 limit is
-consumed by peer sockets, and the metrics listener then fails every `accept()`
+`SOAK_NOFILE_SOFT` (default 65536, the soft value the shipped container unit
+and compose files pin) before the daemon is launched, and refuse to run if the
+inherited hard limit will not allow it. The daemon itself raises its soft limit
+to the inherited hard limit at startup, so the remaining hazard is a low hard
+limit: at the 1000-peer shape a 1024 ceiling is consumed by peer sockets, and
+the metrics listener then fails every `accept()`
 with EMFILE while the served scrapes still return 200, the sessions stay up,
 and `/readyz` stays green — a crippled daemon behind an entirely green
 client-side gate battery. The achieved limit is recorded as `nofile_soft` in

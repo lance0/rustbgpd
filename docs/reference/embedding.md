@@ -471,6 +471,14 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    documentation-only patches: the FlowSpec Terminal Action bit meaning and
    the shutdown-communication length cap.
 
+   The prepared `0.22.0` line pairs with FSM `0.9` and RPKI `0.4`. It is
+   breaking: `PathAttribute::MpReachNlri` and `MpUnreachNlri` hold boxed
+   payloads (the enum shrinks from 208 to 48 bytes), and the `keepalive`
+   module is private. It also names NOTIFICATION code 7
+   (`NotificationCode::RouteRefreshMessage`) and rejects a zero-length
+   `CLUSTER_LIST`; see the crate's
+   [0.22.0 compatibility note](../../crates/wire/README.md#0220-compatibility-note).
+
 2. **`rustbgpd-fsm`.** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
@@ -523,7 +531,12 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    `0.21.0` with no direct FSM API or behavior change. `0.8.1` limits
    `NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol
    intersection, and `0.8.2` is documentation-only: the embedding
-   application owns the ranges of its local timer settings.
+   application owns the ranges of its local timer settings. The prepared
+   `0.9.0` line pairs with wire `0.22` and is breaking: the `action`,
+   `config`, `event`, `session`, and `state` modules are private (import from
+   the crate root), and `Action::RoleMismatchObserved::remote_role` becomes
+   the `#[non_exhaustive]` `ReceivedRole` enum. See the crate's
+   [changelog](../../crates/fsm/CHANGELOG.md).
 
 3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
    Why it is independent:
@@ -549,6 +562,13 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      timers to the RFC 8210 §6 ranges with a warning: a zero refresh or retry
      is raised to 1 second, a zero expire or `max_expire_interval` is raised
      to 600 seconds, and either above 172800 seconds is clamped to it.
+   - RPKI `0.3.2` clamps a `retry_interval` above 7200 seconds, publishes the
+     first accepted empty VRP and ASPA tables, and adds
+     `VrpManager::with_connectivity_observer`, `AspaTable::providers`, and
+     `aspa_verify::validation_context`. See the crate's
+     [changelog](../../crates/rpki/CHANGELOG.md).
+   - The prepared RPKI `0.4.0` line moves the public wire dependency to
+     `0.22`; verifier and RTR method signatures are unchanged.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish

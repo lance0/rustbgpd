@@ -793,7 +793,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | AS_PATH attribute | 4271 §5.1.2 | M1 | FRR, BIRD | 2-byte and 4-byte |
 | NEXT_HOP attribute | 4271 §5.1.3 | M1 | FRR, BIRD | Validation per RFC |
 | LOCAL_PREF attribute | 4271 §5.1.5 | M1 | FRR, BIRD | iBGP only |
-| MED attribute | 4271 §5.1.4 | M1 | FRR, BIRD | Optional, same-AS comparison configurable |
+| MED attribute | 4271 §5.1.4 | M1 | FRR, BIRD | Optional; always-compare (deterministic MED) across all peers, not configurable |
 | Unknown transitive attr pass-through | 4271 §5 | M1 | FRR | Partial bit set, raw bytes preserved |
 | Best-path selection | 4271 §9.1.2 | M2 | FRR, BIRD | Total ordering, see decision rules |
 | UPDATE encoding / Adj-RIB-Out | 4271 §9.2 | M3 | FRR, BIRD | — |

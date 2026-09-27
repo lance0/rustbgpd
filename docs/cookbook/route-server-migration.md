@@ -419,7 +419,8 @@ Prerequisites and limitations:
   member's End-of-RIB. **A peer/family without End-of-RIB is an
   incomplete dump and the conversion is refused (exit 2)** — a
   truncated capture must never read as "in sync". Exclude peers you
-  don't care about with `--peer` if they never completed.
+  don't care about with `--neighbor` (alias `--peer`) if they never
+  completed.
 - Live churn during the capture is fine: updates that interleave with
   the initial dump supersede it, and post-End-of-RIB stats (RFC 8671
   types 15/17) are cross-checked against the folded state.
@@ -508,7 +509,7 @@ cutover blockers.
 6. Confirm counters stay quiet after convergence:
 
    ```bash
-   rbgp policy counters --direction both
+   rbgp policy stats --direction both
    rbgp metrics | grep -E 'route_refresh|session_state|update_group'
    ```
 

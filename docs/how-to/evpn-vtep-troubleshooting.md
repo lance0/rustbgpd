@@ -104,6 +104,17 @@ Expected signals:
 
 ## Remote Type 2 visible, but FDB is not programmed
 
+The RIB selects one best path per EVPN route key, and the key includes the
+RD. When several best Type 2 routes still carry the same MAC in one VNI (for
+example the same MAC under two RDs, or from two VTEPs), the dataplane
+projection keeps one of them: the higher MAC Mobility sequence number wins,
+then the lower next hop (RFC 7432 §15.1), then the lowest RD, ESI, Ethernet
+Tag, host IP, and label, in that order. The remote-MAC FDB row and the MAC/IP
+view, including their sticky bit and ESI, come from that winner, whatever
+order the RIB returns the routes in. Separately, a remote PE that advertises
+one Ethernet Segment under several RDs contributes its DF candidate from the
+route with the lowest RD.
+
 1. Confirm the Type 2 is in the EVPN RIB:
 
    ```bash
