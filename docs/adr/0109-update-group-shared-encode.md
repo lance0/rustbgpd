@@ -175,3 +175,38 @@ Such passes now keep the shared encode:
 Add-Path members remain outside update-groups (ADR-0099), and a member whose
 profile fails the wire-equivalence proof still falls back to its full
 per-session encode, withdrawals included.
+
+### Follow-up (2026-09-27): new winning sources ride the shared payload
+
+The last bullet above left new winning sources on the RIB-side per-member
+walk. That walk cloned every other-sourced announcement into a private
+payload, so the member also missed the pass's exact-export probe reuse and the
+shared encode cell. A failover with alternates from several members paid that
+once per new winner on the RIB actor.
+
+A new winner now rides the group's shared payload:
+
+- **Owed withdrawals are indexed during the shared build.** When the shared
+  emission is built from the pass's deltas, each announcement whose source
+  changed onto a member records that key as the member's owed withdrawal.
+  The member's own routes are hidden by the existing own-source exclusion.
+  Its envelope carries those withdrawals ahead of the pass's shared
+  withdrawals. The shared announce and next-hop arrays, the probe cache and
+  the encode cell are the same ones every other member uses, and the session
+  sends all the member's withdrawals before the shared announcements as
+  described above.
+- **An unchanged source owes nothing.** A member that re-announces its own
+  best path differently is hidden by the exclusion alone, so it no longer
+  leaves the shared payload either.
+- **The remaining exceptions keep the per-member walk.** An old source of a
+  withdrawn key would otherwise receive a withdrawal the per-peer path does
+  not send. The same applies to an ADR-0126 exception-lane substitution or
+  lane target, and to an RS-control member in a tagged pass. Add-Path members
+  are still never grouped (ADR-0099), and an incompatible export profile still
+  falls back in the session.
+
+Wire output matches the per-peer path: withdrawal keys and per-prefix
+announcement attributes are the same, and only the UPDATE frame partition of
+the shared announcements differs, as above. The BMP rib-out tap mirrors the
+frames that were actually sent. A lost envelope records the same
+member-scoped withdrawals for the dirty resync as before.
