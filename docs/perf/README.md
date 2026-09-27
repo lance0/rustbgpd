@@ -128,6 +128,7 @@ records.
 | [`attr-intern-hashing-2026-08.md`][attr-intern-hashing-2026-08.md] | August 2026 | Typical and rich attributes at 10k and 100k entries | NO-GO: the isolated hash control exceeded its stability limit | A production change or speedup |
 | [`attr-intern-hashing-recheck-2026-08.md`][attr-intern-hashing-recheck-2026-08.md] | August 2026 | A 35-row same-source control matrix | Not evaluated: six controls exceeded their limits | A performance or regression claim |
 | [`attribute-layout-2026-08.md`][attribute-layout-2026-08.md] | August 2026 | 900k prefixes with 2.7M and 4.5M route-copy models | Slice-backed attributes increased modeled memory by 17.7 and 31.4 MiB | Allocator, locality, conversion-cost, or nested-payload effects |
+| [`boxed-mp-path-attributes-2026-09.md`][boxed-mp-path-attributes-2026-09.md] | September 2026 | 900k-prefix calibrated RIB rows, codec and export-probe A/B, allocation counts | Boxing the MP payloads cut `PathAttribute` from 208 to 48 B and both calibrated 900k rows by 117.7 MiB | Whole-process RSS on a real table, or daemon convergence |
 | [`authoritative-policy-replacement-cursor-feasibility-2026-07.md`][authoritative-policy-replacement-cursor-feasibility-2026-07.md] | 2026-07 | Borrow-free, exact-once bounded-continuation feasibility gate | Gate 1 NO-GO | Gate 2 or a behavior change |
 | [`competitive-bgperf2-2026-07.md`][competitive-bgperf2-2026-07.md] | Initial campaign 2026-07-26; latest refresh 2026-07-27 | Four daemons, five fleet shapes, three runs per shape | Historical observations whose cross-daemon ranking was later retracted | Any projection beyond 100 peers |
 | [`competitive-bgperf2-v0670-2026-08.md`][competitive-bgperf2-v0670-2026-08.md] | 2026-08-29 | Four daemons, five import shapes, four repetitions | 79 of 80 cells reached the exact expected table | Export, reload, churn, IPv6, Add-Path, OpenBGPD, or another host |
@@ -200,6 +201,7 @@ records.
 [attr-intern-hashing-2026-08.md]: attr-intern-hashing-2026-08.md
 [attr-intern-hashing-recheck-2026-08.md]: attr-intern-hashing-recheck-2026-08.md
 [attribute-layout-2026-08.md]: attribute-layout-2026-08.md
+[boxed-mp-path-attributes-2026-09.md]: boxed-mp-path-attributes-2026-09.md
 [authoritative-policy-replacement-cursor-feasibility-2026-07.md]: authoritative-policy-replacement-cursor-feasibility-2026-07.md
 [competitive-bgperf2-2026-07.md]: competitive-bgperf2-2026-07.md
 [competitive-bgperf2-v0670-2026-08.md]: competitive-bgperf2-v0670-2026-08.md
@@ -268,6 +270,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/adj-rib-out-family-gauge-2026-07/README.md`](artifacts/adj-rib-out-family-gauge-2026-07/README.md) | Unstated | Exact unrounded estimates and controls for the linked family-gauge receipt | Unstated | Unstated |
 | [`artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md`](artifacts/adj-rib-out-family-gauge-2026-07/rejected-attempts.md) | Unstated | Preflight-invalid and threshold-crossing attempts | Why those attempts were excluded | A retained result |
 | [`artifacts/attribute-layout-2026-08/README.md`](artifacts/attribute-layout-2026-08/README.md) | Unstated | 100k, 500k, and 900k structural rows plus a 200k-route bgperf2 result | The container-layout migration was rejected before a prototype | A live-byte A/B or throughput result |
+| [`artifacts/boxed-mp-path-attributes-2026-09/README.md`](artifacts/boxed-mp-path-attributes-2026-09/README.md) | Unstated | Structural rows, Criterion estimates, allocation counts, and DHAT owner summaries for the linked receipt | The retained evidence inventory | Unstated |
 | [`artifacts/competitive-bgperf2-2026-07/README.md`](artifacts/competitive-bgperf2-2026-07/README.md) | 2026-07 | Four daemons, five fleet shapes, and three runs per shape | The retained inputs can recompute the linked receipt | Unstated |
 | [`artifacts/competitive-bgperf2-v0680-2026-08/README.md`](artifacts/competitive-bgperf2-v0680-2026-08/README.md) | Unstated | Eighty rows across five fixed import shapes | The retained row and image inventory | A full-table campaign |
 | [`artifacts/controller-injection-2026-09/README.md`](artifacts/controller-injection-2026-09/README.md) | Unstated | Eight completed controller-injection cells with passive-receiver counts, paginated reconciliation, and metrics snapshots | The retained result and evidence inventory for the linked receipt | Unstated |

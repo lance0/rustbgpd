@@ -5,6 +5,18 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.22.0 - Unreleased
 
+- **Breaking:** `PathAttribute::MpReachNlri` and `PathAttribute::MpUnreachNlri`
+  now hold `Box<MpReachNlri>` and `Box<MpUnreachNlri>`. The inline 208-byte
+  `MP_REACH_NLRI` payload sized every `PathAttribute`, so each stored
+  attribute cost 208 bytes although MP framing is transient. The enum is now
+  48 bytes, sized by `RawAttribute`. Construct the variants with
+  `Box::new(..)`. A pattern that binds the payload, such as
+  `PathAttribute::MpReachNlri(mp)`, still reads fields through `mp`; a
+  pattern that destructures the struct inside the variant must bind it
+  first. Moving the payload out takes `*mp`. Decoding an
+  `MP_REACH_NLRI` or `MP_UNREACH_NLRI` attribute makes one extra allocation
+  for the box.
+
 - Add `NotificationCode::RouteRefreshMessage` and
   `notification::route_refresh_subcode::INVALID_MESSAGE_LENGTH` for RFC 7313
   error 7/1. Decoding code 7 now produces the named variant instead of

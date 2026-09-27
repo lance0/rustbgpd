@@ -462,7 +462,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   attributes; build from a slice with `UpdateMessage::try_build` or from one
   ordered pass over borrowed attributes with
   `UpdateMessage::try_build_from_attribute_iter`
-- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus `MpReachNlri` and canonical/Partial `OnlyToCustomer` (RFC 9234)
+- **`PathAttribute`** — typed variants plus `Unknown` pass-through, including `AsPath`, `Aggregator`, `AtomicAggregate`, `NextHop`, canonical/Partial pairs `Communities` / `CommunitiesPartial`, `ExtendedCommunities` / `ExtendedCommunitiesPartial`, `LargeCommunities` / `LargeCommunitiesPartial`, and `PmsiTunnel` / `PmsiTunnelPartial`, plus boxed `MpReachNlri` / `MpUnreachNlri` payloads (boxed since 0.22.0, so the enum is sized by its largest stored attribute rather than MP framing) and canonical/Partial `OnlyToCustomer` (RFC 9234)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`RpkiValidation` / `AspaValidation` / `AspaValidationContext`** — shared
   routing-domain validation state and ASPA session context used by rustbgpd's
