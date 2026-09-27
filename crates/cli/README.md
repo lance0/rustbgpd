@@ -251,7 +251,7 @@ rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 rbgp rib add <prefix> --next-hop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
 rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised --against <snapshot.ndjson>   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
-rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
+rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --neighbor <addr> --neighbor-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
 
 rbgp policy list
 rbgp policy get <name>

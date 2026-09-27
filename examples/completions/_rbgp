@@ -1825,7 +1825,8 @@ _arguments "${_arguments_options[@]}" : \
 '--view=[Attestation of what the dump is\: adj-rib-out-capture (a per-client post-policy capture; accepted), loc-rib, or adj-rib-in (both refused as non-comparable)]:VIEW:_default' \
 '--neighbor=[Neighbor address the captured routes were advertised to]:NEIGHBOR:_default' \
 '--peer=[Neighbor address the captured routes were advertised to]:NEIGHBOR:_default' \
-'--peer-asn=[ASN of that peer]:PEER_ASN:_default' \
+'--neighbor-asn=[ASN of that neighbor]:NEIGHBOR_ASN:_default' \
+'--peer-asn=[ASN of that neighbor]:NEIGHBOR_ASN:_default' \
 '--source=[Free-form provenance label appended to the header \`source\`]:SOURCE:_default' \
 '--generation=[Capture-round generation stamped into the header]:GENERATION:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
