@@ -484,10 +484,20 @@ pub(super) struct OraclePeerFeatures {
 
 impl Oracle {
     pub(super) fn spawn(force_ungrouped: bool, cluster_id: Option<Ipv4Addr>) -> Self {
+        Self::spawn_configured(force_ungrouped, cluster_id, |_| {})
+    }
+
+    /// [`Self::spawn`] with a hook applied to the manager before it runs.
+    pub(super) fn spawn_configured(
+        force_ungrouped: bool,
+        cluster_id: Option<Ipv4Addr>,
+        configure: impl FnOnce(&mut RibManager),
+    ) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
         manager.test_force_ungrouped = force_ungrouped;
+        configure(&mut manager);
         let roster = manager.export_roster();
         let handle = tokio::spawn(manager.run());
         Self {

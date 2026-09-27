@@ -1924,6 +1924,9 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Exercise the deferral without bulk data: treat any table as expensive.
     manager.initial_dump_defer_min_routes = 0;
+    // The queued message below must join the restarter's window whatever
+    // the host's speed.
+    super::distribution_window::untimed_window(&mut manager);
 
     let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let third = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));

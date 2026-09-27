@@ -23,6 +23,30 @@ const B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
 const C: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
 const CLUSTER: Option<Ipv4Addr> = Some(Ipv4Addr::new(192, 0, 2, 1));
 
+/// A distinct /24 per `(a, b)`: `10.(210 + b).a.0/24`. ([`pfx`] masks its
+/// second argument away, so `pfx(a, 1)` and `pfx(a, 2)` are one prefix.)
+fn window_pfx(a: u8, b: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(10, 210 + b, a, 0), 24)
+}
+
+/// Window limits with every bound out of reach.
+fn unbounded() -> DistributionWindowLimits {
+    DistributionWindowLimits {
+        messages: usize::MAX,
+        routes: usize::MAX,
+        affected_prefixes: usize::MAX,
+        elapsed: Duration::MAX,
+    }
+}
+
+/// Take the wall-clock bound out of play so a test's window shape never
+/// depends on how long the host takes to run it. Only the elapsed-bound
+/// case of [`each_window_bound_splits_queued_input`] exercises that bound,
+/// with a zero limit that always fires.
+pub(super) fn untimed_window(manager: &mut RibManager) {
+    manager.distribution_window_limits.elapsed = Duration::MAX;
+}
+
 fn routes(from: Ipv4Addr, announced: Vec<Route>, withdrawn: Vec<Ipv4Prefix>) -> RibUpdate {
     RibUpdate::RoutesReceived {
         session_id: SESSION,
@@ -44,13 +68,13 @@ async fn run_three<S>(cluster_id: Option<Ipv4Addr>, scenario: S) -> (Streams, St
 where
     S: AsyncFn(&mut Oracle),
 {
-    let mut queued = Oracle::spawn(false, cluster_id);
+    let mut queued = Oracle::spawn_configured(false, cluster_id, untimed_window);
     scenario(&mut queued).await;
     let queued = queued.finish().await;
-    let mut ungrouped = Oracle::spawn(true, cluster_id);
+    let mut ungrouped = Oracle::spawn_configured(true, cluster_id, untimed_window);
     scenario(&mut ungrouped).await;
     let ungrouped = ungrouped.finish().await;
-    let mut sequential = Oracle::spawn(false, cluster_id).sequential();
+    let mut sequential = Oracle::spawn_configured(false, cluster_id, untimed_window).sequential();
     scenario(&mut sequential).await;
     let sequential = sequential.finish().await;
     (queued, ungrouped, sequential)
@@ -238,7 +262,7 @@ async fn barrier_update_settles_window_before_it_applies() {
         }),
     ];
     for (label, barrier) in barriers {
-        let mut o = Oracle::spawn(false, CLUSTER);
+        let mut o = Oracle::spawn_configured(false, CLUSTER, untimed_window);
         o.peer_up(A, false, true, None, 64).await;
         o.peer_up(B, false, true, None, 64).await;
         o.peer_up(C, false, true, None, 64).await;
@@ -375,6 +399,7 @@ struct RejectionFixture {
 fn rejection_fixture() -> RejectionFixture {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    untimed_window(&mut manager);
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1));
     let other = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 2));
     let p = pfx(7, 0);
@@ -464,8 +489,11 @@ async fn exact_export_rejection_retires_after_window_distribution() {
 }
 
 /// Deliver `messages` through the synchronous actor turns with `limits` and
-/// return how many route envelopes one member received (one per window).
-fn windows_for(limits: DistributionWindowLimits, messages: Vec<RibUpdate>) -> usize {
+/// return the route envelopes one member received (one per window).
+fn windows_for(
+    limits: DistributionWindowLimits,
+    messages: Vec<RibUpdate>,
+) -> Vec<OutboundRouteUpdate> {
     let (tx, rx) = mpsc::channel(64);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     manager.distribution_window_limits = limits;
@@ -476,7 +504,34 @@ fn windows_for(limits: DistributionWindowLimits, messages: Vec<RibUpdate>) -> us
         tx.try_send(message).unwrap();
     }
     drain_primary(&mut manager);
-    route_envelopes(&mut out).len()
+    route_envelopes(&mut out)
+}
+
+/// Distinct prefixes announced per window.
+fn prefixes_per_window(limits: DistributionWindowLimits, messages: Vec<RibUpdate>) -> Vec<usize> {
+    windows_for(limits, messages)
+        .iter()
+        .map(|update| update.announce.len())
+        .collect()
+}
+
+/// The MED of the last churn message each window absorbed (message `i`
+/// carries MED `i`), which pins exactly where every window closed.
+fn churn_window_ends(limits: DistributionWindowLimits, count: u32) -> Vec<u32> {
+    windows_for(limits, churn_messages(count))
+        .iter()
+        .map(|update| {
+            assert_eq!(update.announce.len(), 1);
+            update.announce[0]
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    PathAttribute::Med(med) => Some(*med),
+                    _ => None,
+                })
+                .expect("churn routes carry a MED")
+        })
+        .collect()
 }
 
 fn distinct_messages(count: u8, prefixes_each: u8) -> Vec<RibUpdate> {
@@ -484,7 +539,7 @@ fn distinct_messages(count: u8, prefixes_each: u8) -> Vec<RibUpdate> {
         .map(|message| {
             unregistered_routes(
                 (0..prefixes_each)
-                    .map(|index| make_route(pfx(20 + message, index), source()))
+                    .map(|index| make_route(window_pfx(message, index), source()))
                     .collect(),
                 vec![],
             )
@@ -504,78 +559,122 @@ fn churn_messages(count: u32) -> Vec<RibUpdate> {
         .collect()
 }
 
-/// Every bound closes the window on its own, and repeated churn of one
-/// prefix (which never grows the affected set) is capped by the input bound.
+/// Every bound closes the window on its own. Each case enables only the
+/// bound under test (all others unreachable, including the wall-clock one),
+/// so the window shape proves which bound fired.
 #[tokio::test]
 async fn each_window_bound_splits_queued_input() {
-    let limits = DistributionWindowLimits::default;
-    assert_eq!(windows_for(limits(), distinct_messages(10, 1)), 1);
+    let defaults = DistributionWindowLimits::default();
     assert_eq!(
-        windows_for(
+        (
+            defaults.messages,
+            defaults.routes,
+            defaults.affected_prefixes,
+            defaults.elapsed
+        ),
+        (256, 4_096, 1_024, Duration::from_millis(5)),
+        "the documented default bounds"
+    );
+    assert_eq!(
+        prefixes_per_window(unbounded(), distinct_messages(10, 1)),
+        [10],
+        "no bound reached: one window"
+    );
+    assert_eq!(
+        prefixes_per_window(
             DistributionWindowLimits {
                 messages: 4,
-                ..limits()
+                ..unbounded()
             },
             distinct_messages(10, 1)
         ),
-        3,
-        "message bound"
+        [4, 4, 2],
+        "message bound: four messages per window"
     );
     assert_eq!(
-        windows_for(
+        prefixes_per_window(
             DistributionWindowLimits {
                 routes: 3,
-                ..limits()
+                ..unbounded()
             },
             distinct_messages(10, 2)
         ),
-        5,
-        "input-route bound"
+        [4, 4, 4, 4, 4],
+        "input-route bound: closes at the first message reaching three routes"
     );
     assert_eq!(
-        windows_for(
+        prefixes_per_window(
             DistributionWindowLimits {
                 affected_prefixes: 3,
-                ..limits()
+                ..unbounded()
             },
             distinct_messages(10, 1)
         ),
-        4,
-        "affected-prefix bound"
+        [3, 3, 3, 1],
+        "affected-prefix bound: three changed prefixes per window"
     );
+    // A zero limit has always elapsed once the window's first chunk ran, so
+    // this case is deterministic without a clock.
     assert_eq!(
-        windows_for(
+        prefixes_per_window(
             DistributionWindowLimits {
                 elapsed: Duration::ZERO,
-                ..limits()
+                ..unbounded()
             },
             distinct_messages(10, 1)
         ),
-        10,
-        "elapsed bound"
+        [1; 10],
+        "elapsed bound: every message its own window"
     );
+}
+
+/// Repeated churn of one prefix never grows the affected set, so the
+/// input-route and message bounds are what cap it.
+#[tokio::test]
+async fn same_prefix_churn_is_capped_by_the_input_bounds() {
     assert_eq!(
-        windows_for(
+        churn_window_ends(
             DistributionWindowLimits {
-                affected_prefixes: 2,
-                ..limits()
+                affected_prefixes: 1,
+                ..unbounded()
             },
-            churn_messages(10)
+            10
         ),
-        1,
-        "churn of one prefix never reaches the affected-prefix bound"
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "an affected-prefix bound of one closes every churn window"
     );
     assert_eq!(
-        windows_for(
+        churn_window_ends(
             DistributionWindowLimits {
                 affected_prefixes: 2,
+                ..unbounded()
+            },
+            10
+        ),
+        [9],
+        "churn of one prefix never reaches an affected-prefix bound above one"
+    );
+    assert_eq!(
+        churn_window_ends(
+            DistributionWindowLimits {
                 routes: 4,
-                ..limits()
+                ..unbounded()
             },
-            churn_messages(10)
+            10
         ),
-        3,
+        [3, 7, 9],
         "the input-route bound caps same-prefix churn"
+    );
+    assert_eq!(
+        churn_window_ends(
+            DistributionWindowLimits {
+                messages: 4,
+                ..unbounded()
+            },
+            10
+        ),
+        [3, 7, 9],
+        "the message bound caps same-prefix churn"
     );
 }
 
@@ -586,6 +685,7 @@ async fn each_window_bound_splits_queued_input() {
 async fn window_never_waits_and_admits_one_message_per_turn() {
     let (tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    untimed_window(&mut manager);
     let (up, mut out) = member_up(IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1)), 1);
     manager.handle_update(up);
     let _ = route_envelopes(&mut out);
@@ -682,6 +782,7 @@ async fn dirty_resync_settles_an_open_window_first() {
 async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    untimed_window(&mut manager);
     let member = IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1));
     let (up, mut out) = member_up(member, 1);
     manager.handle_update(up);
@@ -716,19 +817,19 @@ async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
     };
     let (query_reply, mut query_response) = oneshot::channel();
     let queued = vec![
-        stale(pfx(50, 1)),
-        stale(pfx(50, 2)),
+        stale(window_pfx(50, 1)),
+        stale(window_pfx(50, 2)),
         RibUpdate::QueryBestRoutes {
             deadline: full_snapshot_query_deadline(),
             reply: query_reply,
         },
-        stale(pfx(50, 3)),
-        stale(pfx(50, 4)),
-        unregistered_routes(vec![make_route(pfx(50, 5), source())], vec![]),
+        stale(window_pfx(50, 3)),
+        stale(window_pfx(50, 4)),
+        unregistered_routes(vec![make_route(window_pfx(50, 5), source())], vec![]),
     ];
     let total = queued.len();
     manager.handle_update(unregistered_routes(
-        vec![make_route(pfx(50, 0), source())],
+        vec![make_route(window_pfx(50, 0), source())],
         vec![],
     ));
     for update in queued {
@@ -764,7 +865,7 @@ async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         delivered,
-        BTreeSet::from([Prefix::V4(pfx(50, 0)), Prefix::V4(pfx(50, 5))]),
+        BTreeSet::from([Prefix::V4(window_pfx(50, 0)), Prefix::V4(window_pfx(50, 5))]),
         "stale messages are dropped, fresh ones distributed"
     );
 }
