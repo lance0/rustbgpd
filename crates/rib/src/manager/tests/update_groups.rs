@@ -7881,8 +7881,10 @@ fn queue_replacement_readiness(
     reason = "the regression exercises both registration paths and negotiated limit replay with all non-readiness lanes fenced"
 )]
 fn initial_export_services_interior_readiness_and_fences_other_lanes() {
+    // A grouped join scopes its inventory to the group residue (empty
+    // here), so the full inventory walk is an ungrouped-join stage.
     for (ungrouped, limits_update, stage) in [
-        (false, false, "initial_inventory"),
+        (true, false, "initial_inventory"),
         (false, false, "initial_group_replay"),
         (true, false, "initial_ungrouped_staging"),
         (true, true, "initial_ungrouped_staging"),

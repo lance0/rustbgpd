@@ -1662,3 +1662,118 @@ async fn single_best_policy_added_no_advertise_emits_policy_filtered_event() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// A member joining a converged update group inherits the group's recorded
+/// export-policy denials exactly as a per-peer staging walk would record
+/// them: the joiner's policy-filtered state and `PolicyFiltered` event come
+/// from the group residue, which the join's prefix scope must cover.
+#[tokio::test]
+async fn grouped_join_inherits_group_export_policy_denials() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let deny_chain = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(denied_prefix)),
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let peer_up = |peer: IpAddr, outbound_tx| RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: Some(deny_chain.clone()),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    };
+
+    let founder = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (founder_tx, mut founder_rx) = mpsc::channel(64);
+    tx.send(peer_up(founder, founder_tx)).await.unwrap();
+    drain_eor(&mut founder_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: source,
+        announced: vec![
+            make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            make_route(permitted_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let update = founder_rx.recv().await.unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].prefix, Prefix::V4(permitted_prefix));
+
+    let joiner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let (joiner_tx, mut joiner_rx) = mpsc::channel(64);
+    tx.send(peer_up(joiner, joiner_tx)).await.unwrap();
+    let initial = joiner_rx.recv().await.unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    assert_eq!(initial.announce[0].prefix, Prefix::V4(permitted_prefix));
+    drain_eor(&mut joiner_rx).await;
+
+    let history = query_route_event_history(
+        &tx,
+        Some(joiner),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(denied_prefix)),
+        10,
+    )
+    .await;
+    let policy_filtered = history
+        .iter()
+        .filter(|event| {
+            event.event_type == RouteEventType::PolicyFiltered && event.target_peer == Some(joiner)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        policy_filtered.len(),
+        1,
+        "the joiner inherits the group denial"
+    );
+    assert_eq!(policy_filtered[0].peer, Some(source));
+
+    drop(tx);
+    handle.await.unwrap();
+}

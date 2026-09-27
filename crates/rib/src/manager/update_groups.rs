@@ -639,6 +639,17 @@ pub(in crate::manager) struct GroupRibOut {
 const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 
 impl GroupRibOut {
+    /// Every unicast prefix a per-member residue query can return:
+    /// export-policy denials, OTC-blocked winners and runner-up lane
+    /// entries. A grouped join scopes its inventory to these.
+    pub(in crate::manager) fn residue_prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
+        self.policy_filtered
+            .keys()
+            .copied()
+            .chain(self.otc_blocked.keys().map(|(prefix, _)| *prefix))
+            .chain(self.runner_up.keys().copied())
+    }
+
     #[cfg(feature = "bench-internals")]
     pub(in crate::manager) fn bench_otc_storage_shape(&self) -> (usize, usize) {
         (self.otc_blocked.len(), self.otc_blocked.capacity())

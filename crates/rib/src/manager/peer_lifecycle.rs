@@ -1312,6 +1312,54 @@ impl RibManager {
         });
     }
 
+    /// The prefix inventory of a grouped join. A grouped member replays the
+    /// group table instead of staging per prefix, so the inventory only
+    /// scopes the group residue queries and this peer's own OTC and
+    /// policy-filtered reconciliation. Every prefix those can touch is a
+    /// group residue prefix or a key of the peer's own residue maps, so the
+    /// scope is that set restricted to prefixes the full inventory holds:
+    /// present in the Loc-RIB or in some Adj-RIB-In (via the announcer
+    /// index, which never under-counts). This avoids walking the Loc-RIB
+    /// and every Adj-RIB-In on each join.
+    fn grouped_join_prefix_scope(
+        &self,
+        peer: IpAddr,
+        group: &super::update_groups::GroupRibOut,
+        checkpoint: &mut impl FnMut(),
+    ) -> HashSet<Prefix> {
+        let in_inventory = |prefix: &Prefix| {
+            self.loc_rib.get(prefix).is_some()
+                || self.unicast_prefix_peers.peers(prefix).any(|source| {
+                    self.ribs
+                        .get(&source)
+                        .is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
+                })
+        };
+        group
+            .residue_prefixes()
+            .chain(
+                self.peer_otc_blocked
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(|blocked| blocked.keys().copied()),
+            )
+            .chain(
+                self.pending_otc_blocked
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(|pending| pending.keys().map(|(prefix, _)| *prefix)),
+            )
+            .chain(
+                self.policy_filtered_routes
+                    .get(&peer)
+                    .into_iter()
+                    .flat_map(|keys| keys.iter().map(|key| key.prefix)),
+            )
+            .inspect(|_| checkpoint())
+            .filter(|prefix| in_inventory(prefix))
+            .collect()
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "initial dump stages every family queue before one Adj-RIB-Out commit"
@@ -1382,19 +1430,28 @@ impl RibManager {
         let target_peer_label = peer.to_string();
         let metrics = self.metrics.clone();
 
-        let mut all_prefixes: HashSet<Prefix> = self
-            .loc_rib
-            .iter()
-            .inspect(|_| checkpoint_at("initial_inventory"))
-            .map(|r| r.prefix)
-            .collect();
-        for rib in self.ribs.values() {
-            all_prefixes.extend(
-                rib.iter()
+        let member_of = self.grouped_member_of(peer);
+        let all_prefixes: HashSet<Prefix> =
+            if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
+                self.grouped_join_prefix_scope(peer, group, &mut || {
+                    checkpoint_at("initial_inventory");
+                })
+            } else {
+                let mut all_prefixes: HashSet<Prefix> = self
+                    .loc_rib
+                    .iter()
                     .inspect(|_| checkpoint_at("initial_inventory"))
-                    .map(|r| r.prefix),
-            );
-        }
+                    .map(|r| r.prefix)
+                    .collect();
+                for rib in self.ribs.values() {
+                    all_prefixes.extend(
+                        rib.iter()
+                            .inspect(|_| checkpoint_at("initial_inventory"))
+                            .map(|r| r.prefix),
+                    );
+                }
+                all_prefixes
+            };
         let otc_prefixes: HashSet<Prefix> = all_prefixes
             .iter()
             .inspect(|_| checkpoint_at("initial_inventory"))
@@ -1422,7 +1479,6 @@ impl RibManager {
         // ran when the table was built (design §4: join pays no
         // per-prefix staging walk). The loop below is the ungrouped
         // path; grouped peers skip it (empty staging set).
-        let member_of = self.grouped_member_of(peer);
         let mut vpn_group_replayed = false;
         let mut grouped_otc_blocked = Vec::new();
         if let Some(group) = member_of.and_then(|gid| self.group_ribs.get(&gid)) {
