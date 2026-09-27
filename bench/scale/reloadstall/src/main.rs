@@ -39,7 +39,9 @@
 //!   completion (100 ms poll), the window's wall length, the daemon's
 //!   churn-only CPU rate sampled over 2 s just before the close, and, with
 //!   `RELOADSTALL_FAILOVER_METRICS_ADDR`, the `distribute_flush` actor-work
-//!   sum/count over the same window. Before the first close the run fails
+//!   sum/count between a metrics scrape just before the CPU read at the
+//!   close and one just after the CPU read at completion (the
+//!   `scrape_bracketed_flush_*` columns: the CPU window plus both scrapes). Before the first close the run fails
 //!   unless every alternate covers the flapped cohort, no alternate is a
 //!   churner, each alternate currently holds its owner's path (it lost the
 //!   initial tie-break).
@@ -2388,9 +2390,9 @@ async fn run_flapstorm(
             });
     println!(
         "flapstorm_failover_csv_header,round,peers_total,peers_flapped,flap_prefixes,\
-         alternate_prefixes,alternate_sources,daemon_cpu_s,distribute_flush_sum_s,\
-         distribute_flush_count,withdraw_p50_s,withdraw_max_s,window_s,\
-         background_cpu_s_per_s"
+         alternate_prefixes,alternate_sources,daemon_cpu_s,\
+         scrape_bracketed_flush_sum_s,scrape_bracketed_flush_count,withdraw_p50_s,\
+         withdraw_max_s,window_s,background_cpu_s_per_s"
     );
     println!(
         "flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,\
@@ -2419,8 +2421,17 @@ async fn run_flapstorm(
         // completion-poll interval after the last survivor completes; this
         // pre-close sample of the churn-only rate lets a receipt bound that.
         let background = background_cpu_rate(pid, BACKGROUND_CPU_WINDOW).await;
-        // Down-pass evidence: scrape first, then read CPU, so the scrape's
-        // own rendering stays outside the measured window.
+        // Arm before closing so no withdrawal (or alternate) is missed.
+        if alternate_count > 0 {
+            arm_survivors_failover(ctx, k, flap_prefixes, total, &alternates);
+        } else {
+            arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
+        }
+        // Down-pass boundaries, mirrored: scrape then read CPU before the
+        // close; read CPU then scrape after completion. The scrape's own
+        // rendering stays outside the CPU window, and the scrape-bracketed
+        // `distribute_flush` interval contains the CPU window plus the two
+        // scrapes (a pass finishing inside a scrape counts in flush only).
         let flush_before = match failover_metrics_addr {
             Some(addr) => Some(distribute_flush_totals(addr).await.unwrap_or_else(|error| {
                 eprintln!("FAIL: flap {round} pre-close metrics scrape: {error}");
@@ -2428,12 +2439,6 @@ async fn run_flapstorm(
             })),
             None => None,
         };
-        // Arm before closing so no withdrawal (or alternate) is missed.
-        if alternate_count > 0 {
-            arm_survivors_failover(ctx, k, flap_prefixes, total, &alternates);
-        } else {
-            arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
-        }
         let cpu_before = process_cpu_seconds(pid);
         let cpu_window = Instant::now();
         println!("flap {round} close wall_us={}", wall_us());

@@ -145,8 +145,10 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   length, and the daemon's churn-only CPU rate sampled over 2 s just before
   the close. The window also contains that background churn. With
   `RELOADSTALL_FAILOVER_METRICS_ADDR` (the daemon's Prometheus address), the
-  row also carries the `distribute_flush` actor-work sum and count over the
-  same window. `failover_cell.sh` runs one such cell end to end; a daemon
+  row also carries the `distribute_flush` actor-work sum and count between a
+  metrics scrape just before the opening CPU read and one just after the
+  closing CPU read (`scrape_bracketed_flush_*`: the CPU window plus both
+  scrapes). `failover_cell.sh` runs one such cell end to end; a daemon
   built with `--features rustbgpd-rib/bench-internals` additionally logs
   which grouped members took the shared payload or the per-member walk in
   each mixed pass, and the script totals them. First receipt:
