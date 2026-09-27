@@ -213,6 +213,9 @@ struct EncodeBuffer<'a> {
     budget: Option<&'a WarmSnapshotBudget>,
     accounted_prefix: usize,
     snapshot_output: bool,
+    /// Per-attribute encoding scratch, reused for every attribute written
+    /// through this buffer instead of allocating one `Vec` per attribute.
+    attr_scratch: Vec<u8>,
     #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
     snapshot_allocation_probe: Option<&'a Cell<u64>>,
 }
@@ -224,6 +227,7 @@ impl<'a> EncodeBuffer<'a> {
             budget,
             accounted_prefix: 0,
             snapshot_output: false,
+            attr_scratch: Vec::new(),
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
         }
@@ -235,6 +239,7 @@ impl<'a> EncodeBuffer<'a> {
             budget,
             accounted_prefix: 0,
             snapshot_output: true,
+            attr_scratch: Vec::new(),
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
         }
@@ -250,6 +255,7 @@ impl<'a> EncodeBuffer<'a> {
             budget,
             accounted_prefix,
             snapshot_output: false,
+            attr_scratch: Vec::new(),
             #[cfg(any(test, feature = "snapshot-allocation-diagnostics"))]
             snapshot_allocation_probe: None,
         }
@@ -848,10 +854,17 @@ fn encode_one_mrt_rib_attribute(
     } else {
         // The wire encoder is Vec-based. One received BGP attribute is
         // protocol-bounded to u16 bytes; append it immediately rather than
-        // retaining owned attributes for a complete prefix record.
-        let mut encoded = Vec::new();
-        encode_path_attributes(std::slice::from_ref(attr), &mut encoded, true, false)?;
-        buf.extend_from_slice(&encoded)
+        // retaining owned attributes for a complete prefix record. The
+        // scratch keeps its capacity across attributes of one encode.
+        let mut encoded = std::mem::take(&mut buf.attr_scratch);
+        encoded.clear();
+        let result =
+            match encode_path_attributes(std::slice::from_ref(attr), &mut encoded, true, false) {
+                Ok(()) => buf.extend_from_slice(&encoded),
+                Err(error) => Err(error.into()),
+            };
+        buf.attr_scratch = encoded;
+        result
     }
 }
 /// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.
@@ -1698,6 +1711,64 @@ mod tests {
             expected.extend_from_slice(&value.to_be_bytes());
         }
         assert_eq!(bytes, expected);
+    }
+
+    /// The per-attribute scratch is reused across attributes and routes of
+    /// one encode. Every attribute must still encode exactly as a fresh
+    /// buffer would, including a short attribute written after a long one
+    /// and a second route after the first; stale scratch bytes must never
+    /// leak into the output.
+    #[test]
+    fn reused_attribute_scratch_encodes_like_fresh_buffers() {
+        let long_path = PathAttribute::AsPath(AsPath {
+            segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(
+                (64_512..64_512 + 200).collect(),
+            )],
+        });
+        let routes: Vec<Route> = [
+            vec![
+                PathAttribute::Origin(Origin::Igp),
+                long_path.clone(),
+                PathAttribute::Med(7),
+                PathAttribute::Communities(vec![0xFDE8_0064, 0xFDE8_00C8]),
+            ],
+            vec![
+                PathAttribute::Origin(Origin::Egp),
+                PathAttribute::LocalPref(50),
+                long_path,
+                PathAttribute::LargeCommunities(vec![LargeCommunity::new(65_000, 1, 2)]),
+                PathAttribute::Med(9),
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, attributes)| Route {
+            attributes: AttrSet::new(attributes),
+            ..make_route(
+                Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(203, 0, 113, u8::try_from(index * 16).unwrap()),
+                    28,
+                )),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            )
+        })
+        .collect();
+
+        let mut reused = Vec::new();
+        let mut output = EncodeBuffer::new(&mut reused, None);
+        for route in &routes {
+            encode_route_mrt_attributes(route, &mut output).unwrap();
+        }
+        drop(output);
+
+        let mut expected = Vec::new();
+        for attr in routes.iter().flat_map(synthesize_attributes) {
+            let mut fresh = Vec::new();
+            encode_path_attributes(std::slice::from_ref(&attr), &mut fresh, true, false).unwrap();
+            expected.extend_from_slice(&fresh);
+        }
+        assert_eq!(reused, expected);
     }
 
     fn subtype_marker(name: &str, subtype: u16) -> String {
