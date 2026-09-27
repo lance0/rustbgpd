@@ -3097,16 +3097,6 @@ fn prune_panic_reports(crash_dir: &Path) {
     }
 }
 
-/// Default tokio worker-thread cap when neither env nor config specifies one.
-const DEFAULT_WORKER_THREAD_CAP: usize = 8;
-
-/// Resolve the tokio worker-thread count: `RUSTBGPD_WORKER_THREADS` (if a
-/// positive integer) overrides the `[global] worker_threads` config field,
-/// which in turn overrides the default of `min(available parallelism, 8)`.
-/// A zero or unparseable value is ignored in favor of the next source. The
-/// cap right-sizes the async runtime for an I/O-bound daemon — reducing
-/// virtual-address reservation and scheduler footprint (it is RSS-neutral)
-/// rather than spawning one worker per core on high-core-count hosts.
 /// Raise the soft `RLIMIT_NOFILE` to the hard limit and return the prior
 /// `(soft, hard)` pair.
 ///
@@ -3123,6 +3113,16 @@ fn raise_nofile_soft_limit() -> nix::Result<(u64, u64)> {
     Ok((soft, hard))
 }
 
+/// Default tokio worker-thread cap when neither env nor config specifies one.
+const DEFAULT_WORKER_THREAD_CAP: usize = 8;
+
+/// Resolve the tokio worker-thread count: `RUSTBGPD_WORKER_THREADS` (if a
+/// positive integer) overrides the `[global] worker_threads` config field,
+/// which in turn overrides the default of `min(available parallelism, 8)`.
+/// A zero or unparseable value is ignored in favor of the next source. The
+/// cap right-sizes the async runtime for an I/O-bound daemon — reducing
+/// virtual-address reservation and scheduler footprint (it is RSS-neutral)
+/// rather than spawning one worker per core on high-core-count hosts.
 fn resolve_worker_threads(configured: Option<usize>) -> usize {
     let env = match std::env::var("RUSTBGPD_WORKER_THREADS") {
         Ok(value) => Some(value),
