@@ -27,7 +27,7 @@ use rustbgpd_rib::route::{Route, RouteOrigin};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
+    AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -223,17 +223,21 @@ impl Mode {
 enum Shape {
     Ixp700,
     DualFullFeed,
+    /// Two IPv6 full feeds: every route encodes an `MP_REACH_NLRI` next hop,
+    /// and the second source's routes carry a link-local next hop too.
+    Ipv6FullFeed,
 }
 
 impl Shape {
-    const ALL: [Self; 2] = [Self::Ixp700, Self::DualFullFeed];
+    const ALL: [Self; 3] = [Self::Ixp700, Self::DualFullFeed, Self::Ipv6FullFeed];
 
     fn parse(value: &str) -> AnyResult<Self> {
         match value {
             "ixp-700" => Ok(Self::Ixp700),
             "dual-full-feed" => Ok(Self::DualFullFeed),
+            "ipv6-full-feed" => Ok(Self::Ipv6FullFeed),
             _ => Err(invalid(format!(
-                "shape must be ixp-700 or dual-full-feed, got {value}"
+                "shape must be ixp-700, dual-full-feed or ipv6-full-feed, got {value}"
             ))),
         }
     }
@@ -242,27 +246,28 @@ impl Shape {
         match self {
             Self::Ixp700 => "ixp-700",
             Self::DualFullFeed => "dual-full-feed",
+            Self::Ipv6FullFeed => "ipv6-full-feed",
         }
     }
 
     const fn full_counts(self) -> (usize, usize, usize) {
         match self {
             Self::Ixp700 => (400_400, 400_400, 700),
-            Self::DualFullFeed => (400_400, 800_800, 2),
+            Self::DualFullFeed | Self::Ipv6FullFeed => (400_400, 800_800, 2),
         }
     }
 
     const fn smoke_counts(self) -> (usize, usize, usize) {
         match self {
             Self::Ixp700 => (28, 28, 7),
-            Self::DualFullFeed => (8, 16, 2),
+            Self::DualFullFeed | Self::Ipv6FullFeed => (8, 16, 2),
         }
     }
 
     const fn paths_per_prefix(self) -> usize {
         match self {
             Self::Ixp700 => 1,
-            Self::DualFullFeed => 2,
+            Self::DualFullFeed | Self::Ipv6FullFeed => 2,
         }
     }
 }
@@ -272,6 +277,8 @@ fn prove_shape_contract() {
     assert_eq!(Shape::DualFullFeed.full_counts(), (400_400, 800_800, 2));
     assert_eq!(Shape::Ixp700.smoke_counts(), (28, 28, 7));
     assert_eq!(Shape::DualFullFeed.smoke_counts(), (8, 16, 2));
+    assert_eq!(Shape::Ipv6FullFeed.full_counts(), (400_400, 800_800, 2));
+    assert_eq!(Shape::Ipv6FullFeed.smoke_counts(), (8, 16, 2));
 }
 
 #[derive(Debug)]
@@ -324,7 +331,7 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "snapshot_allocation <timing|diagnostic> [--candidate] [--smoke] \
-                         [--shape <ixp-700|dual-full-feed>] [--commit SHA] \
+                         [--shape <ixp-700|dual-full-feed|ipv6-full-feed>] [--commit SHA] \
                          [--output FILE]"
                     );
                     std::process::exit(0);
@@ -480,16 +487,20 @@ impl Fixture {
                     expected_per_peer[source_index] += 1;
                 }
             }
-            Shape::DualFullFeed => {
+            Shape::DualFullFeed | Shape::Ipv6FullFeed => {
                 for prefix_index in 0..prefix_count {
                     for (source_index, path_count) in expected_per_peer.iter_mut().enumerate() {
-                        routes.push(make_route(
+                        let mut route = make_route(
                             prefix_index,
                             source_index,
                             &peers,
                             &attributes,
                             received_at,
-                        ));
+                        );
+                        if shape == Shape::Ipv6FullFeed {
+                            make_ipv6(&mut route, prefix_index, source_index);
+                        }
+                        routes.push(route);
                         *path_count += 1;
                     }
                 }
@@ -504,6 +515,23 @@ impl Fixture {
             prefix_count,
         }
     }
+}
+
+/// Rewrite a fixture route into the IPv6 shape: a `/64` from `2001:db8::/32`
+/// with a global IPv6 next hop per source; the second source also carries a
+/// link-local next hop, exercising the 32-byte `MP_REACH_NLRI` form.
+fn make_ipv6(route: &mut Route, prefix_index: usize, source_index: usize) {
+    let prefix_ordinal = u128::try_from(prefix_index).expect("prefix count fits u128");
+    let source_ordinal = u128::try_from(source_index).expect("source count fits u128") + 1;
+    route.prefix = Prefix::V6(Ipv6Prefix::new(
+        Ipv6Addr::from((0x2001_0db8_u128 << 96) | (prefix_ordinal << 64)),
+        64,
+    ));
+    route.next_hop = IpAddr::V6(Ipv6Addr::from(
+        (0x2001_0db8_ffff_u128 << 80) | source_ordinal,
+    ));
+    route.link_local_next_hop =
+        (source_index % 2 == 1).then(|| Ipv6Addr::from((0xfe80_u128 << 112) | source_ordinal));
 }
 
 fn make_peer(index: usize) -> MrtPeerEntry {
@@ -745,8 +773,10 @@ fn expected_peer_index(route: &Route) -> Option<u16> {
 
 fn attributes_match_route(decoded: &[PathAttribute], route: &Route) -> bool {
     let expected = route.attributes.as_slice();
+    // An IPv6 next hop rides in MP_REACH_NLRI, which the reader consumes
+    // into `next_hop` / `link_local_next_hop`.
     let IpAddr::V4(next_hop) = route.next_hop else {
-        return false;
+        return decoded == expected;
     };
     expected.len() >= 2
         && decoded.len() == expected.len() + 1
@@ -1088,6 +1118,7 @@ fn main() -> AnyResult<()> {
     let shapes: &[Shape] = match args.shape {
         Some(Shape::Ixp700) => &[Shape::Ixp700],
         Some(Shape::DualFullFeed) => &[Shape::DualFullFeed],
+        Some(Shape::Ipv6FullFeed) => &[Shape::Ipv6FullFeed],
         None => &Shape::ALL,
     };
     for shape in shapes {

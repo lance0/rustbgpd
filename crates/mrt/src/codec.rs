@@ -881,31 +881,26 @@ fn encode_mrt_mp_reach(
     link_local: Option<std::net::Ipv6Addr>,
     buf: &mut EncodeBuffer<'_>,
 ) -> Result<(), EncodeError> {
-    let mut value: Vec<u8> = Vec::with_capacity(33);
-    match (next_hop, link_local) {
+    // Attribute header (flags, type, length) plus the at most 33-byte value,
+    // built on the stack and appended in one reservation.
+    let mut attr = [0u8; 36];
+    let value_len: u8 = match (next_hop, link_local) {
         (IpAddr::V4(addr), _) => {
-            value.push(4);
-            value.extend_from_slice(&addr.octets());
+            attr[4..8].copy_from_slice(&addr.octets());
+            4
         }
         (IpAddr::V6(addr), Some(ll)) => {
-            value.push(32);
-            value.extend_from_slice(&addr.octets());
-            value.extend_from_slice(&ll.octets());
+            attr[4..20].copy_from_slice(&addr.octets());
+            attr[20..36].copy_from_slice(&ll.octets());
+            32
         }
         (IpAddr::V6(addr), None) => {
-            value.push(16);
-            value.extend_from_slice(&addr.octets());
+            attr[4..20].copy_from_slice(&addr.octets());
+            16
         }
-    }
-    buf.push(0x80)?;
-    buf.push(14)?;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "value length is at most 33 bytes"
-    )]
-    buf.push(value.len() as u8)?;
-    buf.extend_from_slice(&value)?;
-    Ok(())
+    };
+    attr[..4].copy_from_slice(&[0x80, 14, value_len + 1, value_len]);
+    buf.extend_from_slice(&attr[..4 + usize::from(value_len)])
 }
 /// Encode a prefix into MRT format: length byte then ceil(len/8) prefix bytes.
 fn encode_prefix_bytes(buf: &mut EncodeBuffer<'_>, prefix: &Prefix) -> Result<(), EncodeError> {
@@ -1769,6 +1764,53 @@ mod tests {
             expected.extend_from_slice(&fresh);
         }
         assert_eq!(reused, expected);
+    }
+
+    /// IPv6 routes encode their next hop as the RFC 6396 reduced
+    /// `MP_REACH_NLRI` (NH-Len plus next-hop bytes), 16 bytes global-only
+    /// and 32 bytes with a link-local next hop, after the route's own
+    /// attributes. Pin the exact bytes for both forms back to back.
+    #[test]
+    fn ipv6_mp_reach_next_hops_encode_reduced_form() {
+        let global: Ipv6Addr = "2001:db8:ffff::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::2".parse().unwrap();
+        let mut routes = Vec::new();
+        for (index, ll) in [None, Some(link_local)].into_iter().enumerate() {
+            let mut route = make_route(
+                Prefix::V6(Ipv6Prefix::new(
+                    Ipv6Addr::from(
+                        (0x2001_0db8_u128 << 96) | (u128::try_from(index).unwrap() << 64),
+                    ),
+                    64,
+                )),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                IpAddr::V6(global),
+            );
+            route.link_local_next_hop = ll;
+            routes.push(route);
+        }
+
+        let mut encoded = Vec::new();
+        let mut output = EncodeBuffer::new(&mut encoded, None);
+        for route in &routes {
+            encode_route_mrt_attributes(route, &mut output).unwrap();
+        }
+        drop(output);
+
+        let mut expected = Vec::new();
+        for route in &routes {
+            encode_path_attributes(route.attributes.as_slice(), &mut expected, true, false)
+                .unwrap();
+            match route.link_local_next_hop {
+                None => expected.extend_from_slice(&[0x80, 14, 17, 16]),
+                Some(_) => expected.extend_from_slice(&[0x80, 14, 33, 32]),
+            }
+            expected.extend_from_slice(&global.octets());
+            if let Some(ll) = route.link_local_next_hop {
+                expected.extend_from_slice(&ll.octets());
+            }
+        }
+        assert_eq!(encoded, expected);
     }
 
     fn subtype_marker(name: &str, subtype: u16) -> String {
