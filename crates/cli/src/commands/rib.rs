@@ -303,7 +303,12 @@ struct JsonLinesEnd {
     returned_count: u64,
     total_count: u64,
     complete: bool,
+    /// Opaque continuation for `--limit N --page-token`; empty when complete.
+    next_page_token: String,
 }
+
+/// `rbgp-rib` stream version: 1.1 added the end record's `next_page_token`.
+const JSON_LINES_FORMAT_VERSION: &str = "1.1";
 
 async fn write_route_json_lines(
     writer: &mut impl Write,
@@ -318,7 +323,7 @@ async fn write_route_json_lines(
         &JsonLinesHeader {
             r#type: "header",
             format: "rbgp-rib",
-            format_version: "1.0",
+            format_version: JSON_LINES_FORMAT_VERSION,
             view: match rpc {
                 RouteListRpc::Best => "best",
                 RouteListRpc::Received => "received",
@@ -349,6 +354,7 @@ async fn write_route_json_lines(
             returned_count,
             total_count,
             complete: next_page_token.is_empty(),
+            next_page_token,
         },
     )
 }
@@ -2611,13 +2617,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["id"] == "rbgp-rib/1.0")
+            .find(|entry| entry["id"] == "rbgp-rib/1.1")
             .unwrap();
+        assert_eq!(
+            JSON_LINES_FORMAT_VERSION, "1.1",
+            "a format bump renames the rbgp-rib inventory contract"
+        );
         let shapes = &contract["record_json_contracts"];
         let header = serde_json::to_value(JsonLinesHeader {
             r#type: "header",
             format: "rbgp-rib",
-            format_version: "1.0",
+            format_version: JSON_LINES_FORMAT_VERSION,
             view: "received",
         })
         .unwrap();
@@ -2647,6 +2657,7 @@ mod tests {
             returned_count: 1,
             total_count: 2,
             complete: false,
+            next_page_token: "opaque".into(),
         })
         .unwrap();
         assert_json_lines_inventory_shape(&end, &shapes["end"]);
@@ -2706,7 +2717,7 @@ mod tests {
                     .unwrap();
                 let records = json_lines_records(&bytes);
                 assert_eq!(records[0]["format"], "rbgp-rib");
-                assert_eq!(records[0]["format_version"], "1.0");
+                assert_eq!(records[0]["format_version"], "1.1");
                 assert_eq!(
                     records[0]["view"],
                     match rpc {
@@ -2726,6 +2737,7 @@ mod tests {
                     &serde_json::json!({
                         "type": "end", "returned_count": returned, "total_count": 2,
                         "complete": limit.is_none(),
+                        "next_page_token": if limit.is_some() { "opaque-second" } else { "" },
                     })
                 );
                 if limit.is_none() {
@@ -2770,7 +2782,10 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(
             records[1],
-            serde_json::json!({"type":"end", "returned_count":0, "total_count":0, "complete":true})
+            serde_json::json!({
+                "type": "end", "returned_count": 0, "total_count": 0, "complete": true,
+                "next_page_token": "",
+            })
         );
     }
 
