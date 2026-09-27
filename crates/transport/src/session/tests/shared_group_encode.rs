@@ -1621,25 +1621,31 @@ async fn shared_group_mixed_pass_rib_out_bmp_mirrors_emitted_frames() {
         let frames = read_raw_frames(&mut wire, 1 + announced_frames).await;
         let first = parse_frame(&frames[0], false);
         assert_eq!(
-            first.withdrawn.len(),
-            withdraw.len(),
-            "withdrawals go first"
+            first
+                .withdrawn
+                .iter()
+                .map(|nlri| (Prefix::V4(nlri.prefix), 0))
+                .collect::<Vec<_>>(),
+            withdraw,
+            "exactly the member's withdrawals go first"
         );
         assert!(first.announced.is_empty());
-        let announced: Vec<_> = frames[1..]
+        let mut announced: Vec<_> = frames[1..]
             .iter()
             .flat_map(|frame| parse_frame(frame, false).announced)
-            .map(|nlri| nlri.prefix)
+            .map(|nlri| Prefix::V4(nlri.prefix))
             .collect();
-        assert_eq!(announced.len(), announced_frames);
-        assert!(
-            announce
-                .iter()
-                .filter(|route| route.peer == IpAddr::V4(excluded))
-                .all(|route| !announced
-                    .iter()
-                    .any(|prefix| Prefix::V4(*prefix) == route.prefix)),
-            "a member never receives its own route from the shared stream"
+        announced.sort_unstable();
+        let mut expected: Vec<_> = announce
+            .iter()
+            .filter(|route| route.peer != IpAddr::V4(excluded))
+            .map(|route| route.prefix)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(expected.len(), announced_frames);
+        assert_eq!(
+            announced, expected,
+            "exactly the shared routes minus the member's own"
         );
         let mirrored: Vec<Vec<u8>> = std::iter::from_fn(|| bmp_rx.try_recv().ok())
             .map(|event| expect_rib_out_rm(event).to_vec())

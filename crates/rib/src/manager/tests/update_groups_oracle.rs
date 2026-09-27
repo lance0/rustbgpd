@@ -359,7 +359,7 @@ fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
     let own_after = ibgp_route(pfx(4, 0), A, 100, vec![]);
     let override_nh = NextHopAction::Specific(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 9)));
     let mut update = OutboundRouteUpdate {
-        announce: vec![own, other.clone(), third.clone(), own_after].into(),
+        announce: vec![own.clone(), other.clone(), third.clone(), own_after.clone()].into(),
         next_hop_override: vec![
             Some(NextHopAction::Self_),
             Some(override_nh.clone()),
@@ -382,14 +382,22 @@ fn normalize_excludes_own_source_and_keeps_overrides_aligned() {
     };
     assert_eq!(
         normalize(&update).announce,
-        vec![expect(&other, Some(override_nh)), expect(&third, None)],
+        vec![
+            expect(&other, Some(override_nh.clone())),
+            expect(&third, None)
+        ],
         "own-source routes dropped, overrides stay with their routes"
     );
     update.announce_source_exclusion = None;
     assert_eq!(
-        normalize(&update).announce.len(),
-        4,
-        "no exclusion keeps every route"
+        normalize(&update).announce,
+        vec![
+            expect(&own, Some(NextHopAction::Self_)),
+            expect(&other, Some(override_nh)),
+            expect(&third, None),
+            expect(&own_after, Some(NextHopAction::Self_)),
+        ],
+        "no exclusion keeps every route with its override"
     );
 }
 
