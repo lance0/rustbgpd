@@ -438,6 +438,37 @@ struct AttrGroupKey {
 
 type AttrGroupValue = (Arc<Vec<PathAttribute>>, Option<IpAddr>, Option<Ipv6Addr>);
 
+/// A value-map key carrying its value hash, computed once when the key is
+/// built. The map hashes only the stored `u64`, so lookups hash each
+/// attribute vector once and table growth never re-walks the attributes.
+struct HashedAttrGroupValue {
+    hash: u64,
+    value: AttrGroupValue,
+}
+
+impl HashedAttrGroupValue {
+    fn new(value: AttrGroupValue) -> Self {
+        Self {
+            hash: std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, &value),
+            value,
+        }
+    }
+}
+
+impl std::hash::Hash for HashedAttrGroupValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+impl PartialEq for HashedAttrGroupValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.value == other.value
+    }
+}
+
+impl Eq for HashedAttrGroupValue {}
+
 /// Groups one envelope's announcements by final attribute *value*, so
 /// routes whose attributes are equal but separately allocated share
 /// UPDATEs. Post-policy attribute `Arc`s are allocated per RIB distribution
@@ -453,7 +484,7 @@ type AttrGroupValue = (Arc<Vec<PathAttribute>>, Option<IpAddr>, Option<Ipv6Addr>
 struct AttrGroupIndex {
     by_ptr: HashMap<AttrGroupKey, usize>,
     first: Option<(AttrGroupValue, usize)>,
-    by_value: HashMap<AttrGroupValue, usize>,
+    by_value: HashMap<HashedAttrGroupValue, usize>,
     pinned: Vec<Arc<Vec<PathAttribute>>>,
 }
 
@@ -491,11 +522,16 @@ impl AttrGroupIndex {
             }
             Some((first, first_idx)) => {
                 if self.by_value.is_empty() {
-                    self.by_value.insert(first.clone(), *first_idx);
+                    self.by_value
+                        .insert(HashedAttrGroupValue::new(first.clone()), *first_idx);
                 }
                 *self
                     .by_value
-                    .entry((Arc::clone(attrs), next_hop, link_local_next_hop))
+                    .entry(HashedAttrGroupValue::new((
+                        Arc::clone(attrs),
+                        next_hop,
+                        link_local_next_hop,
+                    )))
                     .or_insert(next)
             }
         };
