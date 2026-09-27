@@ -125,10 +125,17 @@ pub async fn health(connection: Connection, json: bool, liveness: bool) -> Resul
         let out = json_health(&resp);
         output::print_json_pretty(&out)?;
     } else {
-        outln!("Status:  {}", output::colored_health(resp.healthy))?;
-        outln!("Uptime:  {}", output::format_duration(resp.uptime_seconds))?;
-        outln!("Peers:   {}", resp.active_peers)?;
-        outln!("Routes:  {}", resp.total_routes)?;
+        // `active_peers` counts only non-stale Established sessions.
+        outln!(
+            "Status:            {}",
+            output::colored_health(resp.healthy)
+        )?;
+        outln!(
+            "Uptime:            {}",
+            output::format_duration(resp.uptime_seconds)
+        )?;
+        outln!("Established peers: {}", resp.active_peers)?;
+        outln!("Routes:            {}", resp.total_routes)?;
     }
     Ok(())
 }

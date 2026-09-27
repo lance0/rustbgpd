@@ -297,7 +297,7 @@ fn emit_neighbor_detail_json(
     output::print_json_pretty(&value)
 }
 
-fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
+fn emit_neighbor_detail_human(value: &str) -> Result<(), CliError> {
     #[cfg(test)]
     if NEIGHBOR_SHOW_CAPTURE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -310,26 +310,6 @@ fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
         return Ok(());
     }
     output::print_text(value)
-}
-
-fn emit_neighbor_source_human(neighbor: &crate::proto::NeighborState) -> Result<(), CliError> {
-    let value = format!(
-        "Peer Source:           {}\n",
-        output::neighbor_source_label(neighbor)
-    );
-    #[cfg(test)]
-    if NEIGHBOR_SHOW_CAPTURE.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(bytes) = slot.as_mut() else {
-            return false;
-        };
-        bytes.extend_from_slice(value.as_bytes());
-        true
-    }) {
-        return Ok(());
-    }
-    output::print_text(&value)?;
-    Ok(())
 }
 
 fn json_neighbor_detail(n: &crate::proto::NeighborState) -> JsonNeighborDetail {
@@ -500,249 +480,318 @@ pub async fn show(
         NeighborShow::Detail(state) => *state,
     };
 
-    let cfg = n.config.as_ref();
-    let distribution_mode = effective_distribution_mode_label(n.effective_distribution_mode);
-    let max_prefix_action = max_prefix_action_label(&n.max_prefix_action);
-    let effective_max_prefixes = n.effective_max_prefixes;
     if json {
-        let out = json_neighbor_detail(&n);
-        emit_neighbor_detail_json(&out, n.negotiated_session.as_ref())?;
+        emit_neighbor_detail_json(&json_neighbor_detail(&n), n.negotiated_session.as_ref())
     } else {
-        outln!(
-            "Neighbor:              {}",
-            cfg.map(|c| c.address.as_str()).unwrap_or("")
-        )?;
-        let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
-        if !interface.is_empty() {
-            outln!("Interface:             {interface}")?;
+        emit_neighbor_detail_human(&render_neighbor_detail_human(&n))
+    }
+}
+
+/// Human neighbor-detail rows. Labeled rows share one value column derived
+/// from the longest label, indentation included, so a long label cannot
+/// overflow into its value. Unlabeled rows (section headers and multi-field
+/// records) keep their own text.
+#[derive(Default)]
+struct DetailRows(Vec<(usize, String, Option<String>)>);
+
+impl DetailRows {
+    fn field(&mut self, indent: usize, label: &str, value: impl std::fmt::Display) {
+        self.0
+            .push((indent, label.to_string(), Some(value.to_string())));
+    }
+
+    fn line(&mut self, indent: usize, text: impl Into<String>) {
+        self.0.push((indent, text.into(), None));
+    }
+
+    fn render(&self) -> String {
+        let width = self
+            .0
+            .iter()
+            .filter(|(_, _, value)| value.is_some())
+            .map(|(indent, label, _)| indent * 2 + label.len() + 1)
+            .max()
+            .unwrap_or(0);
+        let mut out = String::new();
+        for (indent, label, value) in &self.0 {
+            let head = format!("{:pad$}{label}", "", pad = indent * 2);
+            let line = match value {
+                Some(value) => format!("{:width$} {value}", format!("{head}:")),
+                None => head,
+            };
+            out.push_str(line.trim_end());
+            out.push('\n');
         }
-        outln!(
-            "Remote ASN:            {}",
-            cfg.map(|c| c.remote_asn).unwrap_or(0)
-        )?;
-        outln!(
-            "Description:           {}",
-            cfg.map(|c| c.description.as_str()).unwrap_or("")
-        )?;
-        emit_neighbor_source_human(&n)?;
-        outln!(
-            "Hold Time:             {}",
-            cfg.map(|c| c.hold_time).unwrap_or(0)
-        )?;
-        if let Some(minimum) = cfg.and_then(|c| c.min_hold_time) {
-            outln!("Minimum Hold Time:     {minimum}")?;
+        out
+    }
+}
+
+fn render_neighbor_detail_human(n: &crate::proto::NeighborState) -> String {
+    let cfg = n.config.as_ref();
+    let mut rows = DetailRows::default();
+    rows.field(0, "Neighbor", cfg.map(|c| c.address.as_str()).unwrap_or(""));
+    let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
+    if !interface.is_empty() {
+        rows.field(0, "Interface", interface);
+    }
+    rows.field(0, "Remote ASN", cfg.map(|c| c.remote_asn).unwrap_or(0));
+    rows.field(
+        0,
+        "Description",
+        cfg.map(|c| c.description.as_str()).unwrap_or(""),
+    );
+    rows.field(0, "Peer Source", output::neighbor_source_label(n));
+    rows.field(0, "Hold Time", cfg.map(|c| c.hold_time).unwrap_or(0));
+    if let Some(minimum) = cfg.and_then(|c| c.min_hold_time) {
+        rows.field(0, "Minimum Hold Time", minimum);
+    }
+    rows.field(
+        0,
+        "Send Hold Time",
+        cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
+    );
+    rows.field(
+        0,
+        "Max-Prefix Action",
+        max_prefix_action_label(&n.max_prefix_action),
+    );
+    if let Some(seconds) = cfg.and_then(|c| c.max_prefix_restart_seconds) {
+        rows.field(0, "Max-Prefix Restart", format!("{seconds}s configured"));
+    }
+    if let Some(remaining) = n.max_prefix_restart_remaining_millis {
+        rows.field(
+            0,
+            "Max-Prefix Hold-Down",
+            format!("{remaining}ms remaining"),
+        );
+    }
+    rows.field(
+        0,
+        "Families",
+        cfg.map(|c| c.families.join(", ")).unwrap_or_default(),
+    );
+    if let Some(required) = cfg
+        .map(|c| &c.required_families)
+        .filter(|required| !required.is_empty())
+    {
+        rows.field(0, "Required Families", required.join(", "));
+    }
+    rows.field(0, "Negotiation", negotiation_status_label(n));
+    if let Some(negotiated) = n.negotiated_session.as_ref() {
+        push_negotiated_transport_details(&mut rows, negotiated);
+        rows.field(
+            1,
+            "Remote Router ID",
+            negotiated.remote_router_id.as_deref().unwrap_or("unknown"),
+        );
+        rows.field(
+            1,
+            "Four-Octet AS",
+            optional_bool_label(negotiated.four_octet_as),
+        );
+        push_negotiated_capability_details(&mut rows, negotiated);
+        rows.field(
+            1,
+            "Negotiated Families",
+            negotiated_families_label(&negotiated.families),
+        );
+        rows.field(
+            1,
+            "Graceful Restart",
+            graceful_restart_status_label(negotiated.graceful_restart.as_ref()),
+        );
+        if let Some(gr) = negotiated.graceful_restart.as_ref() {
+            rows.field(
+                2,
+                "Peer Families",
+                negotiated_families_label(&gr.peer_families),
+            );
+            rows.field(
+                2,
+                "Peer Restart Time",
+                optional_seconds_label(gr.peer_restart_time_seconds),
+            );
+            rows.field(
+                2,
+                "Effective Retention",
+                gr.effective_retention_time_seconds.map_or_else(
+                    || "disabled locally".to_string(),
+                    |seconds| format!("{seconds}s"),
+                ),
+            );
         }
-        outln!(
-            "Send Hold Time:        {}",
-            cfg.and_then(|c| c.send_hold_time).unwrap_or(0)
-        )?;
-        outln!("Max-Prefix Action:     {max_prefix_action}")?;
-        if let Some(seconds) = cfg.and_then(|c| c.max_prefix_restart_seconds) {
-            outln!("Max-Prefix Restart:    {seconds}s configured")?;
-        }
-        if let Some(remaining) = n.max_prefix_restart_remaining_millis {
-            outln!("Max-Prefix Hold-Down:  {remaining}ms remaining")?;
-        }
-        outln!(
-            "Families:              {}",
-            cfg.map(|c| c.families.join(", ")).unwrap_or_default()
-        )?;
-        if let Some(required) = cfg
-            .map(|c| &c.required_families)
-            .filter(|required| !required.is_empty())
-        {
-            outln!("Required Families:     {}", required.join(", "))?;
-        }
-        outln!("Negotiation:           {}", negotiation_status_label(&n))?;
-        if let Some(negotiated) = n.negotiated_session.as_ref() {
-            output::print_text(&render_negotiated_transport_details(negotiated))?;
-            outln!(
-                "Remote Router ID:     {}",
-                negotiated.remote_router_id.as_deref().unwrap_or("unknown")
-            )?;
-            outln!(
-                "Four-Octet AS:        {}",
-                optional_bool_label(negotiated.four_octet_as)
-            )?;
-            output::print_text(&render_negotiated_capability_details(negotiated))?;
-            outln!(
-                "Negotiated Families:  {}",
-                negotiated_families_label(&negotiated.families)
-            )?;
-            outln!(
-                "Graceful Restart:     {}",
-                graceful_restart_status_label(negotiated.graceful_restart.as_ref())
-            )?;
-            if let Some(gr) = negotiated.graceful_restart.as_ref() {
-                outln!(
-                    "GR Peer Families:    {}",
-                    negotiated_families_label(&gr.peer_families)
-                )?;
-                outln!(
-                    "GR Peer Restart Time: {}",
-                    optional_seconds_label(gr.peer_restart_time_seconds)
-                )?;
-                outln!(
-                    "GR Effective Retention: {}",
-                    gr.effective_retention_time_seconds.map_or_else(
-                        || "disabled locally".to_string(),
-                        |seconds| format!("{seconds}s")
-                    )
-                )?;
-            }
-        }
-        let peer_group = cfg.map(|c| c.peer_group.as_str()).unwrap_or("");
-        if !peer_group.is_empty() {
-            outln!("Peer Group:            {peer_group}")?;
-        }
-        outln!("RR Client:             {}", n.route_reflector_client)?;
-        outln!(
-            "Route Server Client:   {}",
-            cfg.map(|c| c.route_server_client).unwrap_or(false)
-        )?;
-        if let Some(codes) = cfg
-            .map(|config| config.discard_path_attributes.as_slice())
-            .filter(|codes| !codes.is_empty())
-        {
-            outln!("Discard Attributes:    {codes:?}")?;
-        }
-        if cfg.map(|c| c.per_client_best).unwrap_or(false) {
-            outln!("Per-Client Best:       true")?;
-        }
-        emit_effective_posture_human(&render_effective_posture(n.effective_posture.as_ref()))?;
-        outln!("Distribution Mode:     {distribution_mode}")?;
-        let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
-        if !role.is_empty() {
-            outln!("BGP Role:              {role}")?;
-            outln!(
-                "Strict Role:           {}",
-                cfg.map(|c| c.strict_role).unwrap_or(false)
-            )?;
-            let remote_role = n.remote_role.as_str();
-            outln!(
-                "Remote Role:           {}",
-                if remote_role.is_empty() {
-                    "not advertised"
-                } else {
-                    remote_role
-                }
-            )?;
-            outln!("Role Negotiated:       {}", n.role_negotiated)?;
-        }
-        outln!(
-            "Add-Path Receive:      {}",
-            cfg.map(|c| c.add_path_receive).unwrap_or(false)
-        )?;
-        outln!(
-            "Add-Path Send:         {}",
-            cfg.map(|c| c.add_path_send).unwrap_or(false)
-        )?;
-        let add_path_send_max = cfg.map(|c| c.add_path_send_max).unwrap_or(0);
-        if add_path_send_max > 0 {
-            outln!("Add-Path Send Max:     {add_path_send_max}")?;
-        }
+    }
+    let peer_group = cfg.map(|c| c.peer_group.as_str()).unwrap_or("");
+    if !peer_group.is_empty() {
+        rows.field(0, "Peer Group", peer_group);
+    }
+    rows.field(0, "RR Client", n.route_reflector_client);
+    rows.field(
+        0,
+        "Route Server Client",
+        cfg.map(|c| c.route_server_client).unwrap_or(false),
+    );
+    if let Some(codes) = cfg
+        .map(|config| config.discard_path_attributes.as_slice())
+        .filter(|codes| !codes.is_empty())
+    {
+        rows.field(0, "Discard Attributes", format!("{codes:?}"));
+    }
+    if cfg.map(|c| c.per_client_best).unwrap_or(false) {
+        rows.field(0, "Per-Client Best", true);
+    }
+    push_effective_posture(&mut rows, n.effective_posture.as_ref());
+    rows.field(
+        0,
+        "Distribution Mode",
+        effective_distribution_mode_label(n.effective_distribution_mode),
+    );
+    let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
+    if !role.is_empty() {
+        rows.field(0, "BGP Role", role);
+        rows.field(
+            0,
+            "Strict Role",
+            cfg.map(|c| c.strict_role).unwrap_or(false),
+        );
+        rows.field(
+            0,
+            "Remote Role",
+            if n.remote_role.is_empty() {
+                "not advertised"
+            } else {
+                n.remote_role.as_str()
+            },
+        );
+        rows.field(0, "Role Negotiated", n.role_negotiated);
+    }
+    rows.field(
+        0,
+        "Add-Path Receive",
+        cfg.map(|c| c.add_path_receive).unwrap_or(false),
+    );
+    rows.field(
+        0,
+        "Add-Path Send",
+        cfg.map(|c| c.add_path_send).unwrap_or(false),
+    );
+    let add_path_send_max = cfg.map(|c| c.add_path_send_max).unwrap_or(0);
+    if add_path_send_max > 0 {
+        rows.field(0, "Add-Path Send Max", add_path_send_max);
+    }
+    if !n.paths_limits.is_empty() {
+        rows.line(0, "Paths-Limit:");
         for limit in &n.paths_limits {
-            let effective_send = paths_limit_effective_send_label(limit.effective_send_limit);
-            outln!(
-                "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
-                limit.family,
-                limit.configured_receive_max,
-                limit.advertised_receive_max,
-                limit.received_receive_max,
-                effective_send
-            )?;
+            rows.line(
+                1,
+                format!(
+                    "{}: configured={} advertised={} received={} effective-send={}",
+                    limit.family,
+                    limit.configured_receive_max,
+                    limit.advertised_receive_max,
+                    limit.received_receive_max,
+                    paths_limit_effective_send_label(limit.effective_send_limit)
+                ),
+            );
         }
-        outln!(
-            "State:                 {}",
-            output::colored_state_with_stale(n.state, n.stale)
-        )?;
-        if n.slow_peer {
-            outln!("Slow Peer:             true (outbound queue persistently backlogged)")?;
+    }
+    rows.field(
+        0,
+        "State",
+        output::colored_state_with_stale(n.state, n.stale),
+    );
+    if n.slow_peer {
+        rows.field(
+            0,
+            "Slow Peer",
+            "true (outbound queue persistently backlogged)",
+        );
+    }
+    rows.field(
+        0,
+        "GShut Advertise Intent",
+        optional_bool_label(n.graceful_shutdown_advertise_intent),
+    );
+    rows.field(0, "Uptime", output::format_duration(n.uptime_seconds));
+    if let Some(seconds) = n.reconnect_in_seconds.filter(|seconds| *seconds > 0) {
+        rows.field(0, "Reconnect In", output::format_duration(seconds));
+    }
+    rows.field(0, "Prefixes Received", n.prefixes_received);
+    rows.field(1, "IPv4 Unicast", n.prefixes_received_ipv4);
+    rows.field(1, "IPv6 Unicast", n.prefixes_received_ipv6);
+    rows.field(
+        0,
+        "Max Prefixes",
+        max_prefix_capacity_label(n.effective_max_prefixes, n.max_prefix_headroom, n.stale),
+    );
+    rows.field(
+        1,
+        "IPv4 Unicast",
+        max_prefix_capacity_label(
+            n.effective_max_prefixes_ipv4,
+            n.max_prefix_headroom_ipv4,
+            n.stale,
+        ),
+    );
+    rows.field(
+        1,
+        "IPv6 Unicast",
+        max_prefix_capacity_label(
+            n.effective_max_prefixes_ipv6,
+            n.max_prefix_headroom_ipv6,
+            n.stale,
+        ),
+    );
+    rows.field(0, "Prefixes Sent", n.prefixes_sent);
+    rows.field(0, "Updates Received", n.updates_received);
+    rows.field(0, "Updates Sent", n.updates_sent);
+    rows.field(0, "Notifications Received", n.notifications_received);
+    rows.field(0, "Notifications Sent", n.notifications_sent);
+    rows.field(0, "Messages Received", n.messages_received);
+    rows.field(0, "Messages Sent", n.messages_sent);
+    rows.field(0, "Authentication", authentication_label(n.authentication));
+    if matches!(
+        crate::proto::AuthenticationMode::try_from(n.authentication),
+        Ok(crate::proto::AuthenticationMode::TcpAo)
+    ) {
+        rows.field(1, "TCP-AO Health", tcp_ao_health_label(n.tcp_ao_health));
+        rows.field(
+            1,
+            "TCP-AO Rotation",
+            format!(
+                "desired={} applied={} phase={}",
+                n.tcp_ao_desired_generation, n.tcp_ao_applied_generation, n.tcp_ao_rotation_phase
+            ),
+        );
+        if !n.tcp_ao_rotation_error.is_empty() {
+            rows.field(1, "TCP-AO Rotation Error", &n.tcp_ao_rotation_error);
         }
-        outln!(
-            "GShut Advertise Intent: {}",
-            graceful_shutdown_advertise_intent_label(n.graceful_shutdown_advertise_intent)
-        )?;
-        outln!(
-            "Uptime:                {}",
-            output::format_duration(n.uptime_seconds)
-        )?;
-        if let Some(seconds) = n.reconnect_in_seconds.filter(|seconds| *seconds > 0) {
-            outln!(
-                "Reconnect In:          {}",
-                output::format_duration(seconds)
-            )?;
-        }
-        outln!("Prefixes Received:     {}", n.prefixes_received)?;
-        outln!("  IPv4 Unicast:        {}", n.prefixes_received_ipv4)?;
-        outln!("  IPv6 Unicast:        {}", n.prefixes_received_ipv6)?;
-        outln!(
-            "Max Prefixes:          {}",
-            max_prefix_capacity_label(effective_max_prefixes, n.max_prefix_headroom, n.stale)
-        )?;
-        outln!(
-            "Max Prefixes IPv4:     {}",
-            max_prefix_capacity_label(
-                n.effective_max_prefixes_ipv4,
-                n.max_prefix_headroom_ipv4,
-                n.stale
-            )
-        )?;
-        outln!(
-            "Max Prefixes IPv6:     {}",
-            max_prefix_capacity_label(
-                n.effective_max_prefixes_ipv6,
-                n.max_prefix_headroom_ipv6,
-                n.stale
-            )
-        )?;
-        outln!("Prefixes Sent:         {}", n.prefixes_sent)?;
-        outln!("Updates Received:      {}", n.updates_received)?;
-        outln!("Updates Sent:          {}", n.updates_sent)?;
-        outln!("Notifications Received:{}", n.notifications_received)?;
-        outln!("Notifications Sent:    {}", n.notifications_sent)?;
-        outln!("Messages Received:     {}", n.messages_received)?;
-        outln!("Messages Sent:         {}", n.messages_sent)?;
-        outln!(
-            "Authentication:        {}",
-            authentication_label(n.authentication)
-        )?;
-        if matches!(
-            crate::proto::AuthenticationMode::try_from(n.authentication),
-            Ok(crate::proto::AuthenticationMode::TcpAo)
-        ) {
-            outln!(
-                "TCP-AO Health:        {}",
-                tcp_ao_health_label(n.tcp_ao_health)
-            )?;
-            outln!(
-                "TCP-AO Rotation:      desired={} applied={} phase={}",
-                n.tcp_ao_desired_generation,
-                n.tcp_ao_applied_generation,
-                n.tcp_ao_rotation_phase
-            )?;
-            if !n.tcp_ao_rotation_error.is_empty() {
-                outln!("TCP-AO Rotation Error: {}", n.tcp_ao_rotation_error)?;
-            }
-        }
-        if let Some(ao) = &n.tcp_ao {
-            outln!(
-                "TCP-AO Keys:           current={} rnext={}",
+    }
+    if let Some(ao) = &n.tcp_ao {
+        rows.field(
+            1,
+            "TCP-AO Keys",
+            format!(
+                "current={} rnext={}",
                 ao.current_key_id
                     .map_or_else(|| "none".to_string(), |v| v.to_string()),
                 ao.rnext_key_id
                     .map_or_else(|| "none".to_string(), |v| v.to_string())
-            )?;
-            outln!(
-                "TCP-AO Packets:        good={} bad={} key-not-found={} unsigned-required={}",
-                ao.packets_good,
-                ao.packets_bad,
-                ao.packets_key_not_found,
-                ao.packets_ao_required
-            )?;
-            for key in &ao.keys {
-                outln!(
-                    "  MKT {}/{}: send={} recv={} algorithm={} current={} rnext={} preferred={} deprecated={} vrf-ifindex={} good={} bad={}",
+            ),
+        );
+        rows.field(
+            1,
+            "TCP-AO Packets",
+            format!(
+                "good={} bad={} key-not-found={} unsigned-required={}",
+                ao.packets_good, ao.packets_bad, ao.packets_key_not_found, ao.packets_ao_required
+            ),
+        );
+        for key in &ao.keys {
+            rows.line(
+                2,
+                format!(
+                    "MKT {}/{}: send={} recv={} algorithm={} current={} rnext={} preferred={} deprecated={} vrf-ifindex={} good={} bad={}",
                     key.peer_address,
                     key.prefix_length,
                     key.send_id,
@@ -756,104 +805,108 @@ pub async fn show(
                         .map_or_else(|| "unbound".to_string(), |value| value.to_string()),
                     key.packets_good,
                     key.packets_bad
-                )?;
-            }
-        }
-        outln!("OTC Routes Blocked:    {}", n.otc_routes_blocked)?;
-        // ADR-0112: two rows, never one. A peer with an import policy and no
-        // export policy is a real and common half-configured state, and
-        // collapsing it would hide the denied half.
-        outln!("RFC 8212 Policy:")?;
-        outln!(
-            "  Import: {}",
-            rfc8212_policy_status_label(n.rfc8212_import_policy)
-        )?;
-        outln!(
-            "  Export: {}",
-            rfc8212_policy_status_label(n.rfc8212_export_policy)
-        )?;
-        outln!("Policy Stats:")?;
-        outln!(
-            "  Import — permitted: {} denied: {}",
-            n.import_policy_routes_permitted,
-            n.import_policy_routes_denied
-        )?;
-        outln!(
-            "  Export — permitted: {} denied: {}",
-            n.export_policy_routes_permitted,
-            n.export_policy_routes_denied
-        )?;
-        if !n.update_group.is_empty() {
-            outln!("Update Group:          {}", n.update_group)?;
-        }
-        if !n.selection_deferral.is_empty() {
-            outln!("Selection Deferral:")?;
-            for row in &n.selection_deferral {
-                let state = if row.active {
-                    format!(
-                        "active; waiter={}; session={}; blocking={}; remaining={}ms",
-                        row.waiter_state,
-                        row.waiter_session_id
-                            .map_or_else(|| "none".to_string(), |id| id.to_string()),
-                        row.blocking_waiters,
-                        row.remaining_millis
-                    )
-                } else {
-                    format!(
-                        "released={}; waiter={}; session={}",
-                        row.release_reason,
-                        row.waiter_state,
-                        row.waiter_session_id
-                            .map_or_else(|| "none".to_string(), |id| id.to_string())
-                    )
-                };
-                outln!("  AFI {}/SAFI {} — {state}", row.afi, row.safi)?;
-            }
-        }
-        if !n.outbound_prefix_limits.is_empty() {
-            outln!("Outbound Prefix Limits:")?;
-            for row in &n.outbound_prefix_limits {
-                // Unlimited prints as `unlimited`, never a synthetic 0, and a
-                // blocking family names the stable reason it is withholding.
-                let capacity = match (row.limit, row.headroom) {
-                    (Some(limit), Some(headroom)) => {
-                        format!("limit={limit}; headroom={headroom}")
-                    }
-                    _ => "limit=unlimited".to_string(),
-                };
-                let blocking = row
-                    .reason
-                    .as_deref()
-                    .map_or_else(String::new, |reason| format!("; blocking={reason}"));
-                outln!(
-                    "  {:<14} usage={}; {capacity}{blocking}",
-                    row.family,
-                    row.usage
-                )?;
-            }
-        }
-        if !n.inbound_prefix_limits.is_empty() {
-            outln!("Inbound Prefix Limits:")?;
-            for row in &n.inbound_prefix_limits {
-                let blocking = row
-                    .reason
-                    .as_deref()
-                    .map_or_else(String::new, |reason| format!("; blocking={reason}"));
-                outln!(
-                    "  {:<22} usage={}; limit={}; headroom={}{blocking}",
-                    row.scope,
-                    row.usage,
-                    row.limit,
-                    row.headroom
-                )?;
-            }
-        }
-        outln!("Flap Count:            {}", n.flap_count)?;
-        if !n.last_error.is_empty() {
-            outln!("Last Error:            {}", n.last_error)?;
+                ),
+            );
         }
     }
-    Ok(())
+    rows.field(0, "OTC Routes Blocked", n.otc_routes_blocked);
+    // ADR-0112: two rows, never one. A peer with an import policy and no
+    // export policy is a real and common half-configured state, and
+    // collapsing it would hide the denied half.
+    rows.line(0, "RFC 8212 Policy:");
+    rows.field(
+        1,
+        "Import",
+        rfc8212_policy_status_label(n.rfc8212_import_policy),
+    );
+    rows.field(
+        1,
+        "Export",
+        rfc8212_policy_status_label(n.rfc8212_export_policy),
+    );
+    rows.line(0, "Policy Stats:");
+    rows.field(
+        1,
+        "Import",
+        format!(
+            "permitted={} denied={}",
+            n.import_policy_routes_permitted, n.import_policy_routes_denied
+        ),
+    );
+    rows.field(
+        1,
+        "Export",
+        format!(
+            "permitted={} denied={}",
+            n.export_policy_routes_permitted, n.export_policy_routes_denied
+        ),
+    );
+    if !n.update_group.is_empty() {
+        rows.field(0, "Update Group", &n.update_group);
+    }
+    if !n.selection_deferral.is_empty() {
+        rows.line(0, "Selection Deferral:");
+        for row in &n.selection_deferral {
+            let session = row
+                .waiter_session_id
+                .map_or_else(|| "none".to_string(), |id| id.to_string());
+            let state = if row.active {
+                format!(
+                    "active; waiter={}; session={session}; blocking={}; remaining={}ms",
+                    row.waiter_state, row.blocking_waiters, row.remaining_millis
+                )
+            } else {
+                format!(
+                    "released={}; waiter={}; session={session}",
+                    row.release_reason, row.waiter_state
+                )
+            };
+            rows.line(1, format!("AFI {}/SAFI {} — {state}", row.afi, row.safi));
+        }
+    }
+    if !n.outbound_prefix_limits.is_empty() {
+        rows.line(0, "Outbound Prefix Limits:");
+        for row in &n.outbound_prefix_limits {
+            // Unlimited prints as `unlimited`, never a synthetic 0, and a
+            // blocking family names the stable reason it is withholding.
+            let capacity = match (row.limit, row.headroom) {
+                (Some(limit), Some(headroom)) => format!("limit={limit}; headroom={headroom}"),
+                _ => "limit=unlimited".to_string(),
+            };
+            let blocking = row
+                .reason
+                .as_deref()
+                .map_or_else(String::new, |reason| format!("; blocking={reason}"));
+            rows.line(
+                1,
+                format!(
+                    "{:<14} usage={}; {capacity}{blocking}",
+                    row.family, row.usage
+                ),
+            );
+        }
+    }
+    if !n.inbound_prefix_limits.is_empty() {
+        rows.line(0, "Inbound Prefix Limits:");
+        for row in &n.inbound_prefix_limits {
+            let blocking = row
+                .reason
+                .as_deref()
+                .map_or_else(String::new, |reason| format!("; blocking={reason}"));
+            rows.line(
+                1,
+                format!(
+                    "{:<22} usage={}; limit={}; headroom={}{blocking}",
+                    row.scope, row.usage, row.limit, row.headroom
+                ),
+            );
+        }
+    }
+    rows.field(0, "Flap Count", n.flap_count);
+    if !n.last_error.is_empty() {
+        rows.field(0, "Last Error", &n.last_error);
+    }
+    rows.render()
 }
 
 pub(crate) fn negotiation_status_label(state: &crate::proto::NeighborState) -> &'static str {
@@ -904,30 +957,53 @@ fn optional_bool_label(value: Option<bool>) -> &'static str {
     }
 }
 
-fn render_negotiated_capability_details(
+fn push_negotiated_capability_details(
+    rows: &mut DetailRows,
     negotiated: &crate::proto::NegotiatedSessionState,
-) -> String {
-    format!(
-        "Peer Route Refresh:   {}\n\
-         Peer Enhanced RR:     {}\n\
-         Peer Extended Msgs:   {}\n\
-         Outbound Max Message: {}\n",
+) {
+    rows.field(
+        1,
+        "Peer Route Refresh",
         optional_bool_label(negotiated.peer_route_refresh),
+    );
+    rows.field(
+        1,
+        "Peer Enhanced RR",
         optional_bool_label(negotiated.peer_enhanced_route_refresh),
+    );
+    rows.field(
+        1,
+        "Peer Extended Msgs",
         optional_bool_label(negotiated.peer_extended_message),
+    );
+    rows.field(
+        1,
+        "Outbound Max Message",
         negotiated
             .outbound_max_message_bytes
-            .map_or_else(|| "unknown".to_string(), |bytes| format!("{bytes} bytes"))
-    )
+            .map_or_else(|| "unknown".to_string(), |bytes| format!("{bytes} bytes")),
+    );
 }
 
-fn render_negotiated_transport_details(session: &crate::proto::NegotiatedSessionState) -> String {
-    format!(
-        "Local Address:        {}\nNegotiated Hold Time: {}\nKeepalive Interval:   {}\n",
+fn push_negotiated_transport_details(
+    rows: &mut DetailRows,
+    session: &crate::proto::NegotiatedSessionState,
+) {
+    rows.field(
+        1,
+        "Local Address",
         session.local_address.as_deref().unwrap_or("unknown"),
+    );
+    rows.field(
+        1,
+        "Negotiated Hold Time",
         optional_seconds_label(session.hold_time_seconds),
-        optional_seconds_label(session.keepalive_interval_seconds)
-    )
+    );
+    rows.field(
+        1,
+        "Keepalive Interval",
+        optional_seconds_label(session.keepalive_interval_seconds),
+    );
 }
 
 pub(crate) fn negotiated_families_label(families: &[String]) -> String {
@@ -1015,29 +1091,27 @@ fn json_effective_posture(
     })
 }
 
-fn render_effective_posture(posture: Option<&crate::proto::EffectiveNeighborPosture>) -> String {
+fn push_effective_posture(
+    rows: &mut DetailRows,
+    posture: Option<&crate::proto::EffectiveNeighborPosture>,
+) {
     let Some(posture) = posture else {
-        return "Effective Posture:     unknown (not exposed by daemon)\n".to_string();
+        rows.field(0, "Effective Posture", "unknown (not exposed by daemon)");
+        return;
     };
-    format!(
-        "Effective Posture:\n\
-           NEXT_HOP Ownership:    {}\n\
-           Interpret RFC 1997:    {}\n\
-           RS Control Communities: {}\n\
-           ORR Vantage:           {}\n",
+    rows.line(0, "Effective Posture:");
+    rows.field(
+        1,
+        "NEXT_HOP Ownership",
         next_hop_ownership_label(posture.next_hop_ownership),
-        posture.interpret_rfc1997,
-        posture.rs_control_communities,
+    );
+    rows.field(1, "Interpret RFC 1997", posture.interpret_rfc1997);
+    rows.field(1, "RS Control Communities", posture.rs_control_communities);
+    rows.field(
+        1,
+        "ORR Vantage",
         posture.orr_vantage.as_deref().unwrap_or("none"),
-    )
-}
-
-fn graceful_shutdown_advertise_intent_label(value: Option<bool>) -> &'static str {
-    match value {
-        Some(true) => "enabled",
-        Some(false) => "disabled",
-        None => "unknown",
-    }
+    );
 }
 
 fn max_prefix_action_label(reported: &str) -> &str {
@@ -1646,6 +1720,39 @@ mod tests {
         }
     }
 
+    fn render_negotiated_transport_details(
+        session: &crate::proto::NegotiatedSessionState,
+    ) -> String {
+        let mut rows = DetailRows::default();
+        push_negotiated_transport_details(&mut rows, session);
+        rows.render()
+    }
+
+    fn render_negotiated_capability_details(
+        negotiated: &crate::proto::NegotiatedSessionState,
+    ) -> String {
+        let mut rows = DetailRows::default();
+        push_negotiated_capability_details(&mut rows, negotiated);
+        rows.render()
+    }
+
+    /// Keep each line's indent but collapse the label-to-value padding, so a
+    /// wiring test does not depend on the column width the golden test pins.
+    fn collapse_value_padding(captured: &[u8]) -> String {
+        std::str::from_utf8(captured)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let body = line.trim_start();
+                let indent = &line[..line.len() - body.len()];
+                format!(
+                    "{indent}{}\n",
+                    body.split_whitespace().collect::<Vec<_>>().join(" ")
+                )
+            })
+            .collect()
+    }
+
     fn captured_neighbor_detail(state: &crate::proto::NeighborState) -> serde_json::Value {
         begin_neighbor_show_capture();
         emit_neighbor_detail_json(
@@ -1962,19 +2069,107 @@ mod tests {
         }
     }
 
-    /// Load-bearing: inversion or collapsing rolling-upgrade absence into
-    /// disabled changes one of these exact operator-facing labels.
+    /// Golden human layout over the exhaustive fixture: one value column
+    /// derived from the longest label (indent included), every sub-block
+    /// indented two spaces per level, and `true`/`false` for every boolean.
+    /// Hard-coding a column, dropping an indent, or reverting GShut intent to
+    /// `enabled`/`disabled` changes this text.
     #[test]
-    fn graceful_shutdown_advertise_intent_is_presence_aware() {
+    fn neighbor_detail_human_layout_is_golden() {
+        let rendered = render_neighbor_detail_human(&neighbor_projection_fixture());
         assert_eq!(
-            graceful_shutdown_advertise_intent_label(Some(true)),
-            "enabled"
+            rendered,
+            r"Neighbor:                 fe80::2
+Interface:                eth0
+Remote ASN:               65002
+Description:              description-value
+Peer Source:              dynamic (prefix-value, group peer_group-value)
+Hold Time:                104
+Minimum Hold Time:        121
+Send Hold Time:           116
+Max-Prefix Action:        max_prefix_action-value
+Max-Prefix Restart:       119s configured
+Max-Prefix Hold-Down:     139ms remaining
+Families:                 families-value
+Required Families:        required_families-value
+Negotiation:              negotiated
+  Local Address:          fe80::1
+  Negotiated Hold Time:   0s
+  Keepalive Interval:     0s
+  Remote Router ID:       remote_router_id-value
+  Four-Octet AS:          false
+  Peer Route Refresh:     true
+  Peer Enhanced RR:       false
+  Peer Extended Msgs:     true
+  Outbound Max Message:   109 bytes
+  Negotiated Families:    families-value
+  Graceful Restart:       peer capable; helper active
+    Peer Families:        peer_families-value
+    Peer Restart Time:    0s
+    Effective Retention:  103s
+Peer Group:               peer_group-value
+RR Client:                true
+Route Server Client:      false
+Discard Attributes:       [122]
+Per-Client Best:          true
+Effective Posture:
+  NEXT_HOP Ownership:     strict_peer
+  Interpret RFC 1997:     true
+  RS Control Communities: false
+  ORR Vantage:            orr_vantage-value
+Distribution Mode:        add-path
+BGP Role:                 rs
+Strict Role:              false
+Remote Role:              remote_role-value
+Role Negotiated:          true
+Add-Path Receive:         true
+Add-Path Send:            false
+Add-Path Send Max:        112
+Paths-Limit:
+  family-value: configured=102 advertised=103 received=104 effective-send=unlimited
+State:                    Established
+Slow Peer:                true (outbound queue persistently backlogged)
+GShut Advertise Intent:   false
+Uptime:                   213503982334601d 7h
+Reconnect In:             00:02:37
+Prefixes Received:        104
+  IPv4 Unicast:           141
+  IPv6 Unicast:           142
+Max Prefixes:             143 (146 remaining)
+  IPv4 Unicast:           144 (147 remaining)
+  IPv6 Unicast:           145 (148 remaining)
+Prefixes Sent:            105
+Updates Received:         106
+Updates Sent:             107
+Notifications Received:   108
+Notifications Sent:       109
+Messages Received:        123
+Messages Sent:            124
+Authentication:           tcp_ao
+  TCP-AO Health:          degraded
+  TCP-AO Rotation:        desired=132 applied=133 phase=tcp_ao_rotation_phase-value
+  TCP-AO Rotation Error:  tcp_ao_rotation_error-value
+  TCP-AO Keys:            current=101 rnext=102
+  TCP-AO Packets:         good=105 bad=106 key-not-found=107 unsigned-required=108
+    MKT peer_address-value/102: send=103 recv=104 algorithm=algorithm-value current=true rnext=false preferred=true deprecated=false vrf-ifindex=112 good=110 bad=111
+OTC Routes Blocked:       117
+RFC 8212 Policy:
+  Import:                 present
+  Export:                 missing
+Policy Stats:
+  Import:                 permitted=118 denied=119
+  Export:                 permitted=120 denied=121
+Update Group:             update_group-value
+Selection Deferral:
+  AFI 101/SAFI 102 — released=release_reason-value; waiter=waiter_state-value; session=105
+Outbound Prefix Limits:
+  family-value   usage=102; limit=103; headroom=104; blocking=reason-value
+Inbound Prefix Limits:
+  scope-value            usage=102; limit=103; headroom=104; blocking=reason-value
+Flap Count:               110
+Last Error:               last_error-value
+"
         );
-        assert_eq!(
-            graceful_shutdown_advertise_intent_label(Some(false)),
-            "disabled"
-        );
-        assert_eq!(graceful_shutdown_advertise_intent_label(None), "unknown");
     }
 
     /// Load-bearing production-wiring proof: removing either `show` emitter,
@@ -2031,15 +2226,13 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            String::from_utf8(take_neighbor_show_capture()).unwrap(),
-            "Peer Source:           dynamic (10.0.0.0/24, group ix-members)\n\
-             Effective Posture:\n\
-               NEXT_HOP Ownership:    strict_peer\n\
-               Interpret RFC 1997:    false\n\
-               RS Control Communities: true\n\
-               ORR Vantage:           192.0.2.7\n"
-        );
+        let human = collapse_value_padding(&take_neighbor_show_capture());
+        assert!(human.contains("\nPeer Source: dynamic (10.0.0.0/24, group ix-members)\n"));
+        assert!(human.contains(
+            "\nEffective Posture:\n  NEXT_HOP Ownership: strict_peer\n  \
+             Interpret RFC 1997: false\n  RS Control Communities: true\n  \
+             ORR Vantage: 192.0.2.7\n"
+        ));
 
         *server.state.neighbor_effective_posture.lock().await = None;
         begin_neighbor_show_capture();
@@ -2065,11 +2258,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            String::from_utf8(take_neighbor_show_capture()).unwrap(),
-            "Peer Source:           dynamic (range unavailable)\n\
-             Effective Posture:     unknown (not exposed by daemon)\n"
-        );
+        let human = collapse_value_padding(&take_neighbor_show_capture());
+        assert!(human.contains("\nPeer Source: dynamic (range unavailable)\n"));
+        assert!(human.contains("\nEffective Posture: unknown (not exposed by daemon)\n"));
         assert_eq!(next_hop_ownership_label(i32::MAX), "unknown");
     }
 
@@ -2140,14 +2331,14 @@ mod tests {
         assert_eq!(optional_bool_label(negotiated.four_octet_as), "false");
         assert_eq!(
             render_negotiated_transport_details(negotiated),
-            "Local Address:        127.0.0.1\nNegotiated Hold Time: 0s\nKeepalive Interval:   0s\n"
+            "  Local Address:        127.0.0.1\n  Negotiated Hold Time: 0s\n  Keepalive Interval:   0s\n"
         );
         let mut older = negotiated.clone();
         older.local_address = None;
         older.keepalive_interval_seconds = None;
         assert_eq!(
             render_negotiated_transport_details(&older),
-            "Local Address:        unknown\nNegotiated Hold Time: 0s\nKeepalive Interval:   unknown\n"
+            "  Local Address:        unknown\n  Negotiated Hold Time: 0s\n  Keepalive Interval:   unknown\n"
         );
         let (available, json) = negotiated_session_json(&state);
         assert_eq!(available, Some(true));

@@ -571,7 +571,7 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
     } else {
         output::print_text(&resp.human_text)?;
         if !resp.runtime_snapshot_token.is_empty() {
-            outln!("runtime_snapshot_token: {}", resp.runtime_snapshot_token)?;
+            outln!("Runtime snapshot token: {}", resp.runtime_snapshot_token)?;
         }
         print_confirmation(resp.confirmation.as_ref())?;
     }
@@ -685,7 +685,7 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
         "entries": resp.entries.iter().map(|entry| serde_json::json!({
             "index": entry.index,
             "timestamp_unix_seconds": entry.timestamp_unix_seconds,
-            "timestamp": format_unix_utc(entry.timestamp_unix_seconds),
+            "timestamp": format_unix_utc_or_seconds(entry.timestamp_unix_seconds),
             "sha256": entry.sha256,
             "summary": entry.summary,
             "source_sha256": entry.source_sha256,
@@ -715,7 +715,7 @@ fn history_human_line(entry: &crate::proto::ConfigHistoryEntry) -> String {
     let mut line = format!(
         "{:>3}  {}  {}  {}{}  provenance={} source_sha256={}",
         entry.index,
-        format_unix_utc(entry.timestamp_unix_seconds),
+        format_unix_utc_or_seconds(entry.timestamp_unix_seconds),
         short_hash,
         entry.summary,
         history_index_marker(entry.index),
@@ -751,10 +751,18 @@ fn history_index_marker(index: u32) -> &'static str {
     if index == 0 { " (latest)" } else { "" }
 }
 
+/// Latest instant a four-digit RFC 3339 year can express, 9999-12-31T23:59:59Z.
+const MAX_RFC3339_UNIX_SECONDS: u64 = 253_402_300_799;
+
 /// Render unix seconds as `YYYY-MM-DDTHH:MM:SSZ` without a date dependency
-/// (Howard Hinnant's civil-from-days algorithm).
-fn format_unix_utc(unix_seconds: u64) -> String {
-    let days = i64::try_from(unix_seconds / 86_400).unwrap_or(i64::MAX);
+/// (Howard Hinnant's civil-from-days algorithm). `None` past year 9999, so a
+/// daemon-supplied value near `u64::MAX` cannot overflow the day arithmetic;
+/// callers then show the value as received.
+pub(crate) fn format_unix_utc(unix_seconds: u64) -> Option<String> {
+    if unix_seconds > MAX_RFC3339_UNIX_SECONDS {
+        return None;
+    }
+    let days = i64::try_from(unix_seconds / 86_400).ok()?;
     let secs_of_day = unix_seconds % 86_400;
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -766,12 +774,17 @@ fn format_unix_utc(unix_seconds: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { year + 1 } else { year };
-    format!(
+    Some(format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         secs_of_day / 3_600,
         (secs_of_day % 3_600) / 60,
         secs_of_day % 60,
-    )
+    ))
+}
+
+/// RFC 3339 when representable, otherwise the decimal seconds as received.
+fn format_unix_utc_or_seconds(unix_seconds: u64) -> String {
+    format_unix_utc(unix_seconds).unwrap_or_else(|| unix_seconds.to_string())
 }
 
 /// Dump the daemon's effective running config: normalized TOML with
@@ -1108,9 +1121,9 @@ fn print_plan_human(resp: &ConfigTransactionPlanResponse) -> Result<(), CliError
         resp.status,
         &resp.runtime_snapshot_token,
         &[
-            ("supported_sections", &resp.supported_sections),
-            ("unsupported_sections", &resp.unsupported_sections),
-            ("restart_required_sections", &resp.restart_required_sections),
+            ("Supported sections", &resp.supported_sections),
+            ("Unsupported sections", &resp.unsupported_sections),
+            ("Restart-required sections", &resp.restart_required_sections),
         ],
     )?;
     print_update_group_impact(resp.update_group_impact.as_ref())?;
@@ -1122,7 +1135,7 @@ fn print_apply_human(resp: &ConfigTransactionApplyResponse) -> Result<(), CliErr
     print_transaction_tail(
         resp.status,
         &resp.runtime_snapshot_token,
-        &[("committed_sections", &resp.committed_sections)],
+        &[("Committed sections", &resp.committed_sections)],
     )?;
     print_confirmation(resp.confirmation.as_ref())?;
     print_update_group_impact(resp.update_group_impact.as_ref())?;
@@ -1136,30 +1149,30 @@ fn print_confirmation(
         return Ok(());
     };
     outln!(
-        "confirmation_status: {}",
+        "Confirmation: {}",
         confirmation_status_label(confirmation.status)
     )?;
     if !confirmation.confirm_id.is_empty() {
-        outln!("confirm_id: {}", confirmation.confirm_id)?;
+        outln!("Confirm ID: {}", confirmation.confirm_id)?;
     }
     if confirmation.timeout_seconds > 0 {
-        outln!("confirm_timeout_seconds: {}", confirmation.timeout_seconds)?;
+        outln!("Confirm timeout: {}s", confirmation.timeout_seconds)?;
     }
     if confirmation.deadline_unix_seconds > 0 {
         outln!(
-            "confirm_deadline_unix_seconds: {}",
-            confirmation.deadline_unix_seconds
+            "Confirm deadline: {}",
+            format_unix_utc_or_seconds(confirmation.deadline_unix_seconds)
         )?;
     }
     if !confirmation.runtime_snapshot_token.is_empty() {
         outln!(
-            "confirmation_runtime_snapshot_token: {}",
+            "Confirmation runtime snapshot token: {}",
             confirmation.runtime_snapshot_token
         )?;
     }
     if !confirmation.committed_sections.is_empty() {
         outln!(
-            "confirmation_committed_sections: {}",
+            "Confirmation committed sections: {}",
             confirmation.committed_sections.join(", ")
         )?;
     }
@@ -1171,9 +1184,9 @@ fn print_transaction_tail(
     runtime_snapshot_token: &str,
     sections: &[(&str, &Vec<String>)],
 ) -> Result<(), CliError> {
-    outln!("status: {}", status_label(status))?;
+    outln!("Status: {}", status_label(status))?;
     if !runtime_snapshot_token.is_empty() {
-        outln!("runtime_snapshot_token: {runtime_snapshot_token}")?;
+        outln!("Runtime snapshot token: {runtime_snapshot_token}")?;
     }
     for (label, values) in sections {
         if !values.is_empty() {
@@ -2896,10 +2909,32 @@ nested = [{ label = "first", values = [3, 1, 3] }, { label = "second", values = 
 
     #[test]
     fn format_unix_utc_renders_known_instants() {
-        assert_eq!(format_unix_utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_unix_utc(1_787_000_000), "2026-08-17T20:53:20Z");
+        assert_eq!(format_unix_utc(0).unwrap(), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            format_unix_utc(1_787_000_000).unwrap(),
+            "2026-08-17T20:53:20Z"
+        );
         // Leap-year day.
-        assert_eq!(format_unix_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(
+            format_unix_utc(1_709_164_800).unwrap(),
+            "2024-02-29T00:00:00Z"
+        );
+    }
+
+    /// Regression: a daemon value near `u64::MAX` overflowed the day
+    /// arithmetic (a debug panic, garbage in release). The last four-digit
+    /// year still renders; one second later and `u64::MAX` fall back to the
+    /// decimal value.
+    #[test]
+    fn format_unix_utc_falls_back_outside_four_digit_years() {
+        assert_eq!(
+            format_unix_utc(253_402_300_799).unwrap(),
+            "9999-12-31T23:59:59Z"
+        );
+        assert_eq!(format_unix_utc(253_402_300_800), None);
+        assert_eq!(format_unix_utc(u64::MAX), None);
+        assert_eq!(format_unix_utc_or_seconds(u64::MAX), u64::MAX.to_string());
+        assert_eq!(format_unix_utc_or_seconds(0), "1970-01-01T00:00:00Z");
     }
 
     #[tokio::test]

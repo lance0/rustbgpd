@@ -365,10 +365,10 @@ rm $STATE/.compare.toml
 **Live and equal** (`runtime_equals_current: yes`):
 
 ```text
-Status:  healthy
-Uptime:  00:00:05
-Peers:   0
-Routes:  0
+Status:            healthy
+Uptime:            00:00:05
+Established peers: 0
+Routes:            0
 datasets: contents not compared (4 declared); a reload re-reads them
 rc=0
 ```
