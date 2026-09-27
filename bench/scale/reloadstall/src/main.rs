@@ -35,9 +35,14 @@
 //!   announcement (or on a withdrawal at the alternate itself and for
 //!   prefixes with no alternate). Each round also prints a
 //!   `flapstorm_failover_csv` row: daemon CPU-seconds from `/proc/<pid>/stat`
-//!   between the close and the last survivor's completion, and, with
+//!   between the close and the harness's detection of the last survivor's
+//!   completion (100 ms poll), the window's wall length, the daemon's
+//!   churn-only CPU rate sampled over 2 s just before the close, and, with
 //!   `RELOADSTALL_FAILOVER_METRICS_ADDR`, the `distribute_flush` actor-work
-//!   sum/count over the same window.
+//!   sum/count over the same window. Before the first close the run fails
+//!   unless every alternate covers the flapped cohort, no alternate is a
+//!   churner, each alternate currently holds its owner's path (it lost the
+//!   initial tie-break).
 //! - `RELOADSTALL_RECEIVED_VIEW_FILE` (env, reload mode with
 //!   RELOADSTALL_EVIDENCE_DIR): before the final evidence boundary, dump
 //!   each observer's final-generation received view (base prefixes seen
@@ -205,6 +210,8 @@ const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
 const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
+/// Pre-close churn-only CPU sample per flap round (see `run_flapstorm`).
+const BACKGROUND_CPU_WINDOW: Duration = Duration::from_secs(2);
 /// Designated max-prefix trip member (soak mode): always stub 0, which is
 /// never a churner (churners are the last CHURNERS stubs) and whose slice
 /// is the contiguous window `[0, per_peer)` the flapstorm bitmap shape
@@ -501,6 +508,11 @@ struct Obs {
     /// (stable observers) is a before/after delta of these.
     base_withdrawn: AtomicU64,
     base_withdrawn6: AtomicU64,
+    /// Failover shape: bitmap over this stub's overlap extras
+    /// (`Ctx::extras[i]` positions) whose owner path the daemon currently
+    /// advertises to it: set on announcement, cleared on withdrawal.
+    /// Recorded whenever the session is up, independent of any armed bitmap.
+    extras_seen: Mutex<Vec<u64>>,
 }
 
 impl Obs {
@@ -520,6 +532,7 @@ impl Obs {
             refresh6_pending: AtomicBool::new(false),
             base_withdrawn: AtomicU64::new(0),
             base_withdrawn6: AtomicU64::new(0),
+            extras_seen: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1876,6 +1889,28 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                                 }
                             }
                         }
+                        let extras = &rctx.extras[i as usize];
+                        if !extras.is_empty() && (!nlri.v4_ann.is_empty() || !nlri.v4_wd.is_empty())
+                        {
+                            let mut seen = ob.extras_seen.lock().unwrap();
+                            seen.resize(extras.len().div_ceil(64), 0);
+                            for (prefixes, held) in [(&nlri.v4_wd, false), (&nlri.v4_ann, true)] {
+                                for prefix in prefixes {
+                                    if let Some(position) =
+                                        base_prefix_index(*prefix, total_prefixes).and_then(
+                                            |index| extras.binary_search(&(index as u32)).ok(),
+                                        )
+                                    {
+                                        let bit = 1u64 << (position % 64);
+                                        if held {
+                                            seen[position / 64] |= bit;
+                                        } else {
+                                            seen[position / 64] &= !bit;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         ob.base_ann_total
                             .fetch_add(u64::from(base), Ordering::Relaxed);
                         if rctx.record_events.load(Ordering::Relaxed) {
@@ -2216,6 +2251,56 @@ fn flap_alternates(ctx: &Ctx, k: u32, flap_prefixes: u32) -> Vec<Option<u32>> {
     alternates
 }
 
+/// Fail closed unless the loaded overlap allocation is the failover shape
+/// this flapstorm measures: every alternate covers a prefix of the flapped
+/// cohort, no alternate is a churner, and every alternate lost the initial
+/// best-path tie-break. The last is observed, not assumed: a route server
+/// never sends a member a path while its own is best, so each alternate
+/// member must currently hold the owner's path for every one of its
+/// alternate prefixes (announced and not since withdrawn). Owners may see
+/// transient withdrawals of their own prefixes when an alternate's
+/// announcement arrives first; those do not affect the steady state.
+fn validate_failover_allocation(ctx: &Ctx, k: u32, flap_prefixes: u32) -> Result<(), String> {
+    let churners = ctx.n_peers - CHURNERS..ctx.n_peers;
+    for (member, extras) in ctx.extras.iter().enumerate() {
+        let member = u32::try_from(member).unwrap();
+        if extras.is_empty() {
+            continue;
+        }
+        if churners.contains(&member) {
+            return Err(format!("overlap alternate {member} is a churner"));
+        }
+        if let Some(index) = extras.iter().find(|&&index| index >= flap_prefixes) {
+            return Err(format!(
+                "overlap alternate {member} covers prefix {index} outside the \
+                 --flapstorm {k} cohort (indices below {flap_prefixes})"
+            ));
+        }
+        let seen = ctx.obs[member as usize].extras_seen.lock().unwrap();
+        if let Some(index) = extras.iter().enumerate().find_map(|(position, &index)| {
+            seen.get(position / 64)
+                .is_none_or(|word| word & (1u64 << (position % 64)) == 0)
+                .then_some(index)
+        }) {
+            return Err(format!(
+                "overlap alternate {member} does not hold the owner's path for prefix \
+                 {index}: the alternate did not lose the initial tie-break"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Daemon CPU-seconds per wall second over `window` of steady churn, the
+/// background rate a down-pass CPU window also contains.
+async fn background_cpu_rate(pid: i32, window: Duration) -> Option<f64> {
+    let before = process_cpu_seconds(pid)?;
+    let started = Instant::now();
+    tokio::time::sleep(window).await;
+    let after = process_cpu_seconds(pid)?;
+    Some((after - before) / started.elapsed().as_secs_f64())
+}
+
 /// Cumulative user+system CPU seconds of `pid` from `/proc/<pid>/stat`
 /// (all threads). `None` when the daemon PID is not ours to read.
 fn process_cpu_seconds(pid: i32) -> Option<f64> {
@@ -2279,6 +2364,12 @@ async fn run_flapstorm(
     let survivors = k as usize..n_peers as usize;
     // Failover shape (RELOADSTALL_OVERLAP_FILE with --flapstorm): part of the
     // flapped window moves to survivor alternates instead of withdrawing.
+    if ctx.extras.iter().any(|extras| !extras.is_empty()) {
+        if let Err(error) = validate_failover_allocation(ctx, k, flap_prefixes) {
+            eprintln!("FAIL: failover allocation: {error}");
+            std::process::exit(1);
+        }
+    }
     let alternates = flap_alternates(ctx, k, flap_prefixes);
     let alternate_count = alternates.iter().filter(|a| a.is_some()).count();
     let alternate_sources = alternates
@@ -2298,7 +2389,8 @@ async fn run_flapstorm(
     println!(
         "flapstorm_failover_csv_header,round,peers_total,peers_flapped,flap_prefixes,\
          alternate_prefixes,alternate_sources,daemon_cpu_s,distribute_flush_sum_s,\
-         distribute_flush_count,withdraw_p50_s,withdraw_max_s"
+         distribute_flush_count,withdraw_p50_s,withdraw_max_s,window_s,\
+         background_cpu_s_per_s"
     );
     println!(
         "flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,\
@@ -2323,6 +2415,10 @@ async fn run_flapstorm(
             notification_checkpoint(addr, ("round_start", round, up, 0, 0, errors), prior_high)
                 .await;
         }
+        // The CPU window below also contains steady churn and up to one
+        // completion-poll interval after the last survivor completes; this
+        // pre-close sample of the churn-only rate lets a receipt bound that.
+        let background = background_cpu_rate(pid, BACKGROUND_CPU_WINDOW).await;
         // Down-pass evidence: scrape first, then read CPU, so the scrape's
         // own rendering stays outside the measured window.
         let flush_before = match failover_metrics_addr {
@@ -2339,6 +2435,7 @@ async fn run_flapstorm(
             arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
         }
         let cpu_before = process_cpu_seconds(pid);
+        let cpu_window = Instant::now();
         println!("flap {round} close wall_us={}", wall_us());
         let t_close = now_us(ctx);
         // Simultaneous close: abort both split-half tasks per flapped stub.
@@ -2351,6 +2448,7 @@ async fn run_flapstorm(
         }
         wait_flap_completion(ctx, k as usize, round, "withdraw").await;
         let cpu_after = process_cpu_seconds(pid);
+        let window_s = cpu_window.elapsed().as_secs_f64();
         let flush_after = match failover_metrics_addr {
             Some(addr) => Some(distribute_flush_totals(addr).await.unwrap_or_else(|error| {
                 eprintln!("FAIL: flap {round} post-withdraw metrics scrape: {error}");
@@ -2407,8 +2505,11 @@ async fn run_flapstorm(
         );
         println!(
             "flapstorm_failover_csv,{round},{n_peers},{k},{flap_prefixes},{alternate_count},\
-             {alternate_sources},{cpu_s:.3},{flush_sum_s:.6},{flush_count},{:.6},{:.6}",
-            withdraw.p50, withdraw.max
+             {alternate_sources},{cpu_s:.3},{flush_sum_s:.6},{flush_count},{:.6},{:.6},\
+             {window_s:.6},{:.3}",
+            withdraw.p50,
+            withdraw.max,
+            background.unwrap_or(f64::NAN)
         );
 
         // Hold the sessions down until FLAP_RECONNECT_SECS past the close.
@@ -4959,6 +5060,57 @@ mod tests {
             progress.announce_expected.is_empty(),
             "reset disarms failover"
         );
+    }
+
+    #[test]
+    fn failover_allocation_validation_fails_closed() {
+        // 12 peers x 2 prefixes, 2 flapped (window [0, 4)); peers 4..12 churn.
+        let ctx_with = |extras: Vec<Vec<u32>>| Ctx {
+            t0: Instant::now(),
+            n_peers: 12,
+            per_peer: 2,
+            totals: [24, 0],
+            churn_writes: Mutex::new(None),
+            daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1),
+            obs: (0..12).map(|_| Obs::new()).collect(),
+            extras,
+            parse_errors: AtomicU64::new(0),
+            churn_cycles: AtomicU64::new(0),
+            record_events: AtomicBool::new(true),
+        };
+        let mut extras = vec![Vec::new(); 12];
+        extras[2] = vec![0, 3];
+        let ctx = ctx_with(extras.clone());
+        let error = validate_failover_allocation(&ctx, 2, 4).unwrap_err();
+        assert!(
+            error.contains("did not lose the initial tie-break"),
+            "{error}"
+        );
+        *ctx.obs[2].extras_seen.lock().unwrap() = vec![0b01];
+        assert!(
+            validate_failover_allocation(&ctx, 2, 4).is_err(),
+            "one owner path missing"
+        );
+        *ctx.obs[2].extras_seen.lock().unwrap() = vec![0b11];
+        assert_eq!(validate_failover_allocation(&ctx, 2, 4), Ok(()));
+        ctx.obs[0].base_withdrawn.store(3, Ordering::Relaxed);
+        assert_eq!(
+            validate_failover_allocation(&ctx, 2, 4),
+            Ok(()),
+            "an owner's transient withdrawals are not a tie-break failure"
+        );
+
+        let mut outside = extras.clone();
+        outside[2] = vec![0, 5];
+        let error = validate_failover_allocation(&ctx_with(outside), 2, 4).unwrap_err();
+        assert!(
+            error.contains("outside the --flapstorm 2 cohort"),
+            "{error}"
+        );
+        let mut churner = vec![Vec::new(); 12];
+        churner[4] = vec![1];
+        let error = validate_failover_allocation(&ctx_with(churner), 2, 4).unwrap_err();
+        assert!(error.contains("is a churner"), "{error}");
     }
 
     #[test]

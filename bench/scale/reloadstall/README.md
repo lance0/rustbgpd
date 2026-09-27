@@ -136,9 +136,14 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   tie-break and become best only when the flapped member closes. The
   withdraw phase then counts each flapped prefix on the alternate's
   announcement, or on a withdrawal at the alternate itself and for prefixes
-  without one. Each round prints a `flapstorm_failover_csv` row: daemon
-  CPU-seconds from `/proc/<pid>/stat` between the close and the last
-  survivor's completion, and survivor completion p50/max. With
+  without one. Before the first close the run fails unless every alternate
+  covers the flapped cohort, no alternate is a churner, each alternate
+  currently holds its owner's path, i.e. it lost the initial tie-break. Each round prints a
+  `flapstorm_failover_csv` row: daemon CPU-seconds from `/proc/<pid>/stat`
+  between the close and the harness's detection of the last survivor's
+  completion (a 100 ms poll), survivor completion p50/max, the window's wall
+  length, and the daemon's churn-only CPU rate sampled over 2 s just before
+  the close. The window also contains that background churn. With
   `RELOADSTALL_FAILOVER_METRICS_ADDR` (the daemon's Prometheus address), the
   row also carries the `distribute_flush` actor-work sum and count over the
   same window. `failover_cell.sh` runs one such cell end to end; a daemon
