@@ -37,7 +37,6 @@ MANIFEST = ".github/pinned-archives.sha256"
 # bare commit SHAs. Adding an action or moving to a new major edits this set.
 PINS = frozenset(
     {
-        "actions/cache@v4",
         "actions/cache/restore@v6",
         "actions/cache/save@v6",
         "actions/checkout@v7",
@@ -53,9 +52,6 @@ PINS = frozenset(
 VERSION_TAG = re.compile(r"@v\d+(?:\.\d+){0,2}$")
 # rustsec/audit-check posts its findings as a check-run.
 WRITE_GRANTS = {"audit.yml": {"checks"}}
-# ponytail: install-containerlab validates its .deb with dpkg-deb, not a pinned
-# checksum; drop this exemption once it pins one.
-UNPINNED_FETCH = {".github/actions/install-containerlab/action.yml"}
 
 # A digest right after `sha256:` is an image or manifest reference, not an
 # archive checksum; an all-zero digest is a self-test's deliberate mismatch.
@@ -308,7 +304,7 @@ def check(root: Path) -> list[str]:
     for relative, text in texts.items():
         for line, body in _run_blocks(text):
             body = body.replace("\\\n", " ")
-            if FETCH.search(body) and not VERIFY.search(body) and relative not in UNPINNED_FETCH:
+            if FETCH.search(body) and not VERIFY.search(body):
                 errors.append(f"{relative}:{line}: fetches without verifying a SHA-256")
             if STREAM.search(body):
                 errors.append(f"{relative}:{line}: streams network bytes into tar or a shell")

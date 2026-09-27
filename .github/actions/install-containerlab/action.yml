@@ -1,62 +1,72 @@
 name: "Install containerlab (hardened)"
 description: >-
-  Install a pinned containerlab release from the Actions cache, downloading
-  only on a cache miss with retry + archive validation (issue #208). The bare
-  `curl … -o /tmp/clab.deb && dpkg -i` has failed when the download is
-  truncated or returns an HTML error body ("dpkg-deb: '/tmp/clab.deb' is not
-  a Debian format archive"). The cache (LAN-252) removes the download — the
-  interop workflows' flakiest external fetch — from warm runs entirely; a
-  cold run retries with backoff and validates the file with
-  `dpkg-deb --info` — the exact tool that errored — before it is installed
-  and saved to the cache.
+  Install a pinned containerlab release. The .deb is restored from its
+  content-addressed cache entry and checked against its pinned SHA-256; on a
+  miss or a bad cache hit it is fetched upstream with retry + backoff and
+  checked again before it is installed or saved. A truncated download or an
+  HTML error body (issue #208) fails the checksum like any other wrong bytes.
 inputs:
   version:
     description: "containerlab release version (without leading v)."
     required: false
     default: "0.74.3"
+  sha256:
+    description: "SHA-256 of containerlab_<version>_linux_amd64.deb."
+    required: false
+    default: "e9f7fec82daae07b13dc61c25a877a2d81574809fefd6b11cd4ec0b0f4a36474"
 runs:
   using: "composite"
   steps:
-    # The key includes the pinned version, so bumping the version input
-    # naturally invalidates the cache and re-downloads.
-    - name: Restore containerlab ${{ inputs.version }} .deb from cache
-      id: clab-deb
-      uses: actions/cache@v4
+    # The key includes the version and digest, so a bump of either input
+    # misses the cache and re-downloads.
+    - name: Restore exact containerlab .deb cache
+      id: cache
+      uses: actions/cache/restore@v6
       with:
-        path: ~/.cache/containerlab/containerlab_${{ inputs.version }}_linux_amd64.deb
-        key: containerlab-deb-${{ inputs.version }}
+        path: ${{ runner.temp }}/containerlab-cache/containerlab_${{ inputs.version }}_linux_amd64.deb
+        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
 
-    - name: Download containerlab ${{ inputs.version }} (retry + validate)
-      if: steps.clab-deb.outputs.cache-hit != 'true'
+    - name: Verify cached containerlab .deb or fetch it upstream
       shell: bash
       env:
         CLAB_VERSION: ${{ inputs.version }}
+        CLAB_SHA256: ${{ inputs.sha256 }}
       run: |
         set -euo pipefail
         url="https://github.com/srl-labs/containerlab/releases/download/v${CLAB_VERSION}/containerlab_${CLAB_VERSION}_linux_amd64.deb"
-        deb="$HOME/.cache/containerlab/containerlab_${CLAB_VERSION}_linux_amd64.deb"
+        deb="$RUNNER_TEMP/containerlab-cache/containerlab_${CLAB_VERSION}_linux_amd64.deb"
         mkdir -p "$(dirname "$deb")"
-        # Single retry mechanism: the outer loop owns retry + backoff, because
-        # the load-bearing failure (#208) is a 200-OK truncated/HTML body that
-        # `curl --retry` treats as success — only the `dpkg-deb --info` check
-        # after each download catches it. No `curl --retry` (which would nest
-        # retries and risk exceeding the 15-min interop job timeout).
-        ok=0
+        verify() { echo "${CLAB_SHA256}  ${deb}" | sha256sum --check --status; }
+        if [ -f "$deb" ] && verify; then
+          echo "using verified cached containerlab .deb (sha256 ${CLAB_SHA256})"
+          exit 0
+        fi
+        if [ -f "$deb" ]; then
+          echo "::warning::discarding cached containerlab .deb that fails its pinned SHA-256"
+        fi
+        # The outer loop owns retry + backoff: a 200-OK truncated or HTML body
+        # (#208) is a curl success that only the checksum catches. No
+        # `curl --retry`, which would nest retries inside the job timeout.
         attempts=4
         for attempt in $(seq 1 "$attempts"); do
           rm -f "$deb"
-          if curl -fsSL --connect-timeout 15 --max-time 90 "$url" -o "$deb" \
-             && dpkg-deb --info "$deb" >/dev/null 2>&1; then
-            ok=1
-            break
+          if curl -fsSL --connect-timeout 15 --max-time 90 "$url" -o "$deb" && verify; then
+            echo "downloaded and verified containerlab .deb (sha256 ${CLAB_SHA256})"
+            exit 0
           fi
-          echo "::warning::containerlab download/validate attempt ${attempt}/${attempts} failed: $(file -b "$deb" 2>/dev/null | head -c 80)"
+          echo "::warning::containerlab download/verify attempt ${attempt}/${attempts} failed: $(file -b "$deb" 2>/dev/null | head -c 80)"
           sleep $((attempt * 5))
         done
-        if [ "$ok" != 1 ]; then
-          echo "::error::containerlab .deb download/validation failed after ${attempts} attempts (issue #208)"
-          exit 1
-        fi
+        rm -f "$deb"
+        echo "::error::containerlab .deb download/verification failed after ${attempts} attempts: ${url}"
+        exit 1
+
+    - name: Save verified containerlab .deb cache
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ runner.temp }}/containerlab-cache/containerlab_${{ inputs.version }}_linux_amd64.deb
+        key: containerlab-deb-v${{ inputs.version }}-linux-amd64-${{ inputs.sha256 }}
 
     - name: Install containerlab ${{ inputs.version }}
       shell: bash
@@ -64,13 +74,5 @@ runs:
         CLAB_VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
-        deb="$HOME/.cache/containerlab/containerlab_${CLAB_VERSION}_linux_amd64.deb"
-        # Validate on both paths (fresh download and cache restore) with the
-        # exact tool that errored in #208, so a bad artifact fails loudly
-        # here rather than as an opaque dpkg error.
-        if ! dpkg-deb --info "$deb" >/dev/null 2>&1; then
-          echo "::error::containerlab .deb failed validation; evict cache key containerlab-deb-${CLAB_VERSION} and re-run"
-          exit 1
-        fi
-        sudo dpkg -i "$deb"
+        sudo dpkg -i "$RUNNER_TEMP/containerlab-cache/containerlab_${CLAB_VERSION}_linux_amd64.deb"
         containerlab version
