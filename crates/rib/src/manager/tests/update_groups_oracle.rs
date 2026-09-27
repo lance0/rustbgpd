@@ -462,6 +462,10 @@ pub(super) struct Oracle {
     /// invariant checker can fold mid-scenario); `finish` drains the
     /// remainder into it and returns the whole stream set.
     collected: Streams,
+    /// [`Self::queue`] inserts a FIFO barrier after every update, so queued
+    /// route messages never share a distribution window (the reference
+    /// side of the cross-message coalescing tests).
+    sequential_queue: bool,
 }
 
 /// Session features that disqualify a peer from shared single-best staging.
@@ -480,10 +484,20 @@ pub(super) struct OraclePeerFeatures {
 
 impl Oracle {
     pub(super) fn spawn(force_ungrouped: bool, cluster_id: Option<Ipv4Addr>) -> Self {
+        Self::spawn_configured(force_ungrouped, cluster_id, |_| {})
+    }
+
+    /// [`Self::spawn`] with a hook applied to the manager before it runs.
+    pub(super) fn spawn_configured(
+        force_ungrouped: bool,
+        cluster_id: Option<Ipv4Addr>,
+        configure: impl FnOnce(&mut RibManager),
+    ) -> Self {
         let (tx, rx) = mpsc::channel(512);
         let mut manager =
             RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
         manager.test_force_ungrouped = force_ungrouped;
+        configure(&mut manager);
         let roster = manager.export_roster();
         let handle = tokio::spawn(manager.run());
         Self {
@@ -492,10 +506,44 @@ impl Oracle {
             outs: BTreeMap::new(),
             handle,
             collected: Streams::new(),
+            sequential_queue: false,
         }
     }
 
-    async fn peer_up(
+    /// Make [`Self::queue`] deliver one update at a time.
+    pub(super) fn sequential(mut self) -> Self {
+        self.sequential_queue = true;
+        self
+    }
+
+    /// Queue updates back to back without yielding, so the actor finds them
+    /// all already queued (route messages among them may share one
+    /// distribution window), then quiesce.
+    pub(super) async fn queue(&mut self, updates: Vec<RibUpdate>) {
+        for update in updates {
+            self.tx
+                .try_send(update)
+                .expect("queued updates fit the primary channel");
+            if self.sequential_queue {
+                self.quiesce().await;
+            }
+        }
+        self.quiesce().await;
+    }
+
+    /// Stage RFC 7947 control-community handling before the peer's `PeerUp`.
+    pub(super) async fn set_rs_control(&mut self, peer: Ipv4Addr, rs_control_asn: u32) {
+        self.tx
+            .send(RibUpdate::SetPeerRsControl {
+                peer: IpAddr::V4(peer),
+                session_id: SESSION,
+                rs_control_asn: Some(rs_control_asn),
+            })
+            .await
+            .unwrap();
+    }
+
+    pub(super) async fn peer_up(
         &mut self,
         peer: Ipv4Addr,
         is_ebgp: bool,
@@ -1292,7 +1340,7 @@ async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
     }
 }
 
-async fn run_grouped_and_ungrouped<S>(
+pub(super) async fn run_grouped_and_ungrouped<S>(
     cluster_id: Option<Ipv4Addr>,
     scenario: S,
 ) -> (Streams, Streams)
@@ -3065,7 +3113,12 @@ fn deny_tagged_chain() -> PolicyChain {
 
 /// An eBGP route-server candidate: no `LOCAL_PREF`, ranked by AS-path
 /// length, optional standard communities.
-fn rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, asns: Vec<u32>, communities: Vec<u32>) -> Route {
+pub(super) fn rs_route(
+    prefix: Ipv4Prefix,
+    src: Ipv4Addr,
+    asns: Vec<u32>,
+    communities: Vec<u32>,
+) -> Route {
     let mut attributes = vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
@@ -3097,12 +3150,12 @@ fn rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, asns: Vec<u32>, communities: Vec<
 
 /// An overlap candidate ranked by AS-path length: rank 1 wins best
 /// path, higher ranks lose in order.
-fn ranked(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
+pub(super) fn ranked(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
     rs_route(prefix, src, vec![65000 + rank; rank as usize], vec![])
 }
 
 /// Bring up a per-client-best route-server member (eBGP, no RR).
-async fn pcb_peer_up(
+pub(super) async fn pcb_peer_up(
     o: &mut Oracle,
     peer: Ipv4Addr,
     export_policy: Option<PolicyChain>,

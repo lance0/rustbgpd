@@ -901,32 +901,52 @@ pub struct RibManager {
     /// committing cohort that resolves a different destination discards
     /// the unadopted group instead of leaking it.
     prepared_destination: Option<usize>,
-    /// Withdrawn NLRI identities accumulated across the currently-draining
-    /// batch. Retired only after distribution so the exact overlay can
+    /// Withdrawn NLRI identities accumulated across the current distribution
+    /// window. Retired only after distribution so the exact overlay can
     /// suppress any rejected-only wire withdrawal first.
     pending_exact_export_withdrawals: HashSet<ExactExportKey>,
-    /// Best-path changes accumulated across the chunks of the
-    /// currently-draining route batch and distributed in a single
-    /// `distribute_changes` call when the batch is exhausted. Deferring
-    /// only the *distribution* coalesces a multi-chunk initial-load flood
-    /// into one outbound batch per peer instead of one per 1024-route
-    /// chunk. `recompute_best` still runs per chunk, so Loc-RIB, route
-    /// events, and partial-progress Loc-RIB queries stay live mid-batch.
+    /// Best-path changes accumulated across the chunks of the current
+    /// distribution window and distributed in a single `distribute_changes`
+    /// call when the window settles. Deferring only the *distribution*
+    /// coalesces a multi-chunk initial-load flood, and a run of small
+    /// already-queued `RoutesReceived` messages, into one outbound batch per
+    /// peer instead of one per chunk or message (RFC 4271 Appendix F.1).
+    /// `recompute_best` still runs per chunk, so Loc-RIB, route events,
+    /// counters and partial-progress Loc-RIB queries stay live mid-window.
     ///
-    /// Flush boundary, precisely: the run loop processes new primary-channel
-    /// *updates* (`PeerUp` / `PeerDown`, further `RoutesReceived`, `EoR` —
-    /// anything that mutates the RIB) only once all pending chunks drain (see
-    /// `process_next_route_chunk`), so the accumulator is always fully
-    /// flushed before any mutation observes Adj-RIB-Out, and is empty
-    /// between batches. Priority read-only *queries* DO still interleave
-    /// between chunks (`drain_queries`): a `QueryAdvertised*` reading
-    /// Adj-RIB-Out mid-flood correctly sees pre-flush advertised state —
-    /// those routes have not been advertised yet — even though Loc-RIB has
-    /// advanced. That is an accurate, eventually-consistent intermediate
-    /// view, not stale data: Adj-RIB-Out is "what we have sent", and we have
-    /// not sent the deferred batch yet.
+    /// Window boundary, precisely: a window is one route batch plus any
+    /// further unicast-only `RoutesReceived` messages that were ALREADY
+    /// queued on the primary channel when the previous batch drained
+    /// (`extend_distribution_window`); nothing waits for input. The window
+    /// settles (flush, then exact-export retirement) when no such message is
+    /// queued, when the next queued update is anything else (`PeerUp` /
+    /// `PeerDown`, `EoR`, refresh, config, a primary-lane query), or when
+    /// the window reaches its message, input-route, affected-prefix or
+    /// elapsed bound (`DistributionWindowLimits`). Dirty-peer resync
+    /// (`resync_dirty_peers_bounded`, the only resync entry that can run
+    /// mid-window) settles it before reading advertised state. The run loop admits
+    /// other primary updates only while no route batch is queued, and a
+    /// window always holds a queued batch until it settles, so the
+    /// accumulator is empty whenever no route batch is queued and before
+    /// any other mutation observes Adj-RIB-Out. Priority read-only
+    /// *queries* DO still interleave between chunks (`drain_queries`): a
+    /// `QueryAdvertised*` reading Adj-RIB-Out mid-window correctly sees
+    /// pre-flush advertised state — those routes have not been advertised
+    /// yet — even though Loc-RIB has advanced. That is an accurate,
+    /// eventually-consistent intermediate view, not stale data:
+    /// Adj-RIB-Out is "what we have sent", and we have not sent the
+    /// deferred window yet. `FlowSpec` validation slices, which read the
+    /// dependency invalidations that the flush publishes, wait for the
+    /// window to settle; the window bounds cap that delay.
     pending_distribute_changed: HashSet<Prefix>,
     pending_distribute_affected: HashSet<Prefix>,
+    /// Progress of the current distribution window against its bounds.
+    distribution_window: distribution::DistributionWindow,
+    distribution_window_limits: distribution::DistributionWindowLimits,
+    /// A primary update received while deciding whether to extend a
+    /// distribution window, held until the run loop's next ordinary receive
+    /// so a non-extending update keeps its FIFO position.
+    primary_lookahead: Option<RibUpdate>,
     /// Process-local mutation versions bound into opaque route-page tokens.
     /// A successful continuation must match the requested scope's current
     /// version; no server-side snapshots are retained.
@@ -1434,6 +1454,19 @@ enum PendingRouteChunk {
     EvpnAnnounced(Vec<crate::route::EvpnRibRoute>),
 }
 
+impl PendingRouteChunk {
+    fn len(&self) -> usize {
+        match self {
+            Self::Withdrawn(entries) => entries.len(),
+            Self::Announced(entries) => entries.len(),
+            Self::FlowSpecWithdrawn(entries) => entries.len(),
+            Self::FlowSpecAnnounced(entries) => entries.len(),
+            Self::EvpnWithdrawn(entries) => entries.len(),
+            Self::EvpnAnnounced(entries) => entries.len(),
+        }
+    }
+}
+
 enum PendingRoutePhase {
     Withdrawn,
     Announced,
@@ -1872,6 +1905,9 @@ impl RibManager {
             pending_exact_export_withdrawals: HashSet::new(),
             pending_distribute_changed: HashSet::new(),
             pending_distribute_affected: HashSet::new(),
+            distribution_window: distribution::DistributionWindow::default(),
+            distribution_window_limits: distribution::DistributionWindowLimits::default(),
+            primary_lookahead: None,
             route_page_table_version: Some(initial_route_page_version()),
             route_page_advertised_version: Some(initial_route_page_version()),
             test_ingest_stall,
@@ -2545,6 +2581,10 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // Resync diffs against advertised state, and a due timer can fire
+        // between the chunks of an open distribution window: settle it
+        // (flush and exact-export retirement) before any recovery runs.
+        self.settle_distribution_window();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
         // One live peer/family is replayed per timer tick; any runnable
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
@@ -2720,6 +2760,30 @@ impl RibManager {
         }
     }
 
+    /// The next queued primary update, the held lookahead first.
+    fn try_recv_primary(&mut self) -> Option<RibUpdate> {
+        self.primary_lookahead
+            .take()
+            .or_else(|| self.rx.try_recv().ok())
+    }
+
+    /// Cancel-safe receive of the next primary update, the held lookahead
+    /// first: the lookahead is taken only by a poll that completes.
+    async fn recv_primary(
+        lookahead: &mut Option<RibUpdate>,
+        rx: &mut mpsc::Receiver<RibUpdate>,
+    ) -> Option<RibUpdate> {
+        match lookahead.take() {
+            Some(update) => Some(update),
+            None => rx.recv().await,
+        }
+    }
+
+    /// Queued primary updates, including the held lookahead.
+    fn primary_backlog(&self) -> usize {
+        self.rx.len() + usize::from(self.primary_lookahead.is_some())
+    }
+
     /// Apply one queued actor unit before timer or idle-only work. Returning
     /// `true` keeps that work deferred until the primary backlog is empty.
     async fn drain_ready_updates(&mut self) -> bool {
@@ -2727,7 +2791,7 @@ impl RibManager {
         // other primary message. Yielding between chunks preserves that FIFO
         // while giving operator reads and the executor their ordinary seam.
         if !self.traced_route_chunk() {
-            let Ok(update) = self.rx.try_recv() else {
+            let Some(update) = self.try_recv_primary() else {
                 return false;
             };
             self.traced(PostCommitWork::PrimaryUpdate, |manager| {
@@ -4449,8 +4513,9 @@ impl RibManager {
             // Sample ingest-channel depth once per iteration — a gauge
             // pegged at the channel capacity on scrape means producers
             // (sessions, local originators) are parked on backpressure.
-            self.metrics
-                .set_rib_ingest_channel_depth(i64::try_from(self.rx.len()).unwrap_or(i64::MAX));
+            self.metrics.set_rib_ingest_channel_depth(
+                i64::try_from(self.primary_backlog()).unwrap_or(i64::MAX),
+            );
 
             if let Some(mut pending) = self.pending_clean_policy_transition.take() {
                 // A newly owned transition supersedes any trace still armed
@@ -4500,7 +4565,7 @@ impl RibManager {
                             terminal_poll: started.elapsed(),
                             queued_general_queries: manager.query_rx.len(),
                             queued_summary_queries: manager.summary_rx.as_ref().map_or(0, mpsc::Receiver::len),
-                            ingest_backlog: manager.rx.len(),
+                            ingest_backlog: manager.primary_backlog(),
                             busy: std::time::Duration::ZERO,
                             route_chunks: 0,
                             primary_updates: 0,
@@ -4718,7 +4783,7 @@ impl RibManager {
             } else if validated_flowspec {
                 // Do not sleep while validation remains queued, but admit a
                 // primary update between slices instead of monopolizing turns.
-                if let Ok(update) = self.rx.try_recv() {
+                if let Some(update) = self.try_recv_primary() {
                     self.traced(PostCommitWork::PrimaryUpdate, |manager| {
                         manager.handle_update(update);
                     });
@@ -4744,7 +4809,7 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = self.rx.recv() => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;
@@ -4839,7 +4904,7 @@ impl RibManager {
                             None => query_rx_open = false,
                         }
                     }
-                    update = self.rx.recv() => {
+                    update = Self::recv_primary(&mut self.primary_lookahead, &mut self.rx) => {
                         match update {
                             Some(update) => {
                                 self.maybe_stall_test_ingest(&update).await;

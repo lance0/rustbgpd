@@ -1671,6 +1671,9 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
     })
     .await
     .unwrap();
+    // Two distribution passes (one evaluation, then two): without this
+    // barrier the queued messages coalesce into one window.
+    let _ = query_best_routes(&tx).await;
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer: peer2,

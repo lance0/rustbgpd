@@ -37,7 +37,7 @@ use crate::loc_rib::LocRib;
 use crate::update::{
     ExactExportKey, ExplainAdvertisedRoute, ExplainDecision, ExplainReason, ExportGateStep,
     ExportGateVerdict, NeighborPolicyStats, OutboundRouteUpdate, PeerExportPolicyReplacement,
-    PeerExportPolicyRestoreReceipt, RibCommandError,
+    PeerExportPolicyRestoreReceipt, RibCommandError, RibUpdate,
 };
 
 mod bgpls;
@@ -52,6 +52,61 @@ mod unicast;
 mod vpn;
 
 pub(in crate::manager) use export_memo::ExportMemo;
+
+/// Bounds on one cross-message distribution window. Each bound caps a
+/// different cost: queued input messages and ingested routes cap the ingest
+/// work (repeated churn of one prefix never grows the affected set), the
+/// distinct affected prefixes cap the one coalesced pass, and the elapsed
+/// time caps how long the window's first change waits for distribution.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::manager) struct DistributionWindowLimits {
+    pub(in crate::manager) messages: usize,
+    pub(in crate::manager) routes: usize,
+    pub(in crate::manager) affected_prefixes: usize,
+    pub(in crate::manager) elapsed: std::time::Duration,
+}
+
+impl Default for DistributionWindowLimits {
+    fn default() -> Self {
+        Self {
+            messages: 256,
+            routes: 4 * super::ROUTES_RECEIVED_CHUNK_SIZE,
+            affected_prefixes: super::ROUTES_RECEIVED_CHUNK_SIZE,
+            elapsed: std::time::Duration::from_millis(5),
+        }
+    }
+}
+
+/// Progress of the open distribution window; reset when it settles.
+#[derive(Debug, Default)]
+pub(in crate::manager) struct DistributionWindow {
+    /// When the window's first chunk started.
+    pub(in crate::manager) started: Option<std::time::Instant>,
+    /// Drained input messages.
+    pub(in crate::manager) messages: usize,
+    /// Ingested route, withdrawal and other NLRI entries.
+    pub(in crate::manager) routes: usize,
+}
+
+impl DistributionWindow {
+    /// Whether `update` may join an open window: unicast-only route input.
+    /// Every other update is a barrier the window settles before.
+    fn admits(update: &RibUpdate) -> bool {
+        matches!(
+            update,
+            RibUpdate::RoutesReceived {
+                flowspec_announced,
+                flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
+                ..
+            } if flowspec_announced.is_empty()
+                && flowspec_withdrawn.is_empty()
+                && evpn_announced.is_empty()
+                && evpn_withdrawn.is_empty()
+        )
+    }
+}
 
 /// Owned output channels produced by one or more unicast distribution walks.
 ///
@@ -5112,11 +5167,13 @@ impl RibManager {
         // the drained-batch distribution and rejection retirement below.
         let chunk_started = std::time::Instant::now();
         let Some(chunk) = pending.next_chunk() else {
-            // Empty/exhausted batch — flush anything still accumulated
-            // (defensive; normally the has_more() branch below flushes).
-            self.flush_pending_distribute();
-            return false;
+            // Empty batch: nothing ingested, but it still ends a message.
+            return self.finish_route_batch();
         };
+        self.distribution_window
+            .started
+            .get_or_insert(chunk_started);
+        self.distribution_window.routes += chunk.len();
 
         if matches!(
             &chunk,
@@ -5170,26 +5227,96 @@ impl RibManager {
         if pending.has_more() {
             self.pending_route_batches.push_front(pending);
         } else {
-            // Batch fully drained — distribute the changes accumulated
-            // across all its chunks in one coalesced outbound pass.
-            self.flush_pending_distribute();
-            let withdrawn = std::mem::take(&mut self.pending_exact_export_withdrawals);
-            let retire_started = std::time::Instant::now();
-            self.retire_exact_export_rejections(withdrawn);
-            self.metrics
-                .observe_rib_actor_work("exact_export_retire", retire_started.elapsed());
+            self.finish_route_batch();
         }
         self.metrics.observe_rib_actor_work("route_chunk", ingest);
         true
     }
 
-    /// Distribute the best-path changes accumulated across the chunks of a
-    /// route batch in a single pass, then clear the accumulator. Called when
-    /// a batch drains (see [`Self::process_next_route_chunk`]); a no-op when
-    /// nothing accumulated. Deferring distribution this way coalesces a
-    /// multi-chunk initial-load flood into one outbound batch per peer
-    /// instead of one per 1024-route chunk, while `recompute_best` still runs
-    /// per chunk so Loc-RIB and route events stay live mid-batch.
+    /// A route batch has drained. Extend the distribution window over the
+    /// next already-queued eligible message, or settle it. Returns whether
+    /// a route batch is queued again.
+    fn finish_route_batch(&mut self) -> bool {
+        self.distribution_window.messages += 1;
+        if self.extend_distribution_window() {
+            return true;
+        }
+        self.settle_distribution_window();
+        false
+    }
+
+    /// Admit the next primary update into the open window when it is an
+    /// already-queued unicast-only `RoutesReceived` and no bound is reached.
+    /// Never waits: an empty primary channel settles the window, so an
+    /// isolated UPDATE distributes exactly as before. Any other queued
+    /// update stays held in the lookahead, in FIFO position, for the run
+    /// loop to receive after the window settles. At most one message is
+    /// dequeued per call, so every admitted message leaves the actor turn
+    /// before its chunks run and the readiness and query seams still run
+    /// between messages.
+    fn extend_distribution_window(&mut self) -> bool {
+        let limits = self.distribution_window_limits;
+        let window = &self.distribution_window;
+        // The ingest-stall fault injection must see every message on its
+        // own receive; coalescing would bypass the stall.
+        if self.test_ingest_stall.is_some()
+            || !self.pending_route_batches.is_empty()
+            || window.messages >= limits.messages
+            || window.routes >= limits.routes
+            || self.pending_distribute_affected.len() >= limits.affected_prefixes
+            || window
+                .started
+                .is_some_and(|started| started.elapsed() >= limits.elapsed)
+        {
+            return false;
+        }
+        if self.primary_lookahead.is_none() {
+            self.primary_lookahead = self.rx.try_recv().ok();
+        }
+        if !self
+            .primary_lookahead
+            .as_ref()
+            .is_some_and(DistributionWindow::admits)
+        {
+            return false;
+        }
+        let update = self
+            .primary_lookahead
+            .take()
+            .expect("lookahead admitted above");
+        self.handle_update(update);
+        // A stale-session message is dropped without a batch: the window
+        // settles now and the next queued message waits for the next turn.
+        !self.pending_route_batches.is_empty()
+    }
+
+    /// Close the distribution window: distribute everything it accumulated
+    /// in one pass, then retire exact-export rejections for its withdrawals.
+    /// A no-op when no window is open.
+    pub(super) fn settle_distribution_window(&mut self) {
+        let window = std::mem::take(&mut self.distribution_window);
+        if window.started.is_none()
+            && window.messages == 0
+            && self.pending_exact_export_withdrawals.is_empty()
+        {
+            // No window is open: the accumulator is empty by construction.
+            return;
+        }
+        self.flush_pending_distribute();
+        let withdrawn = std::mem::take(&mut self.pending_exact_export_withdrawals);
+        let retire_started = std::time::Instant::now();
+        self.retire_exact_export_rejections(withdrawn);
+        self.metrics
+            .observe_rib_actor_work("exact_export_retire", retire_started.elapsed());
+    }
+
+    /// Distribute the best-path changes accumulated across a distribution
+    /// window in a single pass, then clear the accumulator. Called when the
+    /// window settles (see [`Self::settle_distribution_window`]); a no-op
+    /// when nothing accumulated. Deferring distribution this way coalesces a
+    /// multi-chunk initial-load flood, or a run of already-queued small
+    /// messages, into one outbound batch per peer, while `recompute_best`
+    /// still runs per chunk so Loc-RIB and route events stay live mid-window.
     fn flush_pending_distribute(&mut self) {
         if self.pending_distribute_changed.is_empty() && self.pending_distribute_affected.is_empty()
         {

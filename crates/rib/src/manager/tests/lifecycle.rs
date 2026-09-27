@@ -81,6 +81,9 @@ async fn channel_full_marks_dirty_and_resyncs() {
     })
     .await
     .unwrap();
+    // Separate distribution passes: without this barrier the queued
+    // messages coalesce into one window.
+    let _ = query_best_routes(&tx).await;
 
     // DON'T drain — channel is now full. Withdraw prefix1 to trigger
     // another distribute_changes that will fail on try_send.
@@ -217,6 +220,9 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     })
     .await
     .unwrap();
+    // Separate distribution passes: without this barrier the queued
+    // messages coalesce into one window.
+    let _ = query_best_routes(&tx).await;
 
     // That send succeeded (channel was empty). Now announce again to fill.
     let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
@@ -232,6 +238,9 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     })
     .await
     .unwrap();
+    // Separate distribution passes: without this barrier the queued
+    // messages coalesce into one window.
+    let _ = query_best_routes(&tx).await;
 
     // Don't drain — channel full. Send another route to trigger a failed
     // distribute_changes, marking the peer dirty.
@@ -1915,6 +1924,9 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     // Exercise the deferral without bulk data: treat any table as expensive.
     manager.initial_dump_defer_min_routes = 0;
+    // The queued message below must join the restarter's window whatever
+    // the host's speed.
+    super::distribution_window::untimed_window(&mut manager);
 
     let survivor = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let third = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
@@ -1983,15 +1995,17 @@ async fn deferred_registration_lets_queued_imports_distribute_first() {
 
     // The deferred registration completes: the restarter receives the
     // current table (the third peer's route, not its own) and an EoR.
-    // Drain the queued mutation before advancing the idle-only registration.
-    assert!(manager.drain_ready_updates().await);
+    // The queued route message was already waiting when the restarter's
+    // batch drained, so it joined that distribution window; draining
+    // ready updates never advances the idle-only registration.
+    assert_eq!(manager.primary_backlog(), 0);
+    assert!(!manager.drain_ready_updates().await);
     assert!(
         manager
             .peer_outbound_state(restarter)
             .update_group
             .is_empty()
     );
-    assert!(!manager.drain_ready_updates().await);
     manager.advance_pending_initial_registration();
     assert!(
         !manager

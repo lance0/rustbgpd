@@ -1516,9 +1516,13 @@ impl BgpMetrics {
 
         let rib_ingest_channel_depth = IntGauge::new(
             "bgp_rib_ingest_channel_depth",
-            "Queued RibUpdate messages in the RIB manager ingest channel, sampled \
-             once per manager loop iteration. Pegged at the channel capacity means \
-             producers (sessions, local originators) are parked on backpressure.",
+            "Queued RibUpdate messages (not routes) waiting for the RIB manager: the \
+             ingest channel plus at most one update held while a distribution window \
+             decides whether to extend, sampled once per manager loop iteration. \
+             Producers (sessions, local originators) block only when the channel \
+             itself is full, which reads capacity + 1 while an update is held and \
+             capacity otherwise; a sustained reading at or above the channel capacity \
+             means the channel is full or within one message of full.",
         )
         .expect("valid metric definition");
 
@@ -1584,7 +1588,7 @@ impl BgpMetrics {
         let rib_actor_work_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
                 "bgp_rib_actor_work_duration_seconds",
-                "Wall-clock duration of RIB actor work components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers the coalesced outbound pass including its internal readiness servicing, `exact_export_retire` covers the following rejection retirement, `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks, and `flowspec_validation` covers a receive-side validation slice including completed selection/distribution. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
+                "Wall-clock duration of RIB actor work components: `route_chunk` covers chunk construction and processing excluding its drained-batch tail, `distribute_flush` covers one outbound pass for a distribution window (one route batch plus any already-queued unicast route messages that joined it, so one observation can cover many UPDATE messages) including its internal readiness servicing, `exact_export_retire` covers the rejection retirement when that window settles, `attribute_gc` covers deadline-triggered attribute collection outside ingest chunks, and `flowspec_validation` covers a receive-side validation slice including completed selection/distribution. Correlate with readiness waits; component durations do not bound probe latency or cover all actor work.",
             )
             .buckets(RIB_ACTOR_DURATION_BUCKETS.to_vec()),
             &["work_unit"],

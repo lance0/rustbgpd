@@ -115,6 +115,17 @@
 //!   parse error during the hold aborts). Requires
 //!   `RELOADSTALL_IBGP_RR_ASN`.
 //!
+//! UPDATE-packing extension (small-message input shape) — additive env
+//! vars; absent, every stub keeps the frozen `NLRI_PER_MSG` packing:
+//! - `RELOADSTALL_NLRI_PER_MSG=k` (1..=900): announce UPDATEs carry at most
+//!   `k` IPv4 NLRI, and each UPDATE of a stub carries its own MED so the
+//!   daemon cannot re-pack them into fewer outbound UPDATEs. Applies to the
+//!   base announce, `ROUTE_REFRESH` re-sends and flapstorm re-announcement.
+//!   Churn keeps its one-UPDATE `CHURN_BLOCK` flap.
+//! - `RELOADSTALL_NLRI_PER_MSG_STUBS=K`: apply the packing only to the
+//!   first `K` stubs (default: every stub). With `--flapstorm K` this makes
+//!   exactly the flapped members announce in small UPDATEs.
+//!
 //! Dual-stack extensions (dual-stack policy-reload operating proof) —
 //! additive env vars; absent, the frozen IPv4-only contract is untouched:
 //! - `RELOADSTALL_DUALSTACK=1`: every stub negotiates IPv4 unicast AND
@@ -429,6 +440,21 @@ static IBGP_RR_ASN: AtomicU32 = AtomicU32::new(0);
 
 fn ibgp_rr_asn() -> u32 {
     IBGP_RR_ASN.load(Ordering::Relaxed)
+}
+
+/// `RELOADSTALL_NLRI_PER_MSG` packing and the stub count it applies to;
+/// `NLRI_PER_MSG` / every stub when absent.
+static SMALL_NLRI_PER_MSG: AtomicU32 = AtomicU32::new(NLRI_PER_MSG as u32);
+static SMALL_NLRI_STUBS: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// Announce packing for stub `i`, and whether it uses per-UPDATE MEDs.
+fn nlri_packing(i: u32) -> (usize, bool) {
+    let per_msg = SMALL_NLRI_PER_MSG.load(Ordering::Relaxed) as usize;
+    if per_msg != NLRI_PER_MSG && i < SMALL_NLRI_STUBS.load(Ordering::Relaxed) {
+        (per_msg, true)
+    } else {
+        (NLRI_PER_MSG, false)
+    }
 }
 
 /// Validated `RELOADSTALL_IBGP_RR_ASN`: 0/absent = eBGP (`None`);
@@ -1251,7 +1277,7 @@ fn base_attrs(i: u32) -> Vec<PathAttribute> {
 static ALTERNATE_PREPEND: AtomicBool = AtomicBool::new(false);
 
 fn announce_msgs(i: u32, prefixes: &[Ipv4Prefix]) -> Vec<Message> {
-    announce_msgs_with(&base_attrs(i), prefixes)
+    announce_msgs_with(i, &base_attrs(i), prefixes)
 }
 
 /// Every announcement stub `i` makes: its own slice, then its overlap extras
@@ -1272,14 +1298,32 @@ fn announced_msgs(ctx: &Ctx, i: u32) -> Vec<Message> {
         .copied()
         .map(base_prefix)
         .collect();
-    messages.extend(announce_msgs_with(&attrs, &extras));
+    messages.extend(announce_msgs_with(i, &attrs, &extras));
     messages
 }
 
-fn announce_msgs_with(attrs: &[PathAttribute], prefixes: &[Ipv4Prefix]) -> Vec<Message> {
+/// Stub `i`'s announce UPDATEs carrying `attrs`, packed per [`nlri_packing`].
+fn announce_msgs_with(i: u32, attrs: &[PathAttribute], prefixes: &[Ipv4Prefix]) -> Vec<Message> {
+    let (per_msg, distinct_med) = nlri_packing(i);
+    announce_msgs_packed(attrs, prefixes, per_msg, distinct_med)
+}
+
+/// One announce UPDATE per `per_msg` prefixes; `distinct_med` gives each
+/// UPDATE its own MED (its index) so attributes differ between UPDATEs.
+fn announce_msgs_packed(
+    base: &[PathAttribute],
+    prefixes: &[Ipv4Prefix],
+    per_msg: usize,
+    distinct_med: bool,
+) -> Vec<Message> {
     prefixes
-        .chunks(NLRI_PER_MSG)
-        .map(|chunk| {
+        .chunks(per_msg)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut attrs = base.to_vec();
+            if distinct_med {
+                attrs.push(PathAttribute::Med(u32::try_from(index).unwrap()));
+            }
             let entries: Vec<Ipv4NlriEntry> = chunk
                 .iter()
                 .map(|p| Ipv4NlriEntry {
@@ -1290,7 +1334,7 @@ fn announce_msgs_with(attrs: &[PathAttribute], prefixes: &[Ipv4Prefix]) -> Vec<M
             Message::Update(UpdateMessage::build(
                 &entries,
                 &[],
-                attrs,
+                &attrs,
                 true,
                 false,
                 Ipv4UnicastMode::Body,
@@ -3131,6 +3175,18 @@ fn main() {
     if let Some(shared_as) = ibgp_rr {
         IBGP_RR_ASN.store(u32::from(shared_as), Ordering::Relaxed);
     }
+    // Small-UPDATE packing; absent reproduces the frozen contract.
+    let small_per_msg = env_u64("RELOADSTALL_NLRI_PER_MSG", NLRI_PER_MSG as u64);
+    if !(1..=NLRI_PER_MSG as u64).contains(&small_per_msg) {
+        eprintln!("RELOADSTALL_NLRI_PER_MSG must be in 1..={NLRI_PER_MSG}, got {small_per_msg}");
+        std::process::exit(2);
+    }
+    SMALL_NLRI_PER_MSG.store(u32::try_from(small_per_msg).unwrap(), Ordering::Relaxed);
+    let small_stubs = env_u64("RELOADSTALL_NLRI_PER_MSG_STUBS", u64::from(u32::MAX));
+    SMALL_NLRI_STUBS.store(
+        u32::try_from(small_stubs).unwrap_or(u32::MAX),
+        Ordering::Relaxed,
+    );
     // Dual-stack / filtering knobs; both absent reproduces the frozen contract.
     let dualstack_enabled = env_u64("RELOADSTALL_DUALSTACK", 0) != 0;
     let filter_count = u32::try_from(env_u64("RELOADSTALL_FILTER_COUNT", 0)).unwrap();
@@ -3636,7 +3692,10 @@ fn main() {
                     let msg = if announced {
                         withdraw_msg(&block)
                     } else {
-                        announce_msgs(i, &block).pop().unwrap()
+                        // Always one UPDATE per flap, whatever the base packing.
+                        announce_msgs_packed(&base_attrs(i), &block, NLRI_PER_MSG, false)
+                            .pop()
+                            .unwrap()
                     };
                     // Dual-stack: flap the IPv6 block in lockstep so both
                     // families carry steady churn (and stable-marker proof).
@@ -5769,6 +5828,33 @@ mod tests {
         assert_eq!(
             max_gap_ms_family(&ctx, 0, 0, 1000, false, Some(FAMILY_V6)),
             0.8
+        );
+    }
+
+    #[test]
+    fn small_update_packing_splits_with_distinct_meds() {
+        let prefixes: Vec<Ipv4Prefix> = (0..3).map(base_prefix).collect();
+        let messages = announce_msgs_packed(&base_attrs(7), &prefixes, 1, true);
+        assert_eq!(messages.len(), 3, "one UPDATE per prefix");
+        for (index, message) in messages.iter().enumerate() {
+            let bytes = encode_message(message).expect("small UPDATE encodes");
+            let mut buf = bytes::Bytes::copy_from_slice(&bytes);
+            let Message::Update(update) = decode_message(&mut buf, MAX_MESSAGE_LEN).unwrap() else {
+                panic!("expected an UPDATE");
+            };
+            let parsed = update.parse(true, false, &[]).unwrap();
+            assert_eq!(parsed.announced.len(), 1);
+            assert!(parsed
+                .attributes
+                .contains(&PathAttribute::Med(u32::try_from(index).unwrap())));
+        }
+        // The frozen default: every stub packs NLRI_PER_MSG without a MED,
+        // and the churn flap stays one UPDATE for its whole block.
+        assert_eq!(nlri_packing(7), (NLRI_PER_MSG, false));
+        let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(base_prefix).collect();
+        assert_eq!(
+            announce_msgs_packed(&base_attrs(7), &block, NLRI_PER_MSG, false).len(),
+            1
         );
     }
 }

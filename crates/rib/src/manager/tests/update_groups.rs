@@ -2525,8 +2525,12 @@ async fn clean_policy_transition_drains_unrelated_dirty_residue_before_reply() {
         .unwrap();
     };
     let make_route = |prefix| crate::test_support::make_route(prefix, source);
+    // Barriers between sends: queued messages would coalesce into one
+    // distribution window and never jam the dirty peer's channel.
     send_routes(vec![make_route(first_prefix)], vec![]).await;
+    let _ = query_best_routes(&tx).await;
     send_routes(vec![make_route(second_prefix)], vec![]).await;
+    let _ = query_best_routes(&tx).await;
     send_routes(vec![], vec![(Prefix::V4(first_prefix), 0)]).await;
     let (health_reply, health_response) = oneshot::channel();
     tx.send(RibUpdate::TestQueryOutboundHealth {
@@ -4296,8 +4300,12 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
 
     // p1 fills the channel; p2's emission fails → member goes dirty;
     // p1 withdrawn WHILE dirty → tombstone.
+    // Quiesce between sends: queued messages would coalesce into one
+    // distribution window and never jam the channel.
     send_routes(vec![mk(p1)], vec![]).await;
+    quiesce().await;
     send_routes(vec![mk(p2)], vec![]).await;
+    quiesce().await;
     send_routes(vec![], vec![(Prefix::V4(p1), 0)]).await;
     quiesce().await;
     assert_metric(
@@ -4392,8 +4400,12 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
 
     // p1 fills the channel; p2's emission fails → member goes dirty;
     // p1 withdrawn WHILE dirty → tombstone.
+    // Quiesce between sends: queued messages would coalesce into one
+    // distribution window and never jam the channel.
     send_routes(vec![mk(p1)], vec![]).await;
+    quiesce().await;
     send_routes(vec![mk(p2)], vec![]).await;
+    quiesce().await;
     send_routes(vec![], vec![(Prefix::V4(p1), 0)]).await;
     quiesce().await;
     assert_metric(
@@ -4850,9 +4862,10 @@ async fn grouped_and_ungrouped_export_counters_match_after_dirty_resync() {
         })
         .await
         .unwrap();
+        // One distribution pass per route: queued messages would
+        // otherwise coalesce into one window that fits both channels.
+        let _ = query_best_routes(&tx).await;
     }
-    // Serialize past both distribution passes.
-    let _ = query_best_routes(&tx).await;
 
     let pre_grouped = query_neighbor_policy_stats(&tx, grouped).await;
     let pre_ungrouped = query_neighbor_policy_stats(&tx, ungrouped).await;

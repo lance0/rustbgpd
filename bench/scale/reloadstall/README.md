@@ -239,6 +239,21 @@ outside RFC 8212's default-deny and the RR soak runs zero reloads; the
 contract). Mutually exclusive with the `GEN_TRIP_*` knobs; absent, the
 emitted config is byte-for-byte the historical one.
 
+### Small-UPDATE packing (env vars, all additive)
+
+Absent, every stub packs 900 IPv4 NLRI per announce UPDATE, the frozen
+contract.
+
+- `RELOADSTALL_NLRI_PER_MSG=k` (1..=900) — announce UPDATEs carry at most
+  `k` NLRI, and each UPDATE of a stub carries its own MED so the daemon cannot
+  pack them back into fewer outbound UPDATEs. Applies to the base announce,
+  `ROUTE_REFRESH` re-sends and flapstorm re-announcement; churn keeps its
+  one-UPDATE 16-prefix flap.
+- `RELOADSTALL_NLRI_PER_MSG_STUBS=K` — apply the packing only to the first
+  `K` stubs (default: every stub). With `--flapstorm K`, exactly the flapped
+  members announce in small UPDATEs, so the cell compares their
+  re-announcement against the packed default at an equal prefix count.
+
 ### Dual-stack and filtering extensions (env vars, all additive)
 
 Both knobs absent reproduces the frozen IPv4-only contract and the
