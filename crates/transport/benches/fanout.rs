@@ -67,6 +67,14 @@
 //! inventory, and residue receipts are checked afterward. This is
 //! instrumentation only and makes no performance claim.
 //!
+//! `failover_new_winner_fanout` is a route-server failover: an unregistered
+//! source withdraws 256 best paths in one production `RoutesReceived`, and
+//! 25% or 75% of them fail over to an alternate from 1 or 16 of the 256
+//! members. The timed pass mixes displacing announcements, plain withdrawals
+//! and new winners through recompute, grouped distribution, exact probes,
+//! commit and enqueue. Every member's wire view and shared-cell use are
+//! checked afterward; session encode is outside this manager-level bench.
+//!
 //! Gated behind `bench-internals`; run with:
 //!   cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 //!
@@ -2443,6 +2451,210 @@ fn bench_mp_exact_export_probe(c: &mut Criterion) {
     group.finish();
 }
 
+/// Route-server fleet for the failover new-winner shape.
+const FAILOVER_MEMBERS: usize = 256;
+/// Best paths the failing source held before the timed pass.
+const FAILOVER_PREFIXES: usize = 256;
+/// (alternate fraction in percent, distinct alternate sources).
+const FAILOVER_SHAPES: [(usize, usize); 4] = [(25, 1), (25, 16), (75, 1), (75, 16)];
+
+struct FailoverNewWinnerState {
+    manager: RibManager,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    members: Vec<IpAddr>,
+    source: IpAddr,
+    best: Vec<Route>,
+    withdrawals: Vec<(Prefix, u32)>,
+    /// Alternate source per prefix index (`None` = no alternate).
+    alternates: Vec<Option<IpAddr>>,
+}
+
+fn failover_prefix(index: usize) -> Prefix {
+    let [_, _, b1, b2] = u32::try_from(index)
+        .expect("failover prefix index fits u32")
+        .to_be_bytes();
+    Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64 + b1, b2, 0), 24))
+}
+
+/// A member's alternate: one AS longer than the failing source's path, so
+/// it becomes best only once the source withdraws.
+fn failover_alternate(prefix: Prefix, member: IpAddr) -> Route {
+    let mut route = make_route(prefix);
+    route.peer = member;
+    route.next_hop = member;
+    let IpAddr::V4(router_id) = member else {
+        unreachable!("benchmark members are IPv4")
+    };
+    route.peer_router_id = router_id;
+    let mut attributes = typical_attributes();
+    for attribute in &mut attributes {
+        match attribute {
+            PathAttribute::AsPath(path) => {
+                path.segments = vec![AsPathSegment::AsSequence(vec![
+                    65_000, 65_100, 65_200, 65_300,
+                ])];
+            }
+            PathAttribute::NextHop(next_hop) => *next_hop = router_id,
+            _ => {}
+        }
+    }
+    route.attributes = AttrSet::new(attributes);
+    route
+}
+
+fn drain_all(receivers: &mut [mpsc::Receiver<OutboundRouteUpdate>]) {
+    for receiver in receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+}
+
+fn build_failover_new_winner(percent: usize, sources: usize) -> FailoverNewWinnerState {
+    let (_tx, rx) = mpsc::channel::<RibUpdate>(16);
+    let (_qtx, qrx) = mpsc::channel::<RibUpdate>(16);
+    let mut manager = RibManager::new(rx, qrx, None, None, BgpMetrics::new());
+    let mut receivers = manager.bench_register_route_server_peers(
+        &route_server_remote_asns(FAILOVER_MEMBERS, false),
+        None,
+        // Setup enqueues one envelope per alternate source plus the best
+        // paths; a full channel would divert members to the dirty resync.
+        32,
+        fanout_bench_route_server_export_encoder,
+    );
+    let members: Vec<IpAddr> = (0..FAILOVER_MEMBERS)
+        .map(RibManager::bench_peer_address)
+        .collect();
+    let best: Vec<Route> = (0..FAILOVER_PREFIXES)
+        .map(|index| make_route(failover_prefix(index)))
+        .collect();
+    let covered = FAILOVER_PREFIXES * percent / 100;
+    let alternates: Vec<Option<IpAddr>> = (0..FAILOVER_PREFIXES)
+        .map(|index| (index < covered).then(|| members[1 + index % sources]))
+        .collect();
+    let mut seed: Vec<Route> = alternates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, source)| {
+            source.map(|member| failover_alternate(failover_prefix(index), member))
+        })
+        .collect();
+    seed.extend(best.iter().cloned());
+    manager.bench_seed_loc_rib(seed);
+    drain_all(&mut receivers);
+    assert_eq!(
+        manager.bench_adj_rib_out_fanout_receipt().dirty_peers,
+        0,
+        "setup must not overflow a member channel"
+    );
+    FailoverNewWinnerState {
+        manager,
+        receivers,
+        members,
+        source: best[0].peer,
+        withdrawals: best
+            .iter()
+            .map(|route| (route.prefix, route.path_id))
+            .collect(),
+        best,
+        alternates,
+    }
+}
+
+/// Every member receives one envelope whose wire view is the failover
+/// result: the alternates it does not source, withdrawals of the prefixes
+/// with no alternate and of those that moved onto it. Returns how many
+/// envelopes carried the group's shared encode cell.
+fn assert_failover_envelopes(state: &mut FailoverNewWinnerState) -> usize {
+    let mut shared = 0;
+    for (member, receiver) in state.members.iter().zip(&mut state.receivers) {
+        let update = receiver
+            .try_recv()
+            .expect("the failover pass enqueues one envelope per member");
+        assert!(receiver.try_recv().is_err(), "one envelope per member");
+        assert_unicast_only_envelope(&update);
+        shared += usize::from(update.shared_group_encode.is_some());
+        let announced: HashSet<(Prefix, u32)> = update
+            .announce
+            .iter()
+            .filter(|route| update.announce_source_exclusion != Some(route.peer))
+            .map(|route| {
+                assert_ne!(route.peer, *member, "split horizon");
+                (route.prefix, route.path_id)
+            })
+            .collect();
+        let withdrawn: HashSet<(Prefix, u32)> = update.withdraw.iter().copied().collect();
+        assert_eq!(
+            withdrawn.len(),
+            update.withdraw.len(),
+            "no duplicate withdrawal"
+        );
+        for (index, alternate) in state.alternates.iter().enumerate() {
+            let key = (failover_prefix(index), 0);
+            match alternate {
+                Some(source) if source != member => {
+                    assert!(announced.contains(&key) && !withdrawn.contains(&key));
+                }
+                _ => assert!(withdrawn.contains(&key) && !announced.contains(&key)),
+            }
+        }
+        assert_eq!(announced.len() + withdrawn.len(), FAILOVER_PREFIXES);
+    }
+    shared
+}
+
+/// Envelopes expected to carry the shared encode cell. Unset expects every
+/// member on it; `per-member` expects the parent ref's shape, where each new
+/// winner leaves the shared payload for its own per-member walk.
+fn expected_failover_shared_envelopes(sources: usize) -> usize {
+    const ENV: &str = "RUSTBGPD_FAILOVER_NEW_WINNER_EXPECT";
+    match std::env::var(ENV) {
+        Ok(value) if value == "per-member" => FAILOVER_MEMBERS - sources,
+        Ok(value) => panic!("{ENV} must be unset or \"per-member\", got {value:?}"),
+        Err(std::env::VarError::NotPresent) => FAILOVER_MEMBERS,
+        Err(std::env::VarError::NotUnicode(_)) => panic!("{ENV} must be valid Unicode"),
+    }
+}
+
+/// `failover_new_winner_fanout`: a route-server source loses its 256 best
+/// paths in one production `RoutesReceived` withdrawal while 25% or 75% of
+/// them have an alternate from 1 or 16 other members, so one pass mixes
+/// displacing announcements, plain withdrawals and new winners. Timed from
+/// the manager dispatcher through recompute, grouped distribution, exact
+/// probes, commit and enqueue for 256 members; receipt checks and the
+/// restore pass are outside accumulated time. Session encode is not
+/// measured here.
+fn bench_failover_new_winner_fanout(c: &mut Criterion) {
+    let mut group = c.benchmark_group("failover_new_winner_fanout");
+    group.sample_size(10);
+    for (percent, sources) in FAILOVER_SHAPES {
+        let shape = format!("{FAILOVER_MEMBERS}m/{percent}pct/{sources}src");
+        group.bench_function(BenchmarkId::new("route_server", &shape), |bench| {
+            let mut state = build_failover_new_winner(percent, sources);
+            let expected_shared = expected_failover_shared_envelopes(sources);
+            bench.iter_custom(|iterations| {
+                let mut accumulated = Duration::ZERO;
+                for _ in 0..iterations {
+                    let withdrawn = state.withdrawals.clone();
+                    let started = Instant::now();
+                    state
+                        .manager
+                        .bench_withdraw_loc_rib(state.source, withdrawn);
+                    accumulated += started.elapsed();
+                    assert_eq!(
+                        assert_failover_envelopes(&mut state),
+                        expected_shared,
+                        "shared-cell envelopes; set RUSTBGPD_FAILOVER_NEW_WINNER_EXPECT=per-member \
+                         for the parent ref"
+                    );
+                    state.manager.bench_seed_loc_rib(state.best.clone());
+                    drain_all(&mut state.receivers);
+                }
+                accumulated
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fanout,
@@ -2457,6 +2669,7 @@ criterion_group!(
     bench_add_path_export_staging,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync,
-    bench_mp_exact_export_probe
+    bench_mp_exact_export_probe,
+    bench_failover_new_winner_fanout
 );
 criterion_main!(benches);
