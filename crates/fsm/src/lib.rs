@@ -27,7 +27,8 @@
 //!
 //! # Enum exhaustiveness
 //!
-//! [`Event`], [`Action`], [`TimerType`], and [`error::FsmError`] are
+//! [`Event`], [`Action`], [`TimerType`], [`ReceivedRole`], and
+//! [`error::FsmError`] are
 //! `#[non_exhaustive]`: new protocol features add variants without a
 //! semver-major break, so matches outside this crate must carry a
 //! wildcard arm. [`SessionState`] stays exhaustively matchable — the six
@@ -59,7 +60,7 @@ pub mod negotiation;
 pub mod session;
 pub mod state;
 
-pub use action::{Action, NegotiatedSession, TimerType};
+pub use action::{Action, NegotiatedSession, ReceivedRole, TimerType};
 pub use config::{
     DEFAULT_HOLD_TIME, PeerConfig, default_send_hold_time, graceful_restart_preserves_family,
 };

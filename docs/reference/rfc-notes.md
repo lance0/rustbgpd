@@ -225,9 +225,11 @@ deviations; [docs/interop.md](../interop.md) has the interop matrix,
   which it uses internally for "no Role", even without one.
 - `bgp_role_mismatch_total` reports the first assigned Role value in the
   rejected OPEN as `remote_role`, so `[Customer, 7]` counts as
-  `remote_role="customer"`. When the OPEN carries no assigned Role value, only
-  unassigned or wrong-length ones, the label is `remote_role="none"`, the same
-  label as an absent Role under `strict_role`.
+  `remote_role="customer"`. When the OPEN carries Role capabilities but no
+  assigned value, only unassigned or wrong-length ones, the label is
+  `remote_role="unrecognized"` and the warning log carries the first raw value
+  as `remote_role_raw`, for example `[7]`. `remote_role="none"` means the OPEN
+  carried no Role capability, as with an absent Role under `strict_role`.
 - The configured local Role is session-stamped into the RIB before `PeerUp`,
   so the first Adj-RIB-Out build and every subsequent export use the same
   RFC 9234 relationship semantics. Update-group identity includes that role;

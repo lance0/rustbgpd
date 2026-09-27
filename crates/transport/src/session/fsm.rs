@@ -972,16 +972,25 @@ impl PeerSession {
                     // surrounding `SendNotification` action drives the wire-
                     // level rejection; here we only emit the bounded metric so
                     // operators can see mismatch rates per (peer, local, remote).
+                    let remote_label = received_role_metric_label(&remote_role);
+                    // Present only for an unrecognized Role, e.g. `[7]`.
+                    let remote_role_raw = match &remote_role {
+                        rustbgpd_fsm::ReceivedRole::Unrecognized(raw) => {
+                            Some(tracing::field::debug(raw.as_ref()))
+                        }
+                        _ => None,
+                    };
                     warn!(
                         peer = %self.peer_label,
-                        local_role = ?local_role,
-                        remote_role = ?remote_role,
+                        local_role = role_metric_label(local_role),
+                        remote_role = remote_label,
+                        remote_role_raw,
                         "RFC 9234 role mismatch — rejecting OPEN with NOTIFICATION 2/11"
                     );
                     self.metrics.record_role_mismatch(
                         &self.peer_label,
                         role_metric_label(local_role),
-                        role_metric_label(remote_role),
+                        remote_label,
                     );
                 }
                 Action::SessionDown => {
@@ -1230,5 +1239,16 @@ const fn role_metric_label(role: Option<rustbgpd_wire::BgpRole>) -> &'static str
         Some(rustbgpd_wire::BgpRole::Peer) => "peer",
         Some(_) => "unrecognized",
         None => "none",
+    }
+}
+
+/// `remote_role` label for `bgp_role_mismatch_total`: an OPEN whose Role
+/// capabilities carry only unassigned or wrong-length values is
+/// `"unrecognized"`, distinct from `"none"` for an OPEN with no Role.
+const fn received_role_metric_label(role: &rustbgpd_fsm::ReceivedRole) -> &'static str {
+    match role {
+        rustbgpd_fsm::ReceivedRole::Absent => "none",
+        rustbgpd_fsm::ReceivedRole::Assigned(role) => role_metric_label(Some(*role)),
+        _ => "unrecognized",
     }
 }
