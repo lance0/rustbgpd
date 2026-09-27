@@ -67,7 +67,7 @@ is enabled only when BLACKHOLE enforcement or a general FIB table is active;
 control-plane-only processes keep the lazy RIB layout.
 
 **Redesign triggers (instrumented from day one):**
-- `bgp_rib_ingest_channel_depth` — queued `RibUpdate` messages sampled once per manager loop. Pegged at the channel capacity means producers are parked; evaluate sharding or batch coalescing. The `bgp_rib_outbound_prefix_limit_actor_duration_seconds` and `bgp_rib_route_refresh_actor_duration_seconds` histograms time the actor operations that hold the loop.
+- `bgp_rib_ingest_channel_depth` — queued `RibUpdate` messages (not routes), including at most one held by a distribution window's lookahead, sampled once per manager loop. Pegged at the channel capacity means producers are parked; evaluate sharding or batch coalescing. The `bgp_rib_outbound_prefix_limit_actor_duration_seconds` and `bgp_rib_route_refresh_actor_duration_seconds` histograms time the actor operations that hold the loop.
 - `bgp_inbound_rib_backpressure_total` — any non-zero sustained rate means session tasks are stalling on a full RIB channel (ADR-0078).
 - `bgp_outbound_route_drops_total` — non-zero means a peer's writer channel was full or closed and outbound work was dropped.
 - `bgp_event_stream_lagged_total` — non-zero means a live event-stream subscriber is too slow to keep up and is missing events.

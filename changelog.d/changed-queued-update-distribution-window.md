@@ -15,3 +15,8 @@
   clients, 64 queued one-prefix UPDATEs took about 2.4 ms of RIB work
   instead of 141 ms with a plain update group, and 4.7 ms instead of 147 ms
   with a per-client-best group.
+  **Operator-visible:** `bgp_rib_actor_work_duration_seconds` records one
+  `distribute_flush` observation per window, so its series count is windows,
+  not UPDATE messages. `bgp_rib_ingest_channel_depth` also counts the one
+  update a window may hold while deciding whether to extend, so a full
+  channel can read one above its capacity.
