@@ -292,8 +292,8 @@ the incumbent side. Common rules:
 
 | Adapter | Capture command (verified against) | Form |
 |---------|-------------------------------------|------|
-| `from-mrt/1` | `rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <ip> --peer-asn <asn>` (RFC 6396 `TABLE_DUMP_V2`, RFC 8050 Add-Path subtypes) | in-binary subcommand |
-| `from-bmp/1` | `rbgp diff snapshot from-bmp <capture> [--peer <ip>]` (RFC 7854 BMP v3 byte stream carrying the RFC 8671 post-policy Adj-RIB-Out view, O=1/L=1) | in-binary subcommand |
+| `from-mrt/1` | `rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --neighbor <ip> --peer-asn <asn>` (RFC 6396 `TABLE_DUMP_V2`, RFC 8050 Add-Path subtypes) | in-binary subcommand |
+| `from-bmp/1` | `rbgp diff snapshot from-bmp <capture> [--neighbor <ip>]` (RFC 7854 BMP v3 byte stream carrying the RFC 8671 post-policy Adj-RIB-Out view, O=1/L=1) | in-binary subcommand |
 | `bird2-export/1` | `birdc show route export <member-proto> all` (BIRD 2.0.12); `birdc show route export table <channel> all` (BIRD 3.3.1) | [`scripts/ribsnap/bird2-export-to-ribsnap.py`](../../scripts/ribsnap/bird2-export-to-ribsnap.py) |
 | `frr-advertised/1` | `vtysh -c "show ip bgp neighbor <ip> advertised-routes detail json"` (FRR 10.3.1) | [`scripts/ribsnap/frr-advertised-to-ribsnap.py`](../../scripts/ribsnap/frr-advertised-to-ribsnap.py) |
 | `gobgp-adjout/1` | `gobgp neighbor <ip> adj-out -j` (GoBGP 3.37.0, 4.7.0) | [`scripts/ribsnap/gobgp-adjout-to-ribsnap.py`](../../scripts/ribsnap/gobgp-adjout-to-ribsnap.py) |

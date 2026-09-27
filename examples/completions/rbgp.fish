@@ -1045,7 +1045,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l next-hop -l nexthop -d 'Next hop address' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l origin -d 'Origin (0=igp, 1=egp, 2=incomplete)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l origin -d 'Origin: igp, egp, incomplete (or 0, 1, 2)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l local-pref -d 'Local preference' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l med -d 'MED' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l as-path -d 'AS path (space-separated)' -r
@@ -1403,7 +1403,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rd -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ethernet-tag -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ip -d 'Originator IP (required for Type 3)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l ip -l originator-ip -d 'Originator IP (required for Type 3)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l next-hop -d 'VTEP loopback IP (next-hop)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rt -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1464,7 +1464,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l rd -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ethernet-tag -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ip -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ip -l originator-ip -d 'Originator IP' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l tls-ca -d 'PEM CA bundle used to verify an HTTPS server (required for HTTPS)' -r -F
@@ -1662,7 +1662,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s j -l json -d 'Output
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l address -d 'Neighbor address filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s a -l family -d 'Address family filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s l -l limit -d 'Maximum recent route events to return (default 100; route history only)' -r
@@ -1686,7 +1686,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -f -a "evpn" -d 'Show recent EVPN route events'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l category -d 'Event category filter: route, session, policy, dataplane, evpn, bfd' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l address -d 'Neighbor address filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s a -l family -d 'Address family filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l type -d 'Event type filter: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed' -r
@@ -1706,7 +1706,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l address -d 'Neighbor address filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l type -d 'Session event type filter: state_changed, established, lost, peer_enabled, peer_disabled' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s l -l limit -d 'Maximum recent session events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1723,7 +1723,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l address -d 'Neighbor address filter. Only peer-scoped policy events match' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l neighbor -l peer -d 'Neighbor address filter. Only peer-scoped policy events match' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l type -d 'Policy event type filter: policy_changed' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s l -l limit -d 'Maximum recent policy events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1740,7 +1740,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l address -d 'Neighbor address filter. Matches current and previous best-path peer' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l neighbor -l peer -d 'Neighbor address filter. Matches current and previous best-path peer' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l route-type -d 'EVPN route type filter (1..=5)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l rd -d 'Route Distinguisher filter, e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l type -d 'EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed' -r
