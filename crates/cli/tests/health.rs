@@ -28,7 +28,7 @@ async fn health_preserves_default_output_and_liveness_discloses_no_counts() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "Status:  healthy\nUptime:  00:00:42\nPeers:   2\nRoutes:  10\n"
+        "Status:            healthy\nUptime:            00:00:42\nEstablished peers: 2\nRoutes:            10\n"
     );
     let output = run(&server.addr, &["--json", "health"]).await;
     assert!(output.status.success(), "{output:?}");
