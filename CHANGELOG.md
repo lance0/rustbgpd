@@ -11,6 +11,651 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `rbgp` flag spellings now carry from one command to the next. `events` and
+  its `watch`, `sessions`, `policy` and `evpn` subcommands select a peer with
+  `--neighbor` (visible alias `--peer`; the old `--address` still parses), and
+  `diff snapshot from-mrt|from-bmp` take `--neighbor` alongside `--peer`.
+  `evpn add-imet` and `delete-imet` accept `--originator-ip`, the name
+  `evpn explain imet` uses, alongside `--ip`. `rib add --origin` accepts
+  `igp`, `egp` and `incomplete`, the names every output prints, as well as
+  the numeric codes. Multi-word values accept either separator where the
+  CLI knows them: `--rpki-state not-found`, `rpki verify-path --role
+  rs_client`, `diff snapshot from-mrt --view adj_rib_out_capture`,
+  `diff advertised --ignore-attribute as-path`, and kebab-case event
+  `--type` names. Canonical spellings and all output are unchanged.
+- `rbgp diff snapshot from-mrt` spells its ASN flag `--neighbor-asn`, as
+  `rpki verify-path` does; `--peer-asn` remains a visible alias.
+  `rpki verify-path --role` accepts the config's role spellings:
+  `route_server_client` and `route-server-client` for the RS-client role,
+  and `rs` for the route-server role.
+- `rbgp -j events …` and `rbgp -j watch` records carry
+  `timestamp_unix_seconds`, the event time as a JSON number, next to the
+  existing `timestamp` string, which is unchanged. The
+  [CLI guide](crates/cli/README.md#events-and-control) also records that
+  session events spell `old_state`/`new_state` in the FSM's snake_case
+  vocabulary while `rbgp neighbor` uses the display form; neither field is
+  re-cased.
+- `rbgp --json-lines rib`, `rib received` and `rib advertised` accept
+  `--page-token` with `--limit`. The `rbgp-rib` end record carries a
+  `next_page_token` to continue from, empty once the walk is complete, and
+  the stream format advances to version 1.1 for this additive field.
+  Automatic paging without `--limit`, page bounds, and the failure of a
+  continuation the daemon rejects after a table change are unchanged; a
+  token is not a durable checkpoint.
+- Max-prefix shutdown latches and inbound `block` episodes now have lasting
+  alerting. The new `bgp_max_prefix_latched{peer,interface}` gauge is 1 while
+  a max-prefix shutdown latch holds a peer off, until an explicit enable or
+  until the timed hold-down expires into a successful restart or, under strict
+  BFD, into the BFD withhold. It is seeded and reaped with the other exact
+  peer-identity gauges. The shipped alert pack adds `BgpMaxPrefixLatched`
+  (critical, joined to `bgp_peer_info`), which keeps firing after the
+  10-minute `BgpMaxPrefixLimitExceeded` event alert resolves, and
+  `BgpMaxPrefixBlocking` (warning after 5 minutes of
+  `bgp_max_prefix_blocking` = 1), the inbound sibling of
+  `BgpOutboundPrefixBlocking`. `rbgp doctor` warns on each blocking
+  `inbound_prefix_limits[]` row as
+  `peer.<scoped-address>.inbound_prefix_limit.<scope>`. The
+  `bgp_peer_admin_enabled` help text and the
+  [operations reference](docs/reference/operations.md#peer-max-prefix-exceeded)
+  now say that 0 also covers a max-prefix latch.
+- Add a five-minute advisory for Established peers without outbound
+  registration in Prometheus and `rbgp doctor`. The alert requires continuous
+  observed absence; doctor reports current absence after five minutes of
+  session uptime. Queued imports can legitimately defer registration without
+  a fixed deadline. Unavailable or stale snapshots and unknown daemon field
+  support remain unknown; membership evidence remains address-level for
+  scoped peers.
+- The import entry of the `GetPolicyStats` `grpc_authz` `request_summary`
+  audit record adds `publications=read/selected` and `yields`, the waits its
+  capture took on Pending session publications and busy counter error locks,
+  so an import deadline miss shows where its time went. Deadlines and
+  responses are unchanged. See the
+  [policy stats reference](docs/reference/api.md).
+- `rbgp` supports native mTLS gRPC endpoints with a required explicit CA
+  bundle and client certificate/key, plus a server-name override through
+  `--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-server-name` and matching
+  `RUSTBGPD_TLS_*` environment variables. Doctor reports TLS credential kinds,
+  and TLS certificate failures carry targeted diagnostics while Unix sockets
+  and plaintext TCP remain unchanged.
+- `[global.telemetry] log_format = "text"` writes human-readable log lines
+  instead of JSON. The `lab` starter profile (`rustbgpd --init-config lab`)
+  now uses it, so the quickstart's foreground run is readable; the `edge` and
+  `route-server` profiles and existing configs keep `"json"`. The format is
+  startup-only: a reload keeps the running format. See the
+  [configuration reference](docs/reference/configuration.md).
+
+### Changed
+
+- Batch redundant BFD desired-session publications during configured peer
+  registration, reducing startup work for BFD-heavy configurations. Genuine
+  enable/disable transitions still publish immediately, and strict BFD peers
+  retain their post-registration admission acknowledgement.
+- Stored path attributes take 48 bytes each instead of 208. The
+  `rustbgpd-wire` `PathAttribute` enum was sized by its inline
+  `MP_REACH_NLRI` payload, which the RIB never stores; that payload and
+  `MP_UNREACH_NLRI` are now boxed. At 900,000 prefixes with one attribute set
+  per seven prefixes, allocator-live RIB bytes fall 117.7 MiB: 18.7% on the
+  full-RIB shape and 12.9% on the route-reflector fanout shape. UPDATE
+  parsing is up to 17% faster on the measured fixtures. An UPDATE that
+  carries both MP attributes makes two extra small allocations and parses
+  2–6% slower on the codec fixture
+  ([receipt](docs/perf/boxed-mp-path-attributes-2026-09.md)).
+  **Embedders:** construct `PathAttribute::MpReachNlri` and
+  `PathAttribute::MpUnreachNlri` with `Box::new(..)`; see the
+  `rustbgpd-wire` 0.22.0 changelog.
+- Cache attribute-derived unicast best-path inputs on each shared attribute set,
+  avoiding repeated scans during unicast comparison. Selection rules are unchanged;
+  each unique attribute set carries 24 additional bytes of cached inputs.
+- `rbgp` flags now mean one thing across commands. `-l` is only `--longer`:
+  `events` and its `sessions`, `policy` and `evpn` subcommands drop it as a
+  short form of `--limit`. `policy stats` and `policy explain` require
+  `--direction` instead of defaulting to opposite directions. Paged reads use
+  `--limit N` with `--page-token`: `evpn received|advertised` and `rib fib`
+  rename `--page-size` to `--limit` (the old spelling still parses), and
+  `--limit 0` is a usage error everywhere, with a new `--all` flag on `events`
+  and `policy test` for the full window. `rbgp rib`, `rib received` and
+  `rib advertised` accept `--page-token` with `--limit` and print the next
+  token: `Next page token: …` in human output and an additive
+  `next_page_token` field in the `--json --limit` envelope. Omitting a flag
+  keeps its previous behaviour.
+- Human CLI output reads more consistently. `rbgp events` and `rbgp watch`
+  lines show RFC 3339 UTC timestamps instead of raw epoch seconds.
+  `rbgp neighbor <peer>` aligns every value in one column sized to the
+  longest label, indents negotiated-session, graceful-restart, posture,
+  TCP-AO and per-family rows under their parent, and prints
+  `GShut Advertise Intent` as `true`/`false`/`unknown` like the page's other
+  booleans. `rbgp health` labels its peer count `Established peers`, which is
+  what it counts. The `rbgp config` transaction trailer uses readable labels
+  (`Status:`, `Confirmation:`, `Confirm deadline:` in RFC 3339, and so on)
+  instead of snake_case keys. JSON output is unchanged apart from the added
+  event field; scripts should parse `--json` rather than these text lines.
+- `rbgp policy chain set-import`, `set-export`, `clear-import` and
+  `clear-export` now require `--global` or `--neighbor`, and `rbgp gshut`
+  requires `--all` or `--neighbor`. Omitting the scope is a usage error
+  (exit 2) that names both choices and sends nothing to the daemon; the
+  previous release selected the global chain or every peer and printed a
+  deprecation warning. The confirmation prompt and `--yes` are unchanged. See
+  the [operations reference](docs/reference/operations.md).
+  **Operator-visible:** scripts that still omit the scope now fail instead of
+  changing the global chain or toggling graceful shutdown on every peer; add
+  `--global` or `--all` to keep the daemon-wide behavior.
+- A Graceful Restart or Long-Lived Graceful Restart End-of-RIB now
+  recomputes and redistributes only the unicast routes it removed or
+  changed. Previously every End-of-RIB, including those for other address
+  families such as VPN, walked all of the restarting peer's unicast prefixes.
+  Stale routes that were not re-advertised are still removed, retained
+  routes still drop their stale state, and GR completion is unchanged. In a
+  manager benchmark with 1,000,000 IPv4 and 200,000 IPv6 routes, one restart
+  (three End-of-RIB markers) dropped to about 34 ms of RIB work from about
+  2.9 s with two plain update-group clients, 7.3 s with a two-member
+  per-client-best update group, and 10.3 s with two ungrouped
+  per-client-best clients.
+- A peer joining an existing update group no longer walks the Loc-RIB and
+  every Adj-RIB-In to build a prefix inventory before replaying the group
+  table. The join scopes that inventory to the group's recorded residue
+  (export-policy denials, OTC-blocked routes, runner-up entries) and the
+  peer's own residue, which is all a grouped join consults. This shortens
+  each join on the RIB actor, most on route servers with many overlapping
+  Adj-RIB-Ins. The joiner's table, End-of-RIB, counters and
+  `PolicyFiltered` events are unchanged.
+- The escalating reconnect wait after consecutive NOTIFICATION teardowns now
+  also covers a configured neighbor that reconnects to rustbgpd. Previously
+  an inbound connection during the wait was accepted at once and replaced the
+  waiting session with a fresh one whose streak started at zero, so a
+  neighbor that always dialled in never backed off. From the second
+  consecutive NOTIFICATION teardown, an inbound connection during the wait is
+  now closed without an OPEN, as RFC 4271 §8.2.2 refuses connections in
+  Idle, and a pending collision candidate is dropped instead of promoted. An
+  accepted inbound connection or a promoted candidate keeps the replaced
+  session's streak. Dynamic neighbors are unchanged.
+  **Operator-visible:** such drops are counted as
+  `bgp_inbound_connections_dropped_total{reason="notification_backoff"}` and
+  logged, at most once per second, with the streak and the remaining wait.
+  A neighbor that can only connect inbound re-establishes when the wait ends.
+  See the
+  [operations guide](docs/reference/operations.md#debugging-a-session-that-wont-establish).
+- Update-group members now keep the shared encode for a distribution pass that
+  mixes unicast withdrawals with announcements, such as a member failover
+  where some prefixes move to an alternate source and others have none. Each
+  member sends its own withdrawals first, then streams the group's
+  once-encoded announcements, instead of re-preparing and re-encoding the
+  announcements itself. New winning sources still take the per-member path.
+- MRT snapshot encoding reuses one attribute-encoding buffer per snapshot
+  instead of allocating a buffer for every path attribute of every RIB entry.
+  Allocation calls during a snapshot encode drop by half, and encoding a
+  400,400-path route-server table is about 13% faster. The MRT output is
+  byte-identical ([receipt](docs/perf/artifacts/mrt-attribute-scratch-2026-09/README.md)).
+- MRT snapshot encoding builds each IPv6 or extended-next-hop route's
+  `MP_REACH_NLRI` next-hop attribute on the stack instead of allocating it.
+  On a two-feed IPv6 table this removes one allocation per route and makes
+  the encoder about 3% faster; the MRT output is byte-identical
+  ([receipt](docs/perf/artifacts/mrt-ipv6-mp-reach-2026-09/README.md)).
+- `GetPolicyStats` (`rbgp policy stats`) reads export counters from a roster
+  the RIB manager publishes, instead of queueing on the RIB's summary or
+  query lane. An export or `both` read no longer waits behind RIB work, a
+  synchronous policy replacement, or the commit batches of a grouped policy
+  transition; it reports the live counters of the chains installed by the
+  RIB's last completed operation, and a grouped transition switches its whole
+  cohort at its final commit. Success no longer shows that the RIB manager is
+  making progress, and a read that sees, after its capture, that the RIB
+  manager has stopped returns `UNAVAILABLE`. Export rows now report the
+  counter-instance id in `policy_generation` instead of 0: nonzero, shared by
+  update-group members that share counters, and new whenever the counters
+  restart. `rbgp policy stats` prints it, as `policy_generation` in JSON
+  (previously `null` for export rows) and as `(counter instance N)` in text.
+  The `export` entry of the `grpc_authz` `request_summary` audit record is
+  unchanged. See the [policy stats reference](docs/reference/api.md) and
+  [ADR-0136](docs/adr/0136-owner-published-counter-reads.md).
+- `GetPolicyStats` (`rbgp policy stats`) reads peer validation, import
+  counters and dataset status from a roster the peer manager publishes,
+  instead of queueing on the peer manager's operator lane. A fleet import read
+  no longer waits for peer-manager admission or yields to the scheduler per
+  peer and term; it waits only for a session publication that is still
+  Pending or a busy counter or dataset error lock, under the same 2 s
+  deadline. The roster reflects the peer manager's last completed operation,
+  so a fleet read during a reload that replaces or removes peers can return
+  `UNAVAILABLE` for a session that has already exited. Success no longer
+  shows that the peer manager is responsive, and a read that sees, after its
+  capture, that the peer manager has stopped returns `UNAVAILABLE`. See the
+  [policy stats reference](docs/reference/api.md) and
+  [ADR-0136](docs/adr/0136-owner-published-counter-reads.md).
+- Published crates: `rustbgpd-wire` 0.21.2 → 0.22.0 (breaking),
+  `rustbgpd-fsm` 0.8.2 → 0.9.0 (breaking) and `rustbgpd-rpki` 0.3.2 → 0.4.0.
+  Wire names the ROUTE-REFRESH notification code and Invalid Message Length
+  subcode: code 7 decodes to `NotificationCode::RouteRefreshMessage` instead
+  of `Unknown(7)`, with unchanged raw encoding. FSM and RPKI move their public
+  wire dependency to 0.22, so embedders upgrade the three together. The
+  breaking changes (boxed MP attribute payloads, a private wire `keepalive`
+  module, private FSM submodules and OPEN helpers, and the FSM `ReceivedRole`
+  enum) are listed in each crate's changelog:
+  [wire](crates/wire/CHANGELOG.md), [fsm](crates/fsm/CHANGELOG.md),
+  [rpki](crates/rpki/CHANGELOG.md).
+- The daemon no longer builds the `protobuf` crate or `thiserror` 1.x. The
+  `prometheus` dependency's unused protobuf exposition feature is off;
+  `/metrics` and the gRPC metrics output are the same text format as before.
+  Five unused dependency declarations were also removed.
+- The RIB now distributes a run of already-queued unicast UPDATE messages in
+  one outbound pass instead of one pass per message, following RFC 4271
+  Appendix F.1. When a message finishes ingest, the next queued unicast
+  route message joins its distribution window; the window closes when no
+  such message is waiting, before any other update (session up or down,
+  End-of-RIB, route refresh, configuration, queries on the update channel),
+  or at a bound of 256 messages, 4,096 ingested routes, 1,024 changed
+  prefixes or 5 ms. Nothing waits for input, so an isolated UPDATE is
+  distributed as before. Loc-RIB, route events and ingest counters still
+  advance per chunk. A prefix that changes several times inside one window
+  is advertised once, in its final state, and export-policy counters count
+  that one evaluation. In a manager benchmark with 1,000 route-server
+  clients, 64 queued one-prefix UPDATEs took about 2.4 ms of RIB work
+  instead of 141 ms with a plain update group, and 4.7 ms instead of 147 ms
+  with a per-client-best group.
+  **Operator-visible:** `bgp_rib_actor_work_duration_seconds` records one
+  `distribute_flush` observation per window, so its series count is windows,
+  not UPDATE messages. `bgp_rib_ingest_channel_depth` also counts the one
+  update a window may hold while deciding whether to extend: producers
+  block only when the channel itself is full, which reads capacity + 1
+  while an update is held, so a sustained reading at or above capacity
+  means the channel is full or within one message of full.
+- The daemon raises its soft `RLIMIT_NOFILE` to the hard limit at startup and
+  logs the before and after values. A foreground run from a login shell
+  (soft 1024) or a default `docker run` no longer leaves `rbgp doctor`
+  failing `daemon.rlimit.nofile`, and the
+  [quickstart](docs/tutorials/quickstart.md) drops its `ulimit -n` step.
+  **Operator-visible:** the hard limit is now the effective limit. systemd
+  `LimitNOFILE=` and container `--ulimit nofile=` settings still set that
+  ceiling; a hard limit below 4096 still fails `rbgp doctor`.
+- `bgp_role_mismatch_total` now labels an OPEN refused for Role capabilities
+  that carry only unassigned values (5-255) or a length other than 1 as
+  `remote_role="unrecognized"` instead of `remote_role="none"`, and the
+  warning log adds the first raw value as `remote_role_raw`, for example
+  `[7]`. `remote_role="none"` now means only that the OPEN carried no Role
+  capability. The warning log's `local_role` and `remote_role` fields now use
+  the metric label values, such as `customer`, instead of Rust debug output.
+  See [RFC notes](docs/reference/rfc-notes.md#rfc-9234--roles-and-only-to-customer).
+- Import policy that modifies routes, such as the route-server example's
+  LOCAL_PREF term, now applies each distinct modification once per UPDATE and
+  shares the resulting attribute set across that UPDATE's prefixes, instead of
+  copying and modifying the attributes once per prefix. Policy evaluation,
+  explain records and hit counters stay per prefix. On a 700-client,
+  400,400-prefix route-server load with a LOCAL_PREF import term, RIB actor
+  route-chunk work fell 17% and convergence 6% (3.4 s to 3.2 s). Outbound
+  UPDATE packing also hashes each attribute set once when grouping distinct
+  attribute sets, about 5% faster encoding for 100 to 1,000 routes that
+  carry distinct attributes; packing results are unchanged.
+- Startup registers every configured neighbor in one peer-manager operation,
+  so the policy-stats import roster is published once at startup instead of
+  once per neighbor, which grew quadratically with the neighbor count.
+  **Operator-visible:** during startup, before `/readyz` reports ready,
+  `GetPolicyStats` returns `NOT_FOUND` for every configured neighbor until the
+  whole set is registered, and a peer-manager read that arrives while
+  registration runs waits for it, within its read deadline, instead of
+  answering `NOT_FOUND` part-way. See the
+  [API reference](docs/reference/api.md).
+
+### Fixed
+
+- Enforce the configured Add-Path receive limit for negotiated IPv4/IPv6
+  unicast paths per prefix. Block or shut down on excess retained path IDs
+  according to `max_prefix_action`; warning mode reports attempts without
+  limiting them. Existing path IDs can be replaced at the cap. The new
+  `bgp_add_path_receive_limit_attempts_total` counter reports attempts to
+  admit new IDs beyond the cap by peer, family and action.
+- Crash reports under `<runtime_state_dir>/crash/` are now written to a
+  temporary file and renamed into place, and their names add the process ID
+  and a per-process sequence number to the millisecond timestamp. Previously
+  two threads that panicked in the same millisecond wrote one file, so a
+  report could be lost or mixed with the other, and a process that died
+  mid-write could leave an empty or truncated report for `rbgp doctor` to
+  collect.
+  **Operator-visible:** reports are named `panic-<ts>-<pid>-<n>.toml` and
+  created owner-read-write only; an interrupted write can leave a
+  `panic-*.toml.tmp` file, which `rbgp doctor` and retention ignore.
+- A peer whose BGP Role capability carries an unassigned value (5-255) is
+  now refused with a Role Mismatch NOTIFICATION (2/11) when a local `role` is
+  configured, as RFC 9234 section 4.2 requires. A Role capability with a
+  length other than 1 is refused the same way; RFC 9234 has no requirement
+  for that case, so this is rustbgpd's local policy. Previously both were
+  ignored and the session established as if the peer had sent no Role,
+  unless `strict_role` was set. An OPEN with several Role capabilities that
+  include an unassigned value, such as Customer plus 7, is now also refused
+  with 2/11, with or without a local `role`. **Operator-visible:** such a
+  session no longer establishes. `bgp_role_mismatch_total` reports the first
+  assigned Role in the OPEN as `remote_role`, so Customer plus 7 counts as
+  `remote_role="customer"`. See
+  [RFC notes](docs/reference/rfc-notes.md#rfc-9234--roles-and-only-to-customer).
+- Canonical config persistence omits default-valued optional sections while
+  retaining configured values and explicit safety defaults. Routine runtime
+  changes no longer add unused feature tables such as `[flowspec]`; downgrade
+  compatibility still depends on the features, receiving-release defaults and
+  field spellings in use. The effective-config API continues to return
+  resolved defaults.
+- An inbound connection that collides with our own connection to the same
+  neighbor now waits in `OpenConfirm` for the RFC 4271 §6.8 collision
+  decision before it sends a KEEPALIVE. A connection that loses on BGP
+  Identifier previously reached Established and then closed, so the neighbor
+  saw the session come up and go down again. It is now closed with Cease 6/7
+  from `OpenConfirm`, and it never registers with the RIB or reports
+  Established.
+  **Operator-visible:** the neighbor receives no KEEPALIVE on the losing
+  connection. A candidate that gets no decision within 10 seconds is closed
+  with a Hold Timer Expired NOTIFICATION and the neighbor can reconnect.
+- When many inbound collision candidates were promoted in quick succession,
+  for example while a route server's neighbors all reconnected at startup,
+  each promotion resolved the next peer's queued collision inside itself. The
+  nesting grew by one level per queued peer and could overflow a tokio worker
+  stack, which aborted the daemon. Now, while one peer's collision is being
+  settled, other peers' session notifications wait and are then handled in
+  arrival order. Each peer's own notifications keep their order.
+  **Operator-visible:** a burst of simultaneous inbound connections no longer
+  aborts the daemon with `has overflowed its stack`.
+- Config history now recognizes rows written by a newer rustbgpd history
+  format (`v4-` and later). Such a row lists as unreadable, keeps its sequence
+  and its slot in the twenty-row cap, and is never evicted. While one exists,
+  recording an accepted config into history is skipped with a warning instead
+  of reusing the newer row's sequence; the config change itself still
+  commits. See
+  [ADR-0124](docs/adr/0124-bounded-config-history-retention.md).
+  **Operator-visible:** after a downgrade from a release with a newer history
+  format, `rbgp config history` stops growing and the daemon logs
+  `failed to record applied config in the config history` until the newer
+  rows are moved aside.
+- The `rbgp doctor` `rpki.invalid_route_policy` and `aspa.invalid_route_policy`
+  warnings no longer point at `examples/route-server/` files, which the
+  release tarball does not ship. They now name the import policy statement
+  that closes the gap (`match_rpki_validation = "invalid"` or
+  `match_aspa_validation = "invalid"` with `action = "deny"`).
+- An UPDATE with a zero-length `CLUSTER_LIST` from an internal neighbor now
+  treats its routes as withdrawn under RFC 7606 section 7.10, while the BGP
+  session stays established. External neighbors still discard the attribute
+  and keep the routes; valid non-empty lists remain accepted.
+- Enhanced Route Refresh now sends notification 7/1 for malformed BoRR/EoRR
+  lengths, preserving the complete received PDU when it fits the peer's
+  receive limit. Oversized diagnostics use empty data and log the received
+  length. Unknown identifiable subtypes are ignored before ORF parsing.
+  A GR restarter's initial flood remains unmarked until its initial EoR,
+  including ORF-deferred and backpressured dumps; subsequent refreshes use
+  normal BoRR/EoRR brackets. BMP records the notification's actual encoding.
+- A durable event history store that the host will not let the daemon open
+  or write at startup (a full filesystem, a read-only mount, files owned by
+  another user, I/O errors or locks) is no longer quarantined as corrupt and
+  replaced by an empty store. The files stay in place, and startup follows
+  `[event_history].required` as it does for a newer schema: exit 1, or
+  continue in live-only mode. Only content errors (corrupt or non-SQLite
+  files, malformed metadata) still quarantine. Startup now also stages one
+  write and rolls it back, so a store the daemon can read but not write fails
+  at startup instead of at the first event.
+  **Operator-visible:** a `required = true` daemon whose `events.db` is not
+  writable by its user now refuses to start instead of starting degraded;
+  see [Recovery and degraded health](docs/reference/configuration.md#recovery-and-degraded-health).
+- Preserve each EVPN MAC's primary destination when MACs sharing a Linux
+  nexthop-group key disagree on members or standby. Conflicting MACs use
+  individual destination rows, with shared-group forwarding restored when
+  their intent agrees again. Foreign kernel rows that block a MAC's programming
+  do not force otherwise compatible MACs out of their shared group.
+- Resolve EVPN ties independently of RIB iteration order. When one remote PE
+  advertises an Ethernet Segment under several route distinguishers with
+  different DF Election parameters, the route with the lowest RD now supplies
+  that PE's DF candidate. Remote MAC and MAC/IP routes from the same VTEP at
+  the same mobility sequence now resolve by RD, then ESI, Ethernet Tag, host
+  IP and label. Previously the winner, and with it the elected DF, aliasing
+  group, sticky bit and ESI, depended on hash-map order.
+- Disable IPv6 before containerlab creates M66/M67 attachment circuits, preventing
+  startup MLD and duplicate-address-detection packets from producing unrelated
+  segment MAC advertisements. The drivers reject failed setup and preserve the
+  existing forwarding, nexthop-group, and standby assertions.
+- Disable host multicast membership before bridge and VXLAN link-up in EVPN
+  interoperability fixtures, preventing startup IGMP reports from creating
+  unrelated segment MAC advertisements in handover tests.
+- Preserve unmarked static and permanent FDB rows on local bridge ports when
+  a remote EVPN route names the same MAC. Include those rows in ownership
+  preflight so they cannot be overwritten or force unrelated MACs out of
+  their nexthop group. Dynamic local MAC moves remain unchanged.
+- With RFC 8950 Extended Next Hop negotiated, IPv4 unicast routes whose next
+  hop is an IPv4 address, and all IPv4 unicast withdrawals, are now sent in the
+  classic UPDATE body (`NEXT_HOP` plus NLRI, and Withdrawn Routes) instead of
+  `MP_REACH_NLRI` / `MP_UNREACH_NLRI`. Routes with an IPv6 next hop still use
+  `MP_REACH_NLRI`, and scoped link-local (unnumbered) sessions keep the MP form
+  for everything. OpenBGPD 9.2 resets the session with UPDATE Message Error /
+  Optional Attribute Error (3/9) on an IPv4 unicast `MP_REACH_NLRI` with a
+  4-octet next hop and on any IPv4 unicast `MP_UNREACH_NLRI`, so a route server
+  passing a member's IPv4 next hop through, or withdrawing any IPv4 route,
+  flapped an OpenBGPD member that enabled `announce extended nexthop`. Both
+  encodings are valid under RFC 4760 and RFC 8950 §3.
+  **Operator-visible:** UPDATE wire encoding to Extended Next Hop peers changes
+  as described; received routes and session behavior are otherwise unchanged.
+- The general FIB crash-recovery file `fib-owned.json` is now written
+  before a reconcile pass sends installs or replacements to the kernel, and
+  every write fsyncs the file and its directory and removes its temporary
+  file on failure. Previously it was written once after the whole pass,
+  without fsync, and a failed write only logged a warning, so a crash, full
+  disk or host failure could leave rustbgpd-installed rows reported as
+  `foreign_route_exists` after restart, with manual `ip route del` as the
+  only cleanup.
+  **Operator-visible:** a failed write now increments the new counter
+  `bgp_fib_owned_state_persist_failures_total` and holds route installs and
+  replacements with status `failed` / `owned_state_persist_failed:*` until a
+  later pass writes the file; removals continue. A runtime FIB table change
+  now records its table signatures before touching the kernel; if that write
+  fails, the change is rejected with no kernel effect instead of reported as
+  applied. The change also records both the previous and the new table set
+  until the next change, so a crash before the new config is saved keeps
+  the previous tables' rows owned and withdraws rows already installed into
+  a table the restarted config does not declare. The file keeps its format
+  version; an older build ignores the new optional `in_flight` and
+  `transition_tables` fields.
+- Advertise GR and LLGR forwarding-state bits for control-plane-only families
+  so helpers can retain routes across reconnects. Families with configured
+  FIB, blackhole-discard, or EVPN kernel installers keep these bits clear.
+  Committed runtime role changes and rollback take effect on the next OPEN
+  without restarting unchanged peers; staged candidates remain invisible.
+  Uncertain runtime effects keep the affected families' bits clear, including
+  lost acknowledgements, failed compensation, and interrupted EVPN convergence.
+- A gRPC listener whose socket became unusable no longer waits for every open
+  connection to close before the daemon fail-stops. The transport drained
+  open connections with no deadline once accepts ended, so a long-lived
+  `WatchEvents` stream, or even an idle client connection, kept the daemon
+  running on a dead listener until the client disconnected. The listener now
+  gives open connections the one-second shutdown grace and then exits, and
+  the existing gRPC server supervision exits 1. A TLS listener whose 64
+  handshake slots are all held by stalled clients detects the failure only
+  when a slot frees, up to the 10-second handshake timeout later.
+- Peer-scoped gRPC reads that cannot find a neighbor during initial registration
+  now return retryable `UNAVAILABLE` until the configured roster is installed,
+  including policy-chain and concrete-neighbor gNMI reads.
+- Long-Lived Graceful Restart now retains a family that the peer lists in its
+  LLGR capability but not in its GR capability. RFC 9494 §4.2 deems the
+  Restart Time zero for such a family, so its routes become LLGR-stale when
+  the session goes down instead of being withdrawn. A peer that sends a GR
+  capability with no families alongside LLGR is now LLGR-capable when at
+  least one family has a non-zero Long-Lived Stale Time. When the
+  peer re-establishes, a retained family that the new OPEN no longer lists in
+  its GR or LLGR capability has its stale routes removed at once rather than
+  at End-of-RIB or a timer (RFC 4724 §4.2, RFC 9494 §4.2), and a later
+  promotion to LLGR follows the new OPEN's LLGR capability rather than the
+  previous session's. A family with a zero Long-Lived Stale Time is purged
+  at the end of its GR phase instead of being briefly promoted. A GR capability
+  that lists a family twice no longer deletes that family's routes at session
+  down. `bgp_gr_stale_routes` now counts LLGR-stale routes as well as
+  GR-stale ones at session down, End-of-RIB and Long-Lived Stale Time expiry,
+  so an LLGR-only or partial-GR peer no longer reports zero or too few. See
+  the [RFC notes](docs/reference/rfc-notes.md#rfc-9494-42--llgr-families-outside-the-gr-capability).
+  **Operator-visible:** routes from LLGR-only and partial-GR peers survive a
+  session reset as least-preferred `LLGR_STALE` routes for the configured
+  Long-Lived Stale Time.
+- Keep M67 baseline route and nexthop-group assertions strict when startup drain
+  metrics are present. Reusing a live topology now requires explicit manual
+  `M67_RERUN=1`; invalid values and CI opt-in fail instead of weakening the proof.
+- Wait for a valid nonzero session-uptime baseline in the M87 exact-export
+  interoperability check, avoiding failures when routes converge within the
+  first second while preserving subsequent session-continuity assertions.
+- The metrics/readiness HTTP server is now supervised like the gRPC and BGP
+  listeners. Previously, if its task ended after startup (for example when
+  its listening socket became unusable), the daemon kept running with no
+  `/metrics`, `/readyz` or `/livez` and logged only one ERROR line.
+  **Operator-visible:** such an exit now logs `metrics/readiness server exited
+  unexpectedly`, runs the coordinated peer teardown and exits 1, so
+  `Restart=on-failure` restarts the daemon. A daemon without `prometheus_addr`
+  is unchanged.
+- Negotiate Notification GR from the two advertised N bits even when the
+  peer advertises no GR or LLGR route-retention families. Max-prefix and BFD
+  teardown now send Hard Reset to helper-only peers such as FRR, preserving
+  the original Cease reason and data while preventing stale-route retention.
+- Clear an outbound admission deadline once a pending slice stops waiting for
+  writer capacity, including when source filtering emits no frames. This avoids
+  a stale resource timeout after capacity returns and preserves a fresh timeout
+  for a later stall.
+- Pace large outbound route envelopes through the bounded writer queue so a
+  healthy peer can receive more than 4,096 distinct UPDATE frames without a
+  resource teardown. Shared update-group output and replay terminal markers
+  retain their ordering while session input, timers, and snapshots stay live.
+  A stalled admission still ends in Cease/8 after the configured send-hold
+  interval, or its finite default when the RFC send-hold timer is disabled;
+  the independent RFC 9687 writer timeout remains local error 8/0.
+- An outbound resync or table replay now packs routes into UPDATE messages by
+  attribute value, not by the allocation that carried them. When an export
+  policy modified attributes and the source peer sent a few prefixes per
+  UPDATE, a replay emitted about one UPDATE per original inbound message. A
+  large enough replay overran the per-peer writer queue and tore a healthy
+  session down with Cease/Out-of-Resources.
+  **Operator-visible:** such peers now receive the same routes in far fewer
+  UPDATE messages, and the teardown no longer occurs for this cause.
+- Peer identity metric publication removes the exact previous label tuple
+  instead of scanning every peer's series. Large peer registrations avoid
+  quadratic metric work while description, peer-group, and learned ASN
+  changes continue to replace stale identity rows.
+- Reduce the peer-manager event loop's debug-build stack use during SIGHUP
+  reloads by polling public command dispatch separately. Command ordering,
+  cancellation, and shutdown behavior remain unchanged.
+- Preserve the received AS_PATH for ASPA and RPKI validation when import policy
+  prepends ASNs. Initial RIB validation and cache updates now agree with the
+  path judged at ingress, while selection and export retain the modified path.
+- A burst of plain ROUTE-REFRESH messages for one address family from one
+  peer now queues a single re-advertisement instead of one full-table
+  replay per message on the shared RIB actor. A request that arrives while
+  that replay is still queued is answered by it, since the replay reads the
+  Loc-RIB when it starts; a request that arrives after the replay has
+  started queues exactly one more. Families are never merged, ORF-carrying
+  refreshes still install their filters every time, and with Enhanced Route
+  Refresh one BoRR/EoRR bracket answers the coalesced requests.
+  **Operator-visible:** the peer receives the family once per burst rather
+  than once per message. Every message is still counted in
+  `bgp_messages_received_total{type="route_refresh"}`, and each coalesced
+  request logs `coalesced ROUTE-REFRESH into the replay already queued for
+  this family` at debug level.
+- Remove a peer's `bgp_peer_update_group` sample when its outbound session
+  registration ends, including peer-down and graceful-restart teardown.
+  Departed peers no longer report a stale update-group id in metrics.
+
+### Documentation
+
+- The known issue "Fleet policy stats can time out during reload" is resolved
+  at its measured scope: the
+  [route-server flagship soak](docs/soaks/soak-rs-flagship-24h-2026-09-26.md)
+  on a build with owner-published counter reads passed every gate, with all
+  17,551 `rbgp policy stats --direction both` reads through 48 reloads
+  returning `ok`. The evidence is one IPv4-only soak at 1,000 peers × 400
+  prefixes on one untagged main revision. The 2 s shared deadline and
+  all-or-error result are unchanged. See
+  [known issues](docs/reference/known-issues.md) and
+  [ADR-0136](docs/adr/0136-owner-published-counter-reads.md), now Accepted.
+
+### Upgrade notes
+
+- Scripts that call `rbgp` need these replacements:
+  `rbgp events … -l N` → `--limit N`;
+  `rbgp events … --limit 0` → `--all`;
+  `rbgp policy test … --limit 0` → `--all` (or omit `--limit`);
+  `rbgp policy stats` without `--direction` → `--direction export` for the
+  previous answer (`import` and `both` are unchanged);
+  `rbgp policy explain` without `--direction` → `--direction import` for the
+  previous answer;
+  `rbgp evpn received|advertised --page-size N` and
+  `rbgp rib fib --page-size N` → `--limit N`, and `rib fib --page-size 0` →
+  omit `--limit` for the full snapshot. An omitted `--direction` or a
+  `--limit 0` now exits 2 with a usage error.
+- Consumers that compare `GetPolicyStats` export `policy_generation` values
+  (or `rbgp --json policy stats` export `policy_generation`, previously
+  `null`) now receive a nonzero counter-instance id instead of 0. It changes
+  whenever the export counters restart: at each session registration unless
+  the peer rejoins an update group that other members kept, at a policy
+  replacement that installs a new chain, and when a peer moves to another
+  update group. Compare it
+  only for equality; the values are process-wide and not per-peer sequences.
+- `rbgp policy chain set-import|set-export|clear-import|clear-export` without
+  `--global` or `--neighbor`, and `rbgp gshut` without `--all` or
+  `--neighbor`, now exit 2 and send nothing; 0.72.0 printed a deprecation
+  warning and applied the daemon-wide scope. Add `--global` or `--all` to keep
+  that behavior. Human output of `rbgp events`, `rbgp watch`,
+  `rbgp neighbor <peer>`, `rbgp health` and the `rbgp config` transaction
+  trailer changed layout and labels, and event lines show RFC 3339 UTC times
+  instead of epoch seconds; scripts should parse `--json`.
+- Additive machine-output changes: the `rbgp --json-lines rib` stream
+  advances to `rbgp-rib/1.1`, whose end record adds `next_page_token`, so a
+  consumer that matches the format version exactly must accept `1.1`. The
+  `rbgp rib --json --limit` envelope adds `next_page_token`, and
+  `rbgp -j events`/`watch` records add `timestamp_unix_seconds`.
+- BGP Role (RFC 9234): with a local `role` configured, a peer whose Role
+  capability carries an unassigned value (5-255) or a length other than 1 is
+  now refused with 2/11 instead of establishing as if it sent no Role.
+  `bgp_role_mismatch_total` labels such an OPEN `remote_role="unrecognized"`,
+  and `remote_role="none"` now means only that the OPEN carried no Role
+  capability. The mismatch warning log adds `remote_role_raw`, and its
+  `local_role` and `remote_role` fields carry the metric label values, such
+  as `customer`, instead of Rust debug forms such as `Some(Customer)`. Alerts
+  and log pipelines that match on those values need updating.
+- Session behavior that can change an existing peering:
+  a nonzero `add_path.receive_max` now also caps retained IPv4/IPv6 unicast
+  Add-Path IDs per prefix locally and applies `max_prefix_action`, whose
+  default `"shutdown"` sends Cease/1 and latches the peer (previously the
+  value was only advertised); a zero-length `CLUSTER_LIST` from an internal
+  neighbor withdraws the UPDATE's routes; from the second consecutive
+  NOTIFICATION teardown, a configured neighbor's inbound connection during
+  the reconnect wait is closed without an OPEN
+  (`bgp_inbound_connections_dropped_total{reason="notification_backoff"}`);
+  the losing side of a connection collision is closed from `OpenConfirm`
+  with Cease 6/7 and never sends a KEEPALIVE; and a burst of plain
+  ROUTE-REFRESH messages for one family is answered by one re-advertisement.
+- Advertised capabilities and encoding: GR and LLGR forwarding-state bits are
+  now set for control-plane-only families, so helpers retain our routes
+  across a restart; families with a configured FIB, blackhole-discard or EVPN
+  kernel installer keep them clear. Families a peer lists only in its LLGR
+  capability are retained as LLGR-stale instead of withdrawn, and
+  `bgp_gr_stale_routes` counts LLGR-stale routes. With Extended Next Hop
+  negotiated, IPv4 unicast routes with an IPv4 next hop and all IPv4 unicast
+  withdrawals are sent in the classic UPDATE body instead of `MP_REACH_NLRI`
+  / `MP_UNREACH_NLRI`.
+- Process and startup: the daemon raises its soft `RLIMIT_NOFILE` to the hard
+  limit; an unexpected metrics/readiness server exit now tears down and exits
+  1; a `[event_history] required = true` store the daemon cannot open or
+  write for host reasons now stops startup instead of being quarantined and
+  replaced; a failed `fib-owned.json` write holds FIB installs
+  (`bgp_fib_owned_state_persist_failures_total`) and rejects a runtime FIB
+  table change with no kernel effect; crash reports are named
+  `panic-<ts>-<pid>-<n>.toml`. Until the configured neighbor roster is
+  installed, peer-scoped gRPC reads return retryable `UNAVAILABLE` and
+  `GetPolicyStats` returns `NOT_FOUND` for configured neighbors.
+- `[global.telemetry] log_format = "text"` is new, and
+  `rustbgpd --init-config lab` now emits it; other profiles and existing
+  configs keep `"json"`. A config that sets `"text"` does not load on 0.72.0.
+  Canonical config persistence now omits default-valued optional sections,
+  so a persisted file no longer gains an unused `[flowspec]` table.
+- Queued unicast UPDATEs are now distributed in bounded windows. A prefix
+  that changes several times inside one window is advertised once, in its
+  final state, and export-policy counters count that one evaluation.
+  `bgp_rib_actor_work_duration_seconds` records one `distribute_flush`
+  observation per window, so that series counts windows, not UPDATE
+  messages. `bgp_rib_ingest_channel_depth` also counts the one update a
+  window may hold while deciding whether to extend, so it can read one above
+  capacity; a sustained reading at or above capacity means the channel is
+  full or within one message of full.
+- Embedders of the published crates: `rustbgpd-wire` 0.22.0 and
+  `rustbgpd-fsm` 0.9.0 carry breaking API changes, and `rustbgpd-rpki` 0.4.0
+  moves to wire 0.22; upgrade the three together. See the
+  [wire](crates/wire/CHANGELOG.md), [fsm](crates/fsm/CHANGELOG.md) and
+  [rpki](crates/rpki/CHANGELOG.md) changelogs.
+
 ## [0.72.0] — 2026-09-23
 
 ### Added
