@@ -310,12 +310,13 @@ fn draw_events(f: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 /// The events pane is width-bound, so it shows only the time of day from the
 /// same UTC rendering `rbgp events` prints (`03:05:14Z`). A value that is not
-/// integer seconds is shown as received.
+/// integer seconds, or is past what that rendering covers, is shown as
+/// received.
 fn event_time(raw: &str) -> String {
-    crate::commands::watch::timestamp_unix_seconds(raw).map_or_else(
-        || raw.to_string(),
-        |seconds| crate::commands::config::format_unix_utc(seconds)[11..].to_string(),
-    )
+    crate::commands::watch::timestamp_unix_seconds(raw)
+        .and_then(crate::commands::config::format_unix_utc)
+        .and_then(|utc| utc.split_once('T').map(|(_, time)| time.to_string()))
+        .unwrap_or_else(|| raw.to_string())
 }
 
 fn route_event_context(event: &RouteEventEntry) -> String {
@@ -1415,6 +1416,9 @@ mod tests {
         assert!(rendered.contains("[03:05:14Z] policy_filtered"));
         assert!(!rendered.contains("1790132714"));
         assert!(rendered.contains("[12:00:01] stream_lagged"));
+        assert_eq!(event_time("253402300799"), "23:59:59Z");
+        assert_eq!(event_time("253402300800"), "253402300800");
+        assert_eq!(event_time(&u64::MAX.to_string()), u64::MAX.to_string());
     }
 
     fn snapshot(neighbors: Vec<NeighborState>, freshness: Freshness) -> DataSnapshot {

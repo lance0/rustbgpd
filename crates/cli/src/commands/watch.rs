@@ -71,7 +71,9 @@ pub(crate) fn timestamp_unix_seconds(raw: &str) -> Option<u64> {
 /// Human event lines use the same RFC 3339 UTC rendering as
 /// `config history`; a non-numeric value is shown as received.
 fn human_timestamp(raw: &str) -> String {
-    timestamp_unix_seconds(raw).map_or_else(|| raw.to_string(), super::config::format_unix_utc)
+    timestamp_unix_seconds(raw)
+        .and_then(super::config::format_unix_utc)
+        .unwrap_or_else(|| raw.to_string())
 }
 
 fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
@@ -3638,6 +3640,20 @@ mod tests {
             "[not-a-number] peer_added peer 198.51.100.2 added"
         );
         assert!(json_bgp_event(&odd)["timestamp_unix_seconds"].is_null());
+
+        // Past year 9999 the text falls back to the value as received, while
+        // JSON still carries the exact number.
+        let far = BgpEvent {
+            timestamp: u64::MAX.to_string(),
+            event_type: BgpEventType::PeerAdded as i32,
+            summary: "peer 198.51.100.2 added".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_bgp_event_line(&far),
+            "[18446744073709551615] peer_added peer 198.51.100.2 added"
+        );
+        assert_eq!(json_bgp_event(&far)["timestamp_unix_seconds"], u64::MAX);
     }
 
     #[test]
