@@ -53,6 +53,15 @@ LEGACY_RAW_ROW_FIELDS = (
 # captures remain verifiable and any later upstream drift still fails closed.
 PROVENANCE_FIELDS = ("target image", "tester version", "monitor version")
 PROVENANCE_RAW_HEADER = LEGACY_RAW_ROW_FIELDS + PROVENANCE_FIELDS
+# The maintained lance0/bgperf2 fork (upstream-based since 2026-08-28) adds
+# the host-contention column before the provenance fields, and its monitor
+# check-point is 99% of the offered table, so `required` is that check-point
+# while `received` must still be the whole table.
+FORK_RAW_HEADER = (
+    LEGACY_RAW_ROW_FIELDS + ("max foreign cpu %",) + PROVENANCE_FIELDS
+)
+FORK_CHECKPOINT_PERCENT = 99
+DEFAULT_IMAGE_TAGS = ("bgperf/rustbgpd", "bgperf/rustbgpd:latest")
 OUTPUT_FIELDS = (
     "target",
     "version",
@@ -126,8 +135,8 @@ def load(path: Path) -> str:
     values = tuple(value.strip() for value in rows[1])
     if header == LEGACY_RAW_HEADER:
         row_fields = LEGACY_RAW_ROW_FIELDS
-    elif header == PROVENANCE_RAW_HEADER:
-        row_fields = PROVENANCE_RAW_HEADER
+    elif header in (PROVENANCE_RAW_HEADER, FORK_RAW_HEADER):
+        row_fields = header
     else:
         raise ValueError(f"{path}: unsupported bgperf2 header/schema")
     if len(values) != len(row_fields):
@@ -141,9 +150,22 @@ def load(path: Path) -> str:
         if LONG_HEX_ID.search(value):
             raise ValueError(f"{path}: result contains a process/container-like identifier")
 
-    if header == PROVENANCE_RAW_HEADER:
-        if not SAFE_IMAGE.fullmatch(row["target image"]):
+    if header == FORK_RAW_HEADER:
+        integer(row["max foreign cpu %"], "max foreign cpu %")
+    if header != LEGACY_RAW_HEADER:
+        image = row["target image"]
+        if not SAFE_IMAGE.fullmatch(image) or LONG_HEX_ID.search(image):
             raise ValueError(f"{path}: unsupported target image identity")
+        # The fork's `update rustbgpd` builds the release profile into the
+        # default tag; the DHAT recipe builds into an explicit one. A default
+        # tag here means the row did not come from the DHAT image the
+        # receipt's heap profile describes. The tag cannot prove the profile
+        # either way -- the manifest's image digest and profile label do.
+        if header == FORK_RAW_HEADER and image in DEFAULT_IMAGE_TAGS:
+            raise ValueError(
+                f"{path}: target image must be the receipt's explicit DHAT tag, "
+                f"not the default release tag {image!r}"
+            )
         for field in ("tester version", "monitor version"):
             if not SAFE_VERSION.fullmatch(row[field]) or LONG_HEX_ID.search(row[field]):
                 raise ValueError(f"{path}: unsafe or empty {field}")
@@ -158,7 +180,14 @@ def load(path: Path) -> str:
     required = integer(row["required"], "required")
     received = integer(row["received"], "received")
     expected = int(peers) * int(prefixes)
-    if int(required) != expected or received != required:
+    if header == FORK_RAW_HEADER:
+        checkpoint = expected * FORK_CHECKPOINT_PERCENT // 100
+        if int(required) != checkpoint or int(received) != expected:
+            raise ValueError(
+                f"{path}: required must be the {FORK_CHECKPOINT_PERCENT}% check-point "
+                f"({checkpoint}) and received the full table ({expected})"
+            )
+    elif int(required) != expected or received != required:
         raise ValueError(
             f"{path}: required and received must equal peers x prefixes ({expected})"
         )
@@ -207,7 +236,14 @@ def load_sanitized(path: Path) -> str:
     prefixes = integer(row["prefixes_per_peer"], "prefixes_per_peer")
     required = integer(row["required"], "required")
     received = integer(row["received"], "received")
-    if peers != "2" or prefixes != "100000" or int(required) != 200000 or received != required:
+    # 200000 is the older schemas' full-table requirement; 198000 is the
+    # fork's 99% check-point. Either way the full table must have arrived.
+    if (
+        peers != "2"
+        or prefixes != "100000"
+        or int(required) not in (200000, 198000)
+        or int(received) != 200000
+    ):
         raise ValueError(f"{path}: sanitized CSV is not a converged 2x100k run")
     validated = {
         "target": row["target"],

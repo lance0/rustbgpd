@@ -59,6 +59,14 @@ bgperf2 adapter and no-cache builds. The candidate commit contains the measured
 four-file code diff byte-for-byte; its later documentation files do not enter
 that code-diff hash.
 
+> **Note for new campaigns (added 2026-09-27):** the adapter pin below
+> reproduces this July receipt only. It renders the retired legacy gRPC
+> enforcement mode that rustbgpd v0.63 and later refuse, and
+> its DHAT runs need the daemon stopped by hand. New DHAT measurements should
+> follow the maintained-fork recipe in
+> [the rebaseline guide](../../bench/scale/rebaseline/README.md), which builds
+> the profile with `--profile dhat` and saves it automatically.
+
 ```bash
 BASE_DIR=/tmp/rustbgpd-known-path-base
 CANDIDATE_DIR=/tmp/rustbgpd-known-path-candidate
