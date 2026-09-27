@@ -1177,6 +1177,53 @@ mod tests {
     }
 
     #[test]
+    fn preference_cmp_fallback_keys_prefer_the_lower_value_in_rustdoc_order() {
+        // Each step starts from `base`, holds every earlier key equal and
+        // raises only the next documented fallback key; the lower value
+        // must win in both comparison directions.
+        type Bump = fn(&mut ProjectedEvpnRoute);
+        let base = route(100, 1, "10.0.0.2", Some(3));
+        assert_eq!(
+            base.preference_cmp(&base.clone()),
+            std::cmp::Ordering::Equal
+        );
+        let raise: [(&str, Bump); 6] = [
+            ("rd", |r| r.rd = rd(65003, 100)),
+            ("esi", |r| r.esi = esi_seed(1)),
+            ("ethernet_tag", |r| {
+                r.ethernet_tag = rustbgpd_wire::EthernetTagId(1);
+            }),
+            ("host_ip", |r| r.host_ip = Some(ipa("192.0.2.1"))),
+            ("label1", |r| {
+                r.label1 = MplsLabel::new(r.label1.as_vni() + 1);
+            }),
+            ("mac", |r| r.mac = mac(2)),
+        ];
+        for (i, (key, bump)) in raise.iter().enumerate() {
+            let lower = base.clone();
+            let mut higher = base.clone();
+            bump(&mut higher);
+            assert!(lower.preference_cmp(&higher).is_gt(), "lower {key} wins");
+            assert!(higher.preference_cmp(&lower).is_lt(), "higher {key} loses");
+
+            // Precedence: lower on this key but higher on every later key
+            // still wins, so the keys apply in the documented order.
+            let mut lower_here = base.clone();
+            for (_, later) in &raise[i + 1..] {
+                later(&mut lower_here);
+            }
+            assert!(
+                lower_here.preference_cmp(&higher).is_gt(),
+                "{key} outranks later keys"
+            );
+            assert!(
+                higher.preference_cmp(&lower_here).is_lt(),
+                "{key} outranks later keys"
+            );
+        }
+    }
+
+    #[test]
     fn projection_is_deterministic_under_input_reordering() {
         let routes_a = vec![
             route(100, 1, "10.0.0.2", Some(2)),

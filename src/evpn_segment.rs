@@ -2486,14 +2486,10 @@ mod tests {
         // order the RIB yields the routes in.
         let id = esi(0x17);
         let state = segment_state(id);
-        let es_route = |rd_value: u32, preference: u16| {
+        let es_route = |rd_value: u32, alg: DfAlgorithm, capabilities: u16, preference: u16| {
             let mut attrs = attrs_with_es_import_rt(id);
             attrs.push(PathAttribute::ExtendedCommunities(vec![
-                ExtendedCommunity::df_election(
-                    DfAlgorithm::HighestPreference.algorithm_id(),
-                    0,
-                    Some(preference),
-                ),
+                ExtendedCommunity::df_election(alg.algorithm_id(), capabilities, Some(preference)),
             ]));
             let mut route = type_4_es_route(id, "10.0.0.2", attrs);
             route.route = EvpnRoute::Es(EvpnEs {
@@ -2503,8 +2499,9 @@ mod tests {
             });
             route
         };
-        let low_rd = es_route(100, 500);
-        let high_rd = es_route(200, 900);
+        // Every DF field differs, so a mixed candidate cannot pass.
+        let low_rd = es_route(100, DfAlgorithm::HighestPreference, 0x8000, 500);
+        let high_rd = es_route(200, DfAlgorithm::LowestPreference, 0, 900);
 
         for routes in [
             vec![low_rd.clone(), high_rd.clone()],
@@ -2517,6 +2514,7 @@ mod tests {
                 .find(|c| c.originator_ip == ipa("10.0.0.2"))
                 .expect("remote candidate present");
             assert_eq!(remote.df_preference, 500);
+            assert!(remote.df_dont_preempt);
             assert_eq!(remote.df_algorithm, DfAlgorithm::HighestPreference);
         }
     }
