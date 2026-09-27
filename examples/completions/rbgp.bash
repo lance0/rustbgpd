@@ -2709,7 +2709,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__diff__subcmd__snapshot__subcmd__from__subcmd__mrt)
-            opts="-s -j -h --view --peer --neighbor --peer-asn --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help"
+            opts="-s -j -h --view --peer --neighbor --peer-asn --neighbor-asn --source --generation --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --json-lines --no-color --pager --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2732,6 +2732,10 @@ _rbgp() {
                     return 0
                     ;;
                 --peer)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --neighbor-asn)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

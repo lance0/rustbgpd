@@ -1409,8 +1409,12 @@ enum SnapshotAction {
         #[arg(long = "neighbor", visible_alias = "peer", value_name = "NEIGHBOR")]
         peer: String,
 
-        /// ASN of that peer
-        #[arg(long)]
+        /// ASN of that neighbor
+        #[arg(
+            long = "neighbor-asn",
+            visible_alias = "peer-asn",
+            value_name = "NEIGHBOR_ASN"
+        )]
         peer_asn: u32,
 
         /// Free-form provenance label appended to the header `source`
@@ -9078,7 +9082,7 @@ printf '%s\n' "${COMPREPLY[@]}"
                     .unwrap_or_else(|error| panic!("events {sub} {flag}: {error}"));
             }
         }
-        for flag in ["--neighbor", "--peer"] {
+        for (flag, asn_flag) in [("--neighbor", "--neighbor-asn"), ("--peer", "--peer-asn")] {
             let cli = Cli::try_parse_from([
                 "rbgp",
                 "diff",
@@ -9089,22 +9093,29 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "adj_rib_out_capture",
                 flag,
                 "192.0.2.1",
-                "--peer-asn",
+                asn_flag,
                 "64500",
             ])
             .unwrap();
             let Command::Diff {
                 action:
                     DiffAction::Snapshot {
-                        action: SnapshotAction::FromMrt { peer, view, .. },
+                        action:
+                            SnapshotAction::FromMrt {
+                                peer,
+                                view,
+                                peer_asn,
+                                ..
+                            },
                     },
             } = cli.command
             else {
                 panic!("expected from-mrt");
             };
             assert_eq!(
-                (peer.as_str(), view.as_str()),
-                ("192.0.2.1", "adj-rib-out-capture")
+                (peer.as_str(), view.as_str(), peer_asn),
+                ("192.0.2.1", "adj-rib-out-capture", 64500),
+                "from-mrt {flag} {asn_flag}"
             );
             let cli = Cli::try_parse_from([
                 "rbgp",
@@ -9189,8 +9200,16 @@ printf '%s\n' "${COMPREPLY[@]}"
             };
             assert_eq!(rpki_state, Some(RouteRpkiState::NotFound), "{value}");
         }
-        for value in ["rs-client", "rs_client", "route-server", "route_server"] {
-            Cli::try_parse_from([
+        for (value, rs_client) in [
+            ("rs-client", true),
+            ("rs_client", true),
+            ("route_server_client", true),
+            ("route-server-client", true),
+            ("route-server", false),
+            ("route_server", false),
+            ("rs", false),
+        ] {
+            let cli = Cli::try_parse_from([
                 "rbgp",
                 "rpki",
                 "verify-path",
@@ -9201,6 +9220,20 @@ printf '%s\n' "${COMPREPLY[@]}"
                 value,
             ])
             .unwrap_or_else(|error| panic!("--role {value}: {error}"));
+            let Command::Rpki {
+                action: RpkiAction::VerifyPath { role, .. },
+            } = cli.command
+            else {
+                panic!("expected rpki verify-path");
+            };
+            assert!(
+                matches!(
+                    (role, rs_client),
+                    (commands::rpki::LocalRole::RsClient, true)
+                        | (commands::rpki::LocalRole::RouteServer, false)
+                ),
+                "--role {value} parsed as {role:?}"
+            );
         }
         let cli = Cli::try_parse_from([
             "rbgp",

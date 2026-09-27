@@ -385,7 +385,7 @@ file, convert it in-binary:
 
 ```bash
 rbgp diff snapshot from-mrt capture.mrt --view adj-rib-out-capture \
-    --peer <member-ip> --peer-asn <member-asn> > mrt-<member>.ndjson
+    --neighbor <member-ip> --neighbor-asn <member-asn> > mrt-<member>.ndjson
 ```
 
 `--view` is the honesty gate: `TABLE_DUMP_V2` is by default a collector
