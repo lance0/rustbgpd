@@ -189,6 +189,103 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertEqual(result.exit_code, 7)
         self.assertEqual(result.result, "cli_exit")
 
+    def test_cli_failure_keeps_bounded_stderr_excerpt(self):
+        # Negative control: a CLI that fails before the daemon sees the call
+        # must still leave its own error text in the evidence.
+        result = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('error: transport error: connection refused');"
+             " raise SystemExit(1)"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.result, "cli_exit")
+        self.assertEqual(
+            result.stderr_excerpt, "error: transport error: connection refused"
+        )
+
+    def test_cli_stderr_excerpt_is_truncated_and_lossy(self):
+        result = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.buffer.write(b'\\xff' * 4096); raise SystemExit(1)"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.stderr_excerpt, "\ufffd" * load.STDERR_EXCERPT_BYTES)
+
+    def test_cli_ok_result_drops_stderr(self):
+        result = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('warning'); print('[{}]')"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.result, "ok")
+        self.assertIsNone(result.stderr_excerpt)
+
+    def test_cli_invalid_success_keeps_stderr_excerpt(self):
+        result = load.run_cli_command(
+            [sys.executable, "-c", "import sys; sys.stderr.write('partial'); print('{')"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.result, "json")
+        self.assertEqual(result.stderr_excerpt, "partial")
+
+    def test_cli_timeout_keeps_stderr_written_before_the_deadline(self):
+        result = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys, time; sys.stderr.write('connecting'); sys.stderr.flush();"
+             " time.sleep(2)"],
+            "neighbor", 0.5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.result, "timeout")
+        self.assertEqual(result.stderr_excerpt, "connecting")
+
+    def test_worst_case_stderr_excerpt_fits_the_record_bound(self):
+        # Every excerpt character JSON-escapes to six bytes at worst.
+        excerpt = "\x01" * load.STDERR_EXCERPT_BYTES
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "load.jsonl")
+            engine = load.ManagementPlaneLoad(
+                output=path,
+                metrics_url="http://127.0.0.1:1/metrics",
+                rbgp="/missing/rbgp",
+                uds="unix:///tmp/grpc.sock",
+                peer_count=1,
+                route_prefix="20.0.0.0/24",
+                doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
+                metrics_interval_seconds=60,
+                cli_interval_seconds=60,
+                doctor_interval_seconds=60,
+                timeout_seconds=0.05,
+            )
+            probed = set()
+            probed_lock = threading.Lock()
+
+            def probe(operation):
+                # Stop only once every worker has probed: each then writes
+                # its record, so no operation can be missing from the file.
+                with probed_lock:
+                    probed.add(operation)
+                    if probed == set(load.OPERATIONS):
+                        engine.request_stop()
+                if operation == "metrics":
+                    return load.ProbeResult(200, "ok", 2, "a" * 64)
+                return load.ProbeResult(
+                    -2**31, "payload_too_large", 2**53, "a" * 64, excerpt
+                )
+
+            engine._probe = probe
+            self.assertEqual(engine.run(), 0)
+            lines = Path(path).read_bytes().splitlines()
+        records = [json.loads(line) for line in lines]
+        operations = [r for r in records if r["record"] == "operation"]
+        self.assertEqual({r["operation"] for r in operations}, set(load.OPERATIONS))
+        # Headroom for monotonic timestamps far larger than this test's.
+        self.assertLess(max(len(line) for line in lines), load.MAX_RECORD_BYTES - 256)
+        for record in operations:
+            if record["operation"] == "metrics":
+                self.assertNotIn("stderr_excerpt", record)
+            else:
+                self.assertEqual(record["stderr_excerpt"], excerpt)
+
     def test_cli_timeout_is_recorded_and_process_reaped(self):
         started = time.monotonic()
         result = load.run_cli_command(

@@ -1010,8 +1010,10 @@ base-prefix mapping (`20.1.144.0/24` at the 400-route flagship shape), so
 stub 0's deliberate max-prefix trip cannot create a false load failure. Each
 surface has its own monotonic schedule and a five-second timeout with no retry.
 The retained JSONL contains only timing, disposition, byte count, and SHA-256
-fields—not the potentially large responses. The load must outlive the complete
-measured window. At natural completion the engine holds its sessions at the
+fields—not the potentially large responses. A non-ok `rbgp` result also keeps
+a `stderr_excerpt` (first 512 bytes of the CLI's stderr), so a client-side
+failure stays attributable without daemon-side evidence. The load must outlive
+the complete measured window. At natural completion the engine holds its sessions at the
 existing final evidence barrier (`engine-finish/ready`). The runner ends the
 measured window, SIGTERMs the load and waits for every in-flight probe and its
 atomic summary before writing `engine-finish/ack`. Only then may the engine

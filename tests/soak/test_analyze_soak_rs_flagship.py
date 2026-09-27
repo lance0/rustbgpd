@@ -591,6 +591,85 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
         self.assertFalse(payload["gates"]["management_failures"]["pass"])
 
+    def with_operation_fields(self, meta, operation, **fields):
+        records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+        for record in records:
+            if record.get("record") == "operation" and record["operation"] == operation:
+                record.update(fields)
+        return b"".join((json.dumps(record) + "\n").encode() for record in records)
+
+    def test_failed_cli_stderr_excerpt_reaches_the_verdict(self):
+        # Negative control through both halves: a failing CLI that writes
+        # stderr must surface that text in the reported management failures.
+        probe = load.run_cli_command(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('error: status: Unavailable'); raise SystemExit(1)"],
+            "neighbor", 5, 1, "20.0.0.0/24",
+        )
+        meta = smoke_meta()
+        evidence = self.with_operation_fields(
+            meta, "neighbor", exit=probe.exit_code, result=probe.result,
+            bytes=probe.byte_count, sha256=probe.sha256,
+            stderr_excerpt=probe.stderr_excerpt,
+        )
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta, management=evidence
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["management_evidence"]["pass"])
+        gate = payload["gates"]["management_failures"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(gate["value"]["first"][0], {
+            "operation": "neighbor", "result": "cli_exit", "exit": 1,
+            "stderr_excerpt": "error: status: Unavailable",
+        })
+
+    def test_failed_cli_record_without_stderr_excerpt_stays_valid(self):
+        # Evidence retained before the excerpt existed has no such field.
+        meta = smoke_meta()
+        evidence = self.with_operation_fields(
+            meta, "neighbor", exit=1, result="cli_exit"
+        )
+        self.assertNotIn(b"stderr_excerpt", evidence)
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta, management=evidence
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(payload["gates"]["management_evidence"]["pass"])
+        self.assertEqual(
+            payload["gates"]["management_failures"]["value"]["first"][0],
+            {"operation": "neighbor", "result": "cli_exit", "exit": 1},
+        )
+
+    def test_stderr_excerpt_is_bounded_and_only_on_failed_cli_records(self):
+        self.assertEqual(
+            analyzer.MANAGEMENT_STDERR_EXCERPT_LIMIT, load.STDERR_EXCERPT_BYTES
+        )
+        limit = analyzer.MANAGEMENT_STDERR_EXCERPT_LIMIT
+        for operation, fields in (
+            ("neighbor", {"stderr_excerpt": "noise"}),
+            ("metrics", {"result": "http_status", "stderr_excerpt": "x"}),
+            ("neighbor", {"result": "cli_exit", "stderr_excerpt": 7}),
+            ("neighbor", {"result": "cli_exit", "stderr_excerpt": "x" * (limit + 1)}),
+            ("neighbor", {"result": "cli_exit", "stderr": "raw"}),
+        ):
+            with self.subTest(operation=operation, fields=fields):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta,
+                    management=self.with_operation_fields(meta, operation, **fields),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(payload["gates"]["management_evidence"]["pass"])
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=self.with_operation_fields(
+                meta, "neighbor", result="cli_exit", stderr_excerpt="x" * limit
+            ),
+        )
+        self.assertTrue(payload["gates"]["management_evidence"]["pass"])
+
     def test_doctor_producer_results_survive_receipt_analysis(self):
         for exit_code, name, status, accepted in (
             (0, "daemon.healthy", "ok", True),
