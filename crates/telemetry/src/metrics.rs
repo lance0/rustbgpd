@@ -1518,9 +1518,11 @@ impl BgpMetrics {
             "bgp_rib_ingest_channel_depth",
             "Queued RibUpdate messages (not routes) waiting for the RIB manager: the \
              ingest channel plus at most one update held while a distribution window \
-             decides whether to extend, sampled once per manager loop iteration. At or \
-             above the channel capacity means producers (sessions, local originators) \
-             are parked on backpressure.",
+             decides whether to extend, sampled once per manager loop iteration. \
+             Producers (sessions, local originators) block only when the channel \
+             itself is full, which reads capacity + 1 while an update is held and \
+             capacity otherwise; a sustained reading at or above the channel capacity \
+             means the channel is full or within one message of full.",
         )
         .expect("valid metric definition");
 

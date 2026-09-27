@@ -18,5 +18,7 @@
   **Operator-visible:** `bgp_rib_actor_work_duration_seconds` records one
   `distribute_flush` observation per window, so its series count is windows,
   not UPDATE messages. `bgp_rib_ingest_channel_depth` also counts the one
-  update a window may hold while deciding whether to extend, so a full
-  channel can read one above its capacity.
+  update a window may hold while deciding whether to extend: producers
+  block only when the channel itself is full, which reads capacity + 1
+  while an update is held, so a sustained reading at or above capacity
+  means the channel is full or within one message of full.
