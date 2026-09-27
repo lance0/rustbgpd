@@ -129,6 +129,30 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   `session_notification_receipt` rows after the notification population has
   reached zero. This proves dequeue accounting only: the monotonic lifetime
   high-water value is not a per-round peak, capacity, latency, or bound.
+- `RELOADSTALL_OVERLAP_FILE` with `--flapstorm` — the failover shape. The
+  file (from `gen-failover-overlap.py`) gives part of each flapped member's
+  slice an alternate announced by a surviving member. The harness announces
+  those extras with the stub's ASN prepended, so they lose the initial
+  tie-break and become best only when the flapped member closes. The
+  withdraw phase then counts each flapped prefix on the alternate's
+  announcement, or on a withdrawal at the alternate itself and for prefixes
+  without one. Before the first close the run fails unless every alternate
+  covers the flapped cohort, no alternate is a churner, each alternate
+  currently holds its owner's path, i.e. it lost the initial tie-break. Each round prints a
+  `flapstorm_failover_csv` row: daemon CPU-seconds from `/proc/<pid>/stat`
+  between the close and the harness's detection of the last survivor's
+  completion (a 100 ms poll), survivor completion p50/max, the window's wall
+  length, and the daemon's churn-only CPU rate sampled over 2 s just before
+  the close. The window also contains that background churn. With
+  `RELOADSTALL_FAILOVER_METRICS_ADDR` (the daemon's Prometheus address), the
+  row also carries the `distribute_flush` actor-work sum and count between a
+  metrics scrape just before the opening CPU read and one just after the
+  closing CPU read (`scrape_bracketed_flush_*`: the CPU window plus both
+  scrapes). `failover_cell.sh` runs one such cell end to end; a daemon
+  built with `--features rustbgpd-rib/bench-internals` additionally logs
+  which grouped members took the shared payload or the per-member walk in
+  each mixed pass, and the script totals them. First receipt:
+  [failover alternates cell](../../../docs/perf/failover-alternates-2026-09.md).
 - `--convergence-only` — fail-closed capture mode. It requires `reloads=0`, `control_secs=0`, no flapstorm or
   reload command, an empty `RELOADSTALL_EVIDENCE_DIR`, and no `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`.
   It verifies exact table-minus-own-slice coverage, healthy sessions, and zero parse errors; signals `ready`;

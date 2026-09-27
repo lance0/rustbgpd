@@ -23,12 +23,28 @@
 //!   <daemon_pid>; a nonzero exit fails the run like a failed SIGHUP.
 //! - `daemon_pid` 0: skip in-harness RSS sampling (an outer sampler owns
 //!   it; RSS columns report 0). Requires `reload_cmd` or `--flapstorm`.
-//! - `RELOADSTALL_OVERLAP_FILE` (env, reload mode only): a generator-emitted
-//!   `member<TAB>global prefix index` allocation of overlap second
-//!   announcers (LAN-892). Listed stubs additionally announce those base
-//!   prefixes; completion targets exclude each observer's own announced set
-//!   (slice + extras), which both update-group modes are guaranteed to
-//!   deliver.
+//! - `RELOADSTALL_OVERLAP_FILE` (env, reload or flapstorm mode): a
+//!   generator-emitted `member<TAB>global prefix index` allocation of overlap
+//!   second announcers (LAN-892). Listed stubs additionally announce those
+//!   base prefixes; completion targets exclude each observer's own announced
+//!   set (slice + extras), which both update-group modes are guaranteed to
+//!   deliver. With `--flapstorm` the extras are failover alternates
+//!   (`gen-failover-overlap.py`): they carry the stub's ASN twice so the
+//!   owning member's path stays best, must be announced by survivors, and
+//!   the withdraw phase counts each flapped prefix on the alternate's
+//!   announcement (or on a withdrawal at the alternate itself and for
+//!   prefixes with no alternate). Each round also prints a
+//!   `flapstorm_failover_csv` row: daemon CPU-seconds from `/proc/<pid>/stat`
+//!   between the close and the harness's detection of the last survivor's
+//!   completion (100 ms poll), the window's wall length, the daemon's
+//!   churn-only CPU rate sampled over 2 s just before the close, and, with
+//!   `RELOADSTALL_FAILOVER_METRICS_ADDR`, the `distribute_flush` actor-work
+//!   sum/count between a metrics scrape just before the CPU read at the
+//!   close and one just after the CPU read at completion (the
+//!   `scrape_bracketed_flush_*` columns: the CPU window plus both scrapes). Before the first close the run fails
+//!   unless every alternate covers the flapped cohort, no alternate is a
+//!   churner, each alternate currently holds its owner's path (it lost the
+//!   initial tie-break).
 //! - `RELOADSTALL_RECEIVED_VIEW_FILE` (env, reload mode with
 //!   RELOADSTALL_EVIDENCE_DIR): before the final evidence boundary, dump
 //!   each observer's final-generation received view (base prefixes seen
@@ -196,6 +212,8 @@ const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
 const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;
+/// Pre-close churn-only CPU sample per flap round (see `run_flapstorm`).
+const BACKGROUND_CPU_WINDOW: Duration = Duration::from_secs(2);
 /// Designated max-prefix trip member (soak mode): always stub 0, which is
 /// never a churner (churners are the last CHURNERS stubs) and whose slice
 /// is the contiguous window `[0, per_peer)` the flapstorm bitmap shape
@@ -443,6 +461,10 @@ const FAMILY_V6: u8 = 2;
 const FLAP_OFF: u32 = 0;
 const FLAP_TRACK_WITHDRAWS: u32 = 1;
 const FLAP_TRACK_ANNOUNCES: u32 = 2;
+/// Flapstorm withdraw phase with overlap alternates: per armed prefix, the
+/// observer counts either the alternate's announcement or a withdrawal
+/// (see [`GenerationProgress::announce_expected`]).
+const FLAP_TRACK_FAILOVER: u32 = 3;
 
 /// One received-UPDATE observation.
 #[derive(Clone, Copy)]
@@ -488,6 +510,11 @@ struct Obs {
     /// (stable observers) is a before/after delta of these.
     base_withdrawn: AtomicU64,
     base_withdrawn6: AtomicU64,
+    /// Failover shape: bitmap over this stub's overlap extras
+    /// (`Ctx::extras[i]` positions) whose owner path the daemon currently
+    /// advertises to it: set on announcement, cleared on withdrawal.
+    /// Recorded whenever the session is up, independent of any armed bitmap.
+    extras_seen: Mutex<Vec<u64>>,
 }
 
 impl Obs {
@@ -507,6 +534,7 @@ impl Obs {
             refresh6_pending: AtomicBool::new(false),
             base_withdrawn: AtomicU64::new(0),
             base_withdrawn6: AtomicU64::new(0),
+            extras_seen: Mutex::new(Vec::new()),
         }
     }
 }
@@ -634,6 +662,10 @@ struct GenerationProgress {
     /// Bitmap over `filtered` positions of the withdrawals seen so far.
     filtered_seen: Vec<u64>,
     filtered_withdrawn: u64,
+    /// Failover arm only: bitmap over base indices whose completion is the
+    /// alternate's announcement; every other armed index completes on a
+    /// withdrawal. Empty outside `FLAP_TRACK_FAILOVER`.
+    announce_expected: Vec<u64>,
     /// Named prefixes delivered WITH the generation marker: the filter did
     /// not apply. Fails the reload.
     filtered_leaked: u64,
@@ -662,6 +694,7 @@ impl GenerationProgress {
         self.filtered.clear();
         self.filtered_seen.clear();
         self.filtered_withdrawn = 0;
+        self.announce_expected.clear();
         self.filtered_leaked = 0;
         self.bystander_withdrawn = 0;
         self.duplicate_withdrawn = 0;
@@ -728,6 +761,20 @@ impl GenerationProgress {
         self.excluded_extra = extra.iter().map(|&idx| idx as usize).collect();
         self.excluded_extra.sort_unstable();
         self.target = self.target.saturating_sub(extra.len() as u64);
+    }
+
+    /// Failover arm: count `prefix_index` only when the event direction is
+    /// the one this observer expects for it (an alternate's announcement,
+    /// or a withdrawal when the prefix has no alternate or the alternate is
+    /// this observer's own route).
+    fn observe_failover(&mut self, prefix_index: usize, withdrawn: bool, t_us: u64) {
+        let expects_announce = self
+            .announce_expected
+            .get(prefix_index / 64)
+            .is_some_and(|word| word & (1u64 << (prefix_index % 64)) != 0);
+        if expects_announce != withdrawn {
+            self.observe(prefix_index, t_us);
+        }
     }
 
     fn observe(&mut self, prefix_index: usize, t_us: u64) {
@@ -1197,8 +1244,39 @@ fn base_attrs(i: u32) -> Vec<PathAttribute> {
     ]
 }
 
+/// Overlap alternates lose the initial best-path tie-break (flapstorm
+/// failover shape): their extra announcements carry the stub's ASN twice,
+/// so the owning member's single-hop path stays best until it goes away.
+/// Set once in `main`; off reproduces the LAN-892 reload overlap exactly.
+static ALTERNATE_PREPEND: AtomicBool = AtomicBool::new(false);
+
 fn announce_msgs(i: u32, prefixes: &[Ipv4Prefix]) -> Vec<Message> {
-    let attrs = base_attrs(i);
+    announce_msgs_with(&base_attrs(i), prefixes)
+}
+
+/// Every announcement stub `i` makes: its own slice, then its overlap extras
+/// (prepended when [`ALTERNATE_PREPEND`] is set).
+fn announced_msgs(ctx: &Ctx, i: u32) -> Vec<Message> {
+    if !ALTERNATE_PREPEND.load(Ordering::Relaxed) {
+        return announce_msgs(i, &announced_prefixes(ctx, i));
+    }
+    let mut messages = announce_msgs(i, &own_slice(ctx, i));
+    let mut attrs = base_attrs(i);
+    for attribute in &mut attrs {
+        if let PathAttribute::AsPath(path) = attribute {
+            path.segments = vec![AsPathSegment::AsSequence(vec![stub_asn(i), stub_asn(i)])];
+        }
+    }
+    let extras: Vec<Ipv4Prefix> = ctx.extras[i as usize]
+        .iter()
+        .copied()
+        .map(base_prefix)
+        .collect();
+    messages.extend(announce_msgs_with(&attrs, &extras));
+    messages
+}
+
+fn announce_msgs_with(attrs: &[PathAttribute], prefixes: &[Ipv4Prefix]) -> Vec<Message> {
     prefixes
         .chunks(NLRI_PER_MSG)
         .map(|chunk| {
@@ -1212,7 +1290,7 @@ fn announce_msgs(i: u32, prefixes: &[Ipv4Prefix]) -> Vec<Message> {
             Message::Update(UpdateMessage::build(
                 &entries,
                 &[],
-                &attrs,
+                attrs,
                 true,
                 false,
                 Ipv4UnicastMode::Body,
@@ -1771,7 +1849,22 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                         }
                         // Feed the armed direction into the shared bitmap, including withdrawals.
                         let flap_mode = ob.flap_mode.load(Ordering::Acquire);
-                        if flap_mode != FLAP_OFF {
+                        if flap_mode == FLAP_TRACK_FAILOVER {
+                            let mut generation = ob.generation.lock().unwrap();
+                            if ob.flap_mode.load(Ordering::Acquire) == FLAP_TRACK_FAILOVER {
+                                for (tracked, withdrawn) in
+                                    [(&nlri.v4_wd, true), (&nlri.v4_ann, false)]
+                                {
+                                    for prefix in tracked {
+                                        if let Some(index) =
+                                            base_prefix_index(*prefix, total_prefixes)
+                                        {
+                                            generation.observe_failover(index, withdrawn, t_us);
+                                        }
+                                    }
+                                }
+                            }
+                        } else if flap_mode != FLAP_OFF {
                             let (tracked, tracked6) = if flap_mode == FLAP_TRACK_WITHDRAWS {
                                 (&nlri.v4_wd, &nlri.v6_wd)
                             } else {
@@ -1793,6 +1886,28 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                                             base_prefix6_index(*prefix, total_prefixes6)
                                         {
                                             generation6.observe(index, t_us);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let extras = &rctx.extras[i as usize];
+                        if !extras.is_empty() && (!nlri.v4_ann.is_empty() || !nlri.v4_wd.is_empty())
+                        {
+                            let mut seen = ob.extras_seen.lock().unwrap();
+                            seen.resize(extras.len().div_ceil(64), 0);
+                            for (prefixes, held) in [(&nlri.v4_wd, false), (&nlri.v4_ann, true)] {
+                                for prefix in prefixes {
+                                    if let Some(position) =
+                                        base_prefix_index(*prefix, total_prefixes).and_then(
+                                            |index| extras.binary_search(&(index as u32)).ok(),
+                                        )
+                                    {
+                                        let bit = 1u64 << (position % 64);
+                                        if held {
+                                            seen[position / 64] |= bit;
+                                        } else {
+                                            seen[position / 64] &= !bit;
                                         }
                                     }
                                 }
@@ -1835,7 +1950,7 @@ fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
                             let messages = if ipv6 {
                                 announce6_msgs(i, &own_slice6(&rc, i))
                             } else {
-                                announce_msgs(i, &announced_prefixes(&rc, i))
+                                announced_msgs(&rc, i)
                             };
                             for m in messages {
                                 if tx.send(m).await.is_err() {
@@ -2086,6 +2201,147 @@ fn arm_survivors(ctx: &Ctx, k: u32, flap_prefixes: u32, total: u32, mode: u32) {
     }
 }
 
+/// Arm every survivor for a failover withdraw phase: over the flapped
+/// window, a prefix whose overlap alternate is another member completes on
+/// that alternate's announcement; one with no alternate, or whose alternate
+/// is this observer, completes on a withdrawal (the observer's own route
+/// is now best, so the daemon withdraws the departed member's).
+fn arm_survivors_failover(
+    ctx: &Ctx,
+    k: u32,
+    flap_prefixes: u32,
+    total: u32,
+    alternates: &[Option<u32>],
+) {
+    // Reset every survivor disarmed, then install its direction map.
+    arm_survivors(ctx, k, flap_prefixes, total, FLAP_OFF);
+    for (i, observer) in ctx.obs.iter().enumerate().skip(k as usize) {
+        let mut generation = observer.generation.lock().unwrap();
+        let mut expected = vec![0u64; (flap_prefixes as usize).div_ceil(64)];
+        for (index, alternate) in alternates.iter().enumerate() {
+            if alternate.is_some_and(|member| member as usize != i) {
+                expected[index / 64] |= 1u64 << (index % 64);
+            }
+        }
+        generation.announce_expected = expected;
+        drop(generation);
+        observer
+            .flap_mode
+            .store(FLAP_TRACK_FAILOVER, Ordering::Release);
+    }
+}
+
+/// The overlap alternate of each flapped base index (`[0, flap_prefixes)`),
+/// or `None` for a prefix with no second announcer. Alternates must be
+/// survivors: a flapping alternate would leave the window's outcome to the
+/// close order.
+fn flap_alternates(ctx: &Ctx, k: u32, flap_prefixes: u32) -> Vec<Option<u32>> {
+    let mut alternates = vec![None; flap_prefixes as usize];
+    for (member, extras) in ctx.extras.iter().enumerate() {
+        for &index in extras.iter().filter(|&&index| index < flap_prefixes) {
+            let member = u32::try_from(member).unwrap();
+            assert!(
+                member >= k,
+                "overlap alternate {member} for flapped prefix {index} is itself flapped"
+            );
+            assert!(
+                alternates[index as usize].replace(member).is_none(),
+                "flapped prefix {index} has more than one overlap alternate"
+            );
+        }
+    }
+    alternates
+}
+
+/// Fail closed unless the loaded overlap allocation is the failover shape
+/// this flapstorm measures: every alternate covers a prefix of the flapped
+/// cohort, no alternate is a churner, and every alternate lost the initial
+/// best-path tie-break. The last is observed, not assumed: a route server
+/// never sends a member a path while its own is best, so each alternate
+/// member must currently hold the owner's path for every one of its
+/// alternate prefixes (announced and not since withdrawn). Owners may see
+/// transient withdrawals of their own prefixes when an alternate's
+/// announcement arrives first; those do not affect the steady state.
+fn validate_failover_allocation(ctx: &Ctx, k: u32, flap_prefixes: u32) -> Result<(), String> {
+    let churners = ctx.n_peers - CHURNERS..ctx.n_peers;
+    for (member, extras) in ctx.extras.iter().enumerate() {
+        let member = u32::try_from(member).unwrap();
+        if extras.is_empty() {
+            continue;
+        }
+        if churners.contains(&member) {
+            return Err(format!("overlap alternate {member} is a churner"));
+        }
+        if let Some(index) = extras.iter().find(|&&index| index >= flap_prefixes) {
+            return Err(format!(
+                "overlap alternate {member} covers prefix {index} outside the \
+                 --flapstorm {k} cohort (indices below {flap_prefixes})"
+            ));
+        }
+        let seen = ctx.obs[member as usize].extras_seen.lock().unwrap();
+        if let Some(index) = extras.iter().enumerate().find_map(|(position, &index)| {
+            seen.get(position / 64)
+                .is_none_or(|word| word & (1u64 << (position % 64)) == 0)
+                .then_some(index)
+        }) {
+            return Err(format!(
+                "overlap alternate {member} does not hold the owner's path for prefix \
+                 {index}: the alternate did not lose the initial tie-break"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Daemon CPU-seconds per wall second over `window` of steady churn, the
+/// background rate a down-pass CPU window also contains.
+async fn background_cpu_rate(pid: i32, window: Duration) -> Option<f64> {
+    let before = process_cpu_seconds(pid)?;
+    let started = Instant::now();
+    tokio::time::sleep(window).await;
+    let after = process_cpu_seconds(pid)?;
+    Some((after - before) / started.elapsed().as_secs_f64())
+}
+
+/// Cumulative user+system CPU seconds of `pid` from `/proc/<pid>/stat`
+/// (all threads). `None` when the daemon PID is not ours to read.
+fn process_cpu_seconds(pid: i32) -> Option<f64> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the parenthesized comm: state is field 3, utime 14, stime 15.
+    let rest = &stat[stat.rfind(')')? + 2..];
+    let fields: Vec<&str> = rest.split_ascii_whitespace().collect();
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+    // SAFETY: sysconf has no preconditions; a nonpositive result is rejected.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    (ticks > 0).then(|| (utime + stime) as f64 / ticks as f64)
+}
+
+/// `bgp_rib_actor_work_duration_seconds{work_unit="distribute_flush"}`
+/// (sum seconds, count) from one daemon scrape.
+async fn distribute_flush_totals(addr: SocketAddr) -> Result<(f64, u64), String> {
+    let body = fetch_metrics(addr, Instant::now() + Duration::from_secs(10)).await?;
+    let find = |name: &str| {
+        body.lines()
+            .find_map(|line| {
+                line.strip_prefix(name)?
+                    .strip_prefix("{work_unit=\"distribute_flush\"} ")
+                    .map(str::trim)
+            })
+            .ok_or_else(|| format!("missing {name}{{work_unit=\"distribute_flush\"}}"))
+    };
+    let sum = find("bgp_rib_actor_work_duration_seconds_sum")?
+        .parse::<f64>()
+        .map_err(|e| e.to_string())?;
+    let count = find("bgp_rib_actor_work_duration_seconds_count")?
+        .parse::<u64>()
+        .map_err(|e| e.to_string())?;
+    Ok((sum, count))
+}
+
 /// Disarm every survivor's shared bitmap (flapstorm rounds and trip cycles).
 fn disarm_survivors(ctx: &Ctx, first: usize) {
     for observer in ctx.obs.iter().skip(first) {
@@ -2108,6 +2364,36 @@ async fn run_flapstorm(
     let total = n_peers * ctx.per_peer;
     let flap_prefixes = k * ctx.per_peer;
     let survivors = k as usize..n_peers as usize;
+    // Failover shape (RELOADSTALL_OVERLAP_FILE with --flapstorm): part of the
+    // flapped window moves to survivor alternates instead of withdrawing.
+    if ctx.extras.iter().any(|extras| !extras.is_empty()) {
+        if let Err(error) = validate_failover_allocation(ctx, k, flap_prefixes) {
+            eprintln!("FAIL: failover allocation: {error}");
+            std::process::exit(1);
+        }
+    }
+    let alternates = flap_alternates(ctx, k, flap_prefixes);
+    let alternate_count = alternates.iter().filter(|a| a.is_some()).count();
+    let alternate_sources = alternates
+        .iter()
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let failover_metrics_addr =
+        std::env::var("RELOADSTALL_FAILOVER_METRICS_ADDR")
+            .ok()
+            .map(|value| {
+                value.parse::<SocketAddr>().unwrap_or_else(|_| {
+                    eprintln!("RELOADSTALL_FAILOVER_METRICS_ADDR must be a SocketAddr");
+                    std::process::exit(2);
+                })
+            });
+    println!(
+        "flapstorm_failover_csv_header,round,peers_total,peers_flapped,flap_prefixes,\
+         alternate_prefixes,alternate_sources,daemon_cpu_s,\
+         scrape_bracketed_flush_sum_s,scrape_bracketed_flush_count,withdraw_p50_s,\
+         withdraw_max_s,window_s,background_cpu_s_per_s"
+    );
     println!(
         "flapstorm_csv_header,round,peers_total,peers_flapped,prefixes,flap_prefixes,\
          withdraw_p50_s,withdraw_p95_s,withdraw_max_s,\
@@ -2131,8 +2417,30 @@ async fn run_flapstorm(
             notification_checkpoint(addr, ("round_start", round, up, 0, 0, errors), prior_high)
                 .await;
         }
-        // Arm before closing so no withdrawal is missed.
-        arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
+        // The CPU window below also contains steady churn and up to one
+        // completion-poll interval after the last survivor completes; this
+        // pre-close sample of the churn-only rate lets a receipt bound that.
+        let background = background_cpu_rate(pid, BACKGROUND_CPU_WINDOW).await;
+        // Arm before closing so no withdrawal (or alternate) is missed.
+        if alternate_count > 0 {
+            arm_survivors_failover(ctx, k, flap_prefixes, total, &alternates);
+        } else {
+            arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_WITHDRAWS);
+        }
+        // Down-pass boundaries, mirrored: scrape then read CPU before the
+        // close; read CPU then scrape after completion. The scrape's own
+        // rendering stays outside the CPU window, and the scrape-bracketed
+        // `distribute_flush` interval contains the CPU window plus the two
+        // scrapes (a pass finishing inside a scrape counts in flush only).
+        let flush_before = match failover_metrics_addr {
+            Some(addr) => Some(distribute_flush_totals(addr).await.unwrap_or_else(|error| {
+                eprintln!("FAIL: flap {round} pre-close metrics scrape: {error}");
+                std::process::exit(1);
+            })),
+            None => None,
+        };
+        let cpu_before = process_cpu_seconds(pid);
+        let cpu_window = Instant::now();
         println!("flap {round} close wall_us={}", wall_us());
         let t_close = now_us(ctx);
         // Simultaneous close: abort both split-half tasks per flapped stub.
@@ -2144,6 +2452,15 @@ async fn run_flapstorm(
             observer.established.store(false, Ordering::Relaxed);
         }
         wait_flap_completion(ctx, k as usize, round, "withdraw").await;
+        let cpu_after = process_cpu_seconds(pid);
+        let window_s = cpu_window.elapsed().as_secs_f64();
+        let flush_after = match failover_metrics_addr {
+            Some(addr) => Some(distribute_flush_totals(addr).await.unwrap_or_else(|error| {
+                eprintln!("FAIL: flap {round} post-withdraw metrics scrape: {error}");
+                std::process::exit(1);
+            })),
+            None => None,
+        };
         if let Some(addr) = metrics_addr {
             let up = ctx
                 .obs
@@ -2179,6 +2496,26 @@ async fn run_flapstorm(
             .map(|tc| tc.saturating_sub(t_close) as f64 / 1e6)
             .collect();
         let withdraw = stats_line(&format!("flap {round} withdraw_s"), withdraw_s);
+        let cpu_s = cpu_before
+            .zip(cpu_after)
+            .map_or(f64::NAN, |(before, after)| after - before);
+        let (flush_sum_s, flush_count) = flush_before.zip(flush_after).map_or(
+            (f64::NAN, 0),
+            |((sum_before, count_before), (sum_after, count_after))| {
+                (
+                    sum_after - sum_before,
+                    count_after.saturating_sub(count_before),
+                )
+            },
+        );
+        println!(
+            "flapstorm_failover_csv,{round},{n_peers},{k},{flap_prefixes},{alternate_count},\
+             {alternate_sources},{cpu_s:.3},{flush_sum_s:.6},{flush_count},{:.6},{:.6},\
+             {window_s:.6},{:.3}",
+            withdraw.p50,
+            withdraw.max,
+            background.unwrap_or(f64::NAN)
+        );
 
         // Hold the sessions down until FLAP_RECONNECT_SECS past the close.
         let since_close_ms = now_us(ctx).saturating_sub(t_close) / 1000;
@@ -2208,8 +2545,7 @@ async fn run_flapstorm(
         let t_reann = now_us(ctx);
         println!("flap {round} reannounce wall_us={}", wall_us());
         for i in 0..k {
-            let slice = announced_prefixes(ctx, i);
-            for m in announce_msgs(i, &slice) {
+            for m in announced_msgs(ctx, i) {
                 if stubs[i as usize].tx.send(m).await.is_err() {
                     eprintln!("flap {round} re-announce send failed for stub {i}");
                     std::process::exit(1);
@@ -2932,13 +3268,18 @@ fn main() {
         ibgp_hold_secs == 0 || ibgp_rr.is_some(),
         "RELOADSTALL_IBGP_RR_HOLD_SECS requires RELOADSTALL_IBGP_RR_ASN"
     );
-    // Overlap and the received-view dump are reload-mode instruments only:
-    // flapstorm and convergence-only completion accounting assumes the
-    // historical disjoint announcements.
+    // Overlap drives the reload mode (LAN-892 second announcers) or the
+    // flapstorm failover shape, where the extras are prepended alternates
+    // that take over part of the flapped window. Convergence-only
+    // accounting assumes the historical disjoint announcements; the
+    // received-view dump stays a reload-mode instrument (below).
     assert!(
-        overlap_file.is_none() || (reloads > 0 && flapstorm.is_none() && !convergence_only),
-        "RELOADSTALL_OVERLAP_FILE requires the reload mode (reloads > 0)"
+        overlap_file.is_none() || (!convergence_only && (reloads > 0 || flapstorm.is_some())),
+        "RELOADSTALL_OVERLAP_FILE requires the reload mode (reloads > 0) or --flapstorm"
     );
+    if overlap_file.is_some() && flapstorm.is_some() {
+        ALTERNATE_PREPEND.store(true, Ordering::Relaxed);
+    }
     assert!(
         received_view_file.is_none()
             || (reloads > 0
@@ -3072,8 +3413,7 @@ fn main() {
         }
         // --- Announce base table (FIRST_EXACT_SEND). ---
         for i in 0..n_peers {
-            let slice = announced_prefixes(&ctx, i);
-            for m in announce_msgs(i, &slice) {
+            for m in announced_msgs(&ctx, i) {
                 stubs[i as usize].tx.send(m).await.unwrap();
             }
             if dualstack() {
@@ -4698,6 +5038,104 @@ mod tests {
         assert!(!stable_marker_is_fresh(99, 100));
         assert!(stable_marker_is_fresh(100, 100));
         assert!(stable_marker_is_fresh(101, 100));
+    }
+
+    #[test]
+    fn failover_arm_counts_only_the_expected_direction() {
+        let mut progress = GenerationProgress::default();
+        progress.reset(8, 3, 3, 5);
+        progress.announce_expected = vec![0b010];
+        progress.observe_failover(1, true, 5);
+        assert_eq!(
+            progress.unique, 0,
+            "an alternate's key must not complete on a withdrawal"
+        );
+        progress.observe_failover(0, false, 6);
+        assert_eq!(
+            progress.unique, 0,
+            "a no-alternate key must not complete on an announcement"
+        );
+        progress.observe_failover(0, true, 7);
+        progress.observe_failover(1, false, 8);
+        progress.observe_failover(2, true, 9);
+        assert_eq!(progress.unique, 3);
+        assert_eq!(progress.completed_at_us, Some(9));
+        progress.reset(8, 3, 3, 5);
+        assert!(
+            progress.announce_expected.is_empty(),
+            "reset disarms failover"
+        );
+    }
+
+    #[test]
+    fn failover_allocation_validation_fails_closed() {
+        // 12 peers x 2 prefixes, 2 flapped (window [0, 4)); peers 4..12 churn.
+        let ctx_with = |extras: Vec<Vec<u32>>| Ctx {
+            t0: Instant::now(),
+            n_peers: 12,
+            per_peer: 2,
+            totals: [24, 0],
+            churn_writes: Mutex::new(None),
+            daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1),
+            obs: (0..12).map(|_| Obs::new()).collect(),
+            extras,
+            parse_errors: AtomicU64::new(0),
+            churn_cycles: AtomicU64::new(0),
+            record_events: AtomicBool::new(true),
+        };
+        let mut extras = vec![Vec::new(); 12];
+        extras[2] = vec![0, 3];
+        let ctx = ctx_with(extras.clone());
+        let error = validate_failover_allocation(&ctx, 2, 4).unwrap_err();
+        assert!(
+            error.contains("did not lose the initial tie-break"),
+            "{error}"
+        );
+        *ctx.obs[2].extras_seen.lock().unwrap() = vec![0b01];
+        assert!(
+            validate_failover_allocation(&ctx, 2, 4).is_err(),
+            "one owner path missing"
+        );
+        *ctx.obs[2].extras_seen.lock().unwrap() = vec![0b11];
+        assert_eq!(validate_failover_allocation(&ctx, 2, 4), Ok(()));
+        ctx.obs[0].base_withdrawn.store(3, Ordering::Relaxed);
+        assert_eq!(
+            validate_failover_allocation(&ctx, 2, 4),
+            Ok(()),
+            "an owner's transient withdrawals are not a tie-break failure"
+        );
+
+        let mut outside = extras.clone();
+        outside[2] = vec![0, 5];
+        let error = validate_failover_allocation(&ctx_with(outside), 2, 4).unwrap_err();
+        assert!(
+            error.contains("outside the --flapstorm 2 cohort"),
+            "{error}"
+        );
+        let mut churner = vec![Vec::new(); 12];
+        churner[4] = vec![1];
+        let error = validate_failover_allocation(&ctx_with(churner), 2, 4).unwrap_err();
+        assert!(error.contains("is a churner"), "{error}");
+    }
+
+    #[test]
+    fn process_cpu_seconds_reads_this_process() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let before = process_cpu_seconds(pid).expect("own /proc stat is readable");
+        let started = Instant::now();
+        let mut x = 0u64;
+        // Busy-spin until at least one clock tick is charged; a reader stuck
+        // on one value fails at the deadline.
+        while process_cpu_seconds(pid).unwrap() <= before {
+            for i in 0..1_000_000u64 {
+                x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(i));
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "CPU seconds never advanced"
+            );
+        }
+        assert!(process_cpu_seconds(0).is_none());
     }
 
     #[test]

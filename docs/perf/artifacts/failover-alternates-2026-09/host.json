@@ -1,0 +1,9 @@
+{
+  "measured_on": "2026-09-27",
+  "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+  "logical_cpus": 64,
+  "visible_memory_kib": 131375844,
+  "kernel": "7.0.0-30-generic",
+  "rustc": "1.98.1 (48a229cea 2026-09-01)",
+  "placement": "Daemon and harness shared logical CPUs 12-32 and 34-39 (taskset); CPU 33 was excluded. Timed cells were serialized on a host benchmark lock. Other build and test work ran concurrently on CPUs 40-63; this is not an isolated-host measurement."
+}
