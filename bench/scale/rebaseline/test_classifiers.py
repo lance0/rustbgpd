@@ -78,17 +78,23 @@ class ClassifierFixtures(unittest.TestCase):
             "bgperf.provenance.raw.csv",
             "bgperf.provenance.expected.csv",
         )
-        subprocess.run(
-            [
-                sys.executable,
-                str(HERE / "sanitize_bgperf_csv.py"),
-                "--from-sanitized",
-                str(FIXTURES / "bgperf.expected.csv"),
-                "--check",
-                str(FIXTURES / "bgperf.expected.csv"),
-            ],
-            check=True,
+        self.run_check(
+            "sanitize_bgperf_csv.py",
+            "bgperf.fork.raw.csv",
+            "bgperf.fork.expected.csv",
         )
+        for sanitized in ("bgperf.expected.csv", "bgperf.fork.expected.csv"):
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(HERE / "sanitize_bgperf_csv.py"),
+                    "--from-sanitized",
+                    str(FIXTURES / sanitized),
+                    "--check",
+                    str(FIXTURES / sanitized),
+                ],
+                check=True,
+            )
 
     def test_bgperf_csv_rejects_paths_extra_fields_and_oversize(self) -> None:
         raw = (FIXTURES / "bgperf.raw.csv").read_text(encoding="utf-8")
@@ -156,6 +162,50 @@ class ClassifierFixtures(unittest.TestCase):
                     text=True,
                 )
                 self.assertNotEqual(result.returncode, 0)
+
+    def test_bgperf_fork_schema_rejects_drift_and_incomplete_runs(self) -> None:
+        raw = (FIXTURES / "bgperf.fork.raw.csv").read_text(encoding="utf-8")
+        tail = ",0,0,,,,152,bgperf/rustbgpd:sync-dhat,"
+        bad_inputs = (
+            # A 28-value row under the 29-field header: the contention column
+            # is missing, so every later field would shift by one.
+            ("missing contention value", raw.replace(",,,,152,", ",,,,")),
+            ("contention column dropped", raw.replace(" max foreign cpu %,", "", 1)),
+            ("contention not a count", raw.replace(",,,,152,", ",,,,/tmp,")),
+            ("short of full table", raw.replace(",198000,200000,", ",198000,199999,")),
+            ("wrong check-point", raw.replace(",198000,200000,", ",200000,200000,")),
+            ("tester error", raw.replace(tail, tail.replace(",0,0,", ",1,0,", 1))),
+            ("failed", raw.replace(tail, tail.replace(",,,,", ",FAILED,,,", 1))),
+            ("foreign image", raw.replace("bgperf/rustbgpd:sync-dhat", "../rustbgpd")),
+            ("path version", raw.replace("3.37.0\n", "/tmp/gobgp\n")),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (case, text) in enumerate(bad_inputs):
+                with self.subTest(case=case):
+                    self.assertNotEqual(text, raw)
+                    path = Path(directory) / f"bad-fork-{index}.csv"
+                    path.write_text(text, encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(HERE / "sanitize_bgperf_csv.py"), str(path)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+
+        sanitized = (FIXTURES / "bgperf.fork.expected.csv").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "short.csv"
+            path.write_text(
+                sanitized.replace(",198000,200000,", ",198000,199999,"), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [sys.executable, str(HERE / "sanitize_bgperf_csv.py"), "--from-sanitized", str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
 
     def test_dhat_fixture_and_sanitized_derivative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
