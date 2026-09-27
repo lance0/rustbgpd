@@ -8,9 +8,9 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, Prefix, Safi};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
-use rustc_hash::FxHashMap as HashMap;
 use smallvec::SmallVec;
 
+use crate::fast_hash::{FastMap as HashMap, FastState};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute,
@@ -102,7 +102,7 @@ pub(crate) fn reserve_hash_map<K: Eq + std::hash::Hash, V>(
     }
 
     let old = std::mem::take(map);
-    let mut replacement = HashMap::with_capacity_and_hasher(required, rustc_hash::FxBuildHasher);
+    let mut replacement = HashMap::with_capacity_and_hasher(required, FastState::default());
     let mut entries = old.into_iter();
     for (key, value) in entries.by_ref() {
         checkpoint();

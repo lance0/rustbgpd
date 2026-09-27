@@ -10,9 +10,9 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // FxHash (rustc-hash) on the route-bearing maps — see `adj_rib_in` for the
 // rationale (internal keys, faster hasher on the convergence hot path).
 // Aliased to the std name so the storage types read unchanged.
-use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
 use crate::best_path::{best_path_cmp, best_path_cmp_ranked, compare_bgp_identifier, stale_rank};
+use crate::fast_hash::{FastMap as HashMap, FastState};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
@@ -101,7 +101,7 @@ impl LocRib {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            routes: HashMap::with_capacity_and_hasher(capacity, FxBuildHasher),
+            routes: HashMap::with_capacity_and_hasher(capacity, FastState::default()),
             ordered_prefixes: FamilyPrefixMap::default(),
             // Pre-reserve the journal floor so recompute's membership note
             // never allocates on the hot path.

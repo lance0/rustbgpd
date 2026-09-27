@@ -1,5 +1,5 @@
 use super::{
-    AdjRibOut, FxHashMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
+    AdjRibOut, FastMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
     RegroupBaseline, RibManager,
 };
 
@@ -118,20 +118,20 @@ impl RibManager {
                     self.adj_ribs_out
                         .get(&peer)
                         .map(|rib_out| {
-                            let mut unicast = FxHashMap::with_capacity_and_hasher(
+                            let mut unicast = FastMap::with_capacity_and_hasher(
                                 rib_out.len(),
-                                rustc_hash::FxBuildHasher,
+                                crate::fast_hash::FastState::default(),
                             );
                             checkpoint();
                             for route in rib_out.iter() {
                                 self.replacement_checkpoint_at("fallback_baseline", false);
                                 unicast.insert((route.prefix, route.path_id), route.clone());
                             }
-                            let mut vpn = FxHashMap::default();
+                            let mut vpn = FastMap::default();
                             if vpn_groupable {
-                                vpn = FxHashMap::with_capacity_and_hasher(
+                                vpn = FastMap::with_capacity_and_hasher(
                                     rib_out.vpn_len(),
-                                    rustc_hash::FxBuildHasher,
+                                    crate::fast_hash::FastState::default(),
                                 );
                                 checkpoint();
                                 for route in rib_out.iter_vpn() {

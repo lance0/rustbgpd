@@ -23,14 +23,15 @@ use std::net::IpAddr;
 //      (route hijack / leak / churn flood) that dominate the threat model.
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
 // `BgpLsRouteKey` joins the same class once ADR-0077 receive wiring lands.
-// Aliased to the std names so the storage type declarations read unchanged.
+// The hasher is named once in `crate::fast_hash`; it is imported below under
+// the std names so the storage type declarations read unchanged.
 use rustbgpd_wire::{
     Afi, EvpnRouteKey, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, RpkiValidation, Safi,
 };
-use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
 use crate::attr_set::AttrSet;
+use crate::fast_hash::{FastMap as HashMap, FastSet as HashSet, FastState};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsFamily, BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute,
@@ -134,7 +135,10 @@ impl AdjRibIn {
             llgr_stale_local_tags: HashSet::default(),
             rpki_counts_v4: RpkiValidationCounts::default(),
             rpki_counts_v6: RpkiValidationCounts::default(),
-            flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
+            flowspec_routes: HashMap::with_capacity_and_hasher(
+                flowspec_capacity,
+                FastState::default(),
+            ),
             flowspec_llgr_stale_local_tags: HashSet::default(),
             evpn_routes: HashMap::default(),
             bgpls_routes: HashMap::default(),

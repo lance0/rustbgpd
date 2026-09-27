@@ -139,7 +139,10 @@ fn aspa_cache_update_emits_one_bounded_completion_event() {
         tracing::callsite::rebuild_interest_cache();
         captured.lock().unwrap().clear();
 
-        manager.handle_aspa_cache_update(table, Some(rustc_hash::FxHashSet::from_iter([65003])));
+        manager.handle_aspa_cache_update(
+            table,
+            Some(crate::fast_hash::AspaAsnSet::from_iter([65003])),
+        );
     });
 
     // Count *the* completion event, not this thread's global event volume.
@@ -216,7 +219,7 @@ fn aspa_delta_revalidates_only_intersecting_paths_across_segments() {
 
     manager.handle_aspa_cache_update(
         Arc::new(AspaTable::new(vec![])),
-        Some(rustc_hash::FxHashSet::from_iter([65010])),
+        Some(crate::fast_hash::AspaAsnSet::from_iter([65010])),
     );
 
     let states: Vec<_> = manager.ribs[&peer]
@@ -277,7 +280,7 @@ fn aspa_first_delta_forces_full_rescan() {
 
     manager.handle_aspa_cache_update(
         Arc::new(AspaTable::new(vec![])),
-        Some(rustc_hash::FxHashSet::from_iter([65010])),
+        Some(crate::fast_hash::AspaAsnSet::from_iter([65010])),
     );
     assert_eq!(
         manager.ribs[&peer].iter().next().unwrap().aspa_state,
@@ -456,7 +459,7 @@ fn aspa_delta_matches_full_rescan_on_deterministic_sequences() {
         }
         delta_manager.handle_aspa_cache_update(
             Arc::clone(&next),
-            Some(rustc_hash::FxHashSet::from_iter([customer])),
+            Some(crate::fast_hash::AspaAsnSet::from_iter([customer])),
         );
         full_manager.handle_aspa_cache_update(Arc::clone(&next), None);
         current = next;

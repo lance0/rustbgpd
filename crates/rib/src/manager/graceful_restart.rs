@@ -584,7 +584,7 @@ impl RibManager {
     pub(super) fn handle_aspa_cache_update(
         &mut self,
         table: Arc<rustbgpd_rpki::AspaTable>,
-        delta: Option<rustc_hash::FxHashSet<u32>>,
+        delta: Option<crate::fast_hash::AspaAsnSet>,
     ) {
         let started = std::time::Instant::now();
         // Delta filtering requires a previously distributed state baseline.

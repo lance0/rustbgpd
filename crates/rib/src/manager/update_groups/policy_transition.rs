@@ -1,6 +1,6 @@
 use super::{
     BatchedMemberSupplement, BatchedTransitionCounters, BatchedTransitionInventory,
-    CleanPolicyTransitionInventory, CleanPolicyTransitionInventoryBuilder, FxHashMap, GroupKey,
+    CleanPolicyTransitionInventory, CleanPolicyTransitionInventoryBuilder, FastMap, GroupKey,
     GroupMembership, GroupRibOut, HashSet, IpAddr, LargeCommunity, NextHopAction, PolicyAction,
     PolicyChain, PolicyTransitionGroupStart, Prefix, RibManager, Route, UpdateGroupClassification,
     classify_update_group, routes_equal, source_control_input,
@@ -104,9 +104,8 @@ impl RibManager {
         // the `Option<String>` label twice per route, which dominated this
         // walk at reload-stall scale. The merge clones one label per
         // distinct (label) / (source, label) pair per chunk instead.
-        let mut chunk_totals: FxHashMap<Option<&str>, u64> = FxHashMap::default();
-        let mut chunk_by_source: FxHashMap<IpAddr, FxHashMap<Option<&str>, u64>> =
-            FxHashMap::default();
+        let mut chunk_totals: FastMap<Option<&str>, u64> = FastMap::default();
+        let mut chunk_by_source: FastMap<IpAddr, FastMap<Option<&str>, u64>> = FastMap::default();
         // Run-length fold for the permit counters: tables interleave far
         // fewer (source, label) flips than routes (contiguous prefix blocks
         // from one source are the common shape), so accumulate runs and
@@ -580,7 +579,7 @@ impl RibManager {
         let mut next_hop_override: Vec<Option<NextHopAction>> =
             Vec::with_capacity(destination.table.len());
         checkpoint(true);
-        let mut supplements: FxHashMap<IpAddr, BatchedMemberSupplement> = FxHashMap::default();
+        let mut supplements: FastMap<IpAddr, BatchedMemberSupplement> = FastMap::default();
         let mut counters = BatchedTransitionCounters::default();
         let mut rejected = false;
         'destination: for route in destination.table.iter() {

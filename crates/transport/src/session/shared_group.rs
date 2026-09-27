@@ -50,8 +50,8 @@ use super::{
     Afi, IpAddr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, NlriEntry, OutboundRouteUpdate,
     PathAttribute, PeerSession, Route, Safi, UpdateMessage, debug,
 };
+use crate::fast_hash::FastMap as HashMap;
 use bytes::Bytes;
-use rustc_hash::FxHashMap as HashMap;
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 

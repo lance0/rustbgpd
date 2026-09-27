@@ -12,6 +12,7 @@
 pub mod config;
 pub mod error;
 pub mod event_sink;
+mod fast_hash;
 pub mod framing;
 pub mod handle;
 pub mod listener;

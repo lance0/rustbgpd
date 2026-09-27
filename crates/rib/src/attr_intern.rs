@@ -27,16 +27,15 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
-
 use crate::attr_set::AttrSet;
+use crate::fast_hash::FastSet;
 
 /// Deduplicates identical `Arc<AttrSet>` allocations across
 /// all peers and route families. See the module docs for ownership and
 /// reclaim rules.
 #[derive(Debug, Default)]
 pub struct AttrInternTable {
-    set: FxHashSet<Arc<AttrSet>>,
+    set: FastSet<Arc<AttrSet>>,
 }
 
 impl AttrInternTable {

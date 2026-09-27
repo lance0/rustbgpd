@@ -2724,7 +2724,7 @@ fn regroup_baseline_diff_and_force() {
     group.apply_delta(&announce_delta(k1, OTHER1, None));
     group.apply_delta(&announce_delta(k6, OTHER2, None));
 
-    let mut baseline: FxHashMap<(Prefix, u32), Route> = FxHashMap::default();
+    let mut baseline: FastMap<(Prefix, u32), Route> = FastMap::default();
     baseline.insert((k1, 0), route(k1, OTHER1)); // unchanged — suppressed
     baseline.insert((k5, 0), route(k5, OTHER1)); // gone — withdraw
     baseline.insert((k6, 0), route(k6, OTHER1)); // source flipped — announce
@@ -3900,7 +3900,7 @@ fn vpn_dirty_resync_replays_table_and_tombstones() {
 
     // Regroup one-shot diff: unchanged baseline entry suppressed,
     // baseline key no longer retained withdrawn.
-    let mut baseline: FxHashMap<VpnRouteKey, VpnRibRoute> = FxHashMap::default();
+    let mut baseline: FastMap<VpnRouteKey, VpnRibRoute> = FastMap::default();
     baseline.insert(vpn_key(1), vpn_route(1, OTHER1)); // unchanged — suppressed
     baseline.insert(vpn_key(5), vpn_route(5, OTHER1)); // gone — withdraw
     let mut announce = Vec::new();

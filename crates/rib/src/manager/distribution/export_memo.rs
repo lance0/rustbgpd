@@ -26,15 +26,15 @@
 use std::sync::Arc;
 
 use rustbgpd_policy::{NextHopAction, RouteModifications};
-use rustc_hash::FxHashMap;
 
 use crate::attr_set::AttrSet;
+use crate::fast_hash::FastMap;
 use crate::route::Route;
 
 /// Memoized export-tail results for one distribution pass.
 #[derive(Default)]
 pub(in crate::manager) struct ExportMemo {
-    entries: FxHashMap<usize, MemoEntry>,
+    entries: FastMap<usize, MemoEntry>,
 }
 
 struct MemoEntry {
