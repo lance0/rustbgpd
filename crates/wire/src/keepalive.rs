@@ -11,7 +11,7 @@ use crate::header::{BgpHeader, MessageType};
 ///
 /// Returns [`DecodeError::InvalidKeepaliveLength`] if the header length is
 /// not exactly 19 bytes.
-pub fn validate_keepalive(header: &BgpHeader) -> Result<(), DecodeError> {
+pub fn validate_keepalive(header: BgpHeader) -> Result<(), DecodeError> {
     if header.length != MIN_MESSAGE_LEN {
         return Err(DecodeError::InvalidKeepaliveLength {
             length: header.length,
@@ -55,7 +55,7 @@ mod tests {
         let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(header.message_type, MessageType::Keepalive);
         assert_eq!(header.length, 19);
-        validate_keepalive(&header).unwrap();
+        validate_keepalive(header).unwrap();
     }
 
     #[test]
@@ -65,7 +65,7 @@ mod tests {
             message_type: MessageType::Keepalive,
         };
         assert!(matches!(
-            validate_keepalive(&header),
+            validate_keepalive(header),
             Err(DecodeError::InvalidKeepaliveLength { length: 20 })
         ));
     }

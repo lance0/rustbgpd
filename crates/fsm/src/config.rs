@@ -189,7 +189,7 @@ impl PeerConfig {
 
     /// Build the capability list for our outgoing OPEN message.
     #[must_use]
-    pub fn local_capabilities(&self) -> Vec<Capability> {
+    pub(crate) fn local_capabilities(&self) -> Vec<Capability> {
         let families = self.effective_families();
         let restart_families: Vec<_> = families
             .iter()
@@ -271,7 +271,7 @@ impl PeerConfig {
     /// session. The RIB applies the configured `send_max` numerically per
     /// peer, but only to families that actually negotiate Add-Path Send/Both.
     #[must_use]
-    pub fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
+    pub(crate) fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
         if !self.add_path_receive && !self.add_path_send {
             return Vec::new();
         }
@@ -298,7 +298,7 @@ impl PeerConfig {
     /// Add-Path families. A configured limit without Add-Path receive is not
     /// advertised because the tuple would have no effect.
     #[must_use]
-    pub fn paths_limit_capabilities(&self) -> Vec<PathsLimitFamily> {
+    pub(crate) fn paths_limit_capabilities(&self) -> Vec<PathsLimitFamily> {
         if self.paths_limit_receive_max == 0 || !self.add_path_receive {
             return Vec::new();
         }
@@ -327,7 +327,7 @@ impl PeerConfig {
     /// advertisements. It never advertises the Send role or the legacy
     /// type 128. Non-unicast families are omitted.
     #[must_use]
-    pub fn orf_capabilities(&self) -> Vec<OrfCapEntry> {
+    pub(crate) fn orf_capabilities(&self) -> Vec<OrfCapEntry> {
         if !self.prefix_orf_receive {
             return Vec::new();
         }
@@ -353,7 +353,7 @@ impl PeerConfig {
     /// is configured. `disable_ipv4_unicast` suppresses only the unicast
     /// entry; `VPNv4` does not require IPv6 unicast or `VPNv6` negotiation.
     #[must_use]
-    pub fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
+    pub(crate) fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
         let families = self.effective_families();
         let has_ipv4 = families.contains(&(Afi::Ipv4, Safi::Unicast));
         let has_ipv6 = families.contains(&(Afi::Ipv6, Safi::Unicast));
@@ -378,7 +378,7 @@ impl PeerConfig {
     /// The 2-byte `my_as` field for the OPEN wire format.
     /// Returns `AS_TRANS` (23456) if `local_asn` > 65535.
     #[must_use]
-    pub fn open_my_as(&self) -> u16 {
+    pub(crate) fn open_my_as(&self) -> u16 {
         if self.local_asn > u32::from(u16::MAX) {
             AS_TRANS
         } else {
