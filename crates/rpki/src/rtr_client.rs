@@ -3760,7 +3760,7 @@ mod tests {
             "`RtrClientConfig::max_expire_interval` adds an optional operator freshness ceiling",
             "it clamps both the configured `expire_interval` and a cache-advertised End of Data expire down",
             "never raises a lower value",
-            "when unset leaves the configured interval unchanged while cache-advertised values retain the protocol ceiling",
+            "when unset adds no ceiling of its own: the configured interval is limited only by the §6 bounds below, and cache-advertised values only by the protocol ceiling",
         ] {
             assert!(section.contains(clause), "missing README clause: {clause}");
         }

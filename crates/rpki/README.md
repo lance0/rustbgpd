@@ -39,8 +39,9 @@ a configured `retry_interval` at 7200 seconds.
   `RtrClientConfig::max_expire_interval` adds an
   optional operator freshness ceiling: it clamps both the configured
   `expire_interval` and a cache-advertised End of Data expire down, never raises
-  a lower value, and when unset leaves the configured interval unchanged while
-  cache-advertised values retain the protocol ceiling. The crate exports the
+  a lower value, and when unset adds no ceiling of its own: the configured
+  interval is limited only by the §6 bounds below, and cache-advertised values
+  only by the protocol ceiling. The crate exports the
   RFC 8210 two-day ceiling as `RTR_EXPIRE_MAX_SECS` (`172800` seconds).
   Starting with `0.3.1`, `RtrClient::new` bounds the configured timers to RFC
   8210 §6 and logs a warning when it changes one: a zero `refresh_interval` or
