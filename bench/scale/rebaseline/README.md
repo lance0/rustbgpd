@@ -136,12 +136,20 @@ its root `Cargo.lock`, with cache disabled. Record the exact image-build argv,
 the resulting immutable image digest, and the bgperf2 `git rev-parse HEAD` (or
 an exact packaged version). A mutable image tag is not artifact identity.
 
-Use the maintained fork `https://github.com/lance0/bgperf2` at
-`642a17746e7313deee6895f9ed57c685f9ecb019` or a
-later commit. Older adapter pins, including the one named in dated receipts,
-render the retired `enforcement = "legacy"` gRPC setting, which rustbgpd v0.63
-and later refuse at boot. From the bgperf2 checkout, with `RUSTBGPD_SOURCE`
-pointing at the clean measured checkout:
+New campaigns use the maintained fork `https://github.com/lance0/bgperf2` at
+commit `642a17746e7313deee6895f9ed57c685f9ecb019`. To use a later fork commit,
+repin deliberately: change the commit on this line in the same change that
+adopts it, and do not run from an unpinned fork `master`. Record the bgperf2
+checkout's `git rev-parse HEAD` as `bgperf2.revision_or_version` in the
+manifest; it must equal the pinned commit.
+
+Dated receipts keep the bgperf2 pins they name. Those pins reproduce only
+those receipts: they render the retired `enforcement = "legacy"` gRPC setting,
+which rustbgpd v0.63 and later refuse at boot, so do not use them for a new
+campaign.
+
+From the bgperf2 checkout, with `RUSTBGPD_SOURCE` pointing at the clean
+measured checkout:
 
 ```text
 python3 bgperf2.py update rustbgpd -c <source sha> -n --profile dhat \
@@ -154,7 +162,12 @@ After the result row and versions are recorded, bench sends the daemon SIGTERM,
 waits for it to exit, and saves the profile as
 `<results dir>/rustbgpd_bird_100000_2.dhat-heap.json`. It prints
 `rustbgpd: exited` and the saved path. A run that prints a warning instead
-wrote no profile and is not a receipt.
+wrote no profile and is not a receipt. Run the DHAT image by its explicit tag;
+the sanitizer rejects a row whose target image is the default
+`bgperf/rustbgpd` tag, where `update rustbgpd` puts the release build. The
+tag alone cannot prove the profile, so also record the image digest and its
+`org.rustbgpd.bgperf2.profile` label (`dhat`) from `docker image inspect` in
+the manifest.
 
 Run each CPU shape twice:
 
@@ -246,7 +259,7 @@ The manifest records at least:
     "rrharness_sha256": "hash of target/release/rrharness",
     "daemon_sha256_or_image_digest": "sha256:..."
   },
-  "bgperf2": {"revision_or_version": "40 lowercase hex digits or exact version"},
+  "bgperf2": {"revision_or_version": "40 lowercase hex digits: the pinned fork commit, or an exact version"},
   "memory_run": {
     "id": "rib-memory-YYYYMMDDTHHMMSSZ",
     "started_utc": "YYYY-MM-DDTHH:MM:SSZ",
