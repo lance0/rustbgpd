@@ -249,7 +249,7 @@ impl RibManager {
             };
 
             let mut rtc_swept = false;
-            let mut swept_prefixes: Vec<Prefix> = Vec::new();
+            let mut unicast_changed: Vec<Prefix> = Vec::new();
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 // RFC 4724 §4.1 End-of-RIB removal for every family: a
                 // route still marked stale here was not re-advertised
@@ -263,9 +263,9 @@ impl RibManager {
                 // flag/LLGR-community hygiene for the retained routes.
                 // Each helper is a family-scoped no-op for non-matching
                 // tuples.
-                swept_prefixes = rib.sweep_stale_family((afi, safi));
-                swept_prefixes.extend(rib.sweep_llgr_stale_family((afi, safi)));
-                rib.clear_stale((afi, safi));
+                unicast_changed = rib.sweep_stale_family((afi, safi));
+                unicast_changed.extend(rib.sweep_llgr_stale_family((afi, safi)));
+                unicast_changed.extend(rib.clear_stale((afi, safi)));
                 rib.sweep_stale_flowspec_family((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
@@ -297,18 +297,13 @@ impl RibManager {
             self.llgr_stale_deadlines.remove(&(peer, afi, safi));
 
             // FlowSpec/EVPN affected keys were collected BEFORE the sweep,
-            // so removed keys are already in their sets; the unicast set is
-            // collected from the retained routes and needs the swept
-            // prefixes joined in so their withdrawals distribute. Only this
-            // EoR's family can change: the sweep and clear helpers above are
-            // family-scoped, and the peer's other families (and any unicast
-            // route for a non-unicast EoR) keep their selection inputs.
-            let mut affected: HashSet<Prefix> = self
-                .ribs
-                .get(&peer)
-                .map(|rib| rib.family_prefixes((afi, safi)).collect())
-                .unwrap_or_default();
-            affected.extend(swept_prefixes);
+            // so removed keys are already in their sets. The unicast
+            // selection inputs this EoR changes are exactly the routes the
+            // family-scoped sweeps removed and the clear mutated: every
+            // other retained route was recomputed when it was re-advertised
+            // (which cleared its stale flag), and the peer's other families
+            // are untouched.
+            let affected: HashSet<Prefix> = unicast_changed.into_iter().collect();
             self.recompute_and_distribute_end_of_rib_unicast(&affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
@@ -438,7 +433,7 @@ impl RibManager {
             };
 
             let mut rtc_swept = false;
-            let mut swept_prefixes: Vec<Prefix> = Vec::new();
+            let mut unicast_changed: Vec<Prefix> = Vec::new();
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 // RFC-strict End-of-RIB removal for every family, matching
                 // the GR arm: a route still LLGR-stale here was not
@@ -447,8 +442,8 @@ impl RibManager {
                 // flag/LLGR-community hygiene for the retained routes.
                 // Each helper is a family-scoped no-op for non-matching
                 // tuples.
-                swept_prefixes = rib.sweep_llgr_stale_family((afi, safi));
-                rib.clear_llgr_stale((afi, safi));
+                unicast_changed = rib.sweep_llgr_stale_family((afi, safi));
+                unicast_changed.extend(rib.clear_llgr_stale((afi, safi)));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
                 self.metrics.set_rib_prefixes(
@@ -471,15 +466,9 @@ impl RibManager {
             self.llgr_stale_deadlines.remove(&(peer, afi, safi));
 
             // Same shape as the GR arm: FlowSpec/EVPN affected keys already
-            // include the swept ones (collected pre-sweep); join the swept
-            // unicast prefixes so their withdrawals distribute. Family-scoped
-            // like the GR arm: only this EoR's family can change.
-            let mut affected: HashSet<Prefix> = self
-                .ribs
-                .get(&peer)
-                .map(|rib| rib.family_prefixes((afi, safi)).collect())
-                .unwrap_or_default();
-            affected.extend(swept_prefixes);
+            // include the swept ones (collected pre-sweep), and the unicast
+            // set is exactly the swept and clear-mutated routes.
+            let affected: HashSet<Prefix> = unicast_changed.into_iter().collect();
             self.recompute_and_distribute_end_of_rib_unicast(&affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
