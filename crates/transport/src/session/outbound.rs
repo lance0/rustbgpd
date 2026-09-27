@@ -65,6 +65,12 @@ const OUTBOUND_PHASES: &[OutboundPhase] = &[
     OutboundPhase::Eor,
 ];
 
+const ANNOUNCE_PHASE: usize = 3;
+const _: () = assert!(matches!(
+    OUTBOUND_PHASES[ANNOUNCE_PHASE],
+    OutboundPhase::Announce
+));
+
 impl PendingOutbound {
     /// Waits inside the existing run-loop select, never inside a sender.
     pub(super) async fn ready(&self, writer: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) {
@@ -81,7 +87,20 @@ impl PendingOutbound {
     }
 
     fn finish_empty_phases(&mut self) -> bool {
-        while let Some(phase) = OUTBOUND_PHASES.get(self.phase) {
+        self.skip_empty_phases_before(OUTBOUND_PHASES.len())
+    }
+
+    /// A shared announce stream starts only after every earlier phase (the
+    /// member's own withdrawals) is admitted, so withdrawals keep preceding
+    /// announcements exactly as on the per-session path.
+    fn withdrawals_admitted(&mut self) -> bool {
+        self.skip_empty_phases_before(ANNOUNCE_PHASE)
+    }
+
+    fn skip_empty_phases_before(&mut self, stop: usize) -> bool {
+        while self.phase < stop
+            && let Some(phase) = OUTBOUND_PHASES.get(self.phase)
+        {
             let len = match phase {
                 OutboundPhase::Requests => self.requests.len(),
                 OutboundPhase::Begin => self
@@ -292,7 +311,8 @@ impl PeerSession {
         let before = self.writer_bulk_admitted;
         let mut finished = false;
         pending.capacity_blocked = budget == 0;
-        if let Some((shared, next)) = &mut pending.shared {
+        let shared_ready = pending.shared.is_some() && pending.withdrawals_admitted();
+        if shared_ready && let Some((shared, next)) = &mut pending.shared {
             let (chunks, terminal) =
                 shared.snapshot_from(*next, super::shared_group::PROGRESSIVE_SLICE_ROUTES);
             let end = *next + chunks.len();
@@ -362,7 +382,7 @@ impl PeerSession {
                 .as_ref()
                 .is_some_and(|tx| !tx.is_closed())
         {
-            if pending.shared.is_none() {
+            if pending.shared.is_none() || !shared_ready {
                 pending.capacity_blocked = self
                     .writer_bulk_tx
                     .as_ref()

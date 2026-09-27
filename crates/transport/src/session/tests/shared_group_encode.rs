@@ -1227,3 +1227,294 @@ async fn shared_group_wire_equivalence_proof_ignores_only_byte_inert_fields() {
         "Add-Path send changes NLRI bytes and must break the proof"
     );
 }
+
+/// A failover pass: two prefixes lost their only path (withdrawals) while
+/// three others moved to an alternate source (displacing announcements).
+/// The announce table order is deliberately not source-sorted, so a member
+/// that re-encodes locally emits a different UPDATE order than the shared
+/// source-sorted stream.
+fn mixed_failover_pass() -> (Vec<Route>, Vec<(Prefix, u32)>) {
+    let announce = vec![
+        make_sourced_route(
+            Ipv4Addr::new(10, 44, 0, 3),
+            Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+            64_603,
+        ),
+        make_sourced_route(
+            Ipv4Addr::new(10, 44, 0, 1),
+            Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            64_601,
+        ),
+        make_sourced_route(
+            Ipv4Addr::new(10, 44, 0, 2),
+            Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+            64_602,
+        ),
+    ];
+    let withdraw = vec![
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64, 1, 0), 24)),
+            0,
+        ),
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64, 2, 0), 24)),
+            0,
+        ),
+    ];
+    (announce, withdraw)
+}
+
+async fn read_raw_frames(stream: &mut TcpStream, count: usize) -> Vec<Vec<u8>> {
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        frames.push(
+            tokio::time::timeout(Duration::from_secs(5), read_single_raw_bgp_message(stream))
+                .await
+                .expect("wire read timed out"),
+        );
+    }
+    frames
+}
+
+fn parse_frame(frame: &[u8], add_path: bool) -> rustbgpd_wire::ParsedUpdate {
+    let mut buf = Bytes::from(frame.to_vec());
+    let Message::Update(message) =
+        rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+    else {
+        panic!("expected UPDATE");
+    };
+    message.parse(true, add_path, &[]).unwrap()
+}
+
+/// Proves the stream ended at `frames` by sending a sentinel envelope
+/// through the ordinary path: the next frame on the wire must be it.
+async fn assert_stream_ends(member: &mut PeerSession, wire: &mut TcpStream, add_path: bool) {
+    let sentinel_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 128), 25);
+    let mut sentinel = empty_outbound_update();
+    sentinel.exact_export_snapshot = Some(member.publish_export_profile());
+    sentinel.announce = vec![make_sourced_route(
+        Ipv4Addr::new(10, 44, 0, 8),
+        sentinel_prefix,
+        64_608,
+    )]
+    .into();
+    sentinel.next_hop_override = vec![None].into();
+    member.test_drain_outbound(sentinel).await;
+    let parsed = parse_frame(&read_raw_frames(wire, 1).await[0], add_path);
+    assert_eq!(
+        parsed
+            .announced
+            .iter()
+            .map(|nlri| nlri.prefix)
+            .collect::<Vec<_>>(),
+        vec![sentinel_prefix],
+        "no frame beyond the expected stream"
+    );
+}
+
+/// The ungrouped oracle: the same member profile encoding the same
+/// envelope on the ordinary per-session path.
+async fn ungrouped_frames(
+    local_asn: u32,
+    announce: &[Route],
+    withdraw: &[(Prefix, u32)],
+    excluded: Ipv4Addr,
+    frames: usize,
+) -> Vec<Vec<u8>> {
+    let (mut control, mut wire) = shared_group_member(local_asn).await;
+    let unused = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let mut update = shared_group_envelope(&control, &unused, excluded, announce);
+    update.shared_group_encode = None;
+    update.withdraw = withdraw.to_vec();
+    control.test_drain_outbound(update).await;
+    let out = read_raw_frames(&mut wire, frames).await;
+    assert_stream_ends(&mut control, &mut wire, false).await;
+    out
+}
+
+fn prefix_attr_map(frames: &[Vec<u8>]) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map = std::collections::BTreeMap::new();
+    for frame in frames {
+        let parsed = parse_frame(frame, false);
+        let attrs: Vec<String> = parsed
+            .attributes
+            .iter()
+            .map(|attr| format!("{attr:?}"))
+            .collect();
+        for nlri in &parsed.announced {
+            assert!(
+                map.insert(nlri.prefix.to_string(), attrs.clone()).is_none(),
+                "prefix announced twice"
+            );
+        }
+    }
+    map
+}
+
+/// A mixed failover pass (withdrawals plus displacing announcements) stays
+/// on encode-once: the first member encodes the announce inventory once,
+/// the second streams the published bytes, and each member sends its
+/// withdrawals first. Withdrawal frames are byte-identical to the ungrouped
+/// path, announcement frames are the published shared chunks, and every
+/// announced prefix carries exactly the ungrouped path's attributes.
+#[tokio::test]
+async fn shared_group_mixed_failover_pass_stays_on_encode_once() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    let (announce, withdraw) = mixed_failover_pass();
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let members = [
+        (Ipv4Addr::new(10, 44, 0, 1), true),
+        (Ipv4Addr::new(10, 44, 0, 2), false),
+    ];
+    for (excluded, encoder) in members {
+        let (mut member, mut wire) = shared_group_member(65001).await;
+        let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+        update.withdraw.clone_from(&withdraw);
+        let before = shared.cell.get().map(Arc::clone);
+        member.test_drain_outbound(update).await;
+        let cell = shared
+            .cell
+            .get()
+            .expect("a mixed pass must still elect a shared encoder");
+        if !encoder {
+            assert!(
+                Arc::ptr_eq(before.as_ref().unwrap(), cell),
+                "the second member reuses the first member's encode"
+            );
+        }
+        let encode = cell
+            .downcast_ref::<ProgressiveUnicastEncode>()
+            .expect("transport shared-encode payload");
+        assert_eq!(
+            encode.test_snapshot(),
+            (3, Some(StreamTerminal::Complete)),
+            "one chunk per source, encoded once"
+        );
+        let published: Vec<Vec<u8>> = encode
+            .snapshot_from(0, usize::MAX)
+            .0
+            .into_iter()
+            .filter(|chunk| chunk.source != IpAddr::V4(excluded))
+            .map(|chunk| chunk.bytes.to_vec())
+            .collect();
+        assert_eq!(published.len(), 2);
+
+        let frames = read_raw_frames(&mut wire, 3).await;
+        assert_stream_ends(&mut member, &mut wire, false).await;
+        let oracle = ungrouped_frames(65001, &announce, &withdraw, excluded, 3).await;
+        assert_eq!(
+            frames[0], oracle[0],
+            "withdrawals go first, byte-identical to the ungrouped path"
+        );
+        let first = parse_frame(&frames[0], false);
+        assert_eq!(first.withdrawn.len(), 2);
+        assert!(first.announced.is_empty());
+        assert_eq!(
+            frames[1..],
+            published[..],
+            "announcements are the shared chunks in stream order"
+        );
+        assert_ne!(
+            frames[1..],
+            oracle[1..],
+            "fixture must distinguish the shared stream from a local re-encode"
+        );
+        assert_eq!(
+            prefix_attr_map(&frames[1..]),
+            prefix_attr_map(&oracle[1..]),
+            "every announced prefix carries the ungrouped attributes"
+        );
+    }
+}
+
+/// Members the wire-equivalence proof rejects (Add-Path send, a different
+/// export profile) receive the same mixed envelope with the group's cell
+/// and must fall back to output byte-identical to the ungrouped path.
+#[tokio::test]
+async fn shared_group_mixed_pass_fallback_members_match_ungrouped_bytes() {
+    let (announce, withdraw) = mixed_failover_pass();
+    let excluded = Ipv4Addr::new(10, 44, 0, 9);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let (mut encoder, mut encoder_wire) = shared_group_member(65001).await;
+    let mut update = shared_group_envelope(&encoder, &shared, excluded, &announce);
+    update.withdraw.clone_from(&withdraw);
+    encoder.test_drain_outbound(update).await;
+    drop(read_raw_frames(&mut encoder_wire, 4).await);
+    assert!(shared.cell.get().is_some());
+
+    for add_path in [false, true] {
+        let local_asn = if add_path { 65001 } else { 64_999 };
+        let configure = |session: &mut PeerSession| {
+            if add_path {
+                let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+                negotiated
+                    .add_path_families
+                    .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Send);
+                session.negotiated = Some(Arc::new(negotiated));
+            }
+        };
+        let (mut member, mut wire) = shared_group_member(local_asn).await;
+        configure(&mut member);
+        let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+        update.withdraw.clone_from(&withdraw);
+        member.test_drain_outbound(update).await;
+        let frames = read_raw_frames(&mut wire, 4).await;
+        assert_stream_ends(&mut member, &mut wire, add_path).await;
+
+        let (mut control, mut control_wire) = shared_group_member(local_asn).await;
+        configure(&mut control);
+        let mut update = shared_group_envelope(&control, &shared, excluded, &announce);
+        update.shared_group_encode = None;
+        update.withdraw.clone_from(&withdraw);
+        control.test_drain_outbound(update).await;
+        let oracle = read_raw_frames(&mut control_wire, 4).await;
+        assert_stream_ends(&mut control, &mut control_wire, add_path).await;
+        assert_eq!(frames, oracle, "add_path={add_path}");
+        assert_eq!(parse_frame(&frames[0], add_path).withdrawn.len(), 2);
+    }
+}
+
+/// A stream that fails after the member's withdrawals were admitted falls
+/// back to the local announce encode without resending the withdrawals:
+/// an already-sent shared chunk may repeat, a withdrawal may not follow it.
+#[tokio::test]
+async fn shared_group_mixed_pass_failure_resumes_at_announcements() {
+    use super::shared_group::{ProgressiveUnicastEncode, StreamTerminal};
+    let (announce, withdraw) = mixed_failover_pass();
+    let excluded = Ipv4Addr::new(10, 44, 0, 9);
+    let (mut member, mut wire) = shared_group_member(65001).await;
+    let profile = (*member.publish_export_profile()).clone();
+    let encode = ProgressiveUnicastEncode::test_new(profile.clone());
+    let head = super::shared_group::encode_shared_unicast_slice(
+        &profile,
+        &mut super::export::PreparedAttrCache::default(),
+        &announce,
+        &[None, None, None],
+        &[1],
+    )
+    .expect("head slice encodes");
+    let head_bytes = head[0].bytes.to_vec();
+    encode.test_publish(head);
+    encode.test_finish(StreamTerminal::Failed);
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    assert!(
+        shared
+            .cell
+            .set(Arc::new(encode) as Arc<dyn std::any::Any + Send + Sync>)
+            .is_ok()
+    );
+    let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+    update.withdraw.clone_from(&withdraw);
+    member.test_drain_outbound(update).await;
+
+    let frames = read_raw_frames(&mut wire, 5).await;
+    assert_stream_ends(&mut member, &mut wire, false).await;
+    let oracle = ungrouped_frames(65001, &announce, &withdraw, excluded, 4).await;
+    assert_eq!(frames[0], oracle[0], "withdrawals first");
+    assert_eq!(frames[1], head_bytes, "the published head chunk");
+    assert_eq!(
+        frames[2..],
+        oracle[1..],
+        "fallback re-encodes announcements only"
+    );
+}
