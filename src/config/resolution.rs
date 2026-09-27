@@ -880,6 +880,10 @@ impl Config {
                 (SocketAddr::new(peer_addr, BGP_PORT), None, None)
             };
         let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.local_forwarding_state =
+            Some(rustbgpd_transport::ForwardingStateSource::Configured(
+                crate::forwarding_state::configured_kernel_families(self),
+            ));
         transport.local_address = self.active_source_for(peer_addr);
         transport.peer_interface = peer_interface;
         transport.peer_scope_id = peer_scope_id;

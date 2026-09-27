@@ -164,6 +164,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         gr_peer_restart_time_max: 4095,
         llgr_stale_time: 0,
         gr_restart_until: None,
+        local_forwarding_state: None,
         route_reflector_client: true,
         orr_vantage: None,
         route_server_client: false,

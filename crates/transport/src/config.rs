@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
+use rustbgpd_wire::{Afi, Safi};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Authentication secret owned by the transport runtime.
@@ -427,6 +428,42 @@ impl From<TcpAoConfig> for TcpAoKeyring {
     }
 }
 
+/// Committed local forwarding responsibilities, sampled once per outgoing OPEN.
+pub trait LocalForwardingState: fmt::Debug + Send + Sync {
+    /// Families whose forwarding state this speaker installs in a dataplane.
+    fn kernel_families(&self) -> Vec<(Afi, Safi)>;
+}
+
+/// A configured snapshot or a live committed forwarding-state authority.
+#[derive(Clone, Debug)]
+pub enum ForwardingStateSource {
+    /// Fixed responsibilities for a standalone transport configuration.
+    Configured(Vec<(Afi, Safi)>),
+    /// Authority shared by existing sessions and future collision candidates.
+    Live(Arc<dyn LocalForwardingState>),
+}
+
+impl PartialEq for ForwardingStateSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Configured(a), Self::Configured(b)) => a == b,
+            (Self::Live(a), Self::Live(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ForwardingStateSource {}
+
+impl ForwardingStateSource {
+    pub(crate) fn kernel_families(&self) -> Vec<(Afi, Safi)> {
+        match self {
+            Self::Configured(families) => families.clone(),
+            Self::Live(source) => source.kernel_families(),
+        }
+    }
+}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[expect(
@@ -495,6 +532,10 @@ pub struct TransportConfig {
     /// Local restarting-speaker GR window. When set, outbound OPEN messages
     /// advertise `restart_state = true` until this deadline.
     pub gr_restart_until: Option<Instant>,
+    /// Local forwarding responsibility for GR/LLGR F bits. `None` preserves
+    /// the conservative FSM default (F=0); a configured authority sets F=1
+    /// only for families without a local dataplane role, independently of R.
+    pub local_forwarding_state: Option<ForwardingStateSource>,
     /// Whether this neighbor is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
     /// Optimal Route Reflection vantage point (RFC 9107): an IP address
@@ -638,6 +679,7 @@ impl TransportConfig {
             gr_peer_restart_time_max: 4095,
             llgr_stale_time: 0,
             gr_restart_until: None,
+            local_forwarding_state: None,
             route_reflector_client: false,
             orr_vantage: None,
             route_server_client: false,

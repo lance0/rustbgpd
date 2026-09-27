@@ -512,3 +512,61 @@ fn bfd_auth_compound_diff_reports_rejection_in_json_and_human_output() {
         "{text}"
     );
 }
+
+#[test]
+fn forwarding_state_role_changes_do_not_reconfigure_neighbors() {
+    let prior = rs(RS_TOML);
+    let mut candidate = prior.clone();
+    candidate.fib_tables = vec![crate::test_support::basic_fib_table("dual", 1001)];
+    assert!(
+        plan_reload_peer_actions(&prior, &candidate)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        plan_reload_peer_actions(&candidate, &prior)
+            .unwrap()
+            .is_empty()
+    );
+    let old = prior.resolve_neighbor(&prior.neighbors[0]).unwrap();
+    let new = candidate.resolve_neighbor(&candidate.neighbors[0]).unwrap();
+    assert_ne!(
+        old.transport_config.local_forwarding_state,
+        new.transport_config.local_forwarding_state
+    );
+    let mut retained = old;
+    retained.transport_config.local_forwarding_state =
+        Some(rustbgpd_transport::ForwardingStateSource::Live(
+            std::sync::Arc::new(crate::forwarding_state::ForwardingState::new(&prior)),
+        ));
+    assert_eq!(resolved_session_change(&retained, &new), None);
+}
+
+#[test]
+fn forwarding_state_does_not_turn_policy_impact_into_session_reshape() {
+    let prior = rs(&format!(
+        "{RS_TOML}\n[[dynamic_neighbors]]\nprefix = \"10.30.0.0/16\"\npeer_group = \"members\"\nremote_asn = 65030"
+    ));
+    let mut candidate = rs(&format!(
+        "{}\n[[dynamic_neighbors]]\nprefix = \"10.30.0.0/16\"\npeer_group = \"members\"\nremote_asn = 65030",
+        RS_TOML.replace("default_action = \"permit\"", "default_action = \"deny\"")
+    ));
+    candidate.fib_tables = vec![crate::test_support::basic_fib_table("v4", 1001)];
+    let diff = diff_config(&prior, &candidate);
+    assert_eq!(diff.effective_neighbor_impact.len(), 3);
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .all(|impact| impact.kind == EffectiveNeighborImpactKind::PolicyChain)
+    );
+    assert!(
+        diff.effective_neighbor_impact
+            .iter()
+            .any(|impact| impact.is_dynamic_range)
+    );
+    assert!(
+        plan_reload_peer_actions(&prior, &candidate)
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -78,6 +78,7 @@ pub(crate) async fn apply_evpn_runtime_request_with_metrics(
         converger,
         metrics,
         || {},
+        None,
     )
     .await
 }
@@ -241,6 +242,193 @@ async fn reload_classifier_reports_transport_and_join_uncertainty_as_ambiguous()
 struct GatedRuntimeConverger {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Semaphore>,
+}
+
+#[tokio::test]
+async fn forwarding_state_evpn_changes_only_after_converge_commits() {
+    use rustbgpd_transport::LocalForwardingState;
+    use rustbgpd_wire::{Afi, Safi};
+
+    for candidate_toml in [
+        l2vni_runtime_candidate_toml(),
+        ip_vrf_runtime_candidate_toml(),
+    ] {
+        let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+        let candidate = load_runtime_test_config(candidate_toml, "candidate");
+        let state = Arc::new(crate::forwarding_state::ForwardingState::new(&baseline));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let apply = EvpnRuntimeReloadApply::new(
+            empty_evpn_runtime_coordinator(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(GatedRuntimeConverger {
+                entered: entered.clone(),
+                release: release.clone(),
+            }),
+            baseline.clone(),
+        )
+        .with_forwarding_state(state.clone());
+
+        for (config, installs) in [(&candidate, true), (&baseline, false)] {
+            let before = state.kernel_families();
+            let mut caller = Box::pin(apply.apply_config(config));
+            tokio::select! {
+                _ = &mut caller => panic!("apply must block before commit"),
+                () = entered.notified() => {},
+                () = tokio::time::sleep(Duration::from_secs(5)) => panic!("converge never entered"),
+            }
+            assert_eq!(
+                state.kernel_families(),
+                before,
+                "candidate must stay private"
+            );
+            release.add_permits(1);
+            caller.await.unwrap();
+            // GatedRuntimeConverger returns its borrowed permit after release.
+            release.try_acquire().unwrap().forget();
+            assert_eq!(
+                state.kernel_families(),
+                if installs {
+                    vec![(Afi::L2Vpn, Safi::Evpn)]
+                } else {
+                    Vec::new()
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn forwarding_state_evpn_failure_preserves_model_and_possible_effects() {
+    use rustbgpd_transport::LocalForwardingState;
+    use rustbgpd_wire::{Afi, Safi};
+
+    for (baseline_toml, candidate_toml) in [
+        (
+            minimal_runtime_candidate_toml(),
+            l2vni_runtime_candidate_toml(),
+        ),
+        (
+            l2vni_runtime_candidate_toml(),
+            minimal_runtime_candidate_toml(),
+        ),
+    ] {
+        let baseline = load_runtime_test_config(baseline_toml, "baseline");
+        let candidate = load_runtime_test_config(candidate_toml, "candidate");
+        let state = Arc::new(crate::forwarding_state::ForwardingState::new(&baseline));
+        let model = runtime_candidate_from_toml(baseline_toml);
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            model.instances().clone(),
+            model.ip_vrfs().clone(),
+            model.ethernet_segments().to_vec(),
+        )));
+        let apply = EvpnRuntimeReloadApply::new(
+            coordinator.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(TestRuntimeConverger::failed("injected candidate failure")),
+            baseline.clone(),
+        )
+        .with_forwarding_state(state.clone());
+
+        assert!(matches!(
+            apply.apply_config(&candidate).await,
+            Err(GrpcEvpnRuntimeApplyError::FailedPrecondition(ref message))
+                if message.contains("injected candidate failure")
+        ));
+        assert_eq!(state.kernel_families(), vec![(Afi::L2Vpn, Safi::Evpn)]);
+        assert_eq!(coordinator.lock().unwrap().model().generation().as_u64(), 1);
+        // Neither validation, no-op apply, nor an unrelated FIB publication
+        // acknowledges a reconciliation of the possible EVPN effects.
+        apply
+            .apply_request(&proto::ApplyEvpnRuntimeRequest {
+                candidate_toml: baseline_toml.into(),
+                validate_only: true,
+            })
+            .await
+            .unwrap();
+        apply.apply_config(&baseline).await.unwrap();
+        state.publish_fib(&[]);
+        assert_eq!(state.kernel_families(), vec![(Afi::L2Vpn, Safi::Evpn)]);
+
+        let recovery = EvpnRuntimeReloadApply::new(
+            coordinator,
+            Arc::new(tokio::sync::Mutex::new(())),
+            Arc::new(TestRuntimeConverger::ok()),
+            baseline,
+        )
+        .with_forwarding_state(state.clone());
+        recovery.apply_config(&candidate).await.unwrap();
+        assert_eq!(
+            state.kernel_families(),
+            if candidate.evpn_instances.is_empty() {
+                vec![]
+            } else {
+                vec![(Afi::L2Vpn, Safi::Evpn)]
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn forwarding_state_evpn_executor_loss_retains_possible_effects() {
+    use rustbgpd_transport::LocalForwardingState;
+    use rustbgpd_wire::{Afi, Safi};
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let state = Arc::new(crate::forwarding_state::ForwardingState::new(&baseline));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let converger = GatedRuntimeConverger {
+        entered: entered.clone(),
+        release: Arc::new(tokio::sync::Semaphore::new(0)),
+    };
+    let actor_state = state.clone();
+    let task = tokio::spawn(async move {
+        apply_evpn_runtime_candidate_locked(
+            runtime_candidate_from_toml(l2vni_runtime_candidate_toml()),
+            false,
+            &empty_evpn_runtime_coordinator(),
+            &converger,
+            &BgpMetrics::new(),
+            || {},
+            Some(&actor_state),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("converge entered");
+    assert!(
+        state.kernel_families().is_empty(),
+        "in-flight candidate remains private"
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(state.kernel_families(), vec![(Afi::L2Vpn, Safi::Evpn)]);
+}
+
+#[tokio::test]
+async fn forwarding_state_evpn_unsupported_candidate_has_no_effect() {
+    use rustbgpd_transport::LocalForwardingState;
+    let baseline = load_runtime_test_config(minimal_runtime_candidate_toml(), "baseline");
+    let state = Arc::new(crate::forwarding_state::ForwardingState::new(&baseline));
+    let apply = EvpnRuntimeReloadApply::new(
+        empty_evpn_runtime_coordinator(),
+        Arc::new(tokio::sync::Mutex::new(())),
+        Arc::new(TestRuntimeConverger::unsupported(
+            "injected unsupported candidate",
+        )),
+        baseline,
+    )
+    .with_forwarding_state(state.clone());
+    assert!(
+        apply
+            .apply_config(&load_runtime_test_config(
+                l2vni_runtime_candidate_toml(),
+                "candidate"
+            ))
+            .await
+            .is_err()
+    );
+    assert!(state.kernel_families().is_empty());
 }
 
 impl DaemonEvpnRuntimeConverger for GatedRuntimeConverger {
@@ -7786,6 +7974,72 @@ impl DaemonEvpnRuntimeConverger for ShapeCheckingConverger {
             }
             Ok(())
         })
+    }
+}
+
+#[tokio::test]
+async fn forwarding_state_evpn_decomposed_commit_survives_later_failure() {
+    use rustbgpd_transport::LocalForwardingState;
+    use rustbgpd_wire::{Afi, Safi};
+
+    for (baseline_toml, first_toml) in [
+        (
+            minimal_runtime_candidate_toml(),
+            l2vni_runtime_candidate_toml(),
+        ),
+        (
+            l2vni_runtime_candidate_toml(),
+            minimal_runtime_candidate_toml(),
+        ),
+    ] {
+        let baseline = load_runtime_test_config(baseline_toml, "baseline");
+        let state = crate::forwarding_state::ForwardingState::new(&baseline);
+        let model = runtime_candidate_from_toml(baseline_toml);
+        let coordinator = Arc::new(Mutex::new(rustbgpd_evpn::EvpnRuntimeCoordinator::new(
+            model.instances().clone(),
+            model.ip_vrfs().clone(),
+            model.ethernet_segments().to_vec(),
+        )));
+        let first = runtime_candidate_from_toml(first_toml);
+        let first_installs = !first.instances().is_empty();
+        let second = runtime_candidate_from_toml(two_l2vni_runtime_candidate_toml());
+        let plan = coordinator.lock().unwrap().plan_candidate(&second);
+        // Exercise two valid executor primitives directly: the first changes
+        // the committed role; the second can have effects before failing.
+        let steps = vec![
+            crate::evpn_plan_decomposer::DecomposedStep {
+                description: "commit first role change".into(),
+                candidate: first,
+            },
+            crate::evpn_plan_decomposer::DecomposedStep {
+                description: "attempt second role change".into(),
+                candidate: second,
+            },
+        ];
+        let converger = ShapeCheckingConverger::failing_on(2);
+        let error = apply_decomposed_evpn_runtime_steps(
+            steps,
+            &plan,
+            &coordinator,
+            &converger,
+            &BgpMetrics::new(),
+            Some(&state),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, GrpcEvpnRuntimeApplyError::FailedPrecondition(ref message)
+            if message.contains("step 2/2"))
+        );
+        let committed = coordinator.lock().unwrap();
+        assert_eq!(committed.model().generation().as_u64(), 2);
+        assert_eq!(!committed.model().instances().is_empty(), first_installs);
+        assert_eq!(converger.accepted_plans.lock().unwrap().len(), 2);
+        assert_eq!(
+            state.kernel_families(),
+            vec![(Afi::L2Vpn, Safi::Evpn)],
+            "a committed removal cannot hide the failed re-add's possible effects"
+        );
     }
 }
 

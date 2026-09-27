@@ -704,7 +704,7 @@ impl PeerManager {
             )));
         }
 
-        let (transport, label, peer_group, import_policy, export_policy, next_config) =
+        let (mut transport, label, peer_group, import_policy, export_policy, next_config) =
             if sync_config_snapshot {
                 let mut next_config = self.current_config.clone();
                 apply_config_event(
@@ -749,6 +749,9 @@ impl PeerManager {
                 )
             };
 
+        transport.local_forwarding_state = Some(rustbgpd_transport::ForwardingStateSource::Live(
+            self.local_forwarding_state.clone(),
+        ));
         let address = config.address;
         let remote_asn = config.remote_asn;
         let description = label;

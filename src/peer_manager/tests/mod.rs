@@ -1709,6 +1709,7 @@ mod config_transaction;
 mod dynamic_ranges;
 mod events;
 mod export_cohorts;
+mod forwarding_state;
 mod import_roster;
 mod inbound_admission;
 mod lifecycle;

@@ -208,6 +208,10 @@ impl FibRuntimeHandle {
 /// when no `[[fib_tables]]` are configured or the platform has no
 /// Linux route primitive.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "actor startup wires runtime channels, shutdown, and shared forwarding authority"
+)]
 pub fn spawn(
     config: FibRuntimeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -216,6 +220,7 @@ pub fn spawn(
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
+    forwarding_state: Option<std::sync::Arc<crate::forwarding_state::ForwardingState>>,
 ) -> Option<FibRuntimeHandle> {
     if !config.enabled() {
         return None;
@@ -233,6 +238,7 @@ pub fn spawn(
                 status_tx,
                 event_tx,
                 shutdown,
+                forwarding_state,
             )),
             Err(e) => {
                 metrics.record_fib_kernel_failure("setup");
@@ -256,6 +262,7 @@ fn spawn_with_fib<F>(
     status_tx: watch::Sender<Vec<FibRuntimeStatus>>,
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     shutdown: CancellationToken,
+    forwarding_state: Option<std::sync::Arc<crate::forwarding_state::ForwardingState>>,
 ) -> FibRuntimeHandle
 where
     F: UnicastFib + Send + 'static,
@@ -273,6 +280,7 @@ where
             event_tx,
             cmd_rx,
             task_shutdown,
+            forwarding_state,
         )
         .await;
     });
@@ -299,6 +307,7 @@ async fn run_loop<F>(
     event_tx: broadcast::Sender<FibRuntimeEvent>,
     mut cmd_rx: mpsc::Receiver<FibRuntimeCommand>,
     shutdown: CancellationToken,
+    forwarding_state: Option<std::sync::Arc<crate::forwarding_state::ForwardingState>>,
 ) where
     F: UnicastFib,
 {
@@ -351,6 +360,9 @@ async fn run_loop<F>(
             maybe_cmd = cmd_rx.recv(), if cmd_open => {
                 match maybe_cmd {
                     Some(FibRuntimeCommand::OwnedReplaceTables { tables, reply }) => {
+                        if let Some(state) = &forwarding_state {
+                            state.record_fib_attempt(&tables);
+                        }
                         // Tentatively swap to the new desired set, then make its
                         // table signatures durable BEFORE the reconcile can
                         // install anything into a candidate table. This also
@@ -4326,6 +4338,7 @@ mod tests {
             status_tx,
             event_tx,
             CancellationToken::new(),
+            None,
         );
         assert!(handle.is_none());
     }
@@ -5155,6 +5168,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwarding_state_fenced_actor_keeps_compensated_candidate_family() {
+        const CHILD_ENV: &str = "RUSTBGPD_FIB_FORWARDING_FENCE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert_fenced_actor_forwarding_union().await;
+            println!("forwarding fence actor proof complete");
+            // The real dependency watchdog retains a fenced owner and exits
+            // after its grace period. Contain it in this test subprocess.
+            std::process::exit(0);
+        }
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "fib_runtime::tests::forwarding_state_fenced_actor_keeps_compensated_candidate_family",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("forwarding fence subprocess timed out")
+        .expect("forwarding fence subprocess failed to start");
+        assert!(
+            output.status.success(),
+            "forwarding fence subprocess failed: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("forwarding fence actor proof complete"),
+            "subprocess must execute the selected regression, not pass with zero tests"
+        );
+    }
+
+    async fn assert_fenced_actor_forwarding_union() {
+        use rustbgpd_api::health_probe::DaemonGate;
+        use rustbgpd_api::runtime_config_settlement::{
+            RuntimeConfigFenceReason, RuntimeConfigOperationKind, RuntimeConfigSettlementWatchdog,
+        };
+        use rustbgpd_api::server::RuntimeConfigCoordinator;
+        use rustbgpd_transport::LocalForwardingState;
+
+        let prior = vec![table("edge", 1000, 200, &["ipv4_unicast"])];
+        let candidate = vec![table("edge", 1000, 200, &["ipv6_unicast"])];
+        let mut startup: crate::config::Config = toml::from_str(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\
+             [global.telemetry]\nlog_format = \"json\"",
+        )
+        .unwrap();
+        startup.fib_tables.clone_from(&prior);
+        let watchdog = RuntimeConfigSettlementWatchdog::new();
+        let state = Arc::new(
+            crate::forwarding_state::ForwardingState::new(&startup)
+                .with_settlement(watchdog.clone()),
+        );
+        let confirmed = crate::forwarding_state::ForwardingState::new(&startup)
+            .with_settlement(watchdog.clone());
+        confirmed.record_fib_attempt(&candidate);
+        confirmed.publish_fib(&prior);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let permit = coordinator.acquire().await.unwrap();
+        let (operation, _executor_guard) = watchdog.register_owned(
+            RuntimeConfigOperationKind::FibSet,
+            coordinator,
+            permit,
+            DaemonGate::new(),
+            None,
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
+        let (rib_tx, _count, _events, _candidates) = rib_with_events(vec![
+            route(v4(24), ip("192.0.2.1")),
+            route(v6(64), ip("2001:db8::1")),
+        ]);
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let handle = spawn_with_fib(
+            config_with(prior.clone()),
+            rib_tx.clone(),
+            rib_tx,
+            FakeFib::default(),
+            metrics(),
+            status_tx,
+            event_tx,
+            CancellationToken::new(),
+            Some(state.clone()),
+        );
+        for tables in [candidate, prior.clone()] {
+            let (reply, response) = oneshot::channel();
+            handle
+                .command_sender()
+                .send(FibRuntimeCommand::OwnedReplaceTables { tables, reply })
+                .await
+                .unwrap();
+            assert_eq!(response.await.unwrap(), OwnedFibReplaceOutcome::Applied);
+            assert_eq!(state.kernel_families(), vec![(Afi::Ipv4, Safi::Unicast)]);
+        }
+        let (reply, response) = oneshot::channel();
+        handle
+            .command_sender()
+            .send(FibRuntimeCommand::GetTables { reply })
+            .await
+            .unwrap();
+        assert_eq!(response.await.unwrap(), prior);
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::AcknowledgementLost));
+        assert_eq!(
+            confirmed.kernel_families(),
+            vec![(Afi::Ipv4, Safi::Unicast)],
+            "confirmed rollback clears candidate effects before a later fence"
+        );
+        assert_eq!(
+            state.kernel_families(),
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            "uncertain compensation must retain a family absent from current actor tables"
+        );
+        state.publish_fib(&[]);
+        assert_eq!(
+            state.kernel_families(),
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            "late publication after the terminal fence cannot erase possible effects"
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn replace_tables_pre_apply_bail_restores_previous_owned_state_signature() {
         // A table replacement whose reconcile bails before the apply phase (kernel
         // dump failure here) leaves `owned` untouched. The candidate signatures
@@ -5182,6 +5324,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown.clone(),
+            None,
         );
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -5443,6 +5586,7 @@ mod tests {
             status_tx,
             event_tx,
             CancellationToken::new(),
+            None,
         );
 
         let mut capped = tables[0].clone();
@@ -5513,6 +5657,7 @@ mod tests {
             status_tx,
             event_tx,
             CancellationToken::new(),
+            None,
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             while status_rx.borrow().is_empty() {
@@ -5614,6 +5759,7 @@ mod tests {
             status_tx,
             event_tx,
             CancellationToken::new(),
+            None,
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             while status_rx.borrow().is_empty() {
@@ -5813,6 +5959,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown,
+            None,
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             while status_rx.borrow().is_empty() {
@@ -5862,6 +6009,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown.clone(),
+            None,
         );
 
         tokio::task::yield_now().await;
@@ -5930,6 +6078,7 @@ mod tests {
             status_tx,
             event_tx,
             CancellationToken::new(),
+            None,
         );
 
         let mut outbound = Vec::new();
@@ -7009,6 +7158,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown.clone(),
+            None,
         );
 
         tokio::task::yield_now().await;
@@ -7072,6 +7222,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown.clone(),
+            None,
         );
 
         tokio::task::yield_now().await;
@@ -7283,6 +7434,7 @@ mod tests {
             status_tx,
             event_tx,
             shutdown,
+            None,
         );
 
         tokio::time::timeout(Duration::from_secs(1), async {

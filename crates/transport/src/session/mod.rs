@@ -922,12 +922,37 @@ impl PeerSession {
 
     fn apply_local_gr_restart_state(&mut self, open: &mut rustbgpd_wire::OpenMessage) {
         let restart_state = self.local_gr_restart_active();
+        // One committed snapshot for both capabilities, even if roles change
+        // concurrently. This does not depend on the local restart-state bit.
+        let kernel_families = self
+            .config
+            .local_forwarding_state
+            .as_ref()
+            .map(crate::ForwardingStateSource::kernel_families);
         for capability in &mut open.capabilities {
-            if let Capability::GracefulRestart {
-                restart_state: r, ..
-            } = capability
-            {
-                *r = restart_state;
+            match capability {
+                Capability::GracefulRestart {
+                    restart_state: r,
+                    families,
+                    ..
+                } => {
+                    *r = restart_state;
+                    if let Some(kernel) = &kernel_families {
+                        for family in families {
+                            family.forwarding_preserved =
+                                !kernel.contains(&(family.afi, family.safi));
+                        }
+                    }
+                }
+                Capability::LongLivedGracefulRestart(families) => {
+                    if let Some(kernel) = &kernel_families {
+                        for family in families {
+                            family.forwarding_preserved =
+                                !kernel.contains(&(family.afi, family.safi));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }

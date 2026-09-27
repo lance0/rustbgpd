@@ -60,6 +60,8 @@ const FIB_CHANNEL_CLOSED: &str = "FIB reconciler command channel closed";
 
 /// Dependencies for the FIB-table control hook, wired from `main.rs`.
 pub struct FibTableControlDeps {
+    /// Committed forwarding roles sampled by existing sessions at OPEN emission.
+    pub local_forwarding_state: Option<Arc<crate::forwarding_state::ForwardingState>>,
     /// FIB reconciler command channel. `None` when the reconciler did not spawn
     /// (no `[[fib_tables]]` at startup, or non-Linux / netlink setup failure).
     pub fib_cmd_tx: Option<mpsc::Sender<FibRuntimeCommand>>,
@@ -228,6 +230,7 @@ async fn mutate(
     let operation_name = mutation.operation_label();
     let peer_mgr_tx = deps.peer_mgr_tx.clone();
     let config_mutation_gate = deps.config_mutation_gate.clone();
+    let local_forwarding_state = deps.local_forwarding_state.clone();
     let body = move |owned: Option<OwnedRuntimeConfigOperation>| async move {
         owned_fib_mutation_body(
             owned,
@@ -237,6 +240,7 @@ async fn mutate(
             peer_mgr_tx,
             mutation,
             persist_permit,
+            local_forwarding_state,
         )
         .await
     };
@@ -517,7 +521,8 @@ fn response(candidate: &[FibTableConfig]) -> proto::ListFibTablesResponse {
 
 #[expect(
     clippy::too_many_lines,
-    reason = "linear typed settlement matrix keeps every authority transition visible"
+    clippy::too_many_arguments,
+    reason = "linear typed settlement matrix keeps every authority transition and its explicit dependencies visible"
 )]
 async fn owned_fib_mutation_body(
     owned: Option<OwnedRuntimeConfigOperation>,
@@ -527,6 +532,7 @@ async fn owned_fib_mutation_body(
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     mutation: Mutation,
     persist_permit: mpsc::OwnedPermit<ConfigEvent>,
+    local_forwarding_state: Option<Arc<crate::forwarding_state::ForwardingState>>,
 ) -> OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError> {
     if let Some(gate) = config_mutation_gate
         && let Err(error) = gate(operation_name).await
@@ -624,6 +630,9 @@ async fn owned_fib_mutation_body(
     }
     match staged.commit().await {
         StagedFibCommitOutcome::Settled(ConfigPersistCommitOutcome::PublishedDurable) => {
+            if let Some(state) = &local_forwarding_state {
+                state.publish_fib(&candidate);
+            }
             OwnedRuntimeConfigOutcome::PublishedDurable(response(&candidate))
         }
         StagedFibCommitOutcome::Settled(ConfigPersistCommitOutcome::PublicationAmbiguous(
@@ -929,6 +938,7 @@ mod tests {
         });
         let control = make_owned_fib_table_control_fn(
             FibTableControlDeps {
+                local_forwarding_state: None,
                 fib_cmd_tx,
                 peer_mgr_tx,
                 rib_tx: None,
@@ -956,6 +966,7 @@ mod tests {
         let coordinator = RuntimeConfigCoordinator::new();
         coordinator.close();
         let deps = Arc::new(FibTableControlDeps {
+            local_forwarding_state: None,
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
             rib_tx: None,
@@ -1025,6 +1036,7 @@ mod tests {
         let (fib_tx, mut fib_rx) = mpsc::channel(QUEUE_DEPTH);
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(1);
         let deps = Arc::new(FibTableControlDeps {
+            local_forwarding_state: None,
             fib_cmd_tx: Some(fib_tx.clone()),
             peer_mgr_tx,
             rib_tx: None,
@@ -1131,6 +1143,7 @@ families = ["ipv4_unicast"]
 
         let (peer_tx, _peer_rx) = mpsc::channel(1);
         let deps = Arc::new(FibTableControlDeps {
+            local_forwarding_state: None,
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
             rib_tx: None,
@@ -1296,6 +1309,7 @@ families = ["ipv4_unicast"]
         });
 
         let deps = Arc::new(FibTableControlDeps {
+            local_forwarding_state: None,
             fib_cmd_tx: Some(fib_tx),
             peer_mgr_tx: peer_tx,
             rib_tx: None,
@@ -1428,6 +1442,10 @@ families = ["ipv4_unicast"]
 
     type PersistOutcome = ConfigPersistCommitOutcome;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one owned mutation fixture coordinates FIB, peer-manager, persistence, and role publication assertions"
+    )]
     async fn run_owned_body(
         fib_behavior: FibBehavior,
         commit_behavior: CommitBehavior,
@@ -1436,8 +1454,18 @@ families = ["ipv4_unicast"]
         OwnedRuntimeConfigOutcome<proto::ListFibTablesResponse, OwnedFibControlError>,
         usize,
     ) {
-        let original = table("edge", 1000);
-        let candidate = table("core", 1001);
+        use rustbgpd_transport::LocalForwardingState;
+        use rustbgpd_wire::{Afi, Safi};
+        let mut original = table("edge", 1000);
+        original.families = vec!["ipv4_unicast".into()];
+        let mut candidate = table("core", 1001);
+        candidate.families = vec!["ipv6_unicast".into()];
+        let mut config: Config = toml::from_str(
+            "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"",
+        ).unwrap();
+        config.fib_tables = vec![original.clone()];
+        let forwarding = Arc::new(crate::forwarding_state::ForwardingState::new(&config));
+        let before_commit = forwarding.clone();
         let (config_tx, mut config_rx) = mpsc::channel(1);
         let permit = config_tx.reserve_owned().await.unwrap();
         tokio::spawn(async move {
@@ -1455,6 +1483,11 @@ families = ["ipv4_unicast"]
                 return;
             }
             let Ok(reply) = commit.await else { return };
+            assert_eq!(
+                before_commit.kernel_families(),
+                vec![(Afi::Ipv4, Safi::Unicast)],
+                "runtime and peer staging cannot publish candidate role before persistence"
+            );
             match commit_behavior {
                 CommitBehavior::Applied => reply.send(PersistOutcome::PublishedDurable).unwrap(),
                 CommitBehavior::Rejected => reply
@@ -1529,8 +1562,19 @@ families = ["ipv4_unicast"]
             peer_tx,
             Mutation::Upsert(candidate),
             permit,
+            Some(forwarding.clone()),
         )
         .await;
+        let expected = if matches!(outcome, OwnedRuntimeConfigOutcome::PublishedDurable(_)) {
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+        } else {
+            vec![(Afi::Ipv4, Safi::Unicast)]
+        };
+        assert_eq!(
+            forwarding.kernel_families(),
+            expected,
+            "only acknowledged durable commit publishes the new role"
+        );
         let count = rollback_count.load(std::sync::atomic::Ordering::SeqCst);
         (outcome, count)
     }
@@ -1676,6 +1720,7 @@ families = ["ipv4_unicast"]
                             peer_tx,
                             Mutation::Upsert(table("core", 1001)),
                             permit,
+                            None,
                         )
                     },
                 )

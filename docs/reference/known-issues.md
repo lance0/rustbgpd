@@ -459,11 +459,13 @@ resolved.
   iBGP peers receive them per the §4.6 intra-AS exception with NO_EXPORT
   and LOCAL_PREF 0, LLGR_STALE community intact). Other families such
   as VPN FlowSpec (AFI 1/2, SAFI 134) are not implemented.
-- **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
+- **Graceful Restart: no kernel forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,
-  `forwarding_preserved` is always false because rustbgpd does not persist
-  route/FIB ownership across restart or verify that forwarding state survived.
+  `forwarding_preserved` stays false for families with configured kernel
+  installers because rustbgpd does not persist route/FIB ownership across
+  restart or verify that forwarding state survived. Control-plane-only
+  families advertise F=1 under the [role rules](rfc-notes.md#3--graceful-restart-capability).
   ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
   as foreign rather than adopted.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability

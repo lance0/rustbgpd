@@ -456,6 +456,8 @@ impl PeerManager {
     /// just-applied set as pending.
     pub(super) fn set_fib_tables_snapshot(&mut self, tables: &[FibTableSnapshot]) {
         self.current_config.fib_tables = tables.iter().map(fib_table_snapshot_to_config).collect();
+        self.local_forwarding_state
+            .publish_fib(&self.current_config.fib_tables);
     }
 }
 
