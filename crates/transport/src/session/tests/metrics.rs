@@ -512,3 +512,52 @@ async fn reconnect_opens_a_fresh_exactly_once_down_epoch() {
         "reconnect epochs remain classified",
     );
 }
+
+#[tokio::test]
+async fn role_mismatch_labels_unrecognized_remote_role_apart_from_absent() {
+    use rustbgpd_fsm::ReceivedRole;
+    use rustbgpd_wire::BgpRole;
+
+    let metrics = BgpMetrics::new();
+    let (mut session, _rib_rx) =
+        make_test_session_with_metrics_and_identity(metrics.clone(), SessionIdentity::primary(1));
+    for remote_role in [
+        ReceivedRole::Absent,
+        ReceivedRole::Unrecognized(Bytes::from_static(&[7])),
+        ReceivedRole::Unrecognized(Bytes::from_static(&[1, 2])),
+        ReceivedRole::Assigned(BgpRole::Provider),
+    ] {
+        session
+            .execute_actions(vec![Action::RoleMismatchObserved {
+                local_role: Some(BgpRole::Customer),
+                remote_role,
+            }])
+            .await;
+    }
+
+    let mut rows: Vec<_> = counter_samples(&metrics, "bgp_role_mismatch_total")
+        .into_iter()
+        .map(|(labels, value)| {
+            (
+                labels["peer"].clone(),
+                labels["local_role"].clone(),
+                labels["remote_role"].clone(),
+                value,
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.2.cmp(&b.2));
+    let expected = [
+        ("10.0.0.2", "customer", "none", 1.0),
+        ("10.0.0.2", "customer", "provider", 1.0),
+        ("10.0.0.2", "customer", "unrecognized", 2.0),
+    ];
+    assert_eq!(rows.len(), expected.len(), "rows: {rows:?}");
+    for (row, (peer, local, remote, value)) in rows.iter().zip(expected) {
+        assert_eq!(
+            (row.0.as_str(), row.1.as_str(), row.2.as_str()),
+            (peer, local, remote)
+        );
+        assert_sample(row.3, value, format_args!("remote_role={remote}"));
+    }
+}

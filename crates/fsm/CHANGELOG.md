@@ -23,8 +23,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   without a local Role. Without a local Role, a single unassigned or
   malformed Role capability is still accepted and `remote_role` is `None`.
   `Action::RoleMismatchObserved` reports the first assigned Role value as
-  `remote_role`, and `None` only when the OPEN carries no assigned Role
-  value.
+  `remote_role`.
+
+- **Breaking:** `Action::RoleMismatchObserved::remote_role` is now the new
+  `#[non_exhaustive]` enum `ReceivedRole` instead of `Option<BgpRole>`, so it
+  can tell a missing Role capability (`Absent`) from Role capabilities that
+  carry only unassigned or wrong-length values (`Unrecognized`, holding the
+  first capability's raw value bytes). `Assigned(role)` reports the first
+  assigned Role value, including in a mixed OPEN such as `[Customer, 7]`.
 
 ## 0.8.2 - 2026-09-20
 

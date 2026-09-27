@@ -3,10 +3,11 @@
 use bytes::Bytes;
 use std::sync::Arc;
 
+use rustbgpd_wire::constants::capability_code;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode, open_subcode};
 use rustbgpd_wire::{Capability, OpenMessage};
 
-use crate::action::{Action, NegotiatedSession, TimerType};
+use crate::action::{Action, NegotiatedSession, ReceivedRole, TimerType};
 use crate::config::PeerConfig;
 use crate::event::Event;
 use crate::negotiation::validate_open;
@@ -306,19 +307,12 @@ impl Session {
                     // Observability hook for RFC 9234 Role-Mismatch (2/11):
                     // emit a typed action so transport can label
                     // bgp_role_mismatch_total{peer, local_role, remote_role}.
-                    // For OPENs carrying duplicate Role caps, the FIRST Role
-                    // value is reported as remote_role — sufficient for the
-                    // bounded label set; the negotiator already rejected.
                     if notification.code == NotificationCode::OpenMessage
                         && notification.subcode == open_subcode::ROLE_MISMATCH
                     {
-                        let remote_role = open.capabilities.iter().find_map(|c| match c {
-                            Capability::Role { role } => Some(*role),
-                            _ => None,
-                        });
                         actions.push(Action::RoleMismatchObserved {
                             local_role: self.config.local_role,
-                            remote_role,
+                            remote_role: received_role(&open),
                         });
                     }
                     actions.push(Action::SendNotification(notification));
@@ -659,6 +653,27 @@ impl Session {
         actions.push(self.transition_to(SessionState::Idle));
         actions
     }
+}
+
+/// Classify the Role capabilities of a rejected OPEN for
+/// [`Action::RoleMismatchObserved`]. The first assigned Role wins even when
+/// unassigned values accompany it; otherwise the first code-9 capability's
+/// raw value is reported as unrecognized.
+fn received_role(open: &OpenMessage) -> ReceivedRole {
+    let mut unrecognized = None;
+    for capability in &open.capabilities {
+        match capability {
+            Capability::Role { role } => return ReceivedRole::Assigned(*role),
+            Capability::Unknown {
+                code: capability_code::BGP_ROLE,
+                data,
+            } => {
+                unrecognized.get_or_insert_with(|| data.clone());
+            }
+            _ => {}
+        }
+    }
+    unrecognized.map_or(ReceivedRole::Absent, ReceivedRole::Unrecognized)
 }
 
 #[cfg(test)]
@@ -1020,7 +1035,7 @@ mod tests {
                 a,
                 Action::RoleMismatchObserved {
                     local_role: Some(rustbgpd_wire::BgpRole::Provider),
-                    remote_role: Some(rustbgpd_wire::BgpRole::Provider),
+                    remote_role: ReceivedRole::Assigned(rustbgpd_wire::BgpRole::Provider),
                 }
             )),
             "expected RoleMismatchObserved with both roles; got {actions:?}"
@@ -1050,9 +1065,9 @@ mod tests {
     }
 
     #[test]
-    fn opensent_role_mismatch_strict_no_remote_role_reports_none_remote() {
+    fn opensent_role_mismatch_strict_no_remote_role_reports_absent_remote() {
         // Strict mode: we configured Customer; peer didn't advertise Role.
-        // The observer action should label remote_role as None.
+        // The observer action reports the remote Role as absent.
         let mut cfg = test_config();
         cfg.local_role = Some(rustbgpd_wire::BgpRole::Customer);
         cfg.strict_role = true;
@@ -1070,48 +1085,70 @@ mod tests {
                 a,
                 Action::RoleMismatchObserved {
                     local_role: Some(rustbgpd_wire::BgpRole::Customer),
-                    remote_role: None,
+                    remote_role: ReceivedRole::Absent,
                 }
             )),
-            "strict-mode mismatch must report remote_role=None; got {actions:?}"
+            "strict-mode mismatch must report an absent remote Role; got {actions:?}"
         );
     }
 
     #[test]
-    fn opensent_unassigned_remote_role_is_a_mismatch_reported_as_none() {
-        // Non-strict: an unassigned Role value (7) is still a received Role
-        // that matches no Table 2 pair, so the OPEN is refused with 2/11.
-        let mut cfg = test_config();
-        cfg.local_role = Some(rustbgpd_wire::BgpRole::Customer);
-
-        let mut s = Session::new(cfg);
-        s.handle_event(Event::ManualStart);
-        s.handle_event(Event::TcpConnectionConfirmed);
-
-        let mut open = peer_open();
-        open.capabilities.push(Capability::Unknown {
+    fn opensent_unassigned_remote_role_is_a_mismatch_reported_as_unrecognized() {
+        // Non-strict: a Role capability with an unassigned value (7) or a
+        // wrong length is still a received Role that matches no Table 2
+        // pair, so the OPEN is refused with 2/11 and the observer action
+        // carries the raw value instead of reporting the Role as absent.
+        // A mixed OPEN keeps reporting its assigned Role.
+        let customer = Capability::Role {
+            role: rustbgpd_wire::BgpRole::Customer,
+        };
+        let raw = |data: &'static [u8]| Capability::Unknown {
             code: 9,
-            data: bytes::Bytes::from_static(&[7]),
-        });
-        let actions = s.handle_event(Event::OpenReceived(open));
+            data: Bytes::from_static(data),
+        };
+        let cases = [
+            (
+                vec![raw(&[7])],
+                ReceivedRole::Unrecognized(Bytes::from_static(&[7])),
+            ),
+            (
+                vec![raw(&[1, 2])],
+                ReceivedRole::Unrecognized(Bytes::from_static(&[1, 2])),
+            ),
+            (vec![raw(&[])], ReceivedRole::Unrecognized(Bytes::new())),
+            (
+                vec![raw(&[7]), customer.clone()],
+                ReceivedRole::Assigned(rustbgpd_wire::BgpRole::Customer),
+            ),
+        ];
+        for (role_caps, expected) in cases {
+            let mut cfg = test_config();
+            cfg.local_role = Some(rustbgpd_wire::BgpRole::Customer);
 
-        assert_eq!(s.state(), SessionState::Idle);
-        assert!(
-            has_action(&actions, |a| matches!(
+            let mut s = Session::new(cfg);
+            s.handle_event(Event::ManualStart);
+            s.handle_event(Event::TcpConnectionConfirmed);
+
+            let mut open = peer_open();
+            open.capabilities.extend(role_caps);
+            let actions = s.handle_event(Event::OpenReceived(open));
+
+            assert_eq!(s.state(), SessionState::Idle);
+            assert!(
+                has_action(&actions, |a| *a
+                    == Action::RoleMismatchObserved {
+                        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+                        remote_role: expected.clone(),
+                    }),
+                "expected remote_role {expected:?}; got {actions:?}"
+            );
+            assert!(has_action(&actions, |a| matches!(
                 a,
-                Action::RoleMismatchObserved {
-                    local_role: Some(rustbgpd_wire::BgpRole::Customer),
-                    remote_role: None,
-                }
-            )),
-            "unassigned role must report remote_role=None; got {actions:?}"
-        );
-        assert!(has_action(&actions, |a| matches!(
-            a,
-            Action::SendNotification(n)
-                if n.code == NotificationCode::OpenMessage
-                    && n.subcode == open_subcode::ROLE_MISMATCH
-        )));
+                Action::SendNotification(n)
+                    if n.code == NotificationCode::OpenMessage
+                        && n.subcode == open_subcode::ROLE_MISMATCH
+            )));
+        }
     }
 
     #[test]

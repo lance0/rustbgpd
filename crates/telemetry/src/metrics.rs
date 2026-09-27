@@ -1947,7 +1947,9 @@ impl BgpMetrics {
                 "bgp_role_mismatch_total",
                 "RFC 9234 OPEN-time Role-Mismatch rejections (NOTIFICATION 2/11). \
                  local_role + remote_role ∈ {provider, route_server, \
-                 route_server_client, customer, peer, none}.",
+                 route_server_client, customer, peer, none}; remote_role is \
+                 unrecognized when the OPEN carries only unassigned or \
+                 wrong-length Role values.",
             ),
             &["peer", "local_role", "remote_role"],
         )

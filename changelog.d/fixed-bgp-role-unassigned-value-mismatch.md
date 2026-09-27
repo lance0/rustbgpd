@@ -11,6 +11,5 @@
   with 2/11, with or without a local `role`. **Operator-visible:** such a
   session no longer establishes. `bgp_role_mismatch_total` reports the first
   assigned Role in the OPEN as `remote_role`, so Customer plus 7 counts as
-  `remote_role="customer"`; it uses `remote_role="none"` only when the OPEN
-  carries no assigned Role value. See
+  `remote_role="customer"`. See
   [RFC notes](../docs/reference/rfc-notes.md#rfc-9234--roles-and-only-to-customer).

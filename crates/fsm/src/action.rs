@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use rustbgpd_wire::{
     AddPathMode, Afi, BgpRole, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
     OpenMessage, Safi,
@@ -191,12 +192,31 @@ pub enum Action {
     RoleMismatchObserved {
         /// Locally configured role (`None` if we didn't advertise Role).
         local_role: Option<BgpRole>,
-        /// The first assigned Role value in the peer's OPEN, or `None` when
-        /// the OPEN carries no assigned Role value (no Role capability, or
-        /// only unassigned or wrong-length ones). An OPEN with Customer and
-        /// an unassigned value reports `Some(Customer)`.
-        remote_role: Option<BgpRole>,
+        /// What the peer's OPEN carried in its Role capabilities: nothing,
+        /// an assigned Role, or only unassigned or wrong-length values.
+        /// When the OPEN carries an assigned Role value, the first one is
+        /// reported even if unassigned values accompany it, so
+        /// `[Customer, 7]` reports `Assigned(Customer)`.
+        remote_role: ReceivedRole,
     },
+}
+
+/// The Role capability content of a peer's OPEN, as reported by
+/// [`Action::RoleMismatchObserved`].
+///
+/// `#[non_exhaustive]`: a later release may distinguish further cases, so
+/// matches outside this crate need a wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReceivedRole {
+    /// The OPEN carries no Role capability (code 9).
+    Absent,
+    /// The first assigned RFC 9234 Role value in the OPEN.
+    Assigned(BgpRole),
+    /// The OPEN carries Role capabilities, but none with an assigned value:
+    /// each has an unassigned value (5-255) or a length other than 1. Holds
+    /// the raw value bytes of the first one.
+    Unrecognized(Bytes),
 }
 
 #[cfg(test)]
@@ -261,7 +281,7 @@ mod tests {
             },
             Action::RoleMismatchObserved {
                 local_role: None,
-                remote_role: None,
+                remote_role: ReceivedRole::Absent,
             },
         ] {
             let name = executor_variant_name(&action);
