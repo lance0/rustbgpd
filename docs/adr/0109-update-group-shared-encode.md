@@ -135,3 +135,43 @@ framing, and no route can be skipped: the fallback re-encodes the full
 envelope from index 0. An encoder whose own writer
 saturates keeps publishing for the group; its own teardown policy has
 already run inside the failed enqueue.
+
+## Amendment (2026-09-27): mixed withdrawal and announcement passes keep the shared encode
+
+The Consequences above scoped the incremental delta fanout out, and the
+fallback rule sent any envelope carrying more than unicast announcements to
+the per-session encode. Live grouped distribution passes later gained the
+shared encode cell too, which left one gap: a pass that mixes unicast
+withdrawals with announcements. A member failover is the common case. Some of
+the failed member's prefixes move to an alternate source, and the rest have no
+alternate. The RIB already attached the shared cell to those envelopes and
+appended the group's withdrawals, but the session fell back on any withdrawal.
+Every member therefore re-prepared and re-encoded the shared announce list
+itself.
+
+Such passes now keep the shared encode:
+
+- **Withdrawals stay per member and precede the shared announcements.** A
+  member sends its unicast withdrawals through the ordinary encoder first,
+  then streams the shared announce chunks. This keeps the per-session path's
+  withdrawals-before-announcements order. An elected encoder with withdrawals
+  still encodes and publishes the whole inventory at election. It defers only
+  its own copy, which it streams from the first chunk once its withdrawals are
+  admitted.
+- **Fallback resumes at the announcements.** If the stream fails after a
+  member's withdrawals went out, the ordinary encode continues from the
+  announce phase. Withdrawals are never resent after an announcement, and a
+  shared chunk already sent may repeat as before.
+- **Other payload kinds are unchanged.** An envelope carrying anything beyond
+  unicast withdrawals and announcements still takes the per-session path.
+  This covers other families, End-of-RIB and refresh markers, OTC-blocked
+  routes, and refresh requests.
+- **New winning sources stay per member.** A member whose own route becomes
+  the new best path must receive withdrawals for the prefixes it now owns.
+  The RIB therefore excludes it from the shared emission and walks the pass's
+  deltas for it individually. That RIB-side walk is unchanged and remains
+  out of scope here.
+
+Add-Path members remain outside update-groups (ADR-0099), and a member whose
+profile fails the wire-equivalence proof still falls back to its full
+per-session encode, withdrawals included.
