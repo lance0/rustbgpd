@@ -1,5 +1,6 @@
-//! Structured JSON logging via `tracing`.
+//! Structured JSON or human-readable text logging via `tracing`.
 
+use std::io::IsTerminal as _;
 use std::sync::OnceLock;
 
 use tracing_subscriber::filter::{Directive, EnvFilter};
@@ -120,8 +121,8 @@ fn append_directives(
     Ok(filter)
 }
 
-/// Initialize the global tracing subscriber with JSON output and
-/// `RUST_LOG` env-filter.
+/// Initialize the global tracing subscriber with JSON output (or
+/// human-readable text when `json` is false) and `RUST_LOG` env-filter.
 ///
 /// Call once at startup.  Defaults to `info` level if `RUST_LOG` is not
 /// set.
@@ -142,7 +143,7 @@ fn append_directives(
 /// unparseable `RUST_LOG` directive is not an error: it is dropped, the
 /// valid directives are kept, and one warning line naming it and its parse
 /// error is printed to stderr.
-pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
+pub fn init_logging(extra_directives: &[String], json: bool) -> Result<(), LoggingError> {
     let (filter, report) = build_filter(rust_log_env().as_deref(), extra_directives)?;
     // Reported on stderr rather than as an event: a `warn` would pass
     // through the very filter being reported on, and a `RUST_LOG=error`
@@ -151,24 +152,34 @@ pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
         eprintln!("warning: {report}");
     }
 
-    let builder = fmt()
-        .json()
-        .with_env_filter(filter)
-        .with_target(true)
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_filter_reloading();
-    let handle = builder.reload_handle();
-    builder
-        .try_init()
-        .map_err(|e| LoggingError::AlreadyInitialized(e.to_string()))?;
-
-    // Only publish the reload hook after the subscriber actually installed,
-    // so a failed double-init never overwrites a live handle. `set` failing
-    // means init_logging ran twice — the first handle stays authoritative.
-    let _ = RELOAD_HANDLE.set(Box::new(move |filter| {
-        handle.reload(filter).map_err(|e| e.to_string())
-    }));
+    // The two formats produce different builder types, so the shared
+    // install steps are spelled once here.
+    macro_rules! install {
+        ($builder:expr) => {{
+            let builder = $builder
+                .with_env_filter(filter)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_thread_names(false)
+                .with_filter_reloading();
+            let handle = builder.reload_handle();
+            builder
+                .try_init()
+                .map_err(|e| LoggingError::AlreadyInitialized(e.to_string()))?;
+            // Only publish the reload hook after the subscriber actually
+            // installed, so a failed double-init never overwrites a live
+            // handle. `set` failing means init_logging ran twice — the
+            // first handle stays authoritative.
+            let _ = RELOAD_HANDLE.set(Box::new(move |filter| {
+                handle.reload(filter).map_err(|e| e.to_string())
+            }));
+        }};
+    }
+    if json {
+        install!(fmt().json());
+    } else {
+        install!(fmt().with_ansi(std::io::stdout().is_terminal()));
+    }
     Ok(())
 }
 
@@ -242,7 +253,7 @@ mod tests {
         // We can't reliably test init_logging() in unit tests because the
         // global subscriber may already be set by another test. Instead,
         // verify that calling it produces a well-formed Result.
-        let result = init_logging(&[]);
+        let result = init_logging(&[], true);
         // Either Ok (first call) or Err (already set) — neither should panic.
         assert!(result.is_ok() || result.is_err());
     }

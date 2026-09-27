@@ -41,7 +41,8 @@ error: invalid hold_time 2: must be 0 or >= 3
 
 The daemon exits with code 1 — it never starts with an invalid config.
 
-On success, structured JSON logs go to stdout. If `prometheus_addr` is
+On success, logs go to stdout: structured JSON under `log_format = "json"`,
+human-readable lines under `log_format = "text"`. If `prometheus_addr` is
 configured, use `GET /readyz` on that listener as the orchestrator readiness
 signal; it returns ready once the PeerManager answers an O(1) actor ping and
 the RIB actor answers its O(1) Loc-RIB count query within one shared 200 ms

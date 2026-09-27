@@ -613,7 +613,7 @@ Required. Configures observability and management endpoints.
 | Field             | Type   | Required | Default | Description                        |
 |-------------------|--------|----------|---------|------------------------------------|
 | `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics and HTTP `/livez` / `/readyz` probes (omit to disable) |
-| `log_format`      | enum   | yes      | --      | Log output format; only `"json"` is supported |
+| `log_format`      | enum   | yes      | --      | `"json"` (one JSON object per line, for log pipelines) or `"text"` (human-readable lines, for a foreground run). Startup-only: a reload keeps the running format |
 
 `prometheus_addr`, when present, must be a valid `ip:port` socket address. The
 same listener serves `/metrics`, `/livez`, and `/readyz`.

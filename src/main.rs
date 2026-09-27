@@ -2824,7 +2824,8 @@ fn main() -> ExitCode {
     }
 
     let log_directives = config.per_peer_log_directives();
-    if let Err(e) = init_logging(&log_directives) {
+    let json_logs = config.global.telemetry.log_format == config::LogFormatConfig::Json;
+    if let Err(e) = init_logging(&log_directives, json_logs) {
         eprintln!("error: failed to initialize logging: {e}");
         process::exit(1);
     }

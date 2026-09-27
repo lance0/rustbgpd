@@ -1015,7 +1015,8 @@ pub struct TelemetryConfig {
     /// collected for gRPC health and internal counters.
     #[serde(default)]
     pub prometheus_addr: Option<String>,
-    /// Log output format (`"json"`).
+    /// Log output format: `"json"` (one JSON object per line) or `"text"`
+    /// (human-readable lines for a foreground lab run).
     pub log_format: LogFormatConfig,
     /// gRPC TCP listener.
     #[serde(default)]
@@ -1029,6 +1030,7 @@ pub struct TelemetryConfig {
 #[serde(rename_all = "snake_case")]
 pub enum LogFormatConfig {
     Json,
+    Text,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

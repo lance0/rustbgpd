@@ -1582,8 +1582,8 @@ short version for first deployment:
 
 For deeper investigation, raise the daemon log level globally with the
 `RUST_LOG` environment variable — there is no log-level key in
-`[global.telemetry]`; `log_format` does not select among formats: `"json"` is
-the only accepted value. It does not control verbosity. Under systemd, set the
+`[global.telemetry]`; `log_format` selects `"json"` or `"text"` output and does
+not control verbosity. Under systemd, set the
 log level in the unit's `[Service]` section:
 
 ```ini

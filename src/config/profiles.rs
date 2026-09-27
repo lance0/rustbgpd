@@ -57,7 +57,9 @@ ebgp_requires_policy = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
-log_format = "json"
+# Human-readable log lines for a foreground run. Use "json" wherever a log
+# pipeline parses the output.
+log_format = "text"
 
 # Local control socket for rbgp. The socket is owner-only (mode 0600), so
 # filesystem permissions authenticate access and the socket owner is
@@ -288,6 +290,20 @@ mod tests {
             let toml = profile_toml(name).expect("listed profile must resolve");
             Config::load_toml_with_diagnostics(toml, name)
                 .unwrap_or_else(|e| panic!("--init-config {name} must validate, got:\n{e}"));
+        }
+    }
+
+    #[test]
+    fn only_the_lab_profile_logs_text() {
+        for name in PROFILE_NAMES {
+            let toml = profile_toml(name).expect("listed profile must resolve");
+            let config = Config::load_toml_with_diagnostics(toml, name).unwrap();
+            let expected = if *name == "lab" {
+                crate::config::LogFormatConfig::Text
+            } else {
+                crate::config::LogFormatConfig::Json
+            };
+            assert_eq!(config.global.telemetry.log_format, expected, "{name}");
         }
     }
 
