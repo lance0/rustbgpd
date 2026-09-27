@@ -73,8 +73,13 @@ const _: () = assert!(matches!(
 
 impl PendingOutbound {
     /// Waits inside the existing run-loop select, never inside a sender.
+    /// The shared stream is awaited only once the cursor reaches the announce
+    /// phase: a member's own withdrawals go first and must not wait for the
+    /// encoder to publish.
     pub(super) async fn ready(&self, writer: Option<&tokio::sync::mpsc::Sender<bytes::Bytes>>) {
-        if let Some((shared, next)) = &self.shared {
+        if let Some((shared, next)) = &self.shared
+            && self.phase >= ANNOUNCE_PHASE
+        {
             shared.ready(*next).await;
         }
         if self.capacity_blocked

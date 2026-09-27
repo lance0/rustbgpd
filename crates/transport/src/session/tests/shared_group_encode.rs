@@ -1518,3 +1518,72 @@ async fn shared_group_mixed_pass_failure_resumes_at_announcements() {
         "fallback re-encodes announcements only"
     );
 }
+
+/// A member's own withdrawals are admitted while the group's shared stream
+/// has published nothing yet: waiting for the next step must depend only on
+/// writer capacity until the cursor reaches the announce phase.
+#[tokio::test]
+async fn shared_group_withdrawals_do_not_wait_for_the_first_shared_chunk() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let (mut member, _wire) = shared_group_member(65001).await;
+    member.writer_join.take().unwrap().abort();
+    // One frame of writer capacity: each step admits a single withdrawal
+    // UPDATE, so the second one needs a later step.
+    let (bulk, mut frames) = tokio::sync::mpsc::channel(1);
+    member.writer_bulk_tx = Some(bulk);
+    let (typed, mut update, chunks) = shared_query_update(&member, &[make_route(100)]);
+    update.withdraw = vec![
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64, 1, 0), 24)),
+            0,
+        ),
+        (
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(100, 64, 2, 0), 24)),
+            0,
+        ),
+    ];
+    let withdrawn = |frame: bytes::Bytes| {
+        let mut frame = frame;
+        let Message::Update(message) =
+            rustbgpd_wire::decode_message(&mut frame, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+        else {
+            panic!("expected UPDATE");
+        };
+        let parsed = message.parse(true, false, &[]).unwrap();
+        (parsed.withdrawn.len(), parsed.announced.len())
+    };
+
+    member.handle_outbound_route_update(update);
+    assert_eq!(withdrawn(frames.try_recv().unwrap()), (1, 0));
+    {
+        let pending = member.pending_outbound.as_ref().unwrap();
+        let ready = pending.ready(member.writer_bulk_tx.as_ref());
+        tokio::pin!(ready);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(ready.as_mut().poll(&mut cx), Poll::Ready(())),
+            "the next withdrawal waits only for writer capacity, not the shared stream"
+        );
+    }
+    member.advance_pending_outbound();
+    assert_eq!(
+        withdrawn(frames.try_recv().unwrap()),
+        (1, 0),
+        "the second withdrawal is admitted before anything is published"
+    );
+    assert!(member.pending_outbound.is_some());
+
+    typed.test_publish(chunks);
+    typed.test_finish(super::shared_group::StreamTerminal::Complete);
+    let mut announcements = 0;
+    while let Some(pending) = member.pending_outbound.as_ref() {
+        pending.ready(member.writer_bulk_tx.as_ref()).await;
+        member.advance_pending_outbound();
+        while let Ok(frame) = frames.try_recv() {
+            assert_eq!(withdrawn(frame), (0, 1), "then the shared announcement");
+            announcements += 1;
+        }
+    }
+    assert_eq!(announcements, 1);
+}
