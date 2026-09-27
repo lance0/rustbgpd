@@ -6,7 +6,21 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 ## 0.9.0 - Unreleased
 
 - Move the public wire dependency to 0.22. Public wire types must be
-  upgraded together by embedders; FSM method signatures are unchanged.
+  upgraded together by embedders.
+
+- **Breaking:** make the `action`, `config`, `event`, `session`, and `state`
+  modules private. Their types remain available from the crate root, so
+  `rustbgpd_fsm::PeerConfig` and the other root re-exports are unchanged;
+  module paths such as `rustbgpd_fsm::config::PeerConfig` no longer resolve.
+  `config::MIN_DEFAULT_SEND_HOLD_TIME`, which had no root re-export, is no
+  longer public. The internal `PeerConfig` OPEN helpers `local_capabilities`,
+  `add_path_capabilities`, `paths_limit_capabilities`, `orf_capabilities`,
+  `extended_nexthop_capabilities`, and `open_my_as`, and the negotiation
+  helpers `negotiate_hold_time`, `negotiate_add_path`, and
+  `negotiate_extended_nexthop`, are no longer public.
+  `negotiation::validate_open`, `error::FsmError`, and
+  `PeerConfig::effective_families` stay public. OPEN contents and negotiation
+  results are unchanged.
 
 - Negotiate RFC 8538 Notification GR from the two advertised N bits,
   independently of peer GR/LLGR route-retention families. Helper-only peers

@@ -74,7 +74,7 @@ pub fn decode_message(buf: &mut Bytes, max_message_len: u16) -> Result<Message, 
 
     match header.message_type {
         MessageType::Keepalive => {
-            keepalive::validate_keepalive(&header)?;
+            keepalive::validate_keepalive(header)?;
             Ok(Message::Keepalive)
         }
         MessageType::Notification => {

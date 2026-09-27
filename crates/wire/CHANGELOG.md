@@ -16,6 +16,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   discards the malformed attribute from an external neighbor, per RFC 7606
   section 7.10. Non-empty multiples of four bytes remain accepted.
 
+- **Breaking:** make the `keepalive` module private. `encode_message` and
+  `decode_message` (and `BgpCodec`) still encode and validate KEEPALIVE
+  through `Message::Keepalive`; `keepalive::encode_keepalive`,
+  `keepalive::validate_keepalive`, and `keepalive::KEEPALIVE_LEN` are no
+  longer public.
+
 ## 0.21.2 - 2026-09-20
 
 - Documented the sender-side length cap in `encode_shutdown_communication`.

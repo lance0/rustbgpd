@@ -33,6 +33,9 @@ The prepared 0.22.0 minor release adds `NotificationCode::RouteRefreshMessage`
 and the Invalid Message Length subcode for RFC 7313 error 7/1. Code 7 now
 decodes to the named variant instead of `Unknown(7)`; encoding preserves the
 same byte. It pairs with FSM 0.9 and RPKI 0.4 when sharing public wire types.
+The `keepalive` module is private in 0.22.0; encode and validate KEEPALIVE
+through `Message::Keepalive` with `encode_message`, `decode_message`, or
+`BgpCodec`.
 
 The prepared release also rejects a zero-length `CLUSTER_LIST` on decode. Under
 RFC 7606 section 7.10, revised decoding treats the UPDATE as withdrawn for

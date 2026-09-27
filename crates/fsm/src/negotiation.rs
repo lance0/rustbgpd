@@ -481,7 +481,7 @@ fn role_mismatch_notification() -> NotificationMessage {
 /// RFC 4271 §4.2 — negotiated hold time is the minimum of the two
 /// proposals.  If either side proposes 0 (no keepalives), the result is 0.
 #[must_use]
-pub fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
+fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
     if local == 0 || peer == 0 {
         0
     } else {
@@ -558,7 +558,7 @@ fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi
 ///
 /// Only families where at least one direction matches are included.
 #[must_use]
-pub fn negotiate_add_path(
+fn negotiate_add_path(
     our_caps: &[AddPathFamily],
     peer_caps: &[AddPathFamily],
 ) -> HashMap<(Afi, Safi), AddPathMode> {
@@ -600,7 +600,7 @@ pub fn negotiate_add_path(
 /// tuple matches between our local capability and the peer's capability are
 /// retained.
 #[must_use]
-pub fn negotiate_extended_nexthop(
+fn negotiate_extended_nexthop(
     our_caps: &[ExtendedNextHopFamily],
     peer_caps: &[ExtendedNextHopFamily],
 ) -> HashMap<(Afi, Safi), Afi> {

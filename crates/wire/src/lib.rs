@@ -76,7 +76,7 @@ pub mod flowspec;
 /// BGP message header codec (RFC 4271 §4.1).
 pub mod header;
 /// KEEPALIVE message encoding and validation.
-pub mod keepalive;
+mod keepalive;
 /// IPv4/IPv6 labeled-unicast NLRI codec substrate (RFC 8277, SAFI 4).
 pub mod labeled;
 /// Top-level BGP message enum and codec dispatch.

@@ -52,13 +52,13 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-pub mod action;
-pub mod config;
+mod action;
+mod config;
 pub mod error;
-pub mod event;
+mod event;
 pub mod negotiation;
-pub mod session;
-pub mod state;
+mod session;
+mod state;
 
 pub use action::{Action, NegotiatedSession, ReceivedRole, TimerType};
 pub use config::{

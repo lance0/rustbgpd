@@ -13,8 +13,9 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 `rustbgpd-fsm` 0.8.2 is the latest published release. Version 0.9.0 is
 prepared in this checkout with wire `0.22.0`. Upgrade dependencies exchanging
 public wire types together. Use a path dependency to exercise the prepared
-version until it is published. FSM method signatures are unchanged;
-[Compatibility](#compatibility) describes the negotiation changes.
+version until it is published. Version 0.9.0 also removes internal modules and
+helpers from the public API; [Compatibility](#compatibility) lists them and
+describes the negotiation changes.
 
 ## Usage
 
@@ -143,6 +144,19 @@ family list is empty, so protective teardown sends Hard Reset to helper-only
 peers. It also includes the pending malformed BGP Role negotiation correction;
 see the [changelog](CHANGELOG.md).
 
+`rustbgpd-fsm 0.9.0` also narrows the public API to what embedders use. The
+`action`, `config`, `event`, `session`, and `state` modules are private; import
+their types from the crate root (`rustbgpd_fsm::PeerConfig`,
+`rustbgpd_fsm::Session`, and so on), which is unchanged.
+`config::MIN_DEFAULT_SEND_HOLD_TIME` had no root re-export and is no longer
+public; `default_send_hold_time` still applies it. The `PeerConfig` OPEN
+helpers `local_capabilities`, `add_path_capabilities`,
+`paths_limit_capabilities`, `orf_capabilities`,
+`extended_nexthop_capabilities`, and `open_my_as` are crate-internal, as are
+`negotiation::negotiate_hold_time`, `negotiate_add_path`, and
+`negotiate_extended_nexthop`. The OPEN the session sends and the result of
+`negotiation::validate_open` are unchanged.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)
@@ -156,8 +170,8 @@ see the [changelog](CHANGELOG.md).
 - **`PeerConfig::prefix_orf_receive`** — advertise the Address-Prefix ORF
   Receive role on each configured unicast family (`bool`, default `false`)
 - **`PeerConfig::paths_limit_receive_max`** — the preferred per-family receive
-  limit, defaulting to `0` (disabled); `paths_limit_capabilities()` advertises
-  it only when Add-Path receive is enabled
+  limit, defaulting to `0` (disabled); the OPEN advertises it only when
+  Add-Path receive is enabled
 - **`PeerConfig::min_hold_time`** — minimum hold time accepted from the peer
   (`Option<u16>`, default `None`); when configured, an OPEN proposing a lower
   or zero hold time is rejected with Unacceptable Hold Time
