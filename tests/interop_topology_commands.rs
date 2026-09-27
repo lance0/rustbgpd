@@ -1063,8 +1063,8 @@ fn interop_captures_do_not_gate_on_tshark_capturing_on_line() {
 
 /// `set +e` is shell-global: a helper that relaxes errexit and returns leaves
 /// the rest of the leg running without `set -e`. A function body that runs
-/// `set +e` must scope it with `local -`, re-enable it with a later `set -e`,
-/// or end in `exit` (an exit handler).
+/// `set +e` must scope it with a `local -` placed before the first `set +e`,
+/// re-enable it with a later `set -e`, or end in `exit` (an exit handler).
 #[test]
 fn interop_helpers_do_not_leak_relaxed_errexit() {
     let scripts = interop_path("scripts");
@@ -1092,13 +1092,14 @@ fn interop_helpers_do_not_leak_relaxed_errexit() {
                 .map(|l| l.trim())
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .collect();
-            let Some(relaxed) = body
-                .iter()
-                .rposition(|l| *l == "set +e" || l.ends_with("; set +e"))
-            else {
+            let is_relaxation = |l: &&str| *l == "set +e" || l.ends_with("; set +e");
+            let Some(first_relaxed) = body.iter().position(is_relaxation) else {
                 continue;
             };
-            let scoped = body.contains(&"local -");
+            let relaxed = body.iter().rposition(is_relaxation).expect("found above");
+            // `local -` saves the options current when it runs, so it only
+            // scopes a `set +e` that comes after it.
+            let scoped = body[..first_relaxed].contains(&"local -");
             let restored = body[relaxed + 1..].iter().any(|l| l.starts_with("set -e"));
             let exits = body.last().is_some_and(|l| l.starts_with("exit"));
             if !(scoped || restored || exits) {
@@ -1108,7 +1109,7 @@ fn interop_helpers_do_not_leak_relaxed_errexit() {
     }
     assert!(
         leaks.is_empty(),
-        "helpers leave errexit off after returning (add `local -`): {leaks:?}"
+        "helpers leave errexit off after returning (add `local -` before `set +e`): {leaks:?}"
     );
 }
 
