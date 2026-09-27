@@ -30,7 +30,7 @@ Daemons were built with `cargo build --release --locked -p rustbgpd --features r
   - F=0.75, k=1: 21,450 prefixes from 50 sources.
   - F=0.25, k=1: 7,150 prefixes from 50 sources.
 - **Down-pass evidence per round:**
-  - daemon user+system CPU-seconds from `/proc/<pid>/stat`, all threads, read between the simultaneous close and the last survivor's completion;
+  - daemon user+system CPU-seconds from `/proc/<pid>/stat`, all threads, read just before the simultaneous close and again when the harness's 100 ms poll detects the last survivor's completion. The window therefore also contains the churners' steady background work; see [Measurement window](#measurement-window);
   - survivor completion p50/max, where each flapped prefix completes on the alternate's announcement, or on a withdrawal at the alternate itself and for prefixes without one;
   - `bgp_rib_actor_work_duration_seconds{work_unit="distribute_flush"}` sum and count over the same window, with metrics scrapes outside the CPU window.
 
@@ -99,11 +99,59 @@ The tracking issue's model predicted the RIB-side walk cost, k members cloning a
 
 No figure in this receipt is extrapolated to other fleet sizes, prefix counts, or flap cohorts.
 
+## Measurement window
+
+Post-campaign review found that the campaign's CPU window is not down-pass-only. This is how it was bracketed:
+
+- **Start:** the harness read `/proc/<pid>/stat` after arming completion tracking and immediately before aborting the 50 flapped sessions.
+- **End:** it read again once `wait_flap_completion`, which polls every 100 ms, saw the last survivor complete.
+
+The window therefore also contains:
+
+- the 8 churners' steady fanout for its whole length;
+- up to one poll interval after the actual completion.
+
+It misses only daemon work that continues after that poll, such as late teardown of the closed sessions. The window's length follows each round's completion time, so the background part is not a fixed offset between arms.
+
+**Direction of the bias.** Background work adds a positive amount to every arm's window CPU, and the arm with the longer window carries more of it. Completion max bounds each window's length, less the up-to-100 ms poll slack. Across the campaign's rounds it averaged:
+
+| Arm | Mean completion max (s) | Range (s) |
+|---|---:|---|
+| main | .509 | .357–.911 |
+| pr2782 | .568 | .453–.713 |
+| pre2771 | .446 | .354–.565 |
+
+- **The candidate against main:** the candidate's windows were not shorter on average, so background inclusion understates its measured CPU reduction rather than overstating it.
+- **Main against the session-side change's parent:** main's windows were longer on average, so the −59.6% likewise understates the reduction in window-attributable work rather than overstating it.
+
+These are directional statements from the recorded window lengths, not corrected values.
+
+**Size of the background.** After this review, one supplementary run per arm at the kill cell recorded each window's wall length and a churn-only daemon CPU rate sampled over 2 s just before each close. It used the same alternation and host discipline, and it re-derives no campaign figure.
+
+| Arm | Window CPU per round (s) | Window length (s) | Pre-close background rate (CPU-s/s) |
+|---|---|---|---|
+| main | 1.360 / 1.600 / 1.670 | .651 / .714 / .611 | .870 / 1.590 / 1.709 |
+| pr2782 | 0.950 / 1.110 / 1.340 | .305 / .409 / .608 | .820 / 1.619 / 1.729 |
+| pre2771 | 2.580 / 2.970 / 3.450 | .405 / .505 / .505 | .685 / 1.670 / 1.654 |
+
+The window CPU values fall within the campaign's ranges. At the sampled rates, background work could account for a large part of every main and pr2782 window. The rate during a down pass is not measured: while the RIB actor is busy, churn is likely delayed rather than running at its pre-close rate. This receipt therefore reports no background-corrected figure.
+
+**Scope of the affected claims.**
+
+- **The candidate's −11.5% and the session-side change's −59.6%** are reductions in daemon CPU over the window defined above, not in CPU attributable to the down pass alone. They are reported only in that sense.
+- **The candidate's decline does not depend on this window.** It follows from the completion-p50 condition of the kill rule, which is measured from survivor timestamps. By the direction argument above, background inclusion is not what lets the CPU condition pass.
+- **Future runs** record the window length and background rate per round (`flapstorm_failover_csv` columns `window_s` and `background_cpu_s_per_s`).
+
+The same review added two fail-closed checks; neither changes a campaign number.
+
+- **Allocation check before the first close.** Every alternate must cover a prefix of the flapped cohort and must not be a churner. Each alternate member must currently hold its owner's path, which proves it lost the initial tie-break. The campaign ran before this check existed, but its failover completion arm required every non-alternate survivor to receive each alternate's announcement during the down pass. That cannot happen if an alternate was already best, so any such round would have stalled and failed, and all 63 campaign rounds completed. The per-member walk counts, 2,400 = 3 rounds × 50 flapped members × 16 new winners per run, match the allocation.
+- **Cell status covers every step.** It now fails on a nonzero daemon shutdown or a failed summary, not only a harness failure. Every campaign run recorded harness, daemon and summary success (`runs.csv`).
+
 ## Artifacts
 
 The [artifact guide](artifacts/failover-alternates-2026-09/README.md) lists:
 
-- per-round and per-run CSVs;
+- per-round and per-run CSVs, plus the supplementary window run;
 - every run's harness output, daemon mixed-pass lines and daemon warnings;
 - host metadata.
 
