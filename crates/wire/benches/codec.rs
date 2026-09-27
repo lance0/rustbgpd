@@ -932,7 +932,10 @@ fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
             allocation.allocation_calls,
             allocation.requested_bytes,
         ),
-        (40_000, 0, 10_000, 50_000, 26_440_000),
+        // The attribute Vec grows 4 -> 8 slots per decode, so its requested
+        // bytes track `size_of::<PathAttribute>()` (48 B since the MP
+        // payloads are boxed; 208 B before, at 26,440,000 total).
+        (40_000, 0, 10_000, 50_000, 7_240_000),
         "the fixed duplicate table must remove one 48-byte allocation per revised decode"
     );
 
