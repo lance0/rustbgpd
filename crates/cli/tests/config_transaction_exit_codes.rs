@@ -162,7 +162,7 @@ async fn rejected_human_receipts_print_unchanged_and_exit_three() {
         assert_eq!(output.status.code(), Some(3), "{args:?}: {output:?}");
         assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(stdout.contains("status: rejected"), "{args:?}: {stdout}");
+        assert!(stdout.contains("Status: rejected"), "{args:?}: {stdout}");
     }
 }
 

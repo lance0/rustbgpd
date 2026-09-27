@@ -54,10 +54,24 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
         target_peer_address: event.target_peer_address.clone(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
         timestamp: event.timestamp.clone(),
+        timestamp_unix_seconds: timestamp_unix_seconds(&event.timestamp),
         path_id: event.path_id,
         missed_count: 0,
         reason: event.reason.clone(),
     }
+}
+
+/// Event timestamps travel as decimal Unix seconds in a string field. JSON
+/// keeps that string and adds this numeric form; `None` (JSON `null`) means
+/// the daemon sent something other than integer seconds.
+fn timestamp_unix_seconds(raw: &str) -> Option<u64> {
+    raw.parse().ok()
+}
+
+/// Human event lines use the same RFC 3339 UTC rendering as
+/// `config history`; a non-numeric value is shown as received.
+fn human_timestamp(raw: &str) -> String {
+    timestamp_unix_seconds(raw).map_or_else(|| raw.to_string(), super::config::format_unix_utc)
 }
 
 fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
@@ -65,7 +79,11 @@ fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
         output::print_json_line(&json_event(event))?;
         return Ok(());
     }
+    outln!("{}", format_route_event_line(event))?;
+    Ok(())
+}
 
+fn format_route_event_line(event: &RouteEvent) -> String {
     let prefix = format!("{}/{}", event.prefix, event.prefix_length);
     let path_id_str = if event.path_id > 0 {
         format!(" path_id={}", event.path_id)
@@ -92,9 +110,9 @@ fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
     } else {
         format!(" reason={}", event.reason)
     };
-    outln!(
+    format!(
         "[{}] {} {} from {}{}{}{}{}{}",
-        event.timestamp,
+        human_timestamp(&event.timestamp),
         output::colored_event_type(format_event_type(event.event_type)),
         prefix,
         event.peer_address,
@@ -103,8 +121,7 @@ fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
         reason,
         path_id_str,
         event_id_str,
-    )?;
-    Ok(())
+    )
 }
 
 fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
@@ -596,6 +613,10 @@ impl Serialize for JsonBgpEvent<'_> {
             map.serialize_entry("target_type", &policy.target_type)?;
         }
         map.serialize_entry("timestamp", &event.timestamp)?;
+        map.serialize_entry(
+            "timestamp_unix_seconds",
+            &timestamp_unix_seconds(&event.timestamp),
+        )?;
         map.end()
     }
 }
@@ -628,7 +649,7 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
         .map_or_else(String::new, |id| format!(" id={id}"));
     let mut line = format!(
         "[{}] {} {}{}",
-        event.timestamp,
+        human_timestamp(&event.timestamp),
         output::colored_event_type(bgp_event_type_display_label(event.event_type)),
         event.summary,
         event_id
@@ -754,6 +775,7 @@ fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRo
         target_peer_address: String::new(),
         afi_safi: output::format_family(event.afi_safi).to_string(),
         timestamp: event.timestamp.clone(),
+        timestamp_unix_seconds: timestamp_unix_seconds(&event.timestamp),
         path_id: 0,
         missed_count: lag.missed_count,
         reason: lag.reason.clone(),
@@ -2569,8 +2591,11 @@ mod tests {
         for (label, event) in cases {
             let direct = serde_json::to_string(&JsonBgpEvent(&event))
                 .expect("direct serialize should succeed");
-            let legacy = serde_json::to_string(&legacy_json_bgp_event(&event))
-                .expect("legacy serialize should succeed");
+            // The numeric timestamp is the one field added since the
+            // snapshot; everything else must still byte-match it.
+            let mut legacy = legacy_json_bgp_event(&event);
+            legacy["timestamp_unix_seconds"] = timestamp_unix_seconds(&event.timestamp).into();
+            let legacy = serde_json::to_string(&legacy).expect("legacy serialize should succeed");
             assert_eq!(
                 direct, legacy,
                 "streamed JSON must byte-match the pre-#515 output for {label}"
@@ -3514,6 +3539,7 @@ mod tests {
         assert_eq!(value["afi_safi"], "ipv4_unicast");
         assert_eq!(value["timestamp"], "123");
         assert_eq!(value["path_id"], 7);
+        assert_eq!(value["timestamp_unix_seconds"], 123);
     }
 
     #[test]
@@ -3541,6 +3567,65 @@ mod tests {
         assert_eq!(value["prefix"], "203.0.113.0/24");
         assert_eq!(value["afi_safi"], "ipv4_unicast");
         assert_eq!(value["summary"], "route withdrawn 203.0.113.0/24");
+        assert_eq!(value["timestamp"], "123");
+        assert_eq!(value["timestamp_unix_seconds"], 123);
+    }
+
+    /// Golden human lines: the epoch string renders as RFC 3339 UTC in text,
+    /// while JSON keeps the string and adds the same instant as a number.
+    /// A value that is not integer seconds is shown as received and has no
+    /// numeric form.
+    #[test]
+    fn event_timestamps_render_rfc3339_in_text_and_epoch_in_json() {
+        let session = BgpEvent {
+            timestamp: "1790132714".to_string(),
+            category: EventCategory::Session as i32,
+            event_type: BgpEventType::SessionStateChanged as i32,
+            summary: "session state changed for peer 198.51.100.2: connect -> active".to_string(),
+            event_id: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_bgp_event_line(&session),
+            "[2026-09-23T03:05:14Z] state_changed session state changed for peer \
+             198.51.100.2: connect -> active id=7"
+        );
+        let json = json_bgp_event(&session);
+        assert_eq!(json["timestamp"], "1790132714");
+        assert_eq!(json["timestamp_unix_seconds"], 1_790_132_714_u64);
+
+        let route = RouteEvent {
+            event_type: RouteEventType::Added as i32,
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+            peer_address: "10.0.0.1".to_string(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            timestamp: "0".to_string(),
+            previous_peer_address: String::new(),
+            target_peer_address: String::new(),
+            path_id: 0,
+            event_id: 3,
+            reason: String::new(),
+        };
+        assert_eq!(
+            format_route_event_line(&route),
+            "[1970-01-01T00:00:00Z] added 203.0.113.0/24 from 10.0.0.1 id=3"
+        );
+        let json = serde_json::to_value(json_event(&route)).unwrap();
+        assert_eq!(json["timestamp"], "0");
+        assert_eq!(json["timestamp_unix_seconds"], 0);
+
+        let odd = BgpEvent {
+            timestamp: "not-a-number".to_string(),
+            event_type: BgpEventType::PeerAdded as i32,
+            summary: "peer 198.51.100.2 added".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_bgp_event_line(&odd),
+            "[not-a-number] peer_added peer 198.51.100.2 added"
+        );
+        assert!(json_bgp_event(&odd)["timestamp_unix_seconds"].is_null());
     }
 
     #[test]

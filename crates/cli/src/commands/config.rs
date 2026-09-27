@@ -571,7 +571,7 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
     } else {
         output::print_text(&resp.human_text)?;
         if !resp.runtime_snapshot_token.is_empty() {
-            outln!("runtime_snapshot_token: {}", resp.runtime_snapshot_token)?;
+            outln!("Runtime snapshot token: {}", resp.runtime_snapshot_token)?;
         }
         print_confirmation(resp.confirmation.as_ref())?;
     }
@@ -753,7 +753,7 @@ fn history_index_marker(index: u32) -> &'static str {
 
 /// Render unix seconds as `YYYY-MM-DDTHH:MM:SSZ` without a date dependency
 /// (Howard Hinnant's civil-from-days algorithm).
-fn format_unix_utc(unix_seconds: u64) -> String {
+pub(crate) fn format_unix_utc(unix_seconds: u64) -> String {
     let days = i64::try_from(unix_seconds / 86_400).unwrap_or(i64::MAX);
     let secs_of_day = unix_seconds % 86_400;
     let z = days + 719_468;
@@ -1108,9 +1108,9 @@ fn print_plan_human(resp: &ConfigTransactionPlanResponse) -> Result<(), CliError
         resp.status,
         &resp.runtime_snapshot_token,
         &[
-            ("supported_sections", &resp.supported_sections),
-            ("unsupported_sections", &resp.unsupported_sections),
-            ("restart_required_sections", &resp.restart_required_sections),
+            ("Supported sections", &resp.supported_sections),
+            ("Unsupported sections", &resp.unsupported_sections),
+            ("Restart-required sections", &resp.restart_required_sections),
         ],
     )?;
     print_update_group_impact(resp.update_group_impact.as_ref())?;
@@ -1122,7 +1122,7 @@ fn print_apply_human(resp: &ConfigTransactionApplyResponse) -> Result<(), CliErr
     print_transaction_tail(
         resp.status,
         &resp.runtime_snapshot_token,
-        &[("committed_sections", &resp.committed_sections)],
+        &[("Committed sections", &resp.committed_sections)],
     )?;
     print_confirmation(resp.confirmation.as_ref())?;
     print_update_group_impact(resp.update_group_impact.as_ref())?;
@@ -1136,30 +1136,30 @@ fn print_confirmation(
         return Ok(());
     };
     outln!(
-        "confirmation_status: {}",
+        "Confirmation: {}",
         confirmation_status_label(confirmation.status)
     )?;
     if !confirmation.confirm_id.is_empty() {
-        outln!("confirm_id: {}", confirmation.confirm_id)?;
+        outln!("Confirm ID: {}", confirmation.confirm_id)?;
     }
     if confirmation.timeout_seconds > 0 {
-        outln!("confirm_timeout_seconds: {}", confirmation.timeout_seconds)?;
+        outln!("Confirm timeout: {}s", confirmation.timeout_seconds)?;
     }
     if confirmation.deadline_unix_seconds > 0 {
         outln!(
-            "confirm_deadline_unix_seconds: {}",
-            confirmation.deadline_unix_seconds
+            "Confirm deadline: {}",
+            format_unix_utc(confirmation.deadline_unix_seconds)
         )?;
     }
     if !confirmation.runtime_snapshot_token.is_empty() {
         outln!(
-            "confirmation_runtime_snapshot_token: {}",
+            "Confirmation runtime snapshot token: {}",
             confirmation.runtime_snapshot_token
         )?;
     }
     if !confirmation.committed_sections.is_empty() {
         outln!(
-            "confirmation_committed_sections: {}",
+            "Confirmation committed sections: {}",
             confirmation.committed_sections.join(", ")
         )?;
     }
@@ -1171,9 +1171,9 @@ fn print_transaction_tail(
     runtime_snapshot_token: &str,
     sections: &[(&str, &Vec<String>)],
 ) -> Result<(), CliError> {
-    outln!("status: {}", status_label(status))?;
+    outln!("Status: {}", status_label(status))?;
     if !runtime_snapshot_token.is_empty() {
-        outln!("runtime_snapshot_token: {runtime_snapshot_token}")?;
+        outln!("Runtime snapshot token: {runtime_snapshot_token}")?;
     }
     for (label, values) in sections {
         if !values.is_empty() {

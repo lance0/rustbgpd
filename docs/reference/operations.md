@@ -3832,7 +3832,7 @@ target peer without waiting for an unrelated RIB event. Receiver-side
 verification is still required to prove delivery.
 
 `rbgp neighbor <peer>` always reports the local desired state as
-`GShut Advertise Intent: enabled|disabled|unknown`; `unknown` means the CLI is
+`GShut Advertise Intent: true|false|unknown`; `unknown` means the CLI is
 connected to an older daemon that does not expose this field. This is only the
 local send intent — it does not prove that a route was re-advertised, received,
 or converged downstream.
@@ -3868,7 +3868,7 @@ authoritative checks are:
 rbgp --json rib received <draining-peer> | jq '.[] | {prefix, local_pref_attr, communities}'
 
 # Initiator-side: confirm the local desired advertisement state.
-rbgp neighbor <receiving-peer> | grep 'GShut Advertise Intent: enabled'
+rbgp --json neighbor <receiving-peer> | jq -e '.graceful_shutdown_advertise_intent == true'
 
 # Or verify on the *receiving* peer's BGP table — the canonical
 # observation. On FRR:

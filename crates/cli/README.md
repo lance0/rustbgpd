@@ -542,6 +542,17 @@ checkpoint; use the event-bridge pattern when the consumer must store its own
 confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
 streams remain one-shot.
 
+Human event lines print timestamps as RFC 3339 UTC, the format `config history`
+uses. JSON event records keep `timestamp`, the daemon's decimal Unix-seconds
+string, and add the same instant as the number `timestamp_unix_seconds`
+(`null` when the daemon sent something other than integer seconds). Session
+events report `old_state` and `new_state` in the FSM's snake_case vocabulary
+(`idle`, `connect`, `active`, `open_sent`, `open_confirm`, `established`),
+while `rbgp neighbor` reports `state` in display form (`Idle`, `Connect`,
+`Active`, `OpenSent`, `OpenConfirm`, `Established`, or `Stale`). Both are
+existing fields and keep their spelling; a consumer joining the two maps one
+vocabulary to the other rather than comparing strings directly.
+
 RPC-backed JSON views use exhaustive generated-message fixtures and complete
 serialized expectations. A new protobuf field requires an explicit projection
 decision; losing an existing JSON field fails its output assertion. The coverage

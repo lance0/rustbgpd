@@ -771,6 +771,7 @@ pub struct JsonRouteEvent {
     pub target_peer_address: String,
     pub afi_safi: String,
     pub timestamp: String,
+    pub timestamp_unix_seconds: Option<u64>,
     #[serde(skip_serializing_if = "is_zero")]
     pub path_id: u32,
     #[serde(skip_serializing_if = "is_zero_u64")]
