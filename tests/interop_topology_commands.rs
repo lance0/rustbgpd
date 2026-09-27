@@ -2679,8 +2679,10 @@ fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
             "61e0bae1b47b82f71e6865daec01351f9326a506c898dc9e1fa6f9bdd1ec058a",
         ),
         (
+            // Re-pinned for one CLI-contract edit: `policy explain` now
+            // requires `--direction`, so the explain call passes `import`.
             "scripts/test-m90-differential.sh",
-            "c2a878d51ea09422ffcabd4641de5a0a880d9c43f482016a46423dc49740c230",
+            "06cfcfc0f36c9f4f591eefa23fe22d821ccecfe9dc729e4f5c96673c685afecc",
         ),
         (
             "m90-differential/README.md",
