@@ -9,7 +9,8 @@
 # compiles fine and only fails when the body runs. `cargo test --bench` runs
 # every criterion benchmark body exactly once with no measurement, which is
 # the cheapest thing that actually catches it. The two paging receipt harnesses
-# are custom CLIs, so they use bounded multi-page fixtures below instead.
+# are custom CLIs, so they use bounded multi-page fixtures below instead; the
+# End-of-RIB harness runs its bounded self-test.
 #
 # This is a smoke check, not a measurement. It reports pass/fail only; any
 # timing it happens to produce is meaningless and is not reported.
@@ -43,7 +44,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 # Standalone measurement harnesses have their own CLIs rather than criterion.
-# They accept Cargo's libtest-compatible `--bench` marker; two have bounded
+# They accept Cargo's libtest-compatible `--bench` marker; three have bounded
 # invocations in this script:
 #
 #   route_paging         CSV receipt harness; one complete traversal per
@@ -51,6 +52,8 @@ done
 #   dataplane_prefix_paging
 #                        CSV-to-stdout receipt harness; one complete traversal
 #                        per process, driven by prefix/path/index-mode flags.
+#   gr_end_of_rib        JSON-line receipt harness; its --self-test runs every
+#                        mode at 2,000 IPv4 / 400 IPv6 routes.
 #
 # The remaining four are excluded here because CI executes their native smoke
 # contracts separately:
@@ -119,6 +122,9 @@ for target in "${targets[@]}"; do
     rustbgpd-rib/dataplane_prefix_paging)
       # Cross the harness's 1,024-prefix page boundary and retain multipath.
       bench_args=(-- --prefixes 1025 --announcers 2 --max-paths 2 --mode eager --repetition 1)
+      ;;
+    rustbgpd-rib/gr_end_of_rib)
+      bench_args=(-- --self-test)
       ;;
   esac
 

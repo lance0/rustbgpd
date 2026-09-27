@@ -65,3 +65,8 @@ required-features = ["bench-internals"]
 name = "selection_deferral_release"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "gr_end_of_rib"
+harness = false
+required-features = ["bench-internals"]

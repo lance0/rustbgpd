@@ -604,19 +604,27 @@ impl AdjRibIn {
     }
 
     /// Clear the stale flag on routes matching the given address family.
-    pub fn clear_stale(&mut self, family: (Afi, Safi)) {
+    /// Returns the prefixes of the routes this changed: a GR or LLGR stale
+    /// flag cleared, or the locally added `LLGR_STALE` community removed.
+    pub fn clear_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+        let mut changed = Vec::new();
         let mut clear_local_llgr = Vec::new();
         for route in self.routes.iter_mut() {
             if route_matches_family(route, family) {
+                let key = (route.prefix, route.path_id);
+                let tagged = self.llgr_stale_local_tags.contains(&key);
+                if route.is_stale || route.is_llgr_stale || tagged {
+                    changed.push(route.prefix);
+                }
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                let key = (route.prefix, route.path_id);
-                if self.llgr_stale_local_tags.contains(&key) {
+                if tagged {
                     clear_local_llgr.push(key);
                 }
             }
         }
         self.clear_local_llgr_stale_community(&clear_local_llgr);
+        changed
     }
 
     /// Remove all routes whose family is NOT in `keep`, returning their
@@ -759,19 +767,27 @@ impl AdjRibIn {
     }
 
     /// Clear the LLGR-stale flag on routes matching the given family.
-    /// Called when `EoR` is received during LLGR phase.
-    pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) {
+    /// Called when `EoR` is received during LLGR phase. Returns the prefixes
+    /// of the routes this changed: the LLGR-stale flag cleared, or the
+    /// locally added `LLGR_STALE` community removed.
+    pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+        let mut changed = Vec::new();
         let mut clear_local_llgr = Vec::new();
         for route in self.routes.iter_mut() {
             if route_matches_family(route, family) {
-                route.is_llgr_stale = false;
                 let key = (route.prefix, route.path_id);
-                if self.llgr_stale_local_tags.contains(&key) {
+                let tagged = self.llgr_stale_local_tags.contains(&key);
+                if route.is_llgr_stale || tagged {
+                    changed.push(route.prefix);
+                }
+                route.is_llgr_stale = false;
+                if tagged {
                     clear_local_llgr.push(key);
                 }
             }
         }
         self.clear_local_llgr_stale_community(&clear_local_llgr);
+        changed
     }
 
     // --- FlowSpec methods ---
@@ -3241,6 +3257,81 @@ mod tests {
         rib.clear_stale(family);
         assert_coupled(&rib, "clear_stale");
         assert!(rib.iter().all(|r| !r.is_llgr_stale));
+    }
+
+    /// End-of-RIB recomputes only what the stale clears return, so each
+    /// clear must report every route it changes (a stale flag or the local
+    /// `LLGR_STALE` community) and nothing else, including other families.
+    #[test]
+    fn stale_clears_return_exactly_the_routes_they_change() {
+        let family = (Afi::Ipv4, Safi::Unicast);
+        let fresh = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let gr_stale = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let llgr_stale = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let setup = || {
+            let mut rib = AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+            for prefix in [gr_stale, llgr_stale] {
+                rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+            }
+            rib.mark_stale(family);
+            let mut interned = crate::attr_intern::AttrInternTable::new();
+            let promoted = rib.promote_to_llgr_stale(family, &mut interned);
+            assert_eq!(promoted.len(), 2);
+            rib.mark_stale(family);
+            // Re-advertised routes arrive clean; one GR-stale route of the
+            // other family must not be reported by an IPv4 clear.
+            rib.insert(make_route(fresh, Ipv4Addr::new(10, 0, 0, 1)));
+            rib.insert(make_route(gr_stale, Ipv4Addr::new(10, 0, 0, 1)));
+            let mut v6 = make_route(fresh, Ipv4Addr::new(10, 0, 0, 1));
+            v6.prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));
+            rib.insert(v6);
+            rib.mark_stale((Afi::Ipv6, Safi::Unicast));
+            rib.mark_stale(family);
+            rib
+        };
+        let sorted = |mut prefixes: Vec<Prefix>| {
+            prefixes.sort_unstable();
+            prefixes
+        };
+
+        // `gr_stale` and `fresh` are GR-stale; `llgr_stale` is LLGR-stale
+        // with the local community.
+        let mut rib = setup();
+        let mut expected = vec![
+            Prefix::V4(fresh),
+            Prefix::V4(gr_stale),
+            Prefix::V4(llgr_stale),
+        ];
+        expected.sort_unstable();
+        assert_eq!(sorted(rib.clear_stale(family)), expected);
+        assert!(
+            rib.clear_stale(family).is_empty(),
+            "a second clear changes nothing"
+        );
+
+        let mut rib = setup();
+        assert_eq!(
+            rib.clear_llgr_stale(family),
+            vec![Prefix::V4(llgr_stale)],
+            "only the LLGR-stale route changes"
+        );
+        assert!(rib.clear_llgr_stale(family).is_empty());
+
+        // A route still carrying the local community is changed by either
+        // clear even without a stale flag.
+        for clear_llgr in [false, true] {
+            let mut rib = setup();
+            for route in rib.routes.iter_mut() {
+                route.is_stale = false;
+                route.is_llgr_stale = false;
+            }
+            let changed = if clear_llgr {
+                rib.clear_llgr_stale(family)
+            } else {
+                rib.clear_stale(family)
+            };
+            assert_eq!(changed, vec![Prefix::V4(llgr_stale)]);
+        }
     }
 
     #[test]
