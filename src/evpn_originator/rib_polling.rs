@@ -432,11 +432,22 @@ fn sticky_and_esi_by_mac_winner(
         let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(raw_vni) else {
             continue;
         };
+        // Routes sharing this key tie on sequence and next hop; keep the one
+        // `project_evpn_routes` prefers so the recovered attributes belong
+        // to its actual winner, whatever order the RIB yielded them in.
         by_winner
             .entry((vni, route.mac, route.next_hop, route.mobility_sequence))
-            .or_insert((*sticky, route.esi));
+            .and_modify(|kept: &mut (&ProjectedEvpnRoute, bool)| {
+                if route.preference_cmp(kept.0).is_gt() {
+                    *kept = (route, *sticky);
+                }
+            })
+            .or_insert((route, *sticky));
     }
     by_winner
+        .into_iter()
+        .map(|(key, (route, sticky))| (key, (sticky, route.esi)))
+        .collect()
 }
 
 /// Build both contender maps from a flat set of best-path
@@ -456,8 +467,9 @@ fn sticky_and_esi_by_mac_winner(
 ///   `project_evpn_routes` which collapses by `(VNI, MAC)`.
 /// - `RemoteMacIpViewMap` — per-`(VNI, MAC, IP)` view for MAC+IP
 ///   contention; built inline because `project_evpn_routes`
-///   intentionally drops the IP. Same self-NH filter, same RFC §15.1
-///   tiebreak (higher seq → lower `next_hop` on ties).
+///   intentionally drops the IP. Same self-NH filter, same total order
+///   ([`ProjectedEvpnRoute::preference_cmp`]: higher seq, then lower
+///   `next_hop` per RFC 7432 §15.1, then the remaining route fields).
 pub(super) fn build_remote_views(
     instances: &EvpnInstanceTable,
     routes: &[EvpnRibRoute],
@@ -519,8 +531,7 @@ pub(super) fn build_remote_views(
     // --- MAC+IP map (per-(VNI, MAC, IP) winner) ---
     //
     // Walk the projected set, drop self-NH and IP-less rows, group
-    // by (VNI, MAC, IP), keep the contender with the highest
-    // mobility seq (None < Some(0); ties broken by lower next_hop).
+    // by (VNI, MAC, IP), keep the contender `preference_cmp` prefers.
     let mut staged: BTreeMap<(EvpnInstanceId, MacAddress, IpAddr), &(ProjectedEvpnRoute, bool)> =
         BTreeMap::new();
     for tup in &projected {
@@ -547,7 +558,7 @@ pub(super) fn build_remote_views(
                 staged.insert(key, tup);
             }
             Some(existing) => {
-                if prefer_mac_ip_new(p, &existing.0) {
+                if p.preference_cmp(&existing.0).is_gt() {
                     staged.insert(key, tup);
                 }
             }
@@ -572,18 +583,6 @@ pub(super) fn build_remote_views(
     }
 
     (mac_view, mac_ip_view)
-}
-
-/// MAC+IP contender tiebreak — same shape as
-/// `crates/evpn::projection::prefer_new`: higher mobility seq wins,
-/// then lower `next_hop`. Inlined here because that function is
-/// crate-private to `rustbgpd-evpn`.
-pub(super) fn prefer_mac_ip_new(new: &ProjectedEvpnRoute, existing: &ProjectedEvpnRoute) -> bool {
-    match new.mobility_sequence.cmp(&existing.mobility_sequence) {
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => new.next_hop < existing.next_hop,
-    }
 }
 
 /// Extract `(sticky, mobility_seq)` from a route's path attributes.
@@ -630,7 +629,7 @@ mod partial_extended_community_tests {
     };
 
     use super::*;
-    use crate::test_support::{evpn_instance, ip as ipa, mac, vni};
+    use crate::test_support::{evpn_instance, ip as ipa, mac, rd, vni};
 
     fn contender(attribute: PathAttribute) -> EvpnRibRoute {
         EvpnRibRoute {
@@ -695,5 +694,55 @@ mod partial_extended_community_tests {
             .expect("partial contender produces MAC+IP state");
         assert!(mac_ip_view.sticky);
         assert_eq!(mac_ip_view.mobility_sequence, Some(7));
+    }
+
+    #[test]
+    fn same_vtep_same_sequence_tie_resolves_to_lower_rd_in_either_order() {
+        // One VTEP advertises the same MAC+IP under two RDs at the same
+        // sequence, with different sticky bits and ESIs. Both views must
+        // report the lower-RD route whatever order the RIB yields them in.
+        let rt = rustbgpd_evpn::RouteTarget::TwoOctetAs {
+            asn: 65000,
+            value: 100,
+        }
+        .to_extended_community();
+        let tied = |rd_value: u32, sticky: bool, esi: EthernetSegmentIdentifier| {
+            let mut route = contender(PathAttribute::ExtendedCommunities(vec![
+                rt,
+                ExtendedCommunity::mac_mobility(sticky, 4),
+            ]));
+            let EvpnRoute::MacIp(mac_ip) = &mut route.route else {
+                unreachable!("contender builds a MAC/IP route");
+            };
+            mac_ip.rd = rd(65000, rd_value);
+            mac_ip.esi = esi;
+            route
+        };
+        let low_rd = tied(1, true, EthernetSegmentIdentifier::new([7; 10]));
+        let high_rd = tied(2, false, EthernetSegmentIdentifier::ZERO);
+        let mut instances = EvpnInstanceTable::new();
+        instances
+            .insert(evpn_instance(
+                65_000,
+                100,
+                100,
+                Some("br100".to_string()),
+                false,
+            ))
+            .unwrap();
+        let no_segments = BTreeMap::new();
+
+        for routes in [
+            [low_rd.clone(), high_rd.clone()],
+            [high_rd.clone(), low_rd.clone()],
+        ] {
+            let (mac_views, mac_ip_views) = build_remote_views(&instances, &routes, &no_segments);
+            let mac_view = &mac_views[&(vni(100), mac(0xaa))];
+            assert!(mac_view.sticky);
+            assert_eq!(mac_view.esi, EthernetSegmentIdentifier::new([7; 10]));
+            let mac_ip_view = &mac_ip_views[&(vni(100), mac(0xaa), ipa("192.0.2.10"))];
+            assert!(mac_ip_view.sticky);
+            assert_eq!(mac_ip_view.esi, EthernetSegmentIdentifier::new([7; 10]));
+        }
     }
 }

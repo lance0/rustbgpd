@@ -41,6 +41,7 @@
 //! mass-withdraw on `AS_PATH` change, DF-role-aware MAC origination)
 //! remains Gate 8b — see ADR-0057.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ use rustbgpd_rib::{EvpnRouteEvent, RibRowFilter, RibUpdate, route::EvpnRibRoute}
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnRoute,
-    EvpnRouteKey, MplsLabel, Origin, PathAttribute,
+    EvpnRouteKey, MplsLabel, Origin, PathAttribute, RouteDistinguisher,
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -1277,26 +1278,25 @@ async fn gather_candidates(
     Ok(gather_candidates_from_routes(state, &routes))
 }
 
+/// Project Type 4 ES routes into one DF candidate per originator IP.
+///
+/// The local PE always comes from configuration, never from a Type 4 route
+/// that carries its own originator IP. RFC 7432 §8.5 orders candidates by
+/// originator IP but does not say which route counts when one originator
+/// advertises the ESI under several RDs (an RD change, or a misconfiguration)
+/// with different DF Election Extended Communities. The route with the lowest
+/// RD supplies that PE's preference, don't-preempt bit and algorithm, so the
+/// election never depends on the order the RIB yields routes in.
 fn gather_candidates_from_routes(
     state: &SegmentState,
     routes: &[EvpnRibRoute],
 ) -> Vec<DfCandidate> {
-    let mut by_ip: BTreeMap<IpAddr, DfCandidate> = BTreeMap::new();
-    // Local PE always present.
-    by_ip.insert(
-        state.config.originator_ip,
-        DfCandidate {
-            originator_ip: state.config.originator_ip,
-            df_preference: state.config.df_preference,
-            df_dont_preempt: state.config.df_dont_preempt,
-            df_algorithm: state.config.df_algorithm,
-        },
-    );
+    let mut remote: BTreeMap<IpAddr, (RouteDistinguisher, DfCandidate)> = BTreeMap::new();
     for r in routes {
         let EvpnRoute::Es(es) = &r.route else {
             continue;
         };
-        if es.esi != state.config.esi {
+        if es.esi != state.config.esi || es.originator_ip == state.config.originator_ip {
             continue;
         }
         if !has_matching_es_import_rt(&r.attributes, state.config.esi) {
@@ -1315,13 +1315,35 @@ fn gather_candidates_from_routes(
             false,
             DfAlgorithm::DefaultModulo,
         ));
-        by_ip.entry(es.originator_ip).or_insert(DfCandidate {
+        let candidate = DfCandidate {
             originator_ip: es.originator_ip,
             df_preference: pref,
             df_dont_preempt: dont_preempt,
             df_algorithm: alg,
-        });
+        };
+        match remote.entry(es.originator_ip) {
+            Entry::Vacant(slot) => {
+                slot.insert((es.rd, candidate));
+            }
+            Entry::Occupied(mut slot) if es.rd < slot.get().0 => {
+                slot.insert((es.rd, candidate));
+            }
+            Entry::Occupied(_) => {}
+        }
     }
+    let mut by_ip: BTreeMap<IpAddr, DfCandidate> = remote
+        .into_iter()
+        .map(|(ip, (_, candidate))| (ip, candidate))
+        .collect();
+    by_ip.insert(
+        state.config.originator_ip,
+        DfCandidate {
+            originator_ip: state.config.originator_ip,
+            df_preference: state.config.df_preference,
+            df_dont_preempt: state.config.df_dont_preempt,
+            df_algorithm: state.config.df_algorithm,
+        },
+    );
     by_ip.into_values().collect()
 }
 
@@ -2455,6 +2477,48 @@ mod tests {
         assert_eq!(remote.df_algorithm, DfAlgorithm::LowestPreference);
         assert_eq!(remote.df_preference, 42);
         assert!(remote.df_dont_preempt);
+    }
+
+    #[test]
+    fn gather_candidates_resolves_one_originator_under_two_rds_by_lowest_rd() {
+        // One remote PE advertises the ESI under two RDs whose DF Election
+        // extcomms disagree. The lower RD supplies the candidate whichever
+        // order the RIB yields the routes in.
+        let id = esi(0x17);
+        let state = segment_state(id);
+        let es_route = |rd_value: u32, preference: u16| {
+            let mut attrs = attrs_with_es_import_rt(id);
+            attrs.push(PathAttribute::ExtendedCommunities(vec![
+                ExtendedCommunity::df_election(
+                    DfAlgorithm::HighestPreference.algorithm_id(),
+                    0,
+                    Some(preference),
+                ),
+            ]));
+            let mut route = type_4_es_route(id, "10.0.0.2", attrs);
+            route.route = EvpnRoute::Es(EvpnEs {
+                rd: rd(65000, rd_value),
+                esi: id,
+                originator_ip: ipa("10.0.0.2"),
+            });
+            route
+        };
+        let low_rd = es_route(100, 500);
+        let high_rd = es_route(200, 900);
+
+        for routes in [
+            vec![low_rd.clone(), high_rd.clone()],
+            vec![high_rd.clone(), low_rd.clone()],
+        ] {
+            let candidates = gather_candidates_from_routes(&state, &routes);
+            assert_eq!(candidates.len(), 2);
+            let remote = candidates
+                .iter()
+                .find(|c| c.originator_ip == ipa("10.0.0.2"))
+                .expect("remote candidate present");
+            assert_eq!(remote.df_preference, 500);
+            assert_eq!(remote.df_algorithm, DfAlgorithm::HighestPreference);
+        }
     }
 
     #[test]
