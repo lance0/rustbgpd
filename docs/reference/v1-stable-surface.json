@@ -94,7 +94,7 @@
       {"definition": "GrpcEnforcementConfig", "schema_sha256": "191a2c9e85eefb3a60509df99e81edc496c422170b0bbd24961d9030de42f588"},
       {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
       {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"},
-      {"definition": "LogFormatConfig", "schema_sha256": "2ffe2bc41781cd4765f757cf5a495bb37b338a57b3b6bbad802deffb1d5c213b"}
+      {"definition": "LogFormatConfig", "schema_sha256": "4628686bfbfbb2bfdbba774d9bcf063a9c6ba46a5c7bd86b917bac94ce75f11b"}
     ],
     "effective_defaults": {
       "paths": [

@@ -16,8 +16,10 @@ metrics coverage.
 
 ## Logging
 
-Structured JSON logging via `tracing` + `tracing-subscriber` with
-environment-based filter control (`RUST_LOG`).
+Logging via `tracing` + `tracing-subscriber`: structured JSON lines, or
+human-readable text when `init_logging` is called with `json = false`
+(the daemon's `log_format = "text"`), with environment-based filter
+control (`RUST_LOG`).
 
 ## License
 

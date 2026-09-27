@@ -2824,9 +2824,23 @@ fn main() -> ExitCode {
     }
 
     let log_directives = config.per_peer_log_directives();
-    if let Err(e) = init_logging(&log_directives) {
+    let json_logs = config.global.telemetry.log_format == config::LogFormatConfig::Json;
+    if let Err(e) = init_logging(&log_directives, json_logs) {
         eprintln!("error: failed to initialize logging: {e}");
         process::exit(1);
+    }
+
+    #[cfg(target_os = "linux")]
+    match raise_nofile_soft_limit() {
+        Ok((soft, hard)) if soft < hard => {
+            info!(
+                from = soft,
+                to = hard,
+                "raised soft nofile limit to the hard limit"
+            );
+        }
+        Ok((soft, hard)) => info!(soft, hard, "soft nofile limit already at the hard limit"),
+        Err(e) => warn!(error = %e, "failed to raise the soft nofile limit"),
     }
 
     // Panic hygiene: write a bounded, secret-free crash report under
@@ -3081,6 +3095,22 @@ fn prune_panic_reports(crash_dir: &Path) {
         let oldest = names.remove(0);
         let _ = std::fs::remove_file(crash_dir.join(oldest));
     }
+}
+
+/// Raise the soft `RLIMIT_NOFILE` to the hard limit and return the prior
+/// `(soft, hard)` pair.
+///
+/// A foreground run from a login shell or a default `docker run` inherits a
+/// soft limit of 1024 while every peer costs descriptors. The hard limit set
+/// by the supervisor (`LimitNOFILE=`, `--ulimit`) stays the ceiling.
+#[cfg(target_os = "linux")]
+fn raise_nofile_soft_limit() -> nix::Result<(u64, u64)> {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+    let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE)?;
+    if soft < hard {
+        setrlimit(Resource::RLIMIT_NOFILE, hard, hard)?;
+    }
+    Ok((soft, hard))
 }
 
 /// Default tokio worker-thread cap when neither env nor config specifies one.
@@ -8305,6 +8335,47 @@ mod tests {
         assert!(
             read_panic_reports(dir.path()).is_empty(),
             "an interrupted write must not publish a report"
+        );
+    }
+
+    /// Set in the child process of
+    /// [`startup_raises_soft_nofile_to_the_hard_limit`].
+    const NOFILE_CHILD: &str = "RUSTBGPD_TEST_NOFILE_CHILD";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_raises_soft_nofile_to_the_hard_limit() {
+        use nix::sys::resource::{Resource, getrlimit};
+
+        if std::env::var_os(NOFILE_CHILD).is_some() {
+            assert_eq!(raise_nofile_soft_limit().unwrap(), (1024, 2048));
+            assert_eq!(getrlimit(Resource::RLIMIT_NOFILE).unwrap(), (2048, 2048));
+            assert_eq!(raise_nofile_soft_limit().unwrap(), (2048, 2048));
+            return;
+        }
+        if std::process::Command::new("prlimit")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: prlimit is not installed");
+            return;
+        }
+        let output = std::process::Command::new("prlimit")
+            .args(["--nofile=1024:2048", "--"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::startup_raises_soft_nofile_to_the_hard_limit",
+                "--nocapture",
+            ])
+            .env(NOFILE_CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "child under soft 1024 / hard 2048 failed: {output:?}"
         );
     }
 

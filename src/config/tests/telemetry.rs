@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn log_format_is_json_only() {
+fn log_format_accepts_json_and_text_only() {
     let source = r#"
 [global]
 asn = 65001
@@ -23,6 +23,12 @@ log_format = "json"
         toml::from_str::<TelemetryConfig>(&encoded).unwrap(),
         telemetry
     );
+
+    let text = source.replace("log_format = \"json\"", "log_format = \"text\"");
+    let telemetry = parse(&text).unwrap().global.telemetry;
+    assert_eq!(telemetry.log_format, LogFormatConfig::Text);
+    let encoded = toml::to_string(&telemetry).unwrap();
+    assert!(encoded.contains("log_format = \"text\""));
 }
 
 #[test]

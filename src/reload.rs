@@ -1865,6 +1865,7 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
         .telemetry
         .prometheus_addr
         .clone_from(&current.global.telemetry.prometheus_addr);
+    new_config.global.telemetry.log_format = current.global.telemetry.log_format;
     new_config.flowspec = current.flowspec;
     new_config.rpki.clone_from(&current.rpki);
     new_config.bmp.clone_from(&current.bmp);
@@ -9453,7 +9454,7 @@ runtime_state_dir = "/tmp/rustbgpd-reload-edited"
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:19179"
-log_format = "json"
+log_format = "text"
 
 [rpki]
 [[rpki.cache_servers]]
@@ -9511,10 +9512,9 @@ hold_time = 90
                 runtime.global.runtime_state_dir,
                 startup.global.runtime_state_dir
             );
-            assert_eq!(
-                runtime.global.telemetry.prometheus_addr,
-                startup.global.telemetry.prometheus_addr
-            );
+            let (live, boot) = (&runtime.global.telemetry, &startup.global.telemetry);
+            assert_eq!(live.prometheus_addr, boot.prometheus_addr);
+            assert_eq!(live.log_format, boot.log_format);
             assert_eq!(runtime.rpki, startup.rpki);
             assert_eq!(runtime.bmp, startup.bmp);
             assert_eq!(runtime.mrt, startup.mrt);

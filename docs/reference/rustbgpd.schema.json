@@ -1613,7 +1613,8 @@
     "LogFormatConfig": {
       "type": "string",
       "enum": [
-        "json"
+        "json",
+        "text"
       ]
     },
     "ManagedBridgeNetdevConfig": {
@@ -3335,7 +3336,7 @@
           "default": null
         },
         "log_format": {
-          "description": "Log output format (`\"json\"`).",
+          "description": "Log output format: `\"json\"` (one JSON object per line) or `\"text\"`\n(human-readable lines for a foreground lab run).",
           "$ref": "#/$defs/LogFormatConfig"
         },
         "prometheus_addr": {

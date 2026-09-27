@@ -900,9 +900,10 @@ status does not terminate the attached process and therefore does not drive
 systemd's `Restart=on-failure`. If the config moves the socket, set
 `RUSTBGPD_ADDR` for the container by extending the unit's `docker run` command.
 
-- **File descriptors**: `--ulimit nofile` is required, not tuning. The
-  Docker default soft limit is 1024, well under the 4096 floor
-  `rbgp doctor` enforces, and peers exhaust descriptors at scale.
+- **File descriptors**: `--ulimit nofile` sets the ceiling. rustbgpd
+  raises its soft limit to the hard limit at startup, so the hard limit
+  must clear the 4096 floor `rbgp doctor` enforces; peers exhaust
+  descriptors at scale.
 
 - **Writable config directory**: mount `/etc/rustbgpd` read-write and
   make it owned by the daemon user (`chown` the host directory to the
@@ -1581,8 +1582,8 @@ short version for first deployment:
 
 For deeper investigation, raise the daemon log level globally with the
 `RUST_LOG` environment variable — there is no log-level key in
-`[global.telemetry]`; `log_format` does not select among formats: `"json"` is
-the only accepted value. It does not control verbosity. Under systemd, set the
+`[global.telemetry]`; `log_format` selects `"json"` or `"text"` output and does
+not control verbosity. Under systemd, set the
 log level in the unit's `[Service]` section:
 
 ```ini
