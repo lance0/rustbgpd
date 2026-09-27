@@ -321,7 +321,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::LabeledUnicast,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
@@ -342,7 +342,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
                 },
             ],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
     session.process_update(update).await;
@@ -362,7 +362,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
     );
 
     // Withdraw ONLY path 1 — the delivered key must carry the path ID.
-    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+    let attrs = vec![PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv4,
         safi: Safi::LabeledUnicast,
         withdrawn: vec![],
@@ -378,7 +378,7 @@ async fn process_update_threads_labeled_add_path_ids_into_rib_keys() {
             },
         }],
         rtc_withdrawn: vec![],
-    })];
+    }))];
     let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
     session.process_update(update).await;
     let RibUpdate::LabeledRoutesReceived { withdrawn, .. } = rib_rx.try_recv().unwrap() else {
@@ -447,7 +447,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
             ]
         };
         let reach = |path_ids: &[u32]| {
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi,
                 safi: Safi::LabeledUnicast,
                 next_hop,
@@ -465,10 +465,10 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
                     })
                     .collect(),
                 rtc_announced: vec![],
-            })
+            }))
         };
         let unreach = |path_id| {
-            PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
                 afi,
                 safi: Safi::LabeledUnicast,
                 withdrawn: vec![],
@@ -484,7 +484,7 @@ async fn denied_labeled_add_path_replacements_reconcile_exact_refresh_identity()
                     },
                 }],
                 rtc_withdrawn: vec![],
-            })
+            }))
         };
         let update = |attributes: Vec<PathAttribute>| {
             UpdateMessage::build(&[], &[], &attributes, true, true, Ipv4UnicastMode::Body)
@@ -624,12 +624,15 @@ fn prepare_outbound_attributes_labeled_adds_rr_attrs_for_ibgp_reflection() {
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),
         PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
-        PathAttribute::MpReachNlri(empty_nonunicast_reach(
+        PathAttribute::MpReachNlri(Box::new(empty_nonunicast_reach(
             Afi::Ipv4,
             Safi::LabeledUnicast,
             route.next_hop,
-        )),
-        PathAttribute::MpUnreachNlri(empty_nonunicast_unreach(Afi::Ipv4, Safi::LabeledUnicast)),
+        ))),
+        PathAttribute::MpUnreachNlri(Box::new(empty_nonunicast_unreach(
+            Afi::Ipv4,
+            Safi::LabeledUnicast,
+        ))),
     ]);
     let attrs = session.prepare_outbound_attributes_labeled(&route, false);
     assert!(

@@ -197,7 +197,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
         ]
     };
     let reach = |nlris: Vec<RtcNlri>| {
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::RtConstrain,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
@@ -209,10 +209,10 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: nlris,
-        })
+        }))
     };
     let unreach = |nlris: Vec<RtcNlri>| {
-        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::Ipv4,
             safi: Safi::RtConstrain,
             withdrawn: vec![],
@@ -222,7 +222,7 @@ async fn denied_rtc_replacements_reconcile_exact_refresh_identity() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: nlris,
-        })
+        }))
     };
     let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
         attributes.push(reach_attr);
@@ -401,7 +401,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
             ]
         };
         let reach = |nlris: Vec<BgpLsNlri>| {
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi,
                 safi,
                 next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
@@ -413,10 +413,10 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            })
+            }))
         };
         let unreach = |nlris: Vec<BgpLsNlri>| {
-            PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
                 afi,
                 safi,
                 withdrawn: vec![],
@@ -426,7 +426,7 @@ async fn denied_bgpls_replacements_reconcile_exact_refresh_identity_for_both_saf
                 labeled_withdrawn: vec![],
                 vpn_withdrawn: vec![],
                 rtc_withdrawn: vec![],
-            })
+            }))
         };
         let update = |mut attributes: Vec<PathAttribute>, reach_attr, unreach_attr| {
             attributes.push(reach_attr);
@@ -692,12 +692,15 @@ fn prepare_outbound_attributes_rtc_adds_rr_attrs_for_ibgp_reflection() {
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         PathAttribute::LocalPref(200),
         PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 99)),
-        PathAttribute::MpReachNlri(empty_nonunicast_reach(
+        PathAttribute::MpReachNlri(Box::new(empty_nonunicast_reach(
             Afi::Ipv4,
             Safi::RtConstrain,
             route.next_hop,
-        )),
-        PathAttribute::MpUnreachNlri(empty_nonunicast_unreach(Afi::Ipv4, Safi::RtConstrain)),
+        ))),
+        PathAttribute::MpUnreachNlri(Box::new(empty_nonunicast_unreach(
+            Afi::Ipv4,
+            Safi::RtConstrain,
+        ))),
     ]);
     let attrs = session.prepare_outbound_attributes_rtc(&route, false);
     assert!(

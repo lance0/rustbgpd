@@ -55,19 +55,21 @@ fn rich_ipv6_mp_iterator_build_matches_legacy_oracle() {
         )
         .unwrap();
     let mut legacy_attrs = base_attrs;
-    legacy_attrs.push(PathAttribute::MpReachNlri(rustbgpd_wire::MpReachNlri {
-        afi: Afi::Ipv6,
-        safi: Safi::Unicast,
-        next_hop,
-        link_local_next_hop: None,
-        announced: entries.to_vec(),
-        flowspec_announced: vec![],
-        evpn_announced: vec![],
-        bgpls_announced: vec![],
-        labeled_announced: vec![],
-        vpn_announced: vec![],
-        rtc_announced: vec![],
-    }));
+    legacy_attrs.push(PathAttribute::MpReachNlri(Box::new(
+        rustbgpd_wire::MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop,
+            link_local_next_hop: None,
+            announced: entries.to_vec(),
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        },
+    )));
     let expected = rustbgpd_wire::UpdateMessage::try_build(
         &[],
         &[],

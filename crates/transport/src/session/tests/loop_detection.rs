@@ -48,7 +48,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         // Triggers the loop — local cluster-id present in the advertised list.
         PathAttribute::ClusterList(vec![local_cluster_id]),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -60,8 +60,8 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
-        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        })),
+        PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             withdrawn: vec![],
@@ -71,7 +71,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -570,7 +570,7 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
         PathAttribute::AsPath(AsPath { segments: vec![] }),
         // Triggers the loop — local cluster-id present in the advertised list.
         PathAttribute::ClusterList(vec![local_cluster_id]),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::RtConstrain,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -582,8 +582,8 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![announced_nlri],
-        }),
-        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        })),
+        PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::Ipv4,
             safi: Safi::RtConstrain,
             withdrawn: vec![],
@@ -593,7 +593,7 @@ async fn rr_loop_detected_update_synthesizes_rtc_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![withdrawn_nlri],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -671,7 +671,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002, 65001, 65003])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -683,8 +683,8 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
-        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        })),
+        PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             withdrawn: vec![],
@@ -694,7 +694,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             labeled_withdrawn: vec![],
             vpn_withdrawn: vec![],
             rtc_withdrawn: vec![],
-        }),
+        })),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
     session.process_update(update).await;
@@ -863,7 +863,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
     let prefix = Prefix::V6(Ipv6Prefix::new("2001:db8:440::".parse().unwrap(), 64));
     let nlri = |path_id| NlriEntry { path_id, prefix };
     let reach = |announced| {
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: "2001:db8::2".parse().unwrap(),
@@ -875,7 +875,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        })
+        }))
     };
     let base_attrs = || {
         vec![
@@ -925,7 +925,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         session.config.peer.local_router_id,
     ));
     loop_attrs.push(reach(vec![nlri(11), nlri(22), nlri(44)]));
-    loop_attrs.push(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+    loop_attrs.push(PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         withdrawn: vec![nlri(22)],
@@ -935,7 +935,7 @@ async fn rr_originator_loop_withdraws_mp_add_paths_before_gr_and_preserves_sibli
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
-    }));
+    })));
     session
         .process_update(UpdateMessage::build(
             &[],

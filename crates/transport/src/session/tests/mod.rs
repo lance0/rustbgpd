@@ -633,7 +633,7 @@ fn ipv6_announce(prefix: Ipv6Prefix, path_id: u32) -> UpdateMessage {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: "2001:db8::2".parse().unwrap(),
@@ -648,7 +648,7 @@ fn ipv6_announce(prefix: Ipv6Prefix, path_id: u32) -> UpdateMessage {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ],
         true,
         false,
@@ -1549,9 +1549,9 @@ fn nonunicast_update(
     unreach: Option<rustbgpd_wire::MpUnreachNlri>,
     add_path: bool,
 ) -> UpdateMessage {
-    attrs.push(PathAttribute::MpReachNlri(reach));
+    attrs.push(PathAttribute::MpReachNlri(Box::new(reach)));
     if let Some(unreach) = unreach {
-        attrs.push(PathAttribute::MpUnreachNlri(unreach));
+        attrs.push(PathAttribute::MpUnreachNlri(Box::new(unreach)));
     }
     UpdateMessage::build(&[], &[], &attrs, true, add_path, Ipv4UnicastMode::Body)
 }

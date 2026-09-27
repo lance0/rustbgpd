@@ -6,41 +6,13 @@ use rustbgpd_wire::{
     PathAttribute, PmsiTunnel, RawAttribute,
 };
 
-// Measurement-only mirror of the complete public enum. It intentionally has
-// no constructors or conversions: its sole purpose is to expose the private
-// boxed-candidate layout without changing rustbgpd-wire's public API.
-#[allow(
-    dead_code,
-    reason = "all mirror variants must participate in the compiler's enum layout"
-)]
-enum BoxedMpPathAttributeMirror {
-    Origin(Origin),
-    AsPath(AsPath),
-    Aggregator(Aggregator),
-    AtomicAggregate,
-    NextHop(Ipv4Addr),
-    LocalPref(u32),
-    Med(u32),
-    Communities(Vec<u32>),
-    CommunitiesPartial(Vec<u32>),
-    ExtendedCommunities(Vec<ExtendedCommunity>),
-    ExtendedCommunitiesPartial(Vec<ExtendedCommunity>),
-    LargeCommunities(Vec<LargeCommunity>),
-    LargeCommunitiesPartial(Vec<LargeCommunity>),
-    OriginatorId(Ipv4Addr),
-    ClusterList(Vec<Ipv4Addr>),
-    MpReachNlri(Box<MpReachNlri>),
-    MpUnreachNlri(Box<MpUnreachNlri>),
-    PmsiTunnel(PmsiTunnel),
-    PmsiTunnelPartial(PmsiTunnel),
-    OnlyToCustomer(u32),
-    OnlyToCustomerPartial(u32),
-    Unknown(RawAttribute),
-}
-
+// Every stored attribute set pays `size_of::<PathAttribute>()` per slot, so
+// the enum is only as small as its largest payload. The MP payloads are
+// boxed for that reason; this test names the payload that now sets the size
+// and fails if any variant grows the enum past it.
 #[test]
-fn reports_current_and_boxed_mp_path_attribute_layouts() {
-    let candidate_payloads = [
+fn path_attribute_is_sized_by_its_largest_unboxed_payload() {
+    let payloads = [
         ("Origin", size_of::<Origin>()),
         ("AsPath", size_of::<AsPath>()),
         ("Aggregator", size_of::<Aggregator>()),
@@ -67,38 +39,39 @@ fn reports_current_and_boxed_mp_path_attribute_layouts() {
         ("OnlyToCustomerPartial", size_of::<u32>()),
         ("Unknown", size_of::<RawAttribute>()),
     ];
-    let largest_payload_size = candidate_payloads
+    let largest_payload_size = payloads
         .iter()
         .map(|(_, size)| *size)
         .max()
-        .expect("the complete mirror has payload variants");
-    let largest_payloads: Vec<&str> = candidate_payloads
+        .expect("the enum has payload variants");
+    let largest_payloads: Vec<&str> = payloads
         .iter()
         .filter_map(|(name, size)| (*size == largest_payload_size).then_some(*name))
         .collect();
 
     eprintln!(
-        "PathAttribute={} MpReachNlri={} MpUnreachNlri={} boxed_candidate={} largest_payload_bytes={} largest_payloads={}",
+        "PathAttribute={} MpReachNlri={} MpUnreachNlri={} largest_payload_bytes={} largest_payloads={}",
         size_of::<PathAttribute>(),
         size_of::<MpReachNlri>(),
         size_of::<MpUnreachNlri>(),
-        size_of::<BoxedMpPathAttributeMirror>(),
         largest_payload_size,
         largest_payloads.join(","),
     );
 
-    assert_eq!(size_of::<Box<MpReachNlri>>(), size_of::<usize>());
-    assert_eq!(size_of::<Box<MpUnreachNlri>>(), size_of::<usize>());
-    assert!(
-        size_of::<BoxedMpPathAttributeMirror>() <= size_of::<PathAttribute>(),
-        "boxing both MP payloads must not enlarge the complete enum mirror"
-    );
     assert!(
         !largest_payloads.contains(&"MpReachNlri") && !largest_payloads.contains(&"MpUnreachNlri"),
-        "neither boxed MP payload may remain the candidate's largest payload"
+        "a boxed MP payload must not be the enum's largest payload"
     );
     assert!(
         largest_payloads.contains(&"Unknown"),
-        "RawAttribute must remain among the boxed candidate's largest payloads"
+        "RawAttribute must remain among the largest payloads"
+    );
+    // One word covers the discriminant plus alignment padding. A larger enum
+    // means some payload is being stored inline that the table above misses.
+    assert!(
+        size_of::<PathAttribute>() <= largest_payload_size + size_of::<usize>(),
+        "PathAttribute ({} B) grew past its largest listed payload ({} B) plus a tag word",
+        size_of::<PathAttribute>(),
+        largest_payload_size,
     );
 }

@@ -834,7 +834,10 @@ async fn domain_path_remains_opaque_on_vpn_and_evpn_routes() {
             });
         }
         let mut attributes = route.attributes.to_vec();
-        attributes.extend([domain_path.clone(), PathAttribute::MpReachNlri(mp)]);
+        attributes.extend([
+            domain_path.clone(),
+            PathAttribute::MpReachNlri(Box::new(mp)),
+        ]);
         session
             .process_update(UpdateMessage::build(
                 &[],
@@ -1027,7 +1030,7 @@ async fn bgpls_attribute_discard_keeps_nlri_and_session() {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002])],
         }),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::BgpLs,
             safi: Safi::BgpLs,
             next_hop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
@@ -1039,7 +1042,7 @@ async fn bgpls_attribute_discard_keeps_nlri_and_session() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
         PathAttribute::Unknown(RawAttribute {
             flags: rustbgpd_wire::constants::attr_flags::OPTIONAL,
             type_code: rustbgpd_wire::constants::attr_type::BGP_LS,
@@ -1502,7 +1505,7 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::L2Vpn,
                 safi: Safi::Evpn,
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1514,7 +1517,7 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
         session.process_update(clean.clone()).await;
@@ -1954,7 +1957,7 @@ async fn srv6_service_malformed_vpn_replacement_withdraws_and_recovers() {
         }
         let key = route.key();
         let mut attrs = route.attributes.to_vec();
-        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi,
             safi: Safi::MplsVpn,
             next_hop: route.next_hop,
@@ -1969,7 +1972,7 @@ async fn srv6_service_malformed_vpn_replacement_withdraws_and_recovers() {
                 nlri: route.nlri,
             }],
             rtc_announced: vec![],
-        }));
+        })));
         let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
         session.process_update(clean.clone()).await;
         let RibUpdate::VpnRoutesReceived {

@@ -220,7 +220,7 @@ fn source_table() -> Vec<Message> {
             segments: vec![AsPathSegment::AsSequence(vec![peer_asn(SOURCE)])],
         }),
     ];
-    v6_attrs.push(PathAttribute::MpReachNlri(mp_reach_v6(&v6)));
+    v6_attrs.push(PathAttribute::MpReachNlri(Box::new(mp_reach_v6(&v6))));
 
     vec![
         Message::Update(UpdateMessage::build(

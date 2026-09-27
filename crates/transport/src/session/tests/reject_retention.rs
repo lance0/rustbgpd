@@ -83,7 +83,7 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         PathAttribute::Communities(vec![100]),
-        PathAttribute::MpReachNlri(MpReachNlri {
+        PathAttribute::MpReachNlri(Box::new(MpReachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: "2001:db8::2".parse().unwrap(),
@@ -98,7 +98,7 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        }),
+        })),
     ];
     session
         .process_update(UpdateMessage::build(

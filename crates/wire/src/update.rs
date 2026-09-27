@@ -590,7 +590,7 @@ mod tests {
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
-            PathAttribute::MpReachNlri(MpReachNlri {
+            PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 next_hop: IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -605,7 +605,7 @@ mod tests {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }),
+            })),
         ];
         let msg = UpdateMessage::build(
             &announced,
@@ -938,7 +938,7 @@ mod tests {
         let rule = FlowSpecRule {
             components: vec![FlowSpecComponent::Port(operations)],
         };
-        let attributes = [PathAttribute::MpReachNlri(crate::MpReachNlri {
+        let attributes = [PathAttribute::MpReachNlri(Box::new(crate::MpReachNlri {
             afi: Afi::Ipv4,
             safi: Safi::FlowSpec,
             next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -950,7 +950,7 @@ mod tests {
             labeled_announced: vec![],
             vpn_announced: vec![],
             rtc_announced: vec![],
-        })];
+        }))];
         let error = UpdateMessage::try_build_from_attribute_iter(
             &[],
             &[],

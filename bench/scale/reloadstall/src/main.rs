@@ -1022,7 +1022,7 @@ fn announce6_msgs(i: u32, prefixes: &[Ipv6Prefix]) -> Vec<Message> {
         .chunks(NLRI6_PER_MSG)
         .map(|chunk| {
             let mut attrs = common.clone();
-            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+            attrs.push(PathAttribute::MpReachNlri(Box::new(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: IpAddr::V6(stub_next_hop6(i)),
@@ -1040,7 +1040,7 @@ fn announce6_msgs(i: u32, prefixes: &[Ipv6Prefix]) -> Vec<Message> {
                 labeled_announced: vec![],
                 vpn_announced: vec![],
                 rtc_announced: vec![],
-            }));
+            })));
             Message::Update(UpdateMessage::build(
                 &[],
                 &[],
@@ -1054,7 +1054,7 @@ fn announce6_msgs(i: u32, prefixes: &[Ipv6Prefix]) -> Vec<Message> {
 }
 
 fn withdraw6_msg(prefixes: &[Ipv6Prefix]) -> Message {
-    let attrs = [PathAttribute::MpUnreachNlri(MpUnreachNlri {
+    let attrs = [PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         withdrawn: prefixes
@@ -1070,7 +1070,7 @@ fn withdraw6_msg(prefixes: &[Ipv6Prefix]) -> Message {
         labeled_withdrawn: vec![],
         vpn_withdrawn: vec![],
         rtc_withdrawn: vec![],
-    })];
+    }))];
     Message::Update(UpdateMessage::build(
         &[],
         &[],

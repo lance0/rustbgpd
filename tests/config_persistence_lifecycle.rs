@@ -269,7 +269,7 @@ fn source_table() -> Vec<Message> {
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![peer_asn(SOURCE)])],
         }),
-        PathAttribute::MpReachNlri(mp_reach_v6(&v6)),
+        PathAttribute::MpReachNlri(Box::new(mp_reach_v6(&v6))),
     ];
 
     vec![
@@ -295,7 +295,7 @@ fn source_table() -> Vec<Message> {
 /// RFC 4724 End-of-RIB markers for both negotiated families: an empty IPv4
 /// UPDATE and an `MP_UNREACH_NLRI` with no routes for IPv6.
 fn eor_markers() -> Vec<Message> {
-    let v6_attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+    let v6_attrs = vec![PathAttribute::MpUnreachNlri(Box::new(MpUnreachNlri {
         afi: Afi::Ipv6,
         safi: Safi::Unicast,
         withdrawn: Vec::new(),
@@ -305,7 +305,7 @@ fn eor_markers() -> Vec<Message> {
         vpn_withdrawn: Vec::new(),
         labeled_withdrawn: Vec::new(),
         rtc_withdrawn: Vec::new(),
-    })];
+    }))];
     vec![
         Message::Update(UpdateMessage::build(
             &[],
