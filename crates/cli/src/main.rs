@@ -9207,6 +9207,7 @@ printf '%s\n' "${COMPREPLY[@]}"
             ("route-server-client", true),
             ("route-server", false),
             ("route_server", false),
+            ("rs", false),
         ] {
             let cli = Cli::try_parse_from([
                 "rbgp",
