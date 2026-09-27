@@ -149,7 +149,14 @@ reload commit, and every other gate passed. The last passing flagship receipt
 on a tag therefore still describes v0.71.0. The
 [2026-09-26 run](../soaks/soak-rs-flagship-24h-2026-09-26.md) on untagged
 main `292c32b39`, with owner-published counter reads, passed every gate; it
-covers that SHA and qualifies no release. The
+covers that SHA and qualifies no release. v0.73.0 (2026-09-27) is a minor
+release that serves `policy stats` counters from owner-published rosters,
+settles the `rbgp` flag vocabulary, adds native mTLS for `rbgp`, a text log
+format and max-prefix latch alerting, distributes queued UPDATEs in bounded
+windows and shrinks stored path attributes, with session, Graceful Restart,
+EVPN and FIB durability fixes. It ships on its
+per-change regression tests and main CI; the 2026-09-26 receipt covers an
+earlier main revision and does not qualify it. The
 [release checklist](release-checklist.md#flagship-operating-proof) calls for a
 qualifying 24-hour management-load soak on the selected candidate. Earlier
 archived soaks do not automatically qualify later runtime changes.

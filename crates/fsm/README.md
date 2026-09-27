@@ -10,10 +10,8 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-`rustbgpd-fsm` 0.8.2 is the latest published release. Version 0.9.0 is
-prepared in this checkout with wire `0.22.0`. Upgrade dependencies exchanging
-public wire types together. Use a path dependency to exercise the prepared
-version until it is published. Version 0.9.0 also removes internal modules and
+`rustbgpd-fsm` 0.9.0 moves to wire `0.22.0`. Upgrade dependencies exchanging
+public wire types together. Version 0.9.0 also removes internal modules and
 helpers from the public API; [Compatibility](#compatibility) lists them and
 describes the negotiation changes.
 
@@ -138,7 +136,7 @@ than disabling retries. The send-hold-time documentation previously credited
 that check to "config validation", which belongs to the embedding
 application, not to this crate.
 
-`rustbgpd-fsm 0.9.0` is prepared with the wire 0.22 dependency upgrade.
+`rustbgpd-fsm 0.9.0` moves with the wire 0.22 dependency upgrade.
 Notification GR follows the two advertised N bits even when the peer's GR
 family list is empty, so protective teardown sends Hard Reset to helper-only
 peers. A received BGP Role capability with an unassigned value (5-255) or a

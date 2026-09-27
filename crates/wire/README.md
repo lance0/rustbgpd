@@ -18,8 +18,8 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 ### 0.22.0 compatibility note
 
-The prepared 0.22.0 minor release pairs with FSM 0.9 and RPKI 0.4 when sharing
-public wire types.
+`rustbgpd-wire` 0.22.0 is a breaking minor release and pairs with FSM 0.9 and
+RPKI 0.4 when sharing public wire types.
 
 - **Breaking:** `PathAttribute::MpReachNlri` and `PathAttribute::MpUnreachNlri`
   now hold `Box<MpReachNlri>` and `Box<MpUnreachNlri>`, shrinking

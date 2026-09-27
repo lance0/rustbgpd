@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.22.0 - Unreleased
+## 0.22.0 - 2026-09-27
 
 - **Breaking:** `PathAttribute::MpReachNlri` and `PathAttribute::MpUnreachNlri`
   now hold `Box<MpReachNlri>` and `Box<MpUnreachNlri>`. The inline 208-byte

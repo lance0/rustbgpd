@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.9.0 - Unreleased
+## 0.9.0 - 2026-09-27
 
 - Move the public wire dependency to 0.22. Public wire types must be
   upgraded together by embedders.

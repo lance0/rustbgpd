@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.73.0] — 2026-09-27
+
 ### Added
 
 - `rbgp` flag spellings now carry from one command to the next. `events` and
