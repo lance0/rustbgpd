@@ -177,6 +177,16 @@ class ClassifierFixtures(unittest.TestCase):
             ("tester error", raw.replace(tail, tail.replace(",0,0,", ",1,0,", 1))),
             ("failed", raw.replace(tail, tail.replace(",,,,", ",FAILED,,,", 1))),
             ("foreign image", raw.replace("bgperf/rustbgpd:sync-dhat", "../rustbgpd")),
+            ("empty image", raw.replace("bgperf/rustbgpd:sync-dhat", "")),
+            ("other daemon image", raw.replace("bgperf/rustbgpd:sync-dhat", "bgperf/bird:latest")),
+            ("digest image", raw.replace("bgperf/rustbgpd:sync-dhat", "bgperf/rustbgpd@sha256:0bfe26ff")),
+            # The fork's release build lands in the default tag.
+            ("default release tag", raw.replace("bgperf/rustbgpd:sync-dhat", "bgperf/rustbgpd")),
+            ("latest release tag", raw.replace("bgperf/rustbgpd:sync-dhat", "bgperf/rustbgpd:latest")),
+            (
+                "container-like tag",
+                raw.replace("bgperf/rustbgpd:sync-dhat", "bgperf/rustbgpd:0bfe26ffb2fa0cf08f1e"),
+            ),
             ("path version", raw.replace("3.37.0\n", "/tmp/gobgp\n")),
         )
         with tempfile.TemporaryDirectory() as directory:

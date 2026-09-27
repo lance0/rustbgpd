@@ -61,6 +61,7 @@ FORK_RAW_HEADER = (
     LEGACY_RAW_ROW_FIELDS + ("max foreign cpu %",) + PROVENANCE_FIELDS
 )
 FORK_CHECKPOINT_PERCENT = 99
+DEFAULT_IMAGE_TAGS = ("bgperf/rustbgpd", "bgperf/rustbgpd:latest")
 OUTPUT_FIELDS = (
     "target",
     "version",
@@ -152,8 +153,19 @@ def load(path: Path) -> str:
     if header == FORK_RAW_HEADER:
         integer(row["max foreign cpu %"], "max foreign cpu %")
     if header != LEGACY_RAW_HEADER:
-        if not SAFE_IMAGE.fullmatch(row["target image"]):
+        image = row["target image"]
+        if not SAFE_IMAGE.fullmatch(image) or LONG_HEX_ID.search(image):
             raise ValueError(f"{path}: unsupported target image identity")
+        # The fork's `update rustbgpd` builds the release profile into the
+        # default tag; the DHAT recipe builds into an explicit one. A default
+        # tag here means the row did not come from the DHAT image the
+        # receipt's heap profile describes. The tag cannot prove the profile
+        # either way -- the manifest's image digest and profile label do.
+        if header == FORK_RAW_HEADER and image in DEFAULT_IMAGE_TAGS:
+            raise ValueError(
+                f"{path}: target image must be the receipt's explicit DHAT tag, "
+                f"not the default release tag {image!r}"
+            )
         for field in ("tester version", "monitor version"):
             if not SAFE_VERSION.fullmatch(row[field]) or LONG_HEX_ID.search(row[field]):
                 raise ValueError(f"{path}: unsafe or empty {field}")
