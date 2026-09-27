@@ -369,7 +369,7 @@ async fn versioned_json_wraps_existing_documents() {
         &["policy", "get", "customers"],
         &["policy", "chain", "show"],
         &["flowspec"],
-        &["policy", "stats"],
+        &["policy", "stats", "--direction", "export"],
         &["config", "status"],
         &["rib", "--limit", "1"],
         &["neighbor", "192.0.2.1", "enable"],
@@ -475,10 +475,18 @@ async fn legacy_json_array_and_limited_envelope_keep_their_shapes() {
                 .keys()
                 .map(String::as_str)
                 .collect();
+            // `next_page_token` is an additive field: pass it to `--page-token`.
             assert_eq!(
                 keys,
-                ["complete", "returned_count", "routes", "total_count"]
+                [
+                    "complete",
+                    "next_page_token",
+                    "returned_count",
+                    "routes",
+                    "total_count"
+                ]
             );
+            assert_eq!(value["next_page_token"], "second-page");
             assert_eq!(value["returned_count"], 1);
             assert_eq!(value["total_count"], 2);
             assert_eq!(value["complete"], false);

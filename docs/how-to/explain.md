@@ -29,10 +29,10 @@ catalog.
 |----------|---------|
 | Why was this path selected as best? | `rbgp rib --prefix <cidr> --explain` |
 | Why did/didn't this prefix go to that peer? | `rbgp rib --prefix <cidr> advertised <peer> --explain`, or the same answer as `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction export` |
-| What did import policy decide for this prefix from that peer? (opt-in: `[policy.explain] enabled = true`) | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
+| What did import policy decide for this prefix from that peer? (opt-in: `[policy.explain] enabled = true`) | `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction import` |
 | Which of a member's routes were filtered, and why? | `rbgp rib received <peer> --rejected` |
 | What would this candidate policy do to the live RIB? | `rbgp policy test <file> --policy <name> --direction import` |
-| Which policy terms are actually firing? | `rbgp policy stats` |
+| Which policy terms are actually firing? | `rbgp policy stats --direction both` |
 | What would this config change touch? | `rbgp config diff <candidate.toml>` |
 
 For operators coming from FRR/BIRD, the
@@ -212,7 +212,7 @@ enabled = true
 ```
 
 ```console
-$ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24
+$ rbgp policy explain --neighbor 10.0.0.2 --prefix 10.10.1.0/24 --direction import
 import policy explain — peer 10.0.0.2 prefix 10.10.1.0/24 (policy generation 3)
   permit
     decision: no policy rejected; chain default permit
@@ -284,7 +284,7 @@ rbgp summary
 rbgp rib received 198.51.100.2 --rejected
 
 # 2. Rejected with a reason token? Get the statement-level why.
-rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
+rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24 --direction import
 
 # 3. If RPKI drove the decision, inspect the current complete-table verdict
 #    and its bounded effective covering-VRP evidence.

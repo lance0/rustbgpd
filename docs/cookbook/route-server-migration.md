@@ -508,7 +508,7 @@ cutover blockers.
 6. Confirm counters stay quiet after convergence:
 
    ```bash
-   rbgp policy counters
+   rbgp policy counters --direction both
    rbgp metrics | grep -E 'route_refresh|session_state|update_group'
    ```
 

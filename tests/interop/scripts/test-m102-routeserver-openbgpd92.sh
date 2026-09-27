@@ -72,7 +72,7 @@ wait_for() {
 }
 import_explain_names_m102_import() {
     local output
-    output=$(rs_ctl policy explain --neighbor "$OPENBGPD_ADDR" --prefix "$IMPORT_DENY") \
+    output=$(rs_ctl policy explain --neighbor "$OPENBGPD_ADDR" --prefix "$IMPORT_DENY" --direction import) \
       || return 1
     [[ "$output" == *m102-import* ]]
 }

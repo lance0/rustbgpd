@@ -211,7 +211,7 @@ soft-reset auto-fire). Peers on unchanged chains are untouched.
 # decision cache, which is OPT-IN (ADR-0073) — set
 # `[policy.explain] enabled = true`, reload, and let the session
 # re-establish, or this answers `cache_disabled`.
-$ rbgp policy explain --neighbor 192.0.2.10 --prefix 203.0.113.0/26
+$ rbgp policy explain --neighbor 192.0.2.10 --prefix 203.0.113.0/26 --direction import
 
 # Export: the full gate ladder toward a peer; the export_policy rung
 # reports chain_default_permit for nonempty Permit, or the deciding

@@ -42,7 +42,7 @@ async fn peer_evpn_output_and_rpc_errors() {
     };
     let output = run(
         &server.addr,
-        &["evpn", "advertised", "192.0.2.2", "--page-size", "1"],
+        &["evpn", "advertised", "192.0.2.2", "--limit", "1"],
     );
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
@@ -109,10 +109,10 @@ fn invalid_peer_view_arguments_fail_before_connecting() {
         vec!["evpn", "received", "invalid"],
         vec!["evpn", "received", "192.0.2.1", "--rd", "invalid"],
         vec!["evpn", "--peer", "192.0.2.1", "advertised", "192.0.2.2"],
-        vec!["evpn", "advertised", "192.0.2.1", "--page-size", "1001"],
+        vec!["evpn", "advertised", "192.0.2.1", "--limit", "1001"],
     ] {
         let output = run("http://127.0.0.1:1", &args);
-        let expected = if args.contains(&"--page-size") { 2 } else { 1 };
+        let expected = if args.contains(&"--limit") { 2 } else { 1 };
         assert_eq!(output.status.code(), Some(expected), "{args:?}: {output:?}");
         assert!(output.stdout.is_empty());
         assert!(

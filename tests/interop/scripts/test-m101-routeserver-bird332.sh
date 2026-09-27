@@ -457,7 +457,7 @@ assert_policy_surfaces() {
     else
         fail "import-denied prefix leaked into the Loc-RIB"
     fi
-    explain=$(rs_ctl policy explain --neighbor "$BIRD_ADDR" --prefix "$IMPORT_DENY_PREFIX" || true)
+    explain=$(rs_ctl policy explain --neighbor "$BIRD_ADDR" --prefix "$IMPORT_DENY_PREFIX" --direction import || true)
     if grep -q 'm101-import' <<<"$explain" && grep -q '^  deny' <<<"$explain"; then
         ok "import explain names the m101-import deny decision"
     else

@@ -60,7 +60,7 @@ zero. Find where the routes went:
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
   rib received 10.99.0.20 --rejected
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
-  policy explain --neighbor 10.99.0.20 --prefix 192.168.1.0/24
+  policy explain --neighbor 10.99.0.20 --prefix 192.168.1.0/24 --direction import
 curl --fail --silent http://127.0.0.1:9179/metrics \
   | grep '^bgp_rfc8212_missing_import_policy'
 ```

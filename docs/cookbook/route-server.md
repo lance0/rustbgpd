@@ -398,7 +398,7 @@ the retained rejections, then drill into the deciding term:
 
 ```console
 $ rbgp rib received 198.51.100.2 --rejected
-$ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
+$ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24 --direction import
 ```
 
 The first command works on a stock route server. The second needs

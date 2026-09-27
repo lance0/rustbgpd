@@ -420,7 +420,7 @@ async def watch(run, binary, port):
             assert all(row["state"] == "Established" and not row.get("stale", False) for row in rows.values())
             if generation:
                 check_continuity(json.loads((run / f"before-{generation}.json").read_text()), after)
-            stats = await asyncio.to_thread(cli, run, binary, "policy", "stats")
+            stats = await asyncio.to_thread(cli, run, binary, "policy", "stats", "--direction", "export")
             datasets = stats["datasets"]
             names = dataset_names(roster(peers, generation))
             assert {row["name"] for row in datasets} == names, "dataset status roster mismatch"

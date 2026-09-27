@@ -1573,7 +1573,7 @@ short version for first deployment:
 | Symptom | Where to look |
 |---|---|
 | Session won't establish | `rbgp neighbor <addr>` + `journalctl -u rustbgpd -p warning` |
-| Routes received but not installed | `rbgp rib`, then `rbgp rib received <peer> --rejected`; for the statement-level trace, `rbgp policy explain --neighbor <peer> --prefix <CIDR>` (opt-in: needs `[policy.explain] enabled = true`) |
+| Routes received but not installed | `rbgp rib`, then `rbgp rib received <peer> --rejected`; for the statement-level trace, `rbgp policy explain --neighbor <peer> --prefix <CIDR> --direction import` (opt-in: needs `[policy.explain] enabled = true`) |
 | Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](../reference/reload-matrix.md) |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl -u rustbgpd -g 'failed to apply general FIB route op'` |
 | FIB or BLACKHOLE planning stops before kernel access | `increase(bgp_dataplane_reconcile_planning_failures_total[10m]) > 0` + matching structured warning; status remains the last successful snapshot |

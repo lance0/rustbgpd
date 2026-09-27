@@ -315,7 +315,7 @@ rbgp rib --prefix 192.0.2.0/24 --explain
 # Inspect peer views with familiar route-server / RR terms.
 rbgp rib recv 172.31.254.2
 rbgp rib sent 172.31.254.2
-rbgp policy counters
+rbgp policy counters --direction both
 
 # Reload config after editing the file.
 kill -HUP $(pidof rustbgpd)
