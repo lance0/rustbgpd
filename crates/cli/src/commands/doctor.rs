@@ -373,14 +373,16 @@ fn validation_axis_check(response: &GetValidationPolicyPostureResponse, rpki: bo
         (
             "rpki.invalid_route_policy",
             "RPKI-invalid",
-            "review `reject-rpki-invalid` in examples/route-server/config.toml",
+            "add an import policy statement with `match_rpki_validation = \"invalid\"` and \
+             `action = \"deny\"`",
             response.rpki_invalid.as_ref(),
         )
     } else {
         (
             "aspa.invalid_route_policy",
             "ASPA-invalid",
-            "review `reject-aspa-invalid` in examples/route-server/hygiene.rpol",
+            "add an import policy statement with `match_aspa_validation = \"invalid\"` and \
+             `action = \"deny\"`",
             response.aspa_invalid.as_ref(),
         )
     };
@@ -5647,12 +5649,12 @@ paths = ["x"]
         assert!(
             warnings[0]
                 .detail
-                .contains("`reject-rpki-invalid` in examples/route-server/config.toml")
+                .contains("`match_rpki_validation = \"invalid\"` and `action = \"deny\"`")
         );
         assert!(
             warnings[1]
                 .detail
-                .contains("`reject-aspa-invalid` in examples/route-server/hygiene.rpol")
+                .contains("`match_aspa_validation = \"invalid\"` and `action = \"deny\"`")
         );
     }
 
