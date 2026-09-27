@@ -381,7 +381,7 @@ pinned per ADR-0057.
 | Field | Class | Notes |
 |---|---|---|
 | `prometheus_addr` | restart-required | The exporter listener binds at startup. |
-| `log_format` | rejected-before-mutation | Only `"json"` is accepted; other values fail config parsing before reload mutation. |
+| `log_format` | restart-required | The log subscriber is installed once at startup; a reload keeps the running `"json"` or `"text"` format. Other values fail config parsing before reload mutation. |
 
 ### `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 

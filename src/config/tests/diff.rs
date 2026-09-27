@@ -2116,6 +2116,7 @@ fn reload_matrix_pins_load_bearing_field_classes() {
         ("bfd", "| reload-applied |"),
         ("ebgp_requires_policy", "| restart-required |"),
         ("validation", "| restart-required |"),
+        ("log_format", "| restart-required |"),
     ] {
         let rows = reload_matrix_rows_for(&matrix, field);
         assert!(
