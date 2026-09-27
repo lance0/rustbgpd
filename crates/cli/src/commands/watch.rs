@@ -64,7 +64,7 @@ fn json_event(event: &RouteEvent) -> JsonRouteEvent {
 /// Event timestamps travel as decimal Unix seconds in a string field. JSON
 /// keeps that string and adds this numeric form; `None` (JSON `null`) means
 /// the daemon sent something other than integer seconds.
-fn timestamp_unix_seconds(raw: &str) -> Option<u64> {
+pub(crate) fn timestamp_unix_seconds(raw: &str) -> Option<u64> {
     raw.parse().ok()
 }
 
