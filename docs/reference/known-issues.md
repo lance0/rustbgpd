@@ -360,9 +360,9 @@ resolved.
   rustbgpd-specific; FRR and BIRD can install indistinguishable rows in the
   same table and metric. rustbgpd now persists daemon-owned rows to
   `<runtime_state_dir>/fib-owned.json` and reloads that file after crash,
-  `SIGKILL`, or OOM. Recovery is deliberately conservative: the
-  `[[fib_tables]]` declaration must be unchanged and the live kernel row must
-  still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
+  `SIGKILL`, or OOM. Recovery is deliberately conservative: the row's
+  `[[fib_tables]]` entry must have an unchanged signature and the live kernel
+  row must still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
   from the file and rows with changed config are preserved and reported as
   `foreign_route_exists` rather than adopted by protocol alone. Rows with
   persisted owned-state that drifted are reported once as `owned_route_drifted`.

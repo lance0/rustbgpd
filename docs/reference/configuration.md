@@ -3710,10 +3710,13 @@ this keeps the knob usable for dynamic-neighbor ranges and staged peers.
 `RTPROT_BGP` is not treated as ownership proof by itself. A route that
 already exists in a configured table before this daemon instance owns it
 is reported as `foreign_route_exists`, even if its protocol is BGP. Crash
-recovery uses the persisted owned-state file, the unchanged `[[fib_tables]]`
-declaration, and an exact live-kernel value match; if any of those checks
-fail, the row stays foreign. Unsupported or config-stale state files are
-quarantined as `fib-owned.json.stale`. Each reconcile pass records the
+recovery uses the persisted owned-state file, an unchanged signature for the
+row's `[[fib_tables]]` entry, and an exact live-kernel value match; if any of
+those checks fail, the row stays foreign. A state file with an unsupported
+(newer) version, or whose payload shape contradicts its version, is renamed to
+`fib-owned.json.stale` and nothing is owned. A changed table signature only
+drops that table's rows: the file is copied to `fib-owned.json.stale` as
+evidence and unchanged tables keep their owned routes. Each reconcile pass records the
 routes it is about to install or replace before it sends them to the
 kernel, and every write fsyncs the file and its directory, so a crash at
 any point in a pass leaves the rows it installed recoverable. If that write
@@ -4771,7 +4774,7 @@ the [operations guide](operations.md#configuration-reload-sighup) the
 settlement detail.
 
 1. **Generation** — changes to static `[[neighbors]]`, `[peer_groups]`,
-   inline policy definitions, neighbor sets, global chains, `.rpol` content,
+   BFD member attachments, inline policy definitions, neighbor sets, global chains, `.rpol` content,
    `[policy.datasets]` contents or bindings, or outbound prefix maxima settle
    as one owned runtime generation. The daemon resolves the candidate once,
    derives one action per static neighbor (unchanged, hot update in place,
@@ -4786,7 +4789,8 @@ settlement detail.
    MD5/GTSM inventory, explain-only, `[gnmi_dialout]`), or a generation-class
    change combined with TCP-AO rotation or a listener MD5/GTSM edit (a
    changed password or GTSM setting on a neighbor that stays configured, or
-   on a dynamic range) while dataset contents are unchanged, runs
+   on a dynamic range) while dataset contents, dataset bindings, and BFD
+   member attachments are unchanged, runs
    per-subsystem steps in dependency
    order: listener authentication, EVPN runtime, and outbound prefix maxima;
    definitions and global chains; the `[[neighbors]]` reconcile; the
@@ -4797,8 +4801,9 @@ settlement detail.
    records the failing bucket, target, and error, and the daemon's in-memory
    config tracks what actually applied. Fix the failing TOML and reload again
    to converge.
-3. **Rejected** — dataset content or binding changes combined with TCP-AO
-   rotation or a listener MD5/GTSM edit, and any generation-class or dataset
+3. **Rejected** — dataset content or binding changes, or BFD member
+   attachment changes, combined with TCP-AO rotation or a listener MD5/GTSM
+   edit, and any generation-class or dataset
    change combined with `[[dynamic_neighbors]]`, EVPN runtime tables,
    `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole`, are
    rejected before any effect. Apply those families in separate reloads.
@@ -4817,6 +4822,7 @@ after a chain swap.
 port, cluster-id, the RFC 8212 posture tuple, blackhole-discard admission
 limits and multipath knobs; `dynamic_neighbor_limit`, `honor_graceful_shutdown`
 and `honor_blackhole` are the reload-applied exceptions),
+`[global.telemetry]` `prometheus_addr` and `log_format`,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
 `[mrt]`, `[flowspec]`, `[event_history]`, `[inbound_admission]`,
 `[security.grpc]`, `[managed_netdevs]`, `[[bfd_profiles]]` definitions, and

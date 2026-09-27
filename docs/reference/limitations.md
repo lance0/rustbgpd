@@ -172,7 +172,9 @@ full gate ladder.
   counter rosters published by the peer manager and RIB manager
   ([ADR-0136](../adr/0136-owner-published-counter-reads.md)) and does not
   queue on either actor; it can still wait for a pending session publication
-  or busy counter state under its two-second deadline.
+  or a busy counter or dataset error lock under its one absolute two-second
+  deadline, and returns `DEADLINE_EXCEEDED` with no partial rows when that
+  deadline expires.
 
 ## Operational proof
 

@@ -29,9 +29,7 @@ bug — file an issue.
 | **reload-applied** | Change hot-applies to a running subsystem reconciler or derived matcher on SIGHUP / supported runtime CRUD, but unlike per-session `live` the in-memory config snapshot advances only after the subsystem or snapshot consumer **acks** the new desired set. Used by `[[fib_tables]]` (ADR-0061 FIB reconciler) and `[[dynamic_neighbors]]` matcher rebuilds. Surfaced under the `reload_applied.*` keys in `rustbgpd --diff --json`. |
 | **restart-required** | Change is accepted at parse time but **pinned back to the live value** for the duration of this reload — the new value won't take effect until the next daemon restart. Surfaced as an `ERROR`-level log line during reload and visible in `rustbgpd --diff` until restart. |
 | **rejected** | Validation refuses the change at parse time with a typed `ConfigError`. The daemon keeps running with the old value; no state mutates. |
-| **unsupported** | Field is accepted at parse time but currently has no runtime effect. Documented so operators don't mistake it for live. Future PRs may promote unsupported fields to live; the matrix tracks the current daemon. |
 | **validation-only** | Field is validated at parse time (typically as a cross-field constraint marker) and has no runtime effect of its own. |
-| **rejected-before-mutation** | A reload carrying the value fails config parsing, so the whole candidate is refused before any runtime effect and the running value stays. |
 | **coordinator-gated** | EVPN runtime tables: supported shapes hot-apply through the ADR-0063 coordinator, and the runtime snapshot advances only after the daemon actors accept the change; unsupported shapes pin back to the committed model (see the EVPN section below). |
 
 ## SIGHUP reload routes
