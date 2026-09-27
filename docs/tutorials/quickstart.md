@@ -181,9 +181,7 @@ sed 's/^hold_time = 90/hold_time = 30/' config.toml > new-config.toml
 rustbgpd --diff new-config.toml config.toml
 
 # Start the daemon in the foreground; use a second terminal for the steps
-# below. Raise the shell's soft open-file limit first: `rbgp doctor` fails a
-# daemon running with fewer than 4096.
-ulimit -n 65536
+# below.
 rustbgpd config.toml
 ```
 
@@ -396,9 +394,10 @@ docker run -d --name rustbgpd \
   /bin/sh -c 'cp -n /etc/rustbgpd/config.template.toml /var/lib/rustbgpd/config.toml && exec rustbgpd /var/lib/rustbgpd/config.toml'
 ```
 
-`--ulimit` is required, not tuning: the Docker default soft `nofile` is 1024,
-which `rbgp doctor` fails outright because peers exhaust file descriptors at
-scale.
+`--ulimit` sets the ceiling: rustbgpd raises its soft `nofile` limit to the
+hard limit at startup, so the hard limit is what the daemon runs with.
+`rbgp doctor` fails a daemon left below 4096 because peers exhaust file
+descriptors at scale.
 
 Verify from the host over the published metrics port, and drive `rbgp` with
 `docker exec` — the gRPC socket is a Unix socket inside the container, and the

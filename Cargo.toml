@@ -190,7 +190,7 @@ tokio-stream.workspace = true
 rtnetlink = "0.23"
 netlink-packet-route = "0.33"
 libc.workspace = true
-nix = { workspace = true, features = ["fs", "signal", "time", "user"] }
+nix = { workspace = true, features = ["fs", "resource", "signal", "time", "user"] }
 futures = "0.3"
 
 [[bin]]
