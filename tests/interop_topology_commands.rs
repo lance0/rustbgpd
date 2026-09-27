@@ -1038,6 +1038,29 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     );
 }
 
+/// tshark prints "Capturing on" before dumpcap opens the interface, so a packet
+/// sent right after that line is usually missed. Captures must gate on their
+/// output file instead (`wait_capture_ready` in test-lib.sh).
+#[test]
+fn interop_captures_do_not_gate_on_tshark_capturing_on_line() {
+    let scripts = interop_path("scripts");
+    for entry in fs::read_dir(&scripts).expect("list interop scripts") {
+        let path = entry.expect("interop script entry").path();
+        if path.extension().is_none_or(|ext| ext != "sh") {
+            continue;
+        }
+        let script = fs::read_to_string(&path).expect("read interop script");
+        for (index, line) in script.lines().enumerate() {
+            assert!(
+                line.trim_start().starts_with('#') || !line.contains("Capturing on"),
+                "{}:{} gates on tshark's \"Capturing on\" line",
+                path.display(),
+                index + 1
+            );
+        }
+    }
+}
+
 #[test]
 fn m102_pins_openbgpd92_route_server_member_contract() {
     const OPENBGPD_IMAGE: &str =
@@ -1129,8 +1152,7 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
         "--cap-add=NET_ADMIN --cap-add=NET_RAW",
         "--mount \"type=volume,src=$CAPTURE_VOLUME,dst=/capture\"",
         "\"$CAPTURE_IMAGE\" tshark -p -i any",
-        "docker logs \"$CAPTURE_CONTAINER\"",
-        "Capturing on",
+        "wait_capture_ready \"$CAPTURE_CONTAINER\" /capture/m102.pcap -",
         "docker kill --signal=SIGINT \"$CAPTURE_CONTAINER\"",
         "timeout 10 docker wait \"$CAPTURE_CONTAINER\"",
         "/tmp/m102-rustbgpd.log",
@@ -1433,18 +1455,14 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
     let run_sidecar = start_capture
         .find("docker run -d --name \"$CAPTURE_CONTAINER\"")
         .expect("M102 starts the capture sidecar");
-    let ready_running = start_capture
-        .find("'{{.State.Running}}'")
-        .expect("M102 readiness checks the sidecar state");
-    let ready_log = start_capture
-        .find("Capturing on")
-        .expect("M102 readiness checks tshark output");
+    let ready = start_capture
+        .find("wait_capture_ready \"$CAPTURE_CONTAINER\" /capture/m102.pcap -")
+        .expect("M102 readiness waits for the capture file");
     assert!(
         stale_container < stale_volume
             && stale_volume < create_volume
             && create_volume < run_sidecar
-            && run_sidecar < ready_running
-            && ready_running < ready_log,
+            && run_sidecar < ready,
         "M102 must clean stale state, create its volume, then start and verify the sidecar"
     );
     let stop_capture = script

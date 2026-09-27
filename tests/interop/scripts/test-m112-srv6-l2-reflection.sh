@@ -100,10 +100,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-capture_ready() {
-    docker logs "$CAPTURE" 2>&1 | grep 'Capturing on' >/dev/null
-}
-
 start_capture() {
     if docker container inspect "$CAPTURE" >/dev/null 2>&1 \
         || docker volume inspect "$CAPTURE" >/dev/null 2>&1; then
@@ -120,7 +116,7 @@ start_capture() {
     docker inspect "$CAPTURE" \
         | jq '[.[] | {name:.Name,image:.Image,configured_image:.Config.Image}]' >"$ARTIFACT_DIR/capture-image.json"
     docker start "$CAPTURE" >/dev/null
-    wait_for 'capture ready' capture_ready
+    wait_capture_ready "$CAPTURE" /capture/m112.pcap -
 }
 
 source_state() {

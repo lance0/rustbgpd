@@ -531,12 +531,7 @@ start_capture() {
       --mount "type=volume,src=$CAPTURE_VOLUME,dst=/capture" \
       "$CAPTURE_IMAGE" tshark -p -i any \
       -f 'tcp port 179 and net 10.102.0.0/16' -w /capture/m102.pcap >/dev/null
-    for _ in $(seq 1 20); do
-        [ "$(docker inspect -f '{{.State.Running}}' "$CAPTURE_CONTAINER" 2>/dev/null || true)" = true ] \
-          && docker logs "$CAPTURE_CONTAINER" 2>&1 | grep -q 'Capturing on' && return
-        sleep .25
-    done
-    die "tshark readiness timeout"
+    wait_capture_ready "$CAPTURE_CONTAINER" /capture/m102.pcap - || die "tshark readiness timeout"
 }
 stop_capture() {
     stop_capture_container || die "tshark status failure"
