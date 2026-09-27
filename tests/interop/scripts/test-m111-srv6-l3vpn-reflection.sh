@@ -60,10 +60,6 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
-capture_ready() {
-    docker logs "$CAPTURE" 2>&1 | grep -q 'Capturing on'
-}
-
 sink_ready() {
     docker exec "$SINK" gobgp neighbor 2001:db8:111:20::1 -j >/dev/null 2>&1
 }
@@ -83,7 +79,7 @@ start_capture() {
         "$CAPTURE_IMAGE" tshark -p -i any -f 'tcp port 179' -w /capture/m111.pcap >/dev/null
     CAPTURE_OWNED=1
     docker start "$CAPTURE" >/dev/null
-    wait_for 'packet capture ready' capture_ready
+    wait_capture_ready "$CAPTURE" /capture/m111.pcap -
 }
 
 stop_capture() {

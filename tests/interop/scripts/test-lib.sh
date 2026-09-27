@@ -638,6 +638,8 @@ prober_max_gap_ms() {
 # the capture. Neither helper touches the pass/fail ledger.
 
 # wait_capture_ready CONTAINER PCAP LOG [TIMEOUT_SECONDS]
+# LOG is the capture's log file inside CONTAINER, or "-" for a capture sidecar
+# whose main process is the capture; its container log is shown on timeout.
 wait_capture_ready() {
     local container=${1:?} pcap=${2:?} capture_log=${3:?} timeout=${4:-30}
     local deadline=$((SECONDS + timeout))
@@ -648,7 +650,11 @@ wait_capture_ready() {
         sleep 0.2
     done
     echo "ERROR: packet capture in $container did not create $pcap within ${timeout}s" >&2
-    timeout 5 docker exec "$container" cat "$capture_log" >&2 || true
+    if [ "$capture_log" = - ]; then
+        timeout 5 docker logs "$container" >&2 2>&1 || true
+    else
+        timeout 5 docker exec "$container" cat "$capture_log" >&2 || true
+    fi
     return 1
 }
 

@@ -163,6 +163,13 @@ trap m105_on_exit EXIT
 
 start_capture() {
     cleanup_capture
+    # A leftover m105.pcap would satisfy the readiness check before tshark is
+    # armed, and creating a volume that already exists reuses it.
+    if docker container inspect "$CAPTURE_CONTAINER" >/dev/null 2>&1 \
+        || docker volume inspect "$CAPTURE_VOLUME" >/dev/null 2>&1; then
+        echo "ERROR: stale capture resource survived cleanup: $CAPTURE_CONTAINER or $CAPTURE_VOLUME" >&2
+        return 1
+    fi
     docker volume create --label rustbgpd.interop.milestone=M105 "$CAPTURE_VOLUME" >/dev/null
     docker run -d --name "$CAPTURE_CONTAINER" \
         --label rustbgpd.interop.milestone=M105 \
@@ -171,15 +178,8 @@ start_capture() {
         --mount "type=volume,src=$CAPTURE_VOLUME,dst=/capture" \
         "$CAPTURE_IMAGE" tshark -p -i any \
         -f 'tcp port 179 and net 10.105.0.0/24' -w /capture/m105.pcap >/dev/null
-    for _ in $(seq 1 20); do
-        if [ "$(docker inspect -f '{{.State.Running}}' "$CAPTURE_CONTAINER" 2>/dev/null)" = true ] \
-            && docker logs "$CAPTURE_CONTAINER" 2>&1 | grep 'Capturing on' >/dev/null; then
-            CAPTURE_RUNNING=1
-            return 0
-        fi
-        sleep .25
-    done
-    return 1
+    wait_capture_ready "$CAPTURE_CONTAINER" /capture/m105.pcap - || return 1
+    CAPTURE_RUNNING=1
 }
 
 stop_capture() {

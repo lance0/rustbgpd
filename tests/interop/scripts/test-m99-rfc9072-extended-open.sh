@@ -124,8 +124,11 @@ start_capture() {
         -w - >"$CAPTURE" 2>"$CAPTURE_LOG" &
     CAPTURE_PID=$!
 
+    # dumpcap writes the pcapng header to stdout only after it has opened the
+    # interface and installed the filter; tshark's "Capturing on" line comes
+    # earlier and is not a readiness signal.
     for _ in $(seq 1 20); do
-        if grep -q 'Capturing on' "$CAPTURE_LOG"; then
+        if [ -s "$CAPTURE" ]; then
             ok "host tshark capture armed before rustbgpd startup"
             return 0
         fi
