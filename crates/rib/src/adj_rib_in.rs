@@ -599,6 +599,15 @@ impl AdjRibIn {
         deleted
     }
 
+    /// Prefixes of the unicast routes in `family`: the only routes the
+    /// family-scoped stale sweep and clear helpers can remove or mutate.
+    pub fn family_prefixes(&self, family: (Afi, Safi)) -> impl Iterator<Item = Prefix> + '_ {
+        self.routes
+            .iter()
+            .filter(move |route| route_matches_family(route, family))
+            .map(|route| route.prefix)
+    }
+
     /// Clear the stale flag on routes matching the given address family.
     pub fn clear_stale(&mut self, family: (Afi, Safi)) {
         let mut clear_local_llgr = Vec::new();

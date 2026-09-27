@@ -2910,3 +2910,245 @@ async fn gr_family_with_zero_llst_is_purged_at_gr_expiry() {
             .contains_key(&(source, Afi::Ipv6, Safi::Unicast))
     );
 }
+
+fn eor_oracle_route(prefix: Prefix, source: Ipv4Addr, asns: Vec<u32>, med: Option<u32>) -> Route {
+    let mut route =
+        make_route_with_as_path(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0), source, asns);
+    route.prefix = prefix;
+    if let Prefix::V6(_) = prefix {
+        route.next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 1));
+    }
+    if let Some(med) = med {
+        route.attributes = AttrSet::new(
+            route
+                .attributes
+                .iter()
+                .cloned()
+                .chain([PathAttribute::Med(med)])
+                .collect(),
+        );
+    }
+    route
+}
+
+/// After each End-of-RIB, a full recompute and distribution over every
+/// unicast prefix must find nothing left to change: the family-scoped pass
+/// did all the work the whole-peer pass used to do. Covers a GR peer with
+/// IPv4, IPv6 and a route-less `VPNv4` family (swept and changed routes in
+/// both unicast families) and an LLGR peer, against plain, per-client-best
+/// and Add-Path receivers.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one oracle scenario keeps both GR arms and every receiver kind together"
+)]
+async fn end_of_rib_family_scope_leaves_nothing_for_a_full_pass() {
+    let (_tx, mut manager) = direct_manager(None);
+    let dual = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+    let mut receivers = Vec::new();
+    for (index, (per_client_best, add_path)) in [
+        (false, false),
+        (false, false),
+        (true, false),
+        (true, false),
+        (false, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (out_tx, out_rx) = mpsc::channel(256);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1)),
+            peer_asn: 65_200 + u32::try_from(index).unwrap(),
+            peer_router_id: Ipv4Addr::new(10, 9, 0, u8::try_from(index).unwrap() + 1),
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: dual.clone(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            orr_vantage: None,
+            add_path_send_families: if add_path { dual.clone() } else { vec![] },
+            add_path_send_max: u32::from(add_path) * 2,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        receivers.push(out_rx);
+    }
+    let drain = |receivers: &mut Vec<mpsc::Receiver<OutboundRouteUpdate>>| {
+        receivers
+            .iter_mut()
+            .map(|receiver| std::iter::from_fn(|| receiver.try_recv().ok()).count())
+            .sum::<usize>()
+    };
+
+    let gr = Ipv4Addr::new(10, 0, 0, 1);
+    let llgr = Ipv4Addr::new(10, 0, 0, 2);
+    let other = Ipv4Addr::new(10, 0, 0, 3);
+    let v4 = |i: u8| Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, i * 8), 29));
+    let v6 = |i: u16| {
+        Prefix::V6(Ipv6Prefix::new(
+            Ipv6Addr::new(0x2001, 0xdb8, i, 0, 0, 0, 0, 0),
+            48,
+        ))
+    };
+    let announce = |manager: &mut RibManager, source: Ipv4Addr, routes: Vec<Route>| {
+        manager.handle_update(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: IpAddr::V4(source),
+            announced: routes,
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+        while manager.process_next_route_chunk() {}
+    };
+    let gr_table = |med: bool| -> Vec<Route> {
+        (0..6)
+            .map(|i| eor_oracle_route(v4(i), gr, vec![65_001], (med && i == 4).then_some(7)))
+            .chain((0..4).map(|i| eor_oracle_route(v6(i), gr, vec![65_001], None)))
+            .collect()
+    };
+    announce(&mut manager, gr, gr_table(false));
+    announce(
+        &mut manager,
+        other,
+        vec![
+            eor_oracle_route(v4(0), other, vec![65_003, 65_004], None),
+            eor_oracle_route(v4(5), other, vec![65_003, 65_004], None),
+            eor_oracle_route(v6(0), other, vec![65_003], None),
+            eor_oracle_route(v6(3), other, vec![65_003, 65_004], None),
+        ],
+    );
+    announce(
+        &mut manager,
+        llgr,
+        (6..9)
+            .map(|i| eor_oracle_route(v4(i), llgr, vec![65_002], None))
+            .collect(),
+    );
+    drain(&mut receivers);
+
+    let assert_nothing_left = |manager: &mut RibManager,
+                               receivers: &mut Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+                               step: &str| {
+        let all: HashSet<Prefix> = manager
+            .loc_rib
+            .iter()
+            .map(|route| route.prefix)
+            .chain(
+                manager
+                    .ribs
+                    .values()
+                    .flat_map(|rib| rib.iter().map(|r| r.prefix)),
+            )
+            .collect();
+        let changed = manager.recompute_best(&all);
+        assert!(
+            changed.is_empty(),
+            "{step}: full recompute changed {changed:?}"
+        );
+        manager.distribute_changes(&changed, &all);
+        assert_eq!(
+            drain(receivers),
+            0,
+            "{step}: full distribution emitted updates"
+        );
+    };
+
+    // GR arm: IPv4 + IPv6 + a route-less VPNv4 family. Re-advertise all but
+    // one prefix per family, one IPv4 route with a new MED.
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(gr),
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+        ],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    });
+    announce(
+        &mut manager,
+        gr,
+        gr_table(true)
+            .into_iter()
+            .filter(|route| route.prefix != v4(5) && route.prefix != v6(3))
+            .collect(),
+    );
+    drain(&mut receivers);
+    for (afi, safi) in [
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::Unicast),
+        (Afi::Ipv6, Safi::Unicast),
+    ] {
+        manager.handle_update(RibUpdate::EndOfRib {
+            session_id: 0,
+            peer: IpAddr::V4(gr),
+            afi,
+            safi,
+        });
+        drain(&mut receivers);
+        assert_nothing_left(
+            &mut manager,
+            &mut receivers,
+            &format!("GR {afi:?}/{safi:?}"),
+        );
+    }
+    assert!(
+        !manager.gr_peers.contains_key(&IpAddr::V4(gr)),
+        "GR completed"
+    );
+    assert_eq!(manager.loc_rib.get(&v4(5)).unwrap().peer, IpAddr::V4(other));
+    assert_eq!(manager.loc_rib.get(&v6(3)).unwrap().peer, IpAddr::V4(other));
+
+    // LLGR arm: promote to LLGR-stale (LLGR_STALE community added), then
+    // re-advertise one route and resolve the family with End-of-RIB.
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer: IpAddr::V4(llgr),
+        restart_time: 2,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    });
+    manager.sweep_gr_stale(IpAddr::V4(llgr));
+    assert!(manager.llgr_peers.contains_key(&IpAddr::V4(llgr)));
+    announce(
+        &mut manager,
+        llgr,
+        vec![eor_oracle_route(v4(6), llgr, vec![65_002], None)],
+    );
+    drain(&mut receivers);
+    manager.handle_update(RibUpdate::EndOfRib {
+        session_id: 0,
+        peer: IpAddr::V4(llgr),
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    drain(&mut receivers);
+    assert_nothing_left(&mut manager, &mut receivers, "LLGR Ipv4/Unicast");
+    assert!(
+        !manager.llgr_peers.contains_key(&IpAddr::V4(llgr)),
+        "LLGR completed"
+    );
+    assert!(
+        manager.loc_rib.get(&v4(7)).is_none(),
+        "unrefreshed LLGR route swept"
+    );
+}

@@ -299,11 +299,14 @@ impl RibManager {
             // FlowSpec/EVPN affected keys were collected BEFORE the sweep,
             // so removed keys are already in their sets; the unicast set is
             // collected from the retained routes and needs the swept
-            // prefixes joined in so their withdrawals distribute.
+            // prefixes joined in so their withdrawals distribute. Only this
+            // EoR's family can change: the sweep and clear helpers above are
+            // family-scoped, and the peer's other families (and any unicast
+            // route for a non-unicast EoR) keep their selection inputs.
             let mut affected: HashSet<Prefix> = self
                 .ribs
                 .get(&peer)
-                .map(|rib| rib.iter().map(|r| r.prefix).collect())
+                .map(|rib| rib.family_prefixes((afi, safi)).collect())
                 .unwrap_or_default();
             affected.extend(swept_prefixes);
             self.recompute_and_distribute_end_of_rib_unicast(&affected);
@@ -469,11 +472,12 @@ impl RibManager {
 
             // Same shape as the GR arm: FlowSpec/EVPN affected keys already
             // include the swept ones (collected pre-sweep); join the swept
-            // unicast prefixes so their withdrawals distribute.
+            // unicast prefixes so their withdrawals distribute. Family-scoped
+            // like the GR arm: only this EoR's family can change.
             let mut affected: HashSet<Prefix> = self
                 .ribs
                 .get(&peer)
-                .map(|rib| rib.iter().map(|r| r.prefix).collect())
+                .map(|rib| rib.family_prefixes((afi, safi)).collect())
                 .unwrap_or_default();
             affected.extend(swept_prefixes);
             self.recompute_and_distribute_end_of_rib_unicast(&affected);
