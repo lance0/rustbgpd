@@ -22,8 +22,15 @@
 //! 1. Higher [`ProjectedEvpnRoute::mobility_sequence`] wins. RFC 7432
 //!    §15 puts the higher seq in the more recent advertisement.
 //! 2. On equal sequence (or both `None`), the route whose `next_hop`
-//!    sorts lower wins. Arbitrary but deterministic — the projection
-//!    must always pick the same winner across runs.
+//!    sorts lower wins. RFC 7432 §15.1 resolves an equal-sequence
+//!    contest between PEs by the lowest PE IP address.
+//! 3. The RFC leaves a tie between two routes from the same VTEP at the
+//!    same sequence open (for example the same MAC under two RDs, or
+//!    with different ESIs). The lower RD, then ESI, Ethernet Tag, host
+//!    IP, label and MAC wins, so the winner never depends on input order.
+//!
+//! [`ProjectedEvpnRoute::preference_cmp`] is the single definition of
+//! this order.
 //!
 //! Routes whose `label1` (the primary MPLS / VNI label) doesn't match
 //! any local [`crate::EvpnInstance`] are dropped silently. They
@@ -419,19 +426,35 @@ fn single_active_entry(
     None
 }
 
-/// Decide whether `new` should displace `existing` for the same
-/// `(VNI, MAC)` key. See module docs for the tie-break rule.
-fn prefer_new(new: &ProjectedEvpnRoute, existing: &ProjectedEvpnRoute) -> bool {
-    // Higher mobility sequence wins. None < Some(0), and Some(N+1) >
-    // Some(N) — Option<u32>::cmp gives this ordering naturally.
-    match new.mobility_sequence.cmp(&existing.mobility_sequence) {
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Equal => {
-            // Tie on sequence: deterministic by lower next_hop.
-            new.next_hop < existing.next_hop
-        }
+impl ProjectedEvpnRoute {
+    /// Total preference order between two Type 2 candidates for the same
+    /// `(VNI, MAC)`; `Ordering::Greater` means `self` is preferred.
+    ///
+    /// Higher mobility sequence wins (RFC 7432 §15, `None` below any
+    /// `Some`), then the lower `next_hop` (RFC 7432 §15.1: lowest PE IP on
+    /// equal sequence). The RFC leaves ties between routes from the same
+    /// VTEP open; those fall to the lower `rd`, `esi`, `ethernet_tag`,
+    /// `host_ip`, `label1` and `mac`, in that order. Every field takes
+    /// part, so only identical routes compare `Equal` and the winner is
+    /// independent of the order candidates are seen in.
+    #[must_use]
+    pub fn preference_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.mobility_sequence
+            .cmp(&other.mobility_sequence)
+            .then_with(|| other.next_hop.cmp(&self.next_hop))
+            .then_with(|| other.rd.cmp(&self.rd))
+            .then_with(|| other.esi.cmp(&self.esi))
+            .then_with(|| other.ethernet_tag.cmp(&self.ethernet_tag))
+            .then_with(|| other.host_ip.cmp(&self.host_ip))
+            .then_with(|| other.label1.cmp(&self.label1))
+            .then_with(|| other.mac.cmp(&self.mac))
     }
+}
+
+/// Decide whether `new` should displace `existing` for the same
+/// `(VNI, MAC)` key. See [`ProjectedEvpnRoute::preference_cmp`].
+fn prefer_new(new: &ProjectedEvpnRoute, existing: &ProjectedEvpnRoute) -> bool {
+    new.preference_cmp(existing).is_gt()
 }
 
 /// Convert an MPLS label to a 24-bit VNI per RFC 8365 §5. Returns
@@ -1122,6 +1145,82 @@ mod tests {
         assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
         assert!(entry.alias_group_key.is_none());
         assert!(entry.single_active_backup_vtep_ip.is_none());
+    }
+
+    #[test]
+    fn same_vtep_same_sequence_tie_resolves_to_lower_rd_in_either_order() {
+        // One VTEP advertises the MAC under two RDs at the same sequence,
+        // once on a multi-homed segment and once single-homed. The lower
+        // RD wins regardless of input order, so the aliasing outcome does
+        // not depend on how the RIB happened to iterate.
+        let mut on_segment = route_with_esi(100, 1, "10.0.0.2", Some(3), esi_seed(7));
+        on_segment.rd = rd(65002, 100);
+        let mut single_homed = route(100, 1, "10.0.0.2", Some(3));
+        single_homed.rd = rd(65003, 100);
+        assert!(on_segment.preference_cmp(&single_homed).is_gt());
+        assert!(single_homed.preference_cmp(&on_segment).is_lt());
+
+        for routes in [
+            vec![on_segment.clone(), single_homed.clone()],
+            vec![single_homed.clone(), on_segment.clone()],
+        ] {
+            let eads = vec![ead(esi_seed(7), 0, "10.0.0.3")];
+            let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+            let entry = table.get(vni(100), mac(1)).unwrap();
+            assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
+            assert_eq!(entry.alias_vtep_ips, vec![ipa("10.0.0.3")]);
+            assert_eq!(
+                entry.alias_group_key,
+                Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0)))
+            );
+        }
+    }
+
+    #[test]
+    fn preference_cmp_fallback_keys_prefer_the_lower_value_in_rustdoc_order() {
+        // Each step starts from `base`, holds every earlier key equal and
+        // raises only the next documented fallback key; the lower value
+        // must win in both comparison directions.
+        type Bump = fn(&mut ProjectedEvpnRoute);
+        let base = route(100, 1, "10.0.0.2", Some(3));
+        assert_eq!(
+            base.preference_cmp(&base.clone()),
+            std::cmp::Ordering::Equal
+        );
+        let raise: [(&str, Bump); 6] = [
+            ("rd", |r| r.rd = rd(65003, 100)),
+            ("esi", |r| r.esi = esi_seed(1)),
+            ("ethernet_tag", |r| {
+                r.ethernet_tag = rustbgpd_wire::EthernetTagId(1);
+            }),
+            ("host_ip", |r| r.host_ip = Some(ipa("192.0.2.1"))),
+            ("label1", |r| {
+                r.label1 = MplsLabel::new(r.label1.as_vni() + 1);
+            }),
+            ("mac", |r| r.mac = mac(2)),
+        ];
+        for (i, (key, bump)) in raise.iter().enumerate() {
+            let lower = base.clone();
+            let mut higher = base.clone();
+            bump(&mut higher);
+            assert!(lower.preference_cmp(&higher).is_gt(), "lower {key} wins");
+            assert!(higher.preference_cmp(&lower).is_lt(), "higher {key} loses");
+
+            // Precedence: lower on this key but higher on every later key
+            // still wins, so the keys apply in the documented order.
+            let mut lower_here = base.clone();
+            for (_, later) in &raise[i + 1..] {
+                later(&mut lower_here);
+            }
+            assert!(
+                lower_here.preference_cmp(&higher).is_gt(),
+                "{key} outranks later keys"
+            );
+            assert!(
+                higher.preference_cmp(&lower_here).is_lt(),
+                "{key} outranks later keys"
+            );
+        }
     }
 
     #[test]
