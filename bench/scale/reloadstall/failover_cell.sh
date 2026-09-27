@@ -62,9 +62,12 @@ done
 kill -KILL "$daemon_pid" 2>/dev/null
 wait "$daemon_pid"
 daemon_rc=$?
-cp "$RUN/overlap.tsv" "$OUT/overlap.tsv"
+cp "$RUN/overlap.tsv" "$OUT/overlap.tsv" || exit 1
 
-python3 - "$OUT" <<'PY'
+# The cell passes only when the harness, the daemon's shutdown and this
+# summary all succeed; a malformed log or missing row fails it.
+summary_rc=0
+python3 - "$OUT" <<'PY' || summary_rc=$?
 import json
 import pathlib
 import sys
@@ -78,10 +81,12 @@ for line in (out / "daemon.log").read_text(errors="replace").splitlines():
     passes += 1
     shared += int(fields["shared_members"])
     walks += int(fields["per_member_walks"])
-for line in (out / "reloadstall.log").read_text().splitlines():
-    if line.startswith("flapstorm_failover_csv"):
-        print(line)
+rows = [line for line in (out / "reloadstall.log").read_text().splitlines()
+        if line.startswith("flapstorm_failover_csv")]
+if len(rows) < 2:
+    sys.exit("no flapstorm_failover_csv rounds in reloadstall.log")
+print("\n".join(rows))
 print(f"mixed_passes={passes} shared_members={shared} per_member_walks={walks}")
 PY
-echo "harness_rc=$harness_rc daemon_rc=$daemon_rc"
-[ "$harness_rc" -eq 0 ]
+echo "harness_rc=$harness_rc daemon_rc=$daemon_rc summary_rc=$summary_rc"
+[ "$harness_rc" -eq 0 ] && [ "$daemon_rc" -eq 0 ] && [ "$summary_rc" -eq 0 ]
