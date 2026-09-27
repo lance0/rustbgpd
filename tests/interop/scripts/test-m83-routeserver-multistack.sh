@@ -515,6 +515,7 @@ self_test_signal_artifacts() {
     grpcurl() { return 0; }
     jq() { return 0; }
     export -f docker grpcurl jq
+    local -
     set +e
     M83_ARTIFACT_ROOT="$scratch/artifacts" \
         RUNNER_TEMP="$scratch" \

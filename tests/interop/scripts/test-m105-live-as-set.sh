@@ -125,6 +125,9 @@ write_identities() {
 }
 
 cleanup_capture() {
+    # Best-effort teardown; `local -` confines the errexit relaxation to this
+    # function so the rest of the leg keeps `set -e`.
+    local -
     set +e
     if docker container inspect "$CAPTURE_CONTAINER" >/dev/null 2>&1; then
         if [ "$(docker inspect -f '{{.State.Running}}' "$CAPTURE_CONTAINER" 2>/dev/null)" = true ]; then
@@ -139,6 +142,7 @@ cleanup_capture() {
 m105_on_exit() {
     local status=$?
     trap - EXIT INT TERM HUP
+    set +e
     if [ "$status" -ne 0 ] && [ -d "$ARTIFACT_DIR" ]; then
         docker exec "$RAW" cat /tmp/m105-events.jsonl \
             >"$ARTIFACT_DIR/events.partial.jsonl" 2>/dev/null || true
@@ -377,8 +381,11 @@ snapshot_as_set_observations() {
     local directory="$ARTIFACT_DIR/observations"
     mkdir -p "$directory"
     rs_ctl rib received "$RAW_ADDR" -a ipv4 -j >"$directory/rustbgpd.json"
+    # birdc exits 1 with "Network not found" when BIRD did not install the
+    # probe, which is an observation to record, not a failure.
     docker exec "$BIRD" birdc -r show route for "$PROBE" protocol raw_peer all \
-        >"$directory/bird.txt"
+        >"$directory/bird.txt" \
+        || grep -qx 'Network not found' "$directory/bird.txt"
     docker exec "$OPENBGPD" bgpctl -j show rib "$PROBE" \
         >"$directory/openbgpd.json"
     docker exec "$GOBGP" gobgp neighbor "$RAW_ADDR" adj-in -a ipv4 -j \

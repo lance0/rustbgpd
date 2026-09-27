@@ -1061,6 +1061,58 @@ fn interop_captures_do_not_gate_on_tshark_capturing_on_line() {
     }
 }
 
+/// `set +e` is shell-global: a helper that relaxes errexit and returns leaves
+/// the rest of the leg running without `set -e`. A function body that runs
+/// `set +e` must scope it with a `local -` placed before the first `set +e`,
+/// re-enable it with a later `set -e`, or end in `exit` (an exit handler).
+#[test]
+fn interop_helpers_do_not_leak_relaxed_errexit() {
+    let scripts = interop_path("scripts");
+    let mut leaks = Vec::new();
+    for entry in fs::read_dir(&scripts).expect("list interop scripts") {
+        let path = entry.expect("interop script entry").path();
+        if path.extension().is_none_or(|ext| ext != "sh") {
+            continue;
+        }
+        let script = fs::read_to_string(&path).expect("read interop script");
+        let lines: Vec<&str> = script.lines().collect();
+        for (start, line) in lines.iter().enumerate() {
+            let Some(name) = line.trim_start().strip_suffix("() {") else {
+                continue;
+            };
+            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let close = format!("{}}}", &line[..line.len() - line.trim_start().len()]);
+            let Some(len) = lines[start + 1..].iter().position(|l| *l == close) else {
+                continue;
+            };
+            let body: Vec<&str> = lines[start + 1..start + 1 + len]
+                .iter()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect();
+            let is_relaxation = |l: &&str| *l == "set +e" || l.ends_with("; set +e");
+            let Some(first_relaxed) = body.iter().position(is_relaxation) else {
+                continue;
+            };
+            let relaxed = body.iter().rposition(is_relaxation).expect("found above");
+            // `local -` saves the options current when it runs, so it only
+            // scopes a `set +e` that comes after it.
+            let scoped = body[..first_relaxed].contains(&"local -");
+            let restored = body[relaxed + 1..].iter().any(|l| l.starts_with("set -e"));
+            let exits = body.last().is_some_and(|l| l.starts_with("exit"));
+            if !(scoped || restored || exits) {
+                leaks.push(format!("{}:{} {name}", path.display(), start + 1));
+            }
+        }
+    }
+    assert!(
+        leaks.is_empty(),
+        "helpers leave errexit off after returning (add `local -` before `set +e`): {leaks:?}"
+    );
+}
+
 #[test]
 fn m105_capture_refuses_stale_resources_before_arming() {
     let script = fs::read_to_string(interop_path("scripts/test-m105-live-as-set.sh"))
