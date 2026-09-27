@@ -921,9 +921,9 @@ fn validate_event_filter_categories(
     let wants_evpn = categories.contains(&(EventCategory::Evpn as i32));
     // EVENT_CATEGORY_POLICY carries OtcRouteBlocked which IS peer-
     // scoped (the structured event stores the peer address), so
-    // `--address` is meaningful here. The legacy PolicyChanged
+    // `--neighbor` is meaningful here. The legacy PolicyChanged
     // entries scope by peer too when the mutation targets one
-    // neighbor; --address narrows to those.
+    // neighbor; --neighbor narrows to those.
     let wants_policy = categories.contains(&(EventCategory::Policy as i32));
     if !wants_route && !wants_dataplane && (family.is_some() || prefix.is_some()) {
         return Err(CliError::Argument(
@@ -938,7 +938,7 @@ fn validate_event_filter_categories(
         && neighbor.is_some()
     {
         return Err(CliError::Argument(
-            "--address requires --category route, --category session, --category dataplane, --category evpn, or --category policy"
+            "--neighbor requires --category route, --category session, --category dataplane, --category evpn, or --category policy"
                 .into(),
         ));
     }
@@ -2856,7 +2856,7 @@ mod tests {
     fn validate_event_filter_categories_accepts_policy_with_address() {
         // OTC events ride on EVENT_CATEGORY_POLICY and are peer-
         // scoped. The CLI must not reject the natural shape
-        // `--category policy --address 10.0.0.2` before the
+        // `--category policy --neighbor 10.0.0.2` before the
         // request even reaches the EHM auto-route.
         validate_event_filter_categories(
             &[EventCategory::Policy as i32],
@@ -2864,7 +2864,19 @@ mod tests {
             None,
             &None,
         )
-        .expect("--address must be allowed on --category policy");
+        .expect("--neighbor must be allowed on --category policy");
+        let err = validate_event_filter_categories(
+            &[EventCategory::Bfd as i32],
+            &Some("10.0.0.2".to_string()),
+            None,
+            &None,
+        )
+        .expect_err("a peer filter needs a peer-scoped category");
+        assert!(
+            err.to_string()
+                .starts_with("--neighbor requires --category"),
+            "{err}"
+        );
     }
 
     #[test]
