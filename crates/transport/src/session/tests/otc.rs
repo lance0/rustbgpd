@@ -24,7 +24,7 @@ fn otc_routes_blocked_count(session: &PeerSession, reason: &str) -> u64 {
                             clippy::cast_sign_loss,
                             reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
                         )]
-                        let value = metric.get_counter().value() as u64;
+                        let value = metric.get_counter().get_value() as u64;
                         value
                     })
             })

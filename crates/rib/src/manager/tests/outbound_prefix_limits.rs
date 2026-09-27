@@ -628,7 +628,7 @@ fn outbound_limit_actor_samples(metrics: &BgpMetrics) -> std::collections::BTree
         .into_iter()
         .find(|family| family.name() == "bgp_rib_outbound_prefix_limit_actor_duration_seconds")
         .expect("outbound prefix-limit actor histogram is registered")
-        .metric
+        .get_metric()
         .iter()
         .map(|metric| {
             let operation = metric
@@ -638,7 +638,7 @@ fn outbound_limit_actor_samples(metrics: &BgpMetrics) -> std::collections::BTree
                 .expect("operation label exists")
                 .value()
                 .to_owned();
-            (operation, metric.get_histogram().sample_count())
+            (operation, metric.get_histogram().get_sample_count())
         })
         .collect()
 }
@@ -1673,7 +1673,7 @@ fn capacity_gauge(metrics: &BgpMetrics, name: &str, peer: IpAddr, family: &str) 
     let gathered = metrics.registry().gather();
     let gauge = gathered.iter().find(|group| group.name() == name)?;
     gauge
-        .metric
+        .get_metric()
         .iter()
         .find(|metric| {
             metric
@@ -1685,7 +1685,7 @@ fn capacity_gauge(metrics: &BgpMetrics, name: &str, peer: IpAddr, family: &str) 
                     .iter()
                     .any(|label| label.name() == "family" && label.value() == family)
         })
-        .map(|metric| metric.get_gauge().value())
+        .map(|metric| metric.get_gauge().get_value())
 }
 
 /// A blocking family's gauges must agree with the admitted truth the API

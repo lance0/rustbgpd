@@ -63,7 +63,7 @@ tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 prost = "0.14"
 prost-types = "0.14"
-prometheus = { version = "0.14", features = ["process"] }
+prometheus = { version = "0.14", default-features = false, features = ["process"] }
 socket2 = { version = "0.6", features = ["all"] }
 # `uio` gates recvmsg / ControlMessageOwned / cmsg_space! used by the BFD actor
 # to read IP_RECVTTL / IPV6_RECVHOPLIMIT + IP_PKTINFO / IPV6_PKTINFO ancillary
@@ -181,7 +181,6 @@ lru.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 owo-colors.workspace = true
-axum.workspace = true
 socket2.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tokio-stream.workspace = true
@@ -206,10 +205,8 @@ rs-config-render = { path = "tools/rs-config-render" }
 # The importer gate (tests/config_import_emitted_check.rs) translates the
 # CLI's BIRD/FRR/GoBGP fixtures and proves the output passes `--check`.
 rustbgpctl = { path = "crates/cli" }
-prost.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
-tower.workspace = true
 # Seeds an events DB with a newer schema version for the downgrade-fence
 # proof in tests/grpc_failure_exit_code.rs.
 rusqlite.workspace = true

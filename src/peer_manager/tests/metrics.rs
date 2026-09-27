@@ -33,7 +33,7 @@ fn bmp_source_drop_metric(metrics: &BgpMetrics, peer: &str, reason: &str) -> Opt
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "reason" && label.value() == reason);
-                (has_peer && has_reason).then(|| metric.get_counter().value())
+                (has_peer && has_reason).then(|| metric.get_counter().get_value())
             })
         })
 }
@@ -84,7 +84,7 @@ fn peer_state_gauge(metrics: &BgpMetrics, peer: &str, interface: &str, state: &s
                     && labels
                         .iter()
                         .any(|label| label.name() == "state" && label.value() == state))
-                .then(|| metric.get_gauge().value())
+                .then(|| metric.get_gauge().get_value())
             })
         })
 }
@@ -342,7 +342,7 @@ async fn delete_peer_reaps_metric_series() {
         .into_iter()
         .find(|family| family.name() == "bgp_fib_routes_installed_total")
         .expect("global counter family present");
-    assert!((fib_installed.get_metric()[0].get_counter().value() - 1.0).abs() < f64::EPSILON);
+    assert!((fib_installed.get_metric()[0].get_counter().get_value() - 1.0).abs() < f64::EPSILON);
     // The ordered RIB-side reap marker was queued.
     let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
     assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
@@ -666,7 +666,7 @@ async fn session_flap_does_not_reap_metric_series() {
         .into_iter()
         .find(|family| family.name() == "bgp_path_attribute_discarded_total")
         .expect("discard family remains registered across an ordinary reset");
-    assert!((discard.get_metric()[0].get_counter().value() - 3.0).abs() < f64::EPSILON);
+    assert!((discard.get_metric()[0].get_counter().get_value() - 3.0).abs() < f64::EPSILON);
     assert!(rib_rx.try_recv().is_err(), "no PeerDeleted on a flap");
 }
 
@@ -760,7 +760,7 @@ fn peer_info_series(metrics: &BgpMetrics, peer: &str) -> Vec<Vec<(String, String
                         .any(|label| label.name() == "peer" && label.value() == peer)
                 })
                 .map(|metric| {
-                    assert!((metric.get_gauge().value() - 1.0).abs() < f64::EPSILON);
+                    assert!((metric.get_gauge().get_value() - 1.0).abs() < f64::EPSILON);
                     let mut labels = metric
                         .get_label()
                         .iter()

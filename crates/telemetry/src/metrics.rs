@@ -6425,7 +6425,7 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == name)
             .and_then(|family| family.get_metric().first().cloned())
-            .map(|metric| metric.get_gauge().value())
+            .map(|metric| metric.get_gauge().get_value())
             .unwrap()
     }
 
@@ -6507,7 +6507,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(samples.len(), 1);
-        assert!(samples[0].get_gauge().value() > 0.0);
+        assert!(samples[0].get_gauge().get_value() > 0.0);
     }
 
     fn event_outbox_queue_depths(m: &BgpMetrics) -> Vec<(String, f64)> {
@@ -6530,7 +6530,7 @@ mod tests {
                     .unwrap()
                     .value()
                     .to_owned();
-                (category, metric.get_gauge().value())
+                (category, metric.get_gauge().get_value())
             })
             .collect::<Vec<_>>();
         values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -6564,7 +6564,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(family.len(), 1);
         assert_eq!(family[0].get_metric().len(), 1);
-        assert!((family[0].get_metric()[0].get_counter().value() - 2.0).abs() < f64::EPSILON);
+        assert!((family[0].get_metric()[0].get_counter().get_value() - 2.0).abs() < f64::EPSILON);
     }
     #[test]
     fn independent_instances_isolate_policy_memo_and_registry_lifetime() {
@@ -6778,14 +6778,14 @@ mod tests {
             .find(|family| family.name() == "bgp_orr_input_objects")
             .expect("ORR input diagnostic metric registered");
         let observed: std::collections::BTreeMap<_, _> = family
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 assert_eq!(metric.get_label().len(), 1, "only classification label");
                 assert_eq!(metric.get_label()[0].name(), "classification");
                 (
                     metric.get_label()[0].value().to_owned(),
-                    metric.get_gauge().value(),
+                    metric.get_gauge().get_value(),
                 )
             })
             .collect();
@@ -7093,12 +7093,12 @@ mod tests {
             .find(|family| family.name() == "bgp_dataplane_reconcile_planning_failures_total")
             .expect("planning failure family registered");
         assert_eq!(family.get_metric().len(), 8);
-        assert!(family.get_metric().iter().all(|metric| {
-            metric
-                .get_counter()
-                .as_ref()
-                .is_some_and(|counter| (counter.value() - 1.0).abs() < f64::EPSILON)
-        }));
+        assert!(
+            family
+                .get_metric()
+                .iter()
+                .all(|metric| { (metric.get_counter().get_value() - 1.0).abs() < f64::EPSILON })
+        );
     }
 
     #[test]
@@ -7141,14 +7141,14 @@ mod tests {
             .find(|family| family.name() == "bgp_netlink_subscription_overruns_total")
             .expect("netlink overrun metric registered");
         let observed: std::collections::BTreeMap<_, _> = family
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 assert_eq!(metric.get_label().len(), 1, "only actor label");
                 assert_eq!(metric.get_label()[0].name(), "actor");
                 (
                     metric.get_label()[0].value().to_owned(),
-                    metric.get_counter().value(),
+                    metric.get_counter().get_value(),
                 )
             })
             .collect();
@@ -7238,8 +7238,8 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == "bgp_session_event_source_dropped_total")
             .expect("session event source-drop metric registered")
-            .metric
-            .into_iter()
+            .get_metric()
+            .iter()
             .map(|metric| {
                 assert_eq!(metric.get_label().len(), 2, "kind and reason labels");
                 (
@@ -7247,7 +7247,7 @@ mod tests {
                         metric.get_label()[0].value().to_owned(),
                         metric.get_label()[1].value().to_owned(),
                     ),
-                    metric.get_counter().value(),
+                    metric.get_counter().get_value(),
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
@@ -7855,7 +7855,7 @@ mod tests {
             .find(|family| family.name() == "bgp_rib_policy_transition_actor_poll_duration_seconds")
             .expect("policy-transition poll histogram is registered");
         let observed: std::collections::BTreeMap<_, _> = family
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 let poll_kind = metric
@@ -7871,7 +7871,7 @@ mod tests {
                     .iter()
                     .map(|bucket| bucket.upper_bound().to_bits())
                     .collect::<Vec<_>>();
-                (poll_kind, (histogram.sample_count(), buckets))
+                (poll_kind, (histogram.get_sample_count(), buckets))
             })
             .collect();
         let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
@@ -7898,7 +7898,7 @@ mod tests {
             .find(|family| family.name() == "bgp_rib_outbound_prefix_limit_actor_duration_seconds")
             .expect("outbound prefix-limit actor histogram is registered");
         let observed: std::collections::BTreeMap<_, _> = family
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 let operation = metric
@@ -7914,7 +7914,7 @@ mod tests {
                     .iter()
                     .map(|bucket| bucket.upper_bound().to_bits())
                     .collect::<Vec<_>>();
-                (operation, (histogram.sample_count(), buckets))
+                (operation, (histogram.get_sample_count(), buckets))
             })
             .collect();
         let expected_buckets = RIB_ACTOR_DURATION_BUCKETS.map(f64::to_bits).to_vec();
@@ -7940,7 +7940,7 @@ mod tests {
             .find(|family| family.name() == "bgp_rib_route_refresh_actor_duration_seconds")
             .expect("route-refresh actor duration histogram is registered");
         let observed: std::collections::BTreeMap<_, _> = family
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 let operation = metric
@@ -7956,7 +7956,7 @@ mod tests {
                     .iter()
                     .map(|bucket| bucket.upper_bound().to_bits())
                     .collect::<Vec<_>>();
-                (operation, (histogram.sample_count(), buckets))
+                (operation, (histogram.get_sample_count(), buckets))
             })
             .collect();
         let expected_buckets = [
@@ -8093,7 +8093,7 @@ mod tests {
             .into_iter()
             .find(|family| family.name() == family_name)
             .unwrap_or_else(|| panic!("{family_name} is registered"))
-            .metric
+            .get_metric()
             .iter()
             .map(|metric| {
                 let value = metric
@@ -8109,7 +8109,7 @@ mod tests {
                     .iter()
                     .map(|bucket| bucket.upper_bound().to_bits())
                     .collect::<Vec<_>>();
-                (value, (histogram.sample_count(), buckets))
+                (value, (histogram.get_sample_count(), buckets))
             })
             .collect()
     }
@@ -8686,7 +8686,7 @@ mod tests {
             .unwrap();
         assert_eq!(family.get_metric().len(), 3 * 15 * 3);
         for metric in family.get_metric() {
-            assert!((metric.get_counter().value() - 1.0).abs() < f64::EPSILON);
+            assert!((metric.get_counter().get_value() - 1.0).abs() < f64::EPSILON);
         }
         m.record_state_transition("10.0.0.1", "established", "idle");
         m.initialize_update_malformed_series("10.0.0.1");

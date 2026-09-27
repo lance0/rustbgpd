@@ -2059,7 +2059,7 @@ fn pcb_join_counters_replay_lane_permit() {
     let permits = |peer: IpAddr, policy: &str| {
         let peer_label = peer.to_string();
         family
-            .metric
+            .get_metric()
             .iter()
             .find(|metric| {
                 let has = |name: &str, value: &str| {
@@ -2073,7 +2073,7 @@ fn pcb_join_counters_replay_lane_permit() {
                     && has("direction", "export")
                     && has("action", "permit")
             })
-            .map_or(0.0, |metric| metric.get_counter().value())
+            .map_or(0.0, |metric| metric.get_counter().get_value())
     };
     assert!(
         (permits(MEMBER, rustbgpd_policy::CHAIN_DEFAULT_PERMIT_ATTRIBUTION) - 2.0).abs()
@@ -2832,7 +2832,7 @@ fn gathered_peer_update_group(
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "peer" && label.value() == peer)
-                    .then(|| metric.get_gauge().value())
+                    .then(|| metric.get_gauge().get_value())
             })
         })
 }

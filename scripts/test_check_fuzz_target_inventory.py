@@ -300,7 +300,7 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
         read_text = Path.read_text
         mutations = (
-            ("            - rustbgpd_wire::constants::HEADER_LEN\n", ""),
+            ("- rustbgpd_wire::constants::HEADER_LEN", ""),
             ("rustbgpd_wire::constants::HEADER_LEN", "19"),
         )
 

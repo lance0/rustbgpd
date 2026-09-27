@@ -13,8 +13,7 @@ fuzz_target!(|data: &[u8]| {
     // OPEN is decoded before Extended Messages can be negotiated. Mirror the
     // legacy full-message ceiling for this body-only harness.
     if data.len()
-        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)
-            - rustbgpd_wire::constants::HEADER_LEN
+        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN) - rustbgpd_wire::constants::HEADER_LEN
     {
         return;
     }

@@ -1621,7 +1621,7 @@ mod tests {
                     .iter()
                     .any(|label| label.name() == "category" && label.value() == category)
             })
-            .map(|metric| metric.get_counter().value())
+            .map(|metric| metric.get_counter().get_value())
     }
 
     fn gauge_value(metrics: &BgpMetrics, family_name: &str) -> f64 {
@@ -1633,7 +1633,7 @@ mod tests {
             .unwrap()
             .get_metric()[0]
             .get_gauge()
-            .value()
+            .get_value()
     }
 
     #[test]
@@ -1769,7 +1769,7 @@ mod tests {
                     })
                 })
             })
-            .map_or(0.0, |metric| metric.get_gauge().value())
+            .map_or(0.0, |metric| metric.get_gauge().get_value())
     }
 
     #[tokio::test]
@@ -2270,7 +2270,7 @@ mod tests {
             queue_metrics()
                 .get_metric()
                 .iter()
-                .map(|m| m.get_gauge().value())
+                .map(|m| m.get_gauge().get_value())
                 .sum::<f64>(),
             2.0
         );
@@ -2281,7 +2281,7 @@ mod tests {
             queue_metrics()
                 .get_metric()
                 .iter()
-                .all(|m| m.get_gauge().value() == 0.0)
+                .all(|m| m.get_gauge().get_value() == 0.0)
         );
 
         let restart_dir = tempfile::tempdir().unwrap();
@@ -2293,7 +2293,7 @@ mod tests {
             queue_metrics()
                 .get_metric()
                 .iter()
-                .all(|m| m.get_gauge().value() == 0.0)
+                .all(|m| m.get_gauge().get_value() == 0.0)
         );
 
         sender
@@ -2394,7 +2394,7 @@ mod tests {
         };
         assert!(has_label("category", "route"));
         assert!(has_label("reason", "shutdown_timeout"));
-        assert_eq!(dropped.get_counter().value(), 1.0);
+        assert_eq!(dropped.get_counter().get_value(), 1.0);
         assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
         assert!(losses.has_changed().unwrap());
         assert_eq!(*losses.borrow_and_update(), 1);

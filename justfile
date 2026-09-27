@@ -67,6 +67,7 @@ check-devtools:
 # Check formatting and the cheap repository contracts (seconds, no compilation).
 check-fast:
     cargo fmt --all -- --check
+    rustfmt --check --edition 2024 crates/*/fuzz/fuzz_targets/*.rs
     python3 -m unittest -v scripts/test_build_lock.py
     python3 -m unittest -v scripts/test_run_ci_steps.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py

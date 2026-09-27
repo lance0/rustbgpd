@@ -31,5 +31,8 @@ fuzz_target!(|data: &[u8]| {
     let reparsed: RouteDistinguisher = canonical
         .parse()
         .expect("Display output must re-parse cleanly");
-    assert_eq!(parsed, reparsed, "Display→from_str round-trip must be lossless");
+    assert_eq!(
+        parsed, reparsed,
+        "Display→from_str round-trip must be lossless"
+    );
 });

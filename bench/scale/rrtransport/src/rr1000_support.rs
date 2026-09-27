@@ -25,10 +25,10 @@ pub fn checkpoint(metrics: &BgpMetrics) -> Result<Checkpoint> {
             .find(|family| family.name() == name)
             .with_context(|| format!("missing allocator metric {name}"))?;
         ensure!(
-            family.metric.len() == 1,
+            family.get_metric().len() == 1,
             "allocator metric {name} has unexpected cardinality"
         );
-        let value = family.metric[0].get_gauge().value();
+        let value = family.get_metric()[0].get_gauge().get_value();
         ensure!(
             value.is_finite() && value > 0.0 && value.fract() == 0.0,
             "allocator metric {name} is not a positive integer"

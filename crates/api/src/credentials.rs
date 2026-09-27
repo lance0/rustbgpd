@@ -520,7 +520,7 @@ mod tests {
                 assert_eq!(metric.get_label()[0].name(), "kind");
                 (
                     metric.get_label()[0].value().into(),
-                    metric.get_gauge().value() as i64,
+                    metric.get_gauge().get_value() as i64,
                 )
             })
             .collect()

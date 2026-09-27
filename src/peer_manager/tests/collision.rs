@@ -964,7 +964,7 @@ fn max_prefix_capacity_gauge(
                     .get_label()
                     .iter()
                     .any(|label| label.name() == "scope" && label.value() == scope);
-                (has_peer && has_scope).then(|| metric.get_gauge().value())
+                (has_peer && has_scope).then(|| metric.get_gauge().get_value())
             })
         })
 }

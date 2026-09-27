@@ -13,7 +13,11 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
-    for kind in [DatasetKind::Prefix, DatasetKind::Asn, DatasetKind::Community] {
+    for kind in [
+        DatasetKind::Prefix,
+        DatasetKind::Asn,
+        DatasetKind::Community,
+    ] {
         let _ = parse_dataset_text(text, kind);
     }
 });

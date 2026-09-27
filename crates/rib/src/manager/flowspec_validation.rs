@@ -1857,7 +1857,7 @@ mod tests {
                             .get_label()
                             .iter()
                             .any(|label| label.value() == "flowspec")
-                            && metric.get_gauge().value() >= 1.0
+                            && metric.get_gauge().get_value() >= 1.0
                     });
                 if selected {
                     break;

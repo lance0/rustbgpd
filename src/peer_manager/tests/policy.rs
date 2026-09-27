@@ -73,7 +73,7 @@ fn validation_import_refresh_metric(mgr: &PeerManager, dependency: &str, outcome
         .iter()
         .find(|family| family.name() == "bgp_validation_import_refreshes_total")
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 let label_value = |name| {
                     metric
                         .get_label()
@@ -85,7 +85,7 @@ fn validation_import_refresh_metric(mgr: &PeerManager, dependency: &str, outcome
                     && label_value("outcome") == Some(outcome)
             })
         })
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 fn assert_validation_import_refresh_metric(
@@ -531,9 +531,9 @@ fn policy_metric_value(metrics: &BgpMetrics, family: &str, dataset: Option<&str>
             // Counter families follow the `_total` naming convention;
             // everything read here otherwise is a gauge.
             if family.ends_with("_total") {
-                m.get_counter().value() as i64
+                m.get_counter().get_value() as i64
             } else {
-                m.get_gauge().value() as i64
+                m.get_gauge().get_value() as i64
             }
         })
 }

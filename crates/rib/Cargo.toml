@@ -27,8 +27,6 @@ lru.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-tokio-stream.workspace = true
-
 [features]
 # Exposes RibManager fanout-driver helpers (synthetic peer registration +
 # Loc-RIB seed + distribute_changes) to the `fanout` distribution microbench.

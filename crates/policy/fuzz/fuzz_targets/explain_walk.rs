@@ -9,7 +9,7 @@ mod support;
 
 use libfuzzer_sys::fuzz_target;
 use rustbgpd_policy::{evaluate_chain, explain_chain_statements};
-use support::{mixed_chain, ChainRecipe, OwnedRoute, RouteRecipe};
+use support::{ChainRecipe, OwnedRoute, RouteRecipe, mixed_chain};
 
 fuzz_target!(|bytes: [u8; 8]| {
     let chain_recipe = ChainRecipe {

@@ -211,20 +211,20 @@ fn assert_flowspec_gauge(manager: &RibManager, peer: IpAddr, expected: u32) {
         .find(|metric| metric.name() == "bgp_rib_prefixes")
         .unwrap();
     let sample = gauge
-        .metric
+        .get_metric()
         .iter()
         .find(|metric| {
             metric
-                .label
+                .get_label()
                 .iter()
                 .any(|label| label.name() == "peer" && label.value() == peer.to_string())
                 && metric
-                    .label
+                    .get_label()
                     .iter()
                     .any(|label| label.name() == "afi_safi" && label.value() == "flowspec")
         })
         .unwrap();
-    assert_eq!(sample.gauge.value(), f64::from(expected));
+    assert_eq!(sample.get_gauge().get_value(), f64::from(expected));
 }
 
 #[tokio::test]

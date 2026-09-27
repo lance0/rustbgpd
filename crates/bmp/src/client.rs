@@ -1378,16 +1378,16 @@ mod tests {
             .iter()
             .find(|family| family.name() == "bmp_control_event_drops_total")
             .into_iter()
-            .flat_map(|family| &family.metric)
+            .flat_map(|family| family.get_metric().iter())
             .filter(|metric| {
-                metric.label.iter().any(|label| {
+                metric.get_label().iter().any(|label| {
                     label.name() == "kind" && label.value() == "collector_bootstrap_complete"
                 }) && metric
-                    .label
+                    .get_label()
                     .iter()
                     .any(|label| label.name() == "reason" && label.value() == "channel_timeout")
             })
-            .map(|metric| metric.counter.value())
+            .map(|metric| metric.get_counter().get_value())
             .sum::<f64>();
         assert!((drops - 1.0).abs() < f64::EPSILON);
         handle.abort();
@@ -1491,17 +1491,17 @@ mod tests {
             .iter()
             .find(|f| f.name() == "bmp_control_event_drops_total")
             .map_or(0, |f| {
-                f.metric
+                f.get_metric()
                     .iter()
                     .filter(|m| {
-                        m.label
+                        m.get_label()
                             .iter()
                             .any(|l| l.name() == "kind" && l.value() == "collector_connected")
-                            && m.label
+                            && m.get_label()
                                 .iter()
                                 .any(|l| l.name() == "reason" && l.value() == "channel_timeout")
                     })
-                    .map(|m| m.counter.value() as u64)
+                    .map(|m| m.get_counter().get_value() as u64)
                     .sum::<u64>()
             });
         assert!(

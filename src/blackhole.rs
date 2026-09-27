@@ -2465,12 +2465,7 @@ pub(super) mod tests {
                         .get_label()
                         .iter()
                         .any(|label| label.name() == label_name && label.value() == label_value)
-                        .then(|| {
-                            metric
-                                .get_counter()
-                                .as_ref()
-                                .map_or(0.0, prometheus::proto::Counter::value)
-                        })
+                        .then(|| metric.get_counter().get_value())
                 })
             })
             .unwrap_or(0.0)
@@ -2496,13 +2491,7 @@ pub(super) mod tests {
                     })
                     .cloned()
             })
-            .and_then(|metric| {
-                metric
-                    .get_counter()
-                    .as_ref()
-                    .map(prometheus::proto::Counter::value)
-            })
-            .unwrap_or(0.0)
+            .map_or(0.0, |metric| metric.get_counter().get_value())
     }
 
     fn assert_planning_failure_value(
@@ -2525,12 +2514,10 @@ pub(super) mod tests {
             .into_iter()
             .find(|family| family.name() == name)
             .and_then(|family| {
-                family.get_metric().first().and_then(|metric| {
-                    metric
-                        .get_gauge()
-                        .as_ref()
-                        .map(prometheus::proto::Gauge::value)
-                })
+                family
+                    .get_metric()
+                    .first()
+                    .map(|metric| metric.get_gauge().get_value())
             })
             .unwrap_or(0.0)
     }
@@ -3550,12 +3537,10 @@ pub(super) mod tests {
             .into_iter()
             .find(|family| family.name() == name)
             .and_then(|family| {
-                family.get_metric().first().map(|metric| {
-                    metric
-                        .get_counter()
-                        .as_ref()
-                        .map_or(0.0, prometheus::proto::Counter::value)
-                })
+                family
+                    .get_metric()
+                    .first()
+                    .map(|metric| metric.get_counter().get_value())
             })
             .unwrap_or(0.0)
     }

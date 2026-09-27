@@ -818,6 +818,12 @@ host capability is available.
   transitive only, pulled by `protobuf` (the `prometheus` text-format
   dependency). It clears when `protobuf` moves to
   2.x; re-check with `cargo tree -i thiserror@1` at a dependency refresh.
+
+  Later correction (2026-09): the note above is wrong about the cause. The
+  text exposition format does not use `protobuf`; `prometheus` pulled it in
+  only through its default `protobuf` feature. The workspace now declares
+  `prometheus` with `default-features = false`, so neither `protobuf` nor
+  `thiserror` 1.x is built.
 - [x] **Retire `rustbgpctl` in favor of `rbgp` (single CLI name).** The CLI
   crate now ships only the `rbgp` binary. The old `include!` alias/shim and
   long-form binary are removed; supported docs, package artifacts, generated

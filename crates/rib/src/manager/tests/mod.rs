@@ -828,7 +828,7 @@ fn policy_metric_value(
         .iter()
         .find(|family| family.name() == "bgp_policy_routes_total")
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 let mut labels = std::collections::HashMap::new();
                 for label in metric.get_label() {
                     labels.insert(label.name(), label.value());
@@ -839,7 +839,7 @@ fn policy_metric_value(
                     && labels.get("action") == Some(&action)
             })
         })
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
@@ -849,7 +849,7 @@ fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)])
         .iter()
         .find(|family| family.name() == name)
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 labels.iter().all(|(expected_name, expected_value)| {
                     metric.get_label().iter().any(|label| {
                         label.name() == *expected_name && label.value() == *expected_value
@@ -857,7 +857,7 @@ fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)])
                 })
             })
         })
-        .map_or(0.0, |metric| metric.get_gauge().value())
+        .map_or(0.0, |metric| metric.get_gauge().get_value())
 }
 
 fn counter_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
@@ -867,7 +867,7 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)
         .iter()
         .find(|family| family.name() == name)
         .and_then(|family| {
-            family.metric.iter().find(|metric| {
+            family.get_metric().iter().find(|metric| {
                 labels.iter().all(|(expected_name, expected_value)| {
                     metric.get_label().iter().any(|label| {
                         label.name() == *expected_name && label.value() == *expected_value
@@ -875,7 +875,7 @@ fn counter_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)
                 })
             })
         })
-        .map_or(0.0, |metric| metric.get_counter().value())
+        .map_or(0.0, |metric| metric.get_counter().get_value())
 }
 
 fn histogram_sample_counts_by_label(
@@ -890,7 +890,7 @@ fn histogram_sample_counts_by_label(
         .find(|family| family.name() == name)
         .map(|family| {
             family
-                .metric
+                .get_metric()
                 .iter()
                 .map(|metric| {
                     let label = metric
@@ -900,7 +900,7 @@ fn histogram_sample_counts_by_label(
                         .expect("histogram series carries the bounded label")
                         .value()
                         .to_owned();
-                    (label, metric.get_histogram().sample_count())
+                    (label, metric.get_histogram().get_sample_count())
                 })
                 .collect()
         })
