@@ -5250,46 +5250,44 @@ impl RibManager {
     /// Never waits: an empty primary channel settles the window, so an
     /// isolated UPDATE distributes exactly as before. Any other queued
     /// update stays held in the lookahead, in FIFO position, for the run
-    /// loop to receive after the window settles.
+    /// loop to receive after the window settles. At most one message is
+    /// dequeued per call, so every admitted message leaves the actor turn
+    /// before its chunks run and the readiness and query seams still run
+    /// between messages.
     fn extend_distribution_window(&mut self) -> bool {
         let limits = self.distribution_window_limits;
-        loop {
-            let window = &self.distribution_window;
-            // The ingest-stall fault injection must see every message on its
-            // own receive; coalescing would bypass the stall.
-            if self.test_ingest_stall.is_some()
-                || !self.pending_route_batches.is_empty()
-                || window.messages >= limits.messages
-                || window.routes >= limits.routes
-                || self.pending_distribute_affected.len() >= limits.affected_prefixes
-                || window
-                    .started
-                    .is_some_and(|started| started.elapsed() >= limits.elapsed)
-            {
-                return false;
-            }
-            if self.primary_lookahead.is_none() {
-                self.primary_lookahead = self.rx.try_recv().ok();
-            }
-            if !self
-                .primary_lookahead
-                .as_ref()
-                .is_some_and(DistributionWindow::admits)
-            {
-                return false;
-            }
-            let update = self
-                .primary_lookahead
-                .take()
-                .expect("lookahead admitted above");
-            self.handle_update(update);
-            if !self.pending_route_batches.is_empty() {
-                return true;
-            }
-            // A stale-session message was dropped without a batch; it still
-            // counts against the window.
-            self.distribution_window.messages += 1;
+        let window = &self.distribution_window;
+        // The ingest-stall fault injection must see every message on its
+        // own receive; coalescing would bypass the stall.
+        if self.test_ingest_stall.is_some()
+            || !self.pending_route_batches.is_empty()
+            || window.messages >= limits.messages
+            || window.routes >= limits.routes
+            || self.pending_distribute_affected.len() >= limits.affected_prefixes
+            || window
+                .started
+                .is_some_and(|started| started.elapsed() >= limits.elapsed)
+        {
+            return false;
         }
+        if self.primary_lookahead.is_none() {
+            self.primary_lookahead = self.rx.try_recv().ok();
+        }
+        if !self
+            .primary_lookahead
+            .as_ref()
+            .is_some_and(DistributionWindow::admits)
+        {
+            return false;
+        }
+        let update = self
+            .primary_lookahead
+            .take()
+            .expect("lookahead admitted above");
+        self.handle_update(update);
+        // A stale-session message is dropped without a batch: the window
+        // settles now and the next queued message waits for the next turn.
+        !self.pending_route_batches.is_empty()
     }
 
     /// Close the distribution window: distribute everything it accumulated

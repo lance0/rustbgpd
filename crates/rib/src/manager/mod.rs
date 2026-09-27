@@ -922,8 +922,9 @@ pub struct RibManager {
     /// queued, when the next queued update is anything else (`PeerUp` /
     /// `PeerDown`, `EoR`, refresh, config, a primary-lane query), or when
     /// the window reaches its message, input-route, affected-prefix or
-    /// elapsed bound (`DistributionWindowLimits`). The dirty-resync timer
-    /// settles it before reading advertised state. The run loop admits
+    /// elapsed bound (`DistributionWindowLimits`). Dirty-peer resync
+    /// (`resync_dirty_peers_bounded`, the only resync entry that can run
+    /// mid-window) settles it before reading advertised state. The run loop admits
     /// other primary updates only while no route batch is queued, and a
     /// window always holds a queued batch until it settles, so the
     /// accumulator is empty whenever no route batch is queued and before
@@ -934,7 +935,9 @@ pub struct RibManager {
     /// yet — even though Loc-RIB has advanced. That is an accurate,
     /// eventually-consistent intermediate view, not stale data:
     /// Adj-RIB-Out is "what we have sent", and we have not sent the
-    /// deferred window yet.
+    /// deferred window yet. `FlowSpec` validation slices, which read the
+    /// dependency invalidations that the flush publishes, wait for the
+    /// window to settle; the window bounds cap that delay.
     pending_distribute_changed: HashSet<Prefix>,
     pending_distribute_affected: HashSet<Prefix>,
     /// Progress of the current distribution window against its bounds.
@@ -2578,6 +2581,10 @@ impl RibManager {
     /// state and the dirty flag are committed/cleared only after a successful
     /// send, and withheld peers are not touched at all.
     fn resync_dirty_peers_bounded(&mut self) -> bool {
+        // Resync diffs against advertised state, and a due timer can fire
+        // between the chunks of an open distribution window: settle it
+        // (flush and exact-export retirement) before any recovery runs.
+        self.settle_distribution_window();
         // ADR-0113 capacity recovery is family-scoped and already coalesced.
         // One live peer/family is replayed per timer tick; any runnable
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
@@ -4679,9 +4686,6 @@ impl RibManager {
                     count = self.dirty_peers.len(),
                     "resync timer fired for dirty peers"
                 );
-                // Resync diffs against advertised state: settle any open
-                // distribution window first.
-                self.settle_distribution_window();
                 let backlog =
                     self.traced(PostCommitWork::ResyncTick, Self::resync_dirty_peers_bounded);
                 if self.resync_tick_pending() {

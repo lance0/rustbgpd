@@ -360,17 +360,24 @@ fn route_envelopes(rx: &mut mpsc::Receiver<OutboundRouteUpdate>) -> Vec<Outbound
     envelopes
 }
 
-/// Exact-export rejections retire only after the window's single pass: the
-/// rejected target never receives a withdrawal for a route it never held,
-/// and a rejection whose route is live again at the end of the window stays.
-#[tokio::test]
-async fn exact_export_rejection_retires_after_window_distribution() {
+/// Two grouped members, `target` rejecting `p` through its exact encoder.
+struct RejectionFixture {
+    tx: mpsc::Sender<RibUpdate>,
+    manager: RibManager,
+    target: IpAddr,
+    /// `[target, other]` outbound receivers.
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    p: Ipv4Prefix,
+    q: Ipv4Prefix,
+    key_p: ExactExportKey,
+}
+
+fn rejection_fixture() -> RejectionFixture {
     let (tx, rx) = mpsc::channel(16);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 1));
     let other = IpAddr::V4(Ipv4Addr::new(10, 0, 7, 2));
     let p = pfx(7, 0);
-    let q = pfx(8, 0);
     let key_p = ExactExportKey::Unicast(Prefix::V4(p), 0);
     let rejecting = MockExactExportEncoder::accepting(1);
     rejecting.set_profile(1, [key_p.clone()]);
@@ -389,6 +396,31 @@ async fn exact_export_rejection_retires_after_window_distribution() {
         let _ = route_envelopes(&mut out);
         receivers.push(out);
     }
+    RejectionFixture {
+        tx,
+        manager,
+        target,
+        receivers,
+        p,
+        q: pfx(8, 0),
+        key_p,
+    }
+}
+
+/// Exact-export rejections retire only after the window's single pass: the
+/// rejected target never receives a withdrawal for a route it never held,
+/// and a rejection whose route is live again at the end of the window stays.
+#[tokio::test]
+async fn exact_export_rejection_retires_after_window_distribution() {
+    let RejectionFixture {
+        tx,
+        mut manager,
+        target,
+        mut receivers,
+        p,
+        q,
+        key_p,
+    } = rejection_fixture();
     let route = |prefix| make_route(prefix, source());
 
     tx.try_send(unregistered_routes(vec![route(p)], vec![]))
@@ -584,4 +616,155 @@ async fn window_never_waits_and_admits_one_message_per_turn() {
     assert!(manager.process_next_route_chunk());
     assert_eq!(route_envelopes(&mut out).len(), 1, "settled once drained");
     assert!(!manager.process_next_route_chunk());
+}
+
+/// Dirty-peer resync can run between the chunks of an open window (its due
+/// timer is checked before route chunks): it settles the window first,
+/// distributing the accumulated changes and retiring the window's
+/// exact-export withdrawals before it reads advertised state.
+#[tokio::test]
+async fn dirty_resync_settles_an_open_window_first() {
+    let RejectionFixture {
+        tx,
+        mut manager,
+        target,
+        mut receivers,
+        p,
+        q,
+        key_p,
+    } = rejection_fixture();
+    let route = |prefix| make_route(prefix, source());
+    tx.try_send(unregistered_routes(vec![route(p)], vec![]))
+        .unwrap();
+    drain_primary(&mut manager);
+    let _ = route_envelopes(&mut receivers[1]);
+    assert_eq!(manager.peer_unexportable[&target], HashSet::from([key_p]));
+
+    // Window: withdraw p, then q already queued. One turn ingests the
+    // withdrawal and admits q; the window is open.
+    tx.try_send(unregistered_routes(vec![], vec![p])).unwrap();
+    tx.try_send(unregistered_routes(vec![route(q)], vec![]))
+        .unwrap();
+    let first = manager.try_recv_primary().unwrap();
+    manager.handle_update(first);
+    assert!(manager.process_next_route_chunk());
+    assert!(
+        !manager.pending_distribute_affected.is_empty(),
+        "window open"
+    );
+    assert!(route_envelopes(&mut receivers[1]).is_empty());
+
+    let _ = manager.resync_dirty_peers_bounded();
+    assert!(manager.pending_distribute_affected.is_empty());
+    assert!(manager.pending_exact_export_withdrawals.is_empty());
+    assert!(
+        !manager.peer_unexportable.contains_key(&target),
+        "the window's withdrawal retires the rejection"
+    );
+    assert!(route_envelopes(&mut receivers[0]).is_empty());
+    let settled = route_envelopes(&mut receivers[1]);
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].withdraw, vec![(Prefix::V4(p), 0)]);
+
+    // The admitted message continues as a new window.
+    drain_primary(&mut manager);
+    for receiver in &mut receivers {
+        let later = route_envelopes(receiver);
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].announce[0].prefix, Prefix::V4(q));
+    }
+}
+
+/// A window admits at most one queued message per actor turn, including a
+/// stale-session message it drops: a backlog of stale messages cannot drain
+/// in one turn and skip the readiness and query seams between messages.
+#[tokio::test]
+async fn window_dequeues_at_most_one_message_per_turn_including_stale() {
+    let (tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let member = IpAddr::V4(Ipv4Addr::new(10, 0, 9, 1));
+    let (up, mut out) = member_up(member, 1);
+    manager.handle_update(up);
+    let _ = route_envelopes(&mut out);
+    let IpAddr::V4(member_v4) = member else {
+        unreachable!()
+    };
+    let stale = |prefix| {
+        let RibUpdate::RoutesReceived {
+            peer,
+            announced,
+            withdrawn,
+            flowspec_announced,
+            flowspec_withdrawn,
+            evpn_announced,
+            evpn_withdrawn,
+            ..
+        } = routes(member_v4, vec![make_route(prefix, member_v4)], vec![])
+        else {
+            unreachable!()
+        };
+        RibUpdate::RoutesReceived {
+            peer,
+            session_id: 9,
+            announced,
+            withdrawn,
+            flowspec_announced,
+            flowspec_withdrawn,
+            evpn_announced,
+            evpn_withdrawn,
+        }
+    };
+    let (query_reply, mut query_response) = oneshot::channel();
+    let queued = vec![
+        stale(pfx(50, 1)),
+        stale(pfx(50, 2)),
+        RibUpdate::QueryBestRoutes {
+            deadline: full_snapshot_query_deadline(),
+            reply: query_reply,
+        },
+        stale(pfx(50, 3)),
+        stale(pfx(50, 4)),
+        unregistered_routes(vec![make_route(pfx(50, 5), source())], vec![]),
+    ];
+    let total = queued.len();
+    manager.handle_update(unregistered_routes(
+        vec![make_route(pfx(50, 0), source())],
+        vec![],
+    ));
+    for update in queued {
+        tx.try_send(update).unwrap();
+    }
+
+    // Actor turns: one route chunk (which may admit one queued message), or
+    // one ordinary receive.
+    let mut turns = 0;
+    let mut query_answered_at = None;
+    loop {
+        let before = manager.primary_backlog();
+        if !manager.process_next_route_chunk() {
+            let Some(update) = manager.try_recv_primary() else {
+                break;
+            };
+            manager.handle_update(update);
+        }
+        turns += 1;
+        assert!(
+            before - manager.primary_backlog() <= 1,
+            "turn {turns} dequeued more than one message"
+        );
+        if query_answered_at.is_none() && query_response.try_recv().is_ok() {
+            query_answered_at = Some(turns);
+        }
+    }
+    assert!(turns > total, "every queued message took its own turn");
+    assert!(query_answered_at.is_some());
+    let delivered = route_envelopes(&mut out)
+        .iter()
+        .flat_map(|update| update.announce.iter().map(|route| route.prefix))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        delivered,
+        BTreeSet::from([Prefix::V4(pfx(50, 0)), Prefix::V4(pfx(50, 5))]),
+        "stale messages are dropped, fresh ones distributed"
+    );
 }
