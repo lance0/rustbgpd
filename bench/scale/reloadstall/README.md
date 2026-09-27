@@ -144,7 +144,8 @@ reloadstall <n_peers> <total_prefixes> <daemon_port> <daemon_pid> \
   same window. `failover_cell.sh` runs one such cell end to end; a daemon
   built with `--features rustbgpd-rib/bench-internals` additionally logs
   which grouped members took the shared payload or the per-member walk in
-  each mixed pass, and the script totals them.
+  each mixed pass, and the script totals them. First receipt:
+  [failover alternates cell](../../../docs/perf/failover-alternates-2026-09.md).
 - `--convergence-only` — fail-closed capture mode. It requires `reloads=0`, `control_secs=0`, no flapstorm or
   reload command, an empty `RELOADSTALL_EVIDENCE_DIR`, and no `RELOADSTALL_PRE_CHURN_EVIDENCE_DIR`.
   It verifies exact table-minus-own-slice coverage, healthy sessions, and zero parse errors; signals `ready`;
