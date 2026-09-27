@@ -22,7 +22,8 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
     missing observations fail closed
   - management-plane load brackets the measured window, retains every
     operation, completes >= 90% of scheduled probes, and records zero
-    non-ok results or invalid ok results
+    non-ok results or invalid ok results; a non-ok CLI record's bounded
+    stderr excerpt, when present, is carried into the reported failures
   - management cadence: every missed probe slot falls inside a reload
     window [issued - 2 s, complete + 2 s] from cycles.log and no window
     holds more than 2 missed slots per operation; a miss outside every
@@ -76,6 +77,9 @@ MANAGEMENT_OPERATIONS = (
     "metrics", "neighbor", "policy_stats", "rib_prefix", "doctor",
 )
 MANAGEMENT_RECORD_LIMIT = 4096
+# Optional on non-ok CLI records only; older evidence without it stays valid.
+# Each retained stderr byte decodes to at most one character.
+MANAGEMENT_STDERR_EXCERPT_LIMIT = 512
 # A missed management probe slot is tolerated only inside a reload window
 # (cycles.log issued - grace .. complete + grace) and at most this many per
 # window per operation; operator reads get deadlines, not priority over the
@@ -196,6 +200,11 @@ def analyze_management_load(
                 or (record.get("exit") is not None
                     and (isinstance(record["exit"], bool)
                          or not isinstance(record["exit"], int)))
+                or ("stderr_excerpt" in record
+                    and (operation == "metrics" or record["result"] == "ok"
+                         or not isinstance(record["stderr_excerpt"], str)
+                         or len(record["stderr_excerpt"])
+                         > MANAGEMENT_STDERR_EXCERPT_LIMIT))
             ):
                 schema_errors.append(
                     f"line {line_number}: invalid bounded operation record"
@@ -203,11 +212,14 @@ def analyze_management_load(
                 continue
             operations[operation].append(record)
             if record["result"] != "ok":
-                failures.append({
+                failure = {
                     "operation": operation,
                     "result": record["result"],
                     "exit": record.get("exit"),
-                })
+                }
+                if "stderr_excerpt" in record:
+                    failure["stderr_excerpt"] = record["stderr_excerpt"]
+                failures.append(failure)
             elif operation == "metrics" and record.get("exit") != 200:
                 failures.append({
                     "operation": operation,

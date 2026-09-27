@@ -278,8 +278,14 @@ runs with an explicit `--output`, rewriting one `doctor-bundle.tar.gz` in place
 rather than accumulating a timestamped tarball per attempt. Each attempt has a
 5 s timeout and no retry. Evidence is bounded JSONL: it
 retains schedule/start/completion time, operation, duration, exit/result,
-response bytes, and SHA-256 only, followed by one atomic clean-SIGTERM
-summary. Response payloads are never retained.
+response bytes, and SHA-256, followed by one atomic clean-SIGTERM
+summary. A non-ok `rbgp` result also keeps `stderr_excerpt`, the first 512
+bytes of the CLI's stderr decoded as lossy UTF-8, so a failure that never
+reached the daemon (a refused socket, a client-side transport error) stays
+attributable; `ok` and `/metrics` records never carry it. Response payloads are
+never retained. The excerpt is diagnostic only: every non-ok result already
+fails `management_failures`, and the analyzer reports the excerpt with it.
+Evidence recorded before the field existed remains valid.
 
 RSS bounds rationale: the ceiling is calibrated from the
 `bench/scale/route-server-1000` retained receipt, whose one-shot

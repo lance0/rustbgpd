@@ -3,7 +3,9 @@
 
 Five independent workers exercise the shipped HTTP and ``rbgp`` surfaces.
 Only timing, disposition, byte count, and a payload digest are retained; the
-potentially large response bodies never enter the JSONL evidence.
+potentially large response bodies never enter the JSONL evidence. A non-ok
+``rbgp`` result also keeps a bounded excerpt of the CLI's stderr, so a
+client-side failure stays attributable without daemon-side evidence.
 """
 
 from __future__ import annotations
@@ -40,6 +42,9 @@ DOCTOR_PEER_CHECK_PREFIX = "peer."
 MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_RECORD_BYTES = 4096
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+# Raw stderr bytes kept on a non-ok CLI record. JSON escaping can grow each
+# byte to six, so 512 bytes still fits MAX_RECORD_BYTES with every other field.
+STDERR_EXCERPT_BYTES = 512
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,12 @@ class ProbeResult:
     result: str
     byte_count: int
     sha256: str
+    stderr_excerpt: Optional[str] = None
+
+
+def _stderr_excerpt(stream: BinaryIO) -> str:
+    stream.seek(0)
+    return stream.read(STDERR_EXCERPT_BYTES).decode("utf-8", "replace")
 
 
 def _payload_fingerprint(stream: BinaryIO) -> tuple[Optional[bytes], int, str]:
@@ -164,27 +175,31 @@ def run_cli_command(
     peer_count: int,
     route_prefix: str,
 ) -> ProbeResult:
-    with tempfile.TemporaryFile() as stdout:
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
             completed = subprocess.run(
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr,
                 timeout=timeout_seconds,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             stdout.seek(0)
             _, byte_count, digest = _payload_fingerprint(stdout)
-            return ProbeResult(None, "timeout", byte_count, digest)
+            return ProbeResult(
+                None, "timeout", byte_count, digest, _stderr_excerpt(stderr)
+            )
         stdout.seek(0)
         payload, byte_count, digest = _payload_fingerprint(stdout)
-    reported = operation == "doctor" and completed.returncode == DOCTOR_REPORT_EXIT
-    if completed.returncode != 0 and not reported:
-        return ProbeResult(completed.returncode, "cli_exit", byte_count, digest)
-    result = validate_cli_json(operation, payload, peer_count, route_prefix)
-    return ProbeResult(completed.returncode, result, byte_count, digest)
+        reported = operation == "doctor" and completed.returncode == DOCTOR_REPORT_EXIT
+        if completed.returncode != 0 and not reported:
+            result = "cli_exit"
+        else:
+            result = validate_cli_json(operation, payload, peer_count, route_prefix)
+        excerpt = None if result == "ok" else _stderr_excerpt(stderr)
+    return ProbeResult(completed.returncode, result, byte_count, digest, excerpt)
 
 
 def cli_commands(
@@ -317,7 +332,7 @@ class ManagementPlaneLoad:
                 result = self._probe(operation)
                 completed = time.monotonic()
                 self._mark(operation, "completed")
-                self.sink.write({
+                record = {
                     "record": "operation",
                     "scheduled_monotonic": round(due, 6),
                     "started_monotonic": round(started, 6),
@@ -328,7 +343,10 @@ class ManagementPlaneLoad:
                     "result": result.result,
                     "bytes": result.byte_count,
                     "sha256": result.sha256,
-                })
+                }
+                if result.stderr_excerpt is not None:
+                    record["stderr_excerpt"] = result.stderr_excerpt
+                self.sink.write(record)
                 due += interval
                 if self.stop.is_set():
                     break
