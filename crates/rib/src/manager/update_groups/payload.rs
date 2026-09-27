@@ -349,13 +349,21 @@ pub(in crate::manager) struct GroupStageOutput {
     /// (member-scoped emission the shared payload does not carry).
     pub(super) exceptions: HashSet<IpAddr>,
     /// Exception members that cannot be expressed as the shared announce
-    /// payload plus own-source exclusion and therefore still need the full
-    /// per-member matrix walk.
+    /// payload plus own-source exclusion (and their indexed new-winner
+    /// withdrawals) and therefore still need the full per-member matrix walk:
+    /// exception-lane targets and old sources of withdrawn keys.
     source_exclusion_unsafe: HashSet<IpAddr>,
     /// Number of shared announcements sourced by each member. This makes the
     /// all-own-source no-op test O(1): emitting an otherwise empty envelope
     /// changes marker ordering even though transport would encode no UPDATE.
     shared_source_counts: HashMap<IpAddr, usize>,
+    /// Withdrawals owed to each new winner beside the shared payload: the
+    /// keys whose staged route moved onto that member from another source.
+    /// Own-source exclusion hides the member's new route, so its wire must
+    /// drop the displaced other-sourced advertisement instead. Indexed while
+    /// the shared payload is built, so a failover pass keeps its new winners
+    /// on the shared announce payload and encode cell.
+    new_winner_withdraws: FastMap<IpAddr, Vec<(Prefix, u32)>>,
 }
 
 impl GroupStageOutput {
@@ -381,22 +389,32 @@ impl GroupStageOutput {
     }
 
     /// Whether the shared announcement plus transport-side own-source
-    /// exclusion is exactly this member's source-flip result. This covers a
-    /// cold-table announce whose only exception is the newly staged route's
-    /// source: the member must see nothing for that slot, and no displaced
-    /// advertisement or exception lane is owed.
+    /// exclusion, preceded by [`Self::new_winner_withdraws`], is exactly this
+    /// member's source-flip result. This covers the newly staged route's
+    /// source: the member sees nothing for that slot, plus a withdrawal when
+    /// the slot previously held another source's route. An exception lane or
+    /// a withdrawn own-sourced key still needs the full per-member walk.
     pub(in crate::manager) fn shared_applies_with_source_exclusion(&self, member: IpAddr) -> bool {
         !self.source_exclusion_unsafe.contains(&member)
     }
 
-    /// Whether own-source exclusion leaves an announcement or the shared
-    /// payload carries a withdrawal. If neither is true, the historical
-    /// per-member matrix correctly emits no envelope for this member.
+    /// Withdrawals this member needs before the shared withdrawals when it
+    /// rides the shared payload with own-source exclusion.
+    pub(in crate::manager) fn new_winner_withdraws(&self, member: IpAddr) -> &[(Prefix, u32)] {
+        self.new_winner_withdraws
+            .get(&member)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether own-source exclusion leaves an announcement or the member is
+    /// owed a withdrawal. If neither is true, the historical per-member
+    /// matrix correctly emits no envelope for this member.
     pub(in crate::manager) fn shared_has_payload_after_source_exclusion(
         &self,
         member: IpAddr,
     ) -> bool {
         !self.shared_withdraw.is_empty()
+            || self.new_winner_withdraws.contains_key(&member)
             || self.shared_source_counts.get(&member).copied().unwrap_or(0)
                 < self.shared_announce.len()
     }
@@ -530,8 +548,16 @@ impl GroupStageOutput {
             checkpoint(false);
             if let Some((route, flag)) = &delta.new {
                 self.exceptions.insert(route.peer);
-                if delta.old_source.is_some() || delta.lane.is_some() {
+                if delta.lane.is_some() {
                     self.source_exclusion_unsafe.insert(route.peer);
+                } else if delta.old_source.is_some_and(|source| source != route.peer) {
+                    // Source flip onto `route.peer`: the matrix withdraws the
+                    // displaced entry. An unchanged source (`old_source` =
+                    // `route.peer`) owes nothing beyond the exclusion.
+                    self.new_winner_withdraws
+                        .entry(route.peer)
+                        .or_default()
+                        .push((delta.prefix, delta.path_id));
                 }
                 *self.shared_source_counts.entry(route.peer).or_default() += 1;
                 nh.push(flag.clone());
@@ -583,6 +609,12 @@ impl GroupStageOutput {
         }
         checkpoint(true);
         drop(std::mem::take(&mut self.shared_source_counts));
+        for (_, mut keys) in self.new_winner_withdraws.drain() {
+            checkpoint(false);
+            crate::manager::retire_vec(&mut keys, &mut || checkpoint(false));
+        }
+        checkpoint(true);
+        drop(std::mem::take(&mut self.new_winner_withdraws));
         checkpoint(true);
         drop(std::mem::take(&mut self.shared_announce));
         checkpoint(true);

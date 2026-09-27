@@ -290,10 +290,13 @@ pub(super) struct NormMsg {
 }
 
 fn normalize(update: &OutboundRouteUpdate) -> NormMsg {
+    // Transport drops the receiving member's own routes from a shared payload
+    // before encoding; the normalized stream is what reaches the wire.
     let mut announce: Vec<_> = update
         .announce
         .iter()
         .enumerate()
+        .filter(|(_, r)| update.announce_source_exclusion != Some(r.peer))
         .map(|(i, r)| {
             (
                 r.prefix,
@@ -1558,6 +1561,150 @@ async fn oracle_source_flip_withdraw_lost_to_full_channel_recovers() {
         !c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)),
         "the source-flip withdraw lost to the full channel must be recovered by the resync"
     );
+}
+
+/// Failover passes with several new winners. A member losing its best
+/// paths leaves some prefixes to alternates from other members (source
+/// flips onto them) and withdraws the rest. New winners ride the shared
+/// payload with own-source exclusion plus their indexed withdrawals; the
+/// streams must equal the per-peer oracle message for message across:
+/// the multi-winner failover, a member becoming a winner while losing a
+/// withdrawn key (per-member fallback), a flip away from a member onto
+/// another, a same-source replacement that owes its source nothing (no
+/// envelope), ordinary withdrawals, and a second failover.
+#[tokio::test]
+async fn oracle_failover_new_winners_match_ungrouped() {
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        for peer in [A, B, C, D, E] {
+            o.peer_up(peer, false, true, None, 64).await;
+        }
+        let best: Vec<Route> = (1..=6)
+            .map(|n| ibgp_route(pfx(n, 0), A, 200, vec![]))
+            .collect();
+        o.routes(A, best, vec![]).await;
+        o.routes(
+            B,
+            vec![
+                ibgp_route(pfx(1, 0), B, 100, vec![]),
+                ibgp_route(pfx(2, 0), B, 100, vec![]),
+                ibgp_route(pfx(7, 0), B, 100, vec![]),
+            ],
+            vec![],
+        )
+        .await;
+        o.routes(C, vec![ibgp_route(pfx(3, 0), C, 100, vec![])], vec![])
+            .await;
+        o.routes(
+            D,
+            vec![
+                ibgp_route(pfx(3, 0), D, 80, vec![]),
+                ibgp_route(pfx(8, 0), D, 100, vec![]),
+            ],
+            vec![],
+        )
+        .await;
+        o.routes(E, vec![ibgp_route(pfx(9, 0), E, 100, vec![])], vec![])
+            .await;
+
+        // Failover: p1/p2 flip onto B, p3 onto C, p4-p6 lose every path.
+        o.peer_down(A).await;
+        // E takes p1 from B while its only p9 path goes away.
+        o.routes(
+            E,
+            vec![ibgp_route(pfx(1, 0), E, 300, vec![])],
+            vec![pfx(9, 0)],
+        )
+        .await;
+        // C withdraws p3: the flip lands on D's standing alternate.
+        o.routes(C, vec![], vec![pfx(3, 0)]).await;
+        // Same-source replacement: D's own p8 changes; D is owed nothing.
+        o.routes(D, vec![ibgp_route(pfx(8, 0), D, 150, vec![])], vec![])
+            .await;
+        // Ordinary withdrawal of a sole path.
+        o.routes(B, vec![], vec![pfx(7, 0)]).await;
+        // Second failover: E leaves, p1 returns to B.
+        o.peer_down(E).await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        grouped, ungrouped,
+        "grouped and per-peer outbound streams must be identical"
+    );
+    let b_final = fold(&grouped)
+        .get(&IpAddr::V4(B))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !b_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)),
+        "the new winner's displaced advertisement must be withdrawn"
+    );
+    assert!(
+        grouped.values().any(|msgs| msgs
+            .iter()
+            .any(|msg| !msg.withdraw.is_empty() && !msg.announce.is_empty())),
+        "scenario must exercise mixed withdraw/announce envelopes"
+    );
+}
+
+/// A failover envelope lost to a full channel on a new winner: its owed
+/// withdrawal keeps the key in the group table (invisible to tombstones),
+/// and the plain withdrawal is a tombstone. The resync must recover both
+/// and converge to the per-peer oracle.
+#[tokio::test]
+async fn oracle_failover_new_winner_lost_to_full_channel_recovers() {
+    tokio::time::pause();
+    let cluster = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let scenario = async |o: &mut Oracle| {
+        o.peer_up(A, false, true, None, 64).await;
+        o.peer_up(B, false, true, None, 64).await;
+        o.peer_up(D, false, true, None, 64).await;
+        o.peer_up(C, false, true, None, 1).await;
+        let eor = o.drain_one(C).await;
+        assert!(eor.announce.is_empty() && !eor.end_of_rib.is_empty());
+
+        // A's best paths fill C's only queue slot.
+        o.routes(
+            A,
+            vec![
+                ibgp_route(pfx(1, 0), A, 200, vec![]),
+                ibgp_route(pfx(2, 0), A, 200, vec![]),
+                ibgp_route(pfx(3, 0), A, 200, vec![]),
+            ],
+            vec![],
+        )
+        .await;
+        // Alternates behind A: p1 from C, p2 from D. No best change.
+        o.routes(C, vec![ibgp_route(pfx(1, 0), C, 100, vec![])], vec![])
+            .await;
+        o.routes(D, vec![ibgp_route(pfx(2, 0), D, 100, vec![])], vec![])
+            .await;
+        // Failover while C is jammed: C owes a withdrawal of p1 (now its
+        // own best), is announced D's p2, and loses p3 outright.
+        o.peer_down(A).await;
+
+        let first = o.drain_one(C).await;
+        assert_eq!(
+            first.announce.len(),
+            3,
+            "A's routes reached C before the jam"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        o.quiesce().await;
+    };
+    let (grouped, ungrouped) = run_grouped_and_ungrouped(cluster, scenario).await;
+    assert_eq!(
+        fold(&grouped),
+        fold(&ungrouped),
+        "final advertised state must converge on both paths"
+    );
+    let c_final = fold(&grouped)
+        .get(&IpAddr::V4(C))
+        .cloned()
+        .unwrap_or_default();
+    assert!(!c_final.contains_key(&(Prefix::V4(pfx(1, 0)), 0)));
+    assert!(c_final.contains_key(&(Prefix::V4(pfx(2, 0)), 0)));
+    assert!(!c_final.contains_key(&(Prefix::V4(pfx(3, 0)), 0)));
 }
 
 /// A source flip staged while the member is ALREADY dirty: the member's

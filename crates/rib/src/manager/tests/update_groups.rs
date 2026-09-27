@@ -934,6 +934,242 @@ fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
     assert!(!manager.pending_otc_blocked.contains_key(&peer));
 }
 
+struct FailoverFleet {
+    manager: RibManager,
+    members: Vec<IpAddr>,
+    receivers: Vec<mpsc::Receiver<OutboundRouteUpdate>>,
+    probes: Arc<AtomicUsize>,
+    source: Ipv4Addr,
+    prefixes: Vec<Ipv4Prefix>,
+}
+
+fn failover_member_source(fleet: &FailoverFleet, index: usize) -> Ipv4Addr {
+    let IpAddr::V4(source) = fleet.members[index] else {
+        unreachable!()
+    };
+    source
+}
+
+fn receive_direct(manager: &mut RibManager, source: Ipv4Addr, announced: Vec<Route>) {
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+}
+
+/// Four grouped members behind one unregistered source announcing four
+/// best paths (`LOCAL_PREF` 200). Member 1 holds alternates for p0 and p1,
+/// member 2 for p2 (`LOCAL_PREF` 100); p3 has no alternate. `max_len[i]` is
+/// member i's exact-export ceiling; member 2's alternate optionally
+/// carries the synthetic oversized community.
+fn failover_fleet(max_len: [usize; 4], oversized_alternate: bool) -> FailoverFleet {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let members: Vec<IpAddr> = (0..4)
+        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 63, 5, u8::try_from(index + 1).unwrap())))
+        .collect();
+    let mut receivers = Vec::new();
+    for (index, &peer) in members.iter().enumerate() {
+        receivers.push(register_direct_exact_peer(
+            &mut manager,
+            peer,
+            Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 65,
+                max_len: max_len[index],
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::new(AtomicUsize::new(0)),
+            }),
+        ));
+        assert!(manager.grouped_member_of(peer).is_some());
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 70);
+    // Even third octets: the synthetic community encodes at 256 bytes.
+    let prefixes: Vec<_> = (0..4u8)
+        .map(|index| Ipv4Prefix::new(Ipv4Addr::new(203, 0, 130 + 2 * index, 0), 24))
+        .collect();
+    let mut fleet = FailoverFleet {
+        manager,
+        members,
+        receivers,
+        probes,
+        source,
+        prefixes,
+    };
+    let best = fleet
+        .prefixes
+        .iter()
+        .map(|&prefix| crate::test_support::make_route_with_lp(prefix, source, 200))
+        .collect();
+    receive_direct(&mut fleet.manager, source, best);
+    let member_1 = failover_member_source(&fleet, 1);
+    let alternates_1 = fleet.prefixes[..2]
+        .iter()
+        .map(|&prefix| crate::test_support::make_route_with_lp(prefix, member_1, 100))
+        .collect();
+    receive_direct(&mut fleet.manager, member_1, alternates_1);
+    let member_2 = failover_member_source(&fleet, 2);
+    let mut alternate_2 = crate::test_support::make_route_with_lp(fleet.prefixes[2], member_2, 100);
+    if oversized_alternate {
+        AttrSet::edit(&mut alternate_2.attributes, |attrs| {
+            attrs.push(PathAttribute::Communities(vec![0xFDE8_0002]));
+        });
+    }
+    receive_direct(&mut fleet.manager, member_2, vec![alternate_2]);
+    for receiver in &mut fleet.receivers {
+        let setup = receiver.try_recv().expect("setup advertisement");
+        assert_eq!(setup.announce.len(), 4);
+        assert!(
+            receiver.try_recv().is_err(),
+            "alternates change no best path"
+        );
+    }
+    fleet
+}
+
+fn fail_over(fleet: &mut FailoverFleet) -> Vec<OutboundRouteUpdate> {
+    fleet.manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    fleet.probes.store(0, Ordering::Relaxed);
+    fleet.manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(fleet.source),
+        session_id: 0,
+        announced: vec![],
+        withdrawn: fleet
+            .prefixes
+            .iter()
+            .map(|&prefix| (Prefix::V4(prefix), 0))
+            .collect(),
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while fleet.manager.process_next_route_chunk() {}
+    fleet
+        .receivers
+        .iter_mut()
+        .map(|receiver| {
+            let update = receiver
+                .try_recv()
+                .expect("one failover envelope per member");
+            assert!(
+                receiver.try_recv().is_err(),
+                "exactly one envelope per member"
+            );
+            update
+        })
+        .collect()
+}
+
+fn key_set(keys: &[(Prefix, u32)]) -> HashSet<(Prefix, u32)> {
+    keys.iter().copied().collect()
+}
+
+/// A failover pass whose displacing announcements land on two members
+/// (new winners) keeps them on the group's shared announce payload, encode
+/// cell and exact-probe cache. Each new winner excludes its own routes and
+/// receives the withdrawal of the key it took over before the pass's shared
+/// withdrawals; the other members receive the shared emission unchanged.
+#[test]
+fn failover_new_winners_share_payload_encode_cell_and_exact_proof() {
+    let mut fleet = failover_fleet([4_096; 4], false);
+    let updates = fail_over(&mut fleet);
+    let key = |index: usize| (Prefix::V4(fleet.prefixes[index]), 0);
+
+    let shared = &updates[0];
+    assert_eq!(shared.announce.len(), 3, "p0-p2 move to alternates");
+    let cell = shared
+        .shared_group_encode
+        .as_ref()
+        .expect("the failover pass keeps a shared encode cell");
+    for (index, update) in updates.iter().enumerate() {
+        assert!(
+            Arc::ptr_eq(&update.announce, &shared.announce),
+            "member {index} must share the announce payload"
+        );
+        assert!(
+            update
+                .shared_group_encode
+                .as_ref()
+                .is_some_and(|member_cell| Arc::ptr_eq(member_cell, cell)),
+            "member {index} must share the encode cell"
+        );
+    }
+    for index in [0, 3] {
+        assert_eq!(updates[index].announce_source_exclusion, None);
+        assert_eq!(updates[index].withdraw, vec![key(3)]);
+    }
+    for (index, owed) in [(1, vec![key(0), key(1)]), (2, vec![key(2)])] {
+        let update = &updates[index];
+        assert_eq!(update.announce_source_exclusion, Some(fleet.members[index]));
+        let (supplement, shared_withdraw) = update.withdraw.split_at(owed.len());
+        assert_eq!(key_set(supplement), key_set(&owed), "member {index}");
+        assert_eq!(shared_withdraw, [key(3)], "member {index}");
+        let visible: Vec<_> = update
+            .announce
+            .iter()
+            .filter(|route| route.peer != fleet.members[index])
+            .map(|route| (route.prefix, route.path_id))
+            .collect();
+        assert_eq!(visible.len(), 3 - owed.len(), "member {index}");
+        assert!(key_set(&visible).is_disjoint(&key_set(&owed)));
+    }
+    let stats = fleet.manager.adj_rib_out_commit_stats;
+    assert_eq!(
+        stats.exact_probe_batches, 1,
+        "one exact batch for the cohort"
+    );
+    assert_eq!(fleet.probes.load(Ordering::Relaxed), 3);
+    assert_eq!(stats.successful_enqueues, 4);
+}
+
+/// A new winner whose exact-export ceiling rejects one shared announcement
+/// leaves the shared encode cell, drops the route, and withdraws the
+/// previously advertised key beside its owed new-winner and shared
+/// withdrawals, matching the per-member wire view.
+#[test]
+fn failover_new_winner_exact_rejection_withdraws_rejected_prior() {
+    let mut fleet = failover_fleet([4_096, 128, 4_096, 4_096], true);
+    let updates = fail_over(&mut fleet);
+    let key = |index: usize| (Prefix::V4(fleet.prefixes[index]), 0);
+    let member = fleet.members[1];
+    let update = &updates[1];
+    assert!(
+        update.shared_group_encode.is_none(),
+        "a member-specific exact fallback cannot keep shared bytes"
+    );
+    assert!(
+        update
+            .announce
+            .iter()
+            .all(|route| update.announce_source_exclusion == Some(route.peer)),
+        "the rejected p2 must not reach the new winner's wire"
+    );
+    assert_eq!(
+        key_set(&update.withdraw),
+        key_set(&[key(0), key(1), key(2), key(3)]),
+        "owed, rejected-prior and shared withdrawals"
+    );
+    assert!(
+        fleet.manager.peer_unexportable[&member]
+            .contains(&ExactExportKey::Unicast(Prefix::V4(fleet.prefixes[2]), 0))
+    );
+    for index in [0, 3] {
+        assert_eq!(updates[index].withdraw, vec![key(3)]);
+        assert!(updates[index].shared_group_encode.is_some());
+    }
+}
+
 #[test]
 fn distribution_skips_pristine_otc_prefix_visits() {
     const PEERS: usize = 4;

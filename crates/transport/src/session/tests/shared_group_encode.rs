@@ -1587,3 +1587,71 @@ async fn shared_group_withdrawals_do_not_wait_for_the_first_shared_chunk() {
     }
     assert_eq!(announcements, 1);
 }
+
+/// A failover pass's new winner (the route source the RIB excludes from the
+/// shared payload, owed the withdrawal of the key it took over) and an
+/// ordinary member both stream the group's shared chunks after their own
+/// withdrawals. With the rib-out tap on, every BMP `RouteMonitoring` PDU is
+/// byte-identical to the frame that reached the wire, in wire order: the
+/// withdrawal frame each member encoded locally and the shared chunks it
+/// streamed, whatever the frame partition.
+#[tokio::test]
+async fn shared_group_new_winner_rib_out_bmp_mirrors_emitted_frames() {
+    let (announce, withdraw) = mixed_failover_pass();
+    let new_winner = Ipv4Addr::new(10, 44, 0, 2);
+    let taken_over = (
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+        0,
+    );
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    let members = [(new_winner, true), (Ipv4Addr::new(10, 44, 0, 9), false)];
+    for (excluded, is_new_winner) in members {
+        let (mut member, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+        member.config.bmp_rib_out = true;
+        member.config.route_server_client = true;
+        let (client, mut wire) = connected_stream_pair().await;
+        member.test_install_stream(client);
+        member.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+        let mut update = shared_group_envelope(&member, &shared, excluded, &announce);
+        if is_new_winner {
+            update.withdraw.push(taken_over);
+        }
+        update.withdraw.extend_from_slice(&withdraw);
+        member.test_drain_outbound(update).await;
+        assert!(
+            shared.cell.get().is_some(),
+            "the pass keeps a shared encoder"
+        );
+
+        let announced_frames = if is_new_winner { 2 } else { 3 };
+        let frames = read_raw_frames(&mut wire, 1 + announced_frames).await;
+        let first = parse_frame(&frames[0], false);
+        assert_eq!(
+            first.withdrawn.len(),
+            withdraw.len() + usize::from(is_new_winner),
+            "withdrawals, including the new winner's owed one, go first"
+        );
+        assert!(first.announced.is_empty());
+        let announced: Vec<_> = frames[1..]
+            .iter()
+            .flat_map(|frame| parse_frame(frame, false).announced)
+            .map(|nlri| nlri.prefix)
+            .collect();
+        assert_eq!(announced.len(), announced_frames);
+        if is_new_winner {
+            assert!(
+                !announced
+                    .iter()
+                    .any(|prefix| Prefix::V4(*prefix) == taken_over.0),
+                "the new winner never receives its own route"
+            );
+        }
+        let mirrored: Vec<Vec<u8>> = std::iter::from_fn(|| bmp_rx.try_recv().ok())
+            .map(|event| expect_rib_out_rm(event).to_vec())
+            .collect();
+        assert_eq!(
+            mirrored, frames,
+            "BMP rib-out must mirror the emitted frames byte for byte"
+        );
+    }
+}

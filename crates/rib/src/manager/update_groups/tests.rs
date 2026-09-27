@@ -729,6 +729,83 @@ fn source_flip_matrix_exhaustive() {
     }
 }
 
+/// Multi-delta plain-group passes: every sequence of up to three deltas
+/// over distinct prefixes, each drawn from the full source-flip matrix.
+/// A member rides the shared payload with own-source exclusion exactly when
+/// it is not the old source of a withdrawn key; there its shared emission
+/// (new-winner withdrawals, shared withdrawals, shared announcements minus
+/// its own) equals the per-member walk ([`member_emission`] asserts it).
+/// This covers a member becoming a winner on one key while losing, keeping
+/// or re-announcing another in the same pass.
+#[test]
+fn new_winner_supplements_match_walk_across_multi_delta_passes() {
+    let members = [MEMBER, OTHER1, OTHER2];
+    let sources = [None, Some(MEMBER), Some(OTHER1), Some(OTHER2)];
+    let mut shapes = Vec::new();
+    for old in sources {
+        for new in sources {
+            if old.is_some() || new.is_some() {
+                shapes.push((old, new));
+            }
+        }
+    }
+    let mut new_winner_members = 0;
+    let mut passes = vec![vec![]];
+    for _ in 0..3 {
+        passes = passes
+            .into_iter()
+            .flat_map(|pass: Vec<(Option<IpAddr>, Option<IpAddr>)>| {
+                shapes.iter().map(move |shape| {
+                    let mut next = pass.clone();
+                    next.push(*shape);
+                    next
+                })
+            })
+            .collect();
+        for pass in &passes {
+            let deltas: Vec<GroupDelta> = pass
+                .iter()
+                .zip(1u8..)
+                .map(|(&(old, new), n)| match new {
+                    Some(src) => announce_delta(prefix(n), src, old),
+                    None => withdraw_delta(prefix(n), old),
+                })
+                .collect();
+            let mut out = GroupStageOutput::default();
+            out.deltas.extend(deltas);
+            out.build_shared_emit(&mut |_| {});
+            for member in members {
+                let loses_withdrawn_key = pass
+                    .iter()
+                    .any(|&(old, new)| new.is_none() && old == Some(member));
+                assert_eq!(
+                    out.shared_applies_with_source_exclusion(member),
+                    !loses_withdrawn_key,
+                    "{pass:?}: shared eligibility for {member}"
+                );
+                let expected_supplement: Vec<(Prefix, u32)> = pass
+                    .iter()
+                    .zip(1u8..)
+                    .filter(|&(&(old, new), _)| {
+                        new == Some(member) && old.is_some_and(|old| old != member)
+                    })
+                    .map(|(_, n)| (prefix(n), 0))
+                    .collect();
+                assert_eq!(
+                    out.new_winner_withdraws(member),
+                    expected_supplement.as_slice(),
+                    "{pass:?}: new-winner withdrawals for {member}"
+                );
+                if !expected_supplement.is_empty() && !loses_withdrawn_key {
+                    new_winner_members += 1;
+                }
+                let _ = member_emission(&out, member);
+            }
+        }
+    }
+    assert!(new_winner_members > 0, "matrix must exercise new winners");
+}
+
 // --- ADR-0126 Phase 1: per-client-best group staging (winner walk
 // --- + exception lane), dark behind the unchanged classifier. The
 // --- groups below exist only because these tests construct them.
@@ -2190,11 +2267,23 @@ fn member_emission(out: &GroupStageOutput, member: IpAddr) -> (Vec<Route>, Vec<(
             );
         }
         assert_eq!(
-            withdraw, out.shared_withdraw,
+            sorted_keys(withdraw.clone()),
+            sorted_keys(
+                out.new_winner_withdraws(member)
+                    .iter()
+                    .chain(&out.shared_withdraw)
+                    .copied()
+                    .collect()
+            ),
             "source-excluded shared/walk withdraw diverged for {member}"
         );
     }
     (announce, withdraw)
+}
+
+fn sorted_keys(mut keys: Vec<(Prefix, u32)>) -> Vec<(Prefix, u32)> {
+    keys.sort_by_key(|(prefix, path_id)| (prefix.to_string(), *path_id));
+    keys
 }
 
 /// ADR-0126 Decision 5 steady-state reference matrix. Every

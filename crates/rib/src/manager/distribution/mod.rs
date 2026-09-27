@@ -6380,8 +6380,11 @@ impl RibManager {
                         if (shared_exact || shared_with_source_exclusion) && !rs_diverges {
                             // Common case: this member's matrix output IS
                             // the shared emission after transport omits any
-                            // newly staged own-source routes. Enqueue Arc
-                            // clones and one encode cell for the whole group.
+                            // newly staged own-source routes, preceded by the
+                            // withdrawals a new winner owes for keys it took
+                            // over. Enqueue Arc clones and one encode cell for
+                            // the whole group; transport sends the envelope's
+                            // withdrawals before the shared announcements.
                             shared_unicast =
                                 Some((stage.shared_announce.clone(), stage.shared_nh.clone()));
                             announce_source_exclusion =
@@ -6390,6 +6393,9 @@ impl RibManager {
                                 Some(Arc::clone(shared_group_encodes.entry(gid).or_insert_with(
                                     || Arc::new(crate::update::SharedGroupEncode::default()),
                                 )));
+                            unicast
+                                .withdraw
+                                .extend_from_slice(stage.new_winner_withdraws(peer));
                             unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
                         } else {
                             super::update_groups::emit_group_deltas_for_member_with_checkpoint(
