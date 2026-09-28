@@ -1509,7 +1509,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ExplainAdvertisedRoute` | Dry-run export decision for one prefix (or, with `rd`, one VPN identity) to one peer: the full gate ladder in live evaluation order (split horizon, RFC 4456 reflection, family, RFC 9494 LLGR, RFC 5291 ORF, RFC 4684 RT membership, export-policy rejection with per-term attribution or nonempty Permit with `chain_default_permit`, Adj-RIB-Out diff), produced by a dry run of the live staging body. For negotiated unicast Add-Path send, optional `source { peer_address, path_id }` selects one exact Adj-RIB-In candidate. |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
-| `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
+| `ListFlowSpecRoutes` | FlowSpec selected Loc-RIB, received Adj-RIB-In, or per-peer committed advertised Adj-RIB-Out view (alpha) |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136) in Loc-RIB view, filterable by route type / source peer / RD |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
@@ -1544,7 +1544,7 @@ used by best, received, advertised, and embedded `ExplainBestPath` routes.
 A peer-scoped view that finds no rows returns `NOT_FOUND` with the message
 `neighbor <address> not found` when the address names no known peer. This
 covers `ListReceivedRoutes` with `neighbor_address` set, `ListAdvertisedRoutes`,
-received-mode `ListFlowSpecRoutes`, `ListReceivedEvpnRoutes`,
+received/advertised-mode `ListFlowSpecRoutes`, `ListReceivedEvpnRoutes`,
 `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute` with `received_from` or
 `advertised_to` when that side is absent, and `BfdService.GetBfdSessions`
 with `peer_address` set. A known peer is a configured neighbor, an accepted
@@ -1948,7 +1948,7 @@ IPv6 prefix-match semantics, including zero and nonzero values.
 The ordinary `ListFlowSpecRoutes` response remains the selected Loc-RIB view
 in `routes`. Set `received_peer_address` to an IP address to inspect that
 peer's retained, post-import-policy candidates instead, including nonselected
-and infeasible rules. `afi_safi` narrows either view. Invalid peer addresses
+and infeasible rules. `afi_safi` narrows all three views. Invalid peer addresses
 are rejected before the query reaches the RIB. The address `0.0.0.0` selects
 the rules injected through `InjectionService`; see the
 [FlowSpec injection contract](#flowspec-injection-contract).
@@ -1961,6 +1961,38 @@ acknowledgement because older servers ignore the additive request field.
 `rbgp flowspec received PEER [-a ipv4_flowspec|ipv6_flowspec]` performs that
 check and reports an unsupported operation instead of displaying an older
 server's selected routes as received candidates.
+
+Set `advertised_peer_address` to inspect the destination peer's committed
+post-export-policy Adj-RIB-Out. The response uses `routes` and sets
+`advertised_view: true`, including for an empty result; `received_view` stays
+false. Both peer selectors together return `INVALID_ARGUMENT`. Unknown peers
+return `NOT_FOUND`; until the initial configured-peer roster is installed,
+an unresolved peer returns `UNAVAILABLE`. A known peer with no negotiated
+FlowSpec family returns an acknowledged empty view. Each row's `peer_address`
+is the **source** peer, including `0.0.0.0` for local injection, not the queried
+destination. Export denials and suppression omit rows; export modifications
+appear in the committed attributes and actions.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"advertised_peer_address":"192.0.2.1"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
+rbgp flowspec advertised 192.0.2.1 -a ipv4_flowspec
+```
+
+Clients must check `advertised_view` before interpreting the rows: an older
+server ignores the selector and returns its selected Loc-RIB instead.
+`rbgp flowspec advertised PEER [-a ipv4_flowspec|ipv6_flowspec]` rejects that
+unacknowledged response. This surface remains alpha and `sensitive_read`.
+
+"Committed" means admitted to the destination's outbound channel. When that
+channel is full, the peer becomes outbound-dirty and this view retains the
+previous committed rows until resynchronization succeeds, including a prior
+row awaiting withdrawal. Admitted updates can still await transport encoding
+or socket writes. This is local state, not evidence that the edge accepted,
+installed, or enforced a rule. Reads filter inside the RIB task before copying
+rows and check cancellation at bounded visit intervals; they still walk the
+destination's FlowSpec table and return a unary response, without pagination.
 
 Each received row contains the existing `route` projection plus `path_id`,
 `selected`, `validation`, `reason`, and `pending`. Validation is `disabled`,

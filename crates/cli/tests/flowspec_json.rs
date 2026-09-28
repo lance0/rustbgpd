@@ -97,6 +97,7 @@ async fn flowspec_json_covers_proto_fields() {
             },
             proto::FlowSpecRouteEntry::default(),
         ],
+        advertised_view: false,
     };
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_rbgp"))
@@ -219,6 +220,7 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
             })
             .collect(),
         received_view: true,
+        advertised_view: false,
     };
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_rbgp"))
@@ -266,6 +268,7 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
         Some(proto::ListFlowSpecRequest {
             afi_safi: proto::AddressFamily::Ipv6Flowspec as i32,
             received_peer_address: "2001:db8::1".into(),
+            advertised_peer_address: String::new(),
         })
     );
 
@@ -303,6 +306,7 @@ async fn received_flowspec_json_projection_covers_proto_fields_and_pending_resul
             pending: false,
         }],
         received_view: true,
+        advertised_view: false,
     };
     let output = run(&args);
     assert!(output.status.success(), "{output:?}");
@@ -343,6 +347,7 @@ async fn received_flowspec_rejects_unacknowledged_old_server_view_without_output
             routes,
             received_routes: Vec::new(),
             received_view: false,
+            advertised_view: false,
         };
         for flags in [
             vec![],
@@ -361,6 +366,40 @@ async fn received_flowspec_rejects_unacknowledged_old_server_view_without_output
                 String::from_utf8(output.stderr)
                     .unwrap()
                     .contains("received FlowSpec diagnostics require a newer daemon")
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advertised_flowspec_rejects_unacknowledged_old_server_view_without_output() {
+    let server = test_support::spawn_mock_server(None).await;
+    // Older servers ignore the request's new selector, returning selected rows
+    // or an empty table. Neither is evidence about committed advertised routes.
+    for routes in [vec![proto::FlowSpecRouteEntry::default()], Vec::new()] {
+        *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+            routes,
+            received_routes: Vec::new(),
+            received_view: false,
+            advertised_view: false,
+        };
+        for flags in [
+            vec![],
+            vec!["--json"],
+            vec!["--json", "--json-version", "1"],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+                .args(["--addr", &server.addr])
+                .args(flags)
+                .args(["flowspec", "advertised", "192.0.2.1"])
+                .output()
+                .expect("run rbgp");
+            assert!(!output.status.success(), "{output:?}");
+            assert!(output.stdout.is_empty(), "{output:?}");
+            assert!(
+                String::from_utf8(output.stderr)
+                    .unwrap()
+                    .contains("advertised FlowSpec view requires a newer daemon")
             );
         }
     }
@@ -488,4 +527,44 @@ async fn flowspec_delete_allow_missing_reports_not_present() {
     *server.state.delete_flowspec_matches.lock().await = false;
     let output = delete(false, true);
     assert!(!output.status.success(), "{output:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advertised_flowspec_projects_rows_and_selector() {
+    let server = test_support::spawn_mock_server(None).await;
+    *server.state.list_flowspec_response.lock().await = proto::ListFlowSpecResponse {
+        advertised_view: true,
+        routes: vec![proto::FlowSpecRouteEntry {
+            peer_address: "0.0.0.0".into(),
+            afi_safi: proto::AddressFamily::Ipv6Flowspec as i32,
+            communities: vec![(65000 << 16) | 0x002a],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+        .args([
+            "--addr",
+            &server.addr,
+            "--json",
+            "flowspec",
+            "advertised",
+            "2001:db8::1",
+            "-a",
+            "ipv6_flowspec",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rows[0]["peer_address"], "0.0.0.0");
+    assert_eq!(rows[0]["communities"], serde_json::json!(["65000:42"]));
+    assert_eq!(
+        *server.state.last_list_flowspec.lock().await,
+        Some(proto::ListFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv6Flowspec as i32,
+            advertised_peer_address: "2001:db8::1".into(),
+            ..Default::default()
+        })
+    );
 }

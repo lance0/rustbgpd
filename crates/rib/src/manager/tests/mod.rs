@@ -1405,6 +1405,7 @@ mod explain_mrt;
 mod export_explain;
 mod exportability;
 mod flowspec;
+mod flowspec_advertised;
 mod gr_llgr;
 mod incremental_best;
 mod labeled;

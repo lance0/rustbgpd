@@ -2132,6 +2132,11 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListFlowSpecResponse>, Status> {
         let req = request.into_inner();
         validate_flowspec_afi_safi(req.afi_safi)?;
+        if !req.received_peer_address.is_empty() && !req.advertised_peer_address.is_empty() {
+            return Err(Status::invalid_argument(
+                "received_peer_address and advertised_peer_address are mutually exclusive",
+            ));
+        }
 
         // Family narrowing runs inside the RIB task, so a single-family
         // listing never costs a copy of the other family's rows.
@@ -2167,17 +2172,27 @@ impl proto::rib_service_server::RibService for RibService {
                     .map(received_flowspec_route_to_proto)
                     .collect(),
                 received_view: true,
+                advertised_view: false,
             }));
         }
         let filter = row_filter(afi_filter.is_some(), move |route: &FlowSpecRoute| {
             afi_filter.is_none_or(|afi| route.afi == afi)
         });
 
-        let matched = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryFlowSpecRoutes {
-            filter,
-            reply,
+        let advertised_peer = parse_optional_peer_filter(&req.advertised_peer_address)?;
+        let matched = rib_manager_read(&self.rib_tx, |reply| match advertised_peer {
+            Some(peer) => RibUpdate::QueryAdvertisedFlowSpecRoutes {
+                peer,
+                filter,
+                reply,
+            },
+            None => RibUpdate::QueryFlowSpecRoutes { filter, reply },
         })
         .await?;
+        if let Some(peer) = advertised_peer {
+            self.require_known_peer_if_empty(peer, matched.is_empty())
+                .await?;
+        }
 
         let routes: Vec<proto::FlowSpecRouteEntry> =
             matched.iter().map(flowspec_route_to_proto).collect();
@@ -2186,6 +2201,7 @@ impl proto::rib_service_server::RibService for RibService {
             routes,
             received_routes: Vec::new(),
             received_view: false,
+            advertised_view: advertised_peer.is_some(),
         }))
     }
 
@@ -3411,6 +3427,7 @@ mod tests {
         ListRouteEvents,
         ListFlowSpecRoutes,
         ListReceivedFlowSpecRoutes,
+        ListAdvertisedFlowSpecRoutes,
         ListEvpnRoutes,
         ListReceivedEvpnRoutes,
         ListAdvertisedEvpnRoutes,
@@ -3424,7 +3441,7 @@ mod tests {
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 20] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 21] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
@@ -3434,6 +3451,7 @@ mod tests {
         UnaryRibRead::ListRouteEvents,
         UnaryRibRead::ListFlowSpecRoutes,
         UnaryRibRead::ListReceivedFlowSpecRoutes,
+        UnaryRibRead::ListAdvertisedFlowSpecRoutes,
         UnaryRibRead::ListEvpnRoutes,
         UnaryRibRead::ListReceivedEvpnRoutes,
         UnaryRibRead::ListAdvertisedEvpnRoutes,
@@ -3497,6 +3515,15 @@ mod tests {
                 .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
                     afi_safi: 0,
                     received_peer_address: "192.0.2.1".into(),
+                    advertised_peer_address: String::new(),
+                }))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListAdvertisedFlowSpecRoutes => svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: 0,
+                    advertised_peer_address: "192.0.2.1".into(),
+                    received_peer_address: String::new(),
                 }))
                 .await
                 .map(|_| ()),
@@ -3558,6 +3585,7 @@ mod tests {
         ListReceivedRoutes,
         ListAdvertisedRoutes,
         ListReceivedFlowSpecRoutes,
+        ListAdvertisedFlowSpecRoutes,
         ListReceivedEvpnRoutes,
         ListAdvertisedEvpnRoutes,
         ExplainEvpnReceivedFrom,
@@ -3591,6 +3619,15 @@ mod tests {
                 .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
                     afi_safi: 0,
                     received_peer_address: peer,
+                    advertised_peer_address: String::new(),
+                }))
+                .await
+                .map(|_| ()),
+            PeerScopedRead::ListAdvertisedFlowSpecRoutes => svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    afi_safi: 0,
+                    advertised_peer_address: peer,
+                    received_peer_address: String::new(),
                 }))
                 .await
                 .map(|_| ()),
@@ -3634,6 +3671,9 @@ mod tests {
                     RibUpdate::QueryReceivedFlowSpecRoutes { reply, .. } => {
                         let _ = reply.send(Vec::new());
                     }
+                    RibUpdate::QueryAdvertisedFlowSpecRoutes { reply, .. } => {
+                        let _ = reply.send(Vec::new());
+                    }
                     RibUpdate::ExplainEvpnRoute {
                         key,
                         received_from,
@@ -3675,6 +3715,7 @@ mod tests {
             PeerScopedRead::ListReceivedRoutes,
             PeerScopedRead::ListAdvertisedRoutes,
             PeerScopedRead::ListReceivedFlowSpecRoutes,
+            PeerScopedRead::ListAdvertisedFlowSpecRoutes,
             PeerScopedRead::ListReceivedEvpnRoutes,
             PeerScopedRead::ListAdvertisedEvpnRoutes,
             PeerScopedRead::ExplainEvpnReceivedFrom,
@@ -6228,6 +6269,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn advertised_flowspec_rejects_invalid_selectors_before_enqueue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = RibService::new(tx);
+        for (received, advertised) in [("192.0.2.1", "192.0.2.2"), ("", "not-an-ip")] {
+            let error = svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    received_peer_address: received.into(),
+                    advertised_peer_address: advertised.into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn advertised_flowspec_acknowledges_empty_and_filters_each_family() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let svc = RibService::new(tx);
+        let actor = tokio::spawn(async move {
+            for afi in [Afi::Ipv4, Afi::Ipv6, Afi::Ipv4] {
+                let RibUpdate::QueryAdvertisedFlowSpecRoutes {
+                    peer,
+                    filter,
+                    reply,
+                } = rx.recv().await.unwrap()
+                else {
+                    panic!("expected advertised FlowSpec query");
+                };
+                assert_eq!(peer, "2001:db8::1".parse::<IpAddr>().unwrap());
+                let mut row = FlowSpecRoute {
+                    rule: rustbgpd_wire::FlowSpecRule { components: vec![] },
+                    afi,
+                    peer: "0.0.0.0".parse().unwrap(),
+                    attributes: vec![],
+                    received_at: Instant::now(),
+                    origin_type: rustbgpd_rib::RouteOrigin::Local,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    is_stale: false,
+                    is_llgr_stale: false,
+                    path_id: 0,
+                };
+                let filter = filter.unwrap();
+                assert!(filter(&row));
+                row.afi = if afi == Afi::Ipv4 {
+                    Afi::Ipv6
+                } else {
+                    Afi::Ipv4
+                };
+                assert!(!filter(&row));
+                row.afi = afi;
+                if afi == Afi::Ipv6 {
+                    row.attributes
+                        .push(PathAttribute::Communities(vec![(65000 << 16) | 0x002a]));
+                    reply.send(vec![row]).unwrap();
+                } else {
+                    reply.send(Vec::new()).unwrap();
+                }
+            }
+        });
+        for family in [
+            proto::AddressFamily::Ipv4Flowspec,
+            proto::AddressFamily::Ipv6Flowspec,
+            proto::AddressFamily::Ipv4Flowspec,
+        ] {
+            let response = svc
+                .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+                    advertised_peer_address: "2001:db8::1".into(),
+                    afi_safi: family as i32,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(response.advertised_view);
+            assert!(!response.received_view);
+            if family == proto::AddressFamily::Ipv6Flowspec {
+                assert_eq!(response.routes.len(), 1);
+                assert_eq!(response.routes[0].peer_address, "0.0.0.0");
+                assert_eq!(response.routes[0].communities, vec![(65000 << 16) | 0x002a]);
+            } else {
+                assert!(response.routes.is_empty());
+            }
+            assert!(response.received_routes.is_empty());
+        }
+        actor.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn advertised_flowspec_unknown_waits_for_startup_roster() {
+        let known = crate::actor_read::mock_known_peer_queries(
+            "192.0.2.1".parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+        );
+        let gate = known.daemon_gate.clone();
+        gate.arm_initial_roster();
+        let svc = RibService::new(empty_peer_scoped_rib()).with_known_peer_queries(known);
+        let request = proto::ListFlowSpecRequest {
+            advertised_peer_address: "192.0.2.99".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            svc.list_flow_spec_routes(Request::new(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        gate.complete_initial_roster();
+        assert_eq!(
+            svc.list_flow_spec_routes(Request::new(request))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+
+    #[tokio::test]
     async fn received_flowspec_routes_reject_invalid_peer_before_enqueue() {
         let (tx, mut rx) = mpsc::channel(1);
         let svc = RibService::new(tx);
@@ -6235,6 +6400,7 @@ mod tests {
             .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
                 afi_safi: 0,
                 received_peer_address: "not-an-ip".into(),
+                advertised_peer_address: String::new(),
             }))
             .await
             .unwrap_err();
@@ -6296,6 +6462,7 @@ mod tests {
             .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 received_peer_address: "192.0.2.1".into(),
+                advertised_peer_address: String::new(),
             }))
             .await
             .unwrap()
@@ -6356,6 +6523,7 @@ mod tests {
                     } else {
                         String::new()
                     },
+                    advertised_peer_address: String::new(),
                 }))
                 .await
                 .unwrap()
@@ -6366,6 +6534,7 @@ mod tests {
                     routes: Vec::new(),
                     received_routes: Vec::new(),
                     received_view: received,
+                    advertised_view: false,
                 }
             );
         }
@@ -6378,6 +6547,7 @@ mod tests {
         let req = Request::new(proto::ListFlowSpecRequest {
             afi_safi: proto::AddressFamily::Ipv4Unicast as i32,
             received_peer_address: String::new(),
+            advertised_peer_address: String::new(),
         });
         let err = svc.list_flow_spec_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
