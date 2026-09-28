@@ -134,8 +134,10 @@ The headline refresh has one command for the whole multi-arm campaign:
 from its own tree, runs the IXP matrix S2 and S3 legs, the IRR reload roots,
 and the RR1000 campaigns with the arm order rotated each run, records the CPU
 placement and swap counters at every leg, and writes `summary.csv` and a
-per-arm table. `just bench-headline-summary` re-extracts those files from a
-campaign directory or a committed bundle without running anything. The
+per-arm table. `just bench-headline-summary <out-dir>` re-extracts those
+files from a campaign directory without running anything; for a committed
+bundle, pass an output directory too, as in
+`just bench-headline-summary docs/perf/artifacts/<bundle> --out <dir>`. The
 receipts before 2026-09-28 ran from hand-built drivers.
 
 ## Reading the archive
