@@ -133,7 +133,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -142,7 +142,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let route2 = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
@@ -226,7 +226,7 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: AttrSet::new(attrs.clone()),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -235,7 +235,7 @@ async fn send_route_update_packs_equal_attributes_from_distinct_allocations() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
         .collect();
     let update = announce_only(&session, routes);
@@ -293,7 +293,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: AttrSet::new(attrs.clone()),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -302,7 +302,7 @@ async fn send_route_update_packs_equal_ipv6_attributes_from_distinct_allocations
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let route2 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
@@ -334,7 +334,7 @@ fn v4_route_with(attributes: Arc<AttrSet>, third_octet: u8, next_hop: Ipv4Addr) 
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes,
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -343,7 +343,7 @@ fn v4_route_with(attributes: Arc<AttrSet>, third_octet: u8, next_hop: Ipv4Addr) 
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -523,7 +523,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -532,7 +532,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let route2 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
@@ -628,7 +628,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -637,7 +637,7 @@ async fn send_route_update_splits_oversized_ipv4_group_across_updates() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let routes: Vec<Route> = (0..count).map(route).collect();
     let sent_before = session.updates_sent;
@@ -799,7 +799,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
             next_hop_scope: None,
             peer: IpAddr::V6("fe80::2".parse().unwrap()),
             attributes: Arc::clone(&attrs),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -808,7 +808,7 @@ async fn send_route_update_splits_oversized_ipv4_mp_reach_across_updates() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
@@ -968,7 +968,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
             next_hop_scope: None,
             peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
             attributes: Arc::clone(&attrs),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -977,7 +977,7 @@ async fn send_route_update_chunks_ipv6_at_negotiated_message_limit() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {
@@ -1203,7 +1203,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
             next_hop_scope: None,
             peer: IpAddr::V6("2001:db8::2".parse().unwrap()),
             attributes: Arc::clone(&attrs),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -1212,7 +1212,7 @@ async fn extended_ipv6_chunk_probe_grows_bounded_without_reordering() {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
         .collect();
     session.send_route_update(OutboundRouteUpdate {

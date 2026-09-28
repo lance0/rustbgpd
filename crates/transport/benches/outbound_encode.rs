@@ -22,7 +22,6 @@
 use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rustbgpd_rib::AttrSet;
@@ -59,7 +58,7 @@ fn routes(count: u32, shape: &str) -> Arc<[Route]> {
                 "equal_values" => AttrSet::new(attrs(None)),
                 _ => AttrSet::new(attrs(Some(i))),
             },
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             is_stale: false,
@@ -68,7 +67,7 @@ fn routes(count: u32, shape: &str) -> Arc<[Route]> {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         })
         .collect()
 }

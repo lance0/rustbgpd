@@ -578,7 +578,7 @@ fn validate_route_rpki_empty_as_path() {
             PathAttribute::AsPath(AsPath { segments: vec![] }),
             PathAttribute::LocalPref(100),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(1, 0, 0, 1),
         is_stale: false,
@@ -587,7 +587,7 @@ fn validate_route_rpki_empty_as_path() {
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     assert_eq!(
         super::validate_route_rpki(&route, &table),
@@ -904,11 +904,12 @@ async fn ibgp_aspa_stays_unknown_on_insert_and_cache_revalidation() {
         vec![65002, 65003],
     );
     route.origin_type = crate::route::RouteOrigin::Ibgp;
-    route.aspa_context = rustbgpd_wire::AspaValidationContext {
-        neighbor_asn: Some(65002),
-        local_role: None,
-        first_as_check_exempt: false,
-    };
+    route.aspa_context =
+        crate::route::AspaContextId::intern(rustbgpd_wire::AspaValidationContext {
+            neighbor_asn: Some(65002),
+            local_role: None,
+            first_as_check_exempt: false,
+        });
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
         peer,
@@ -963,11 +964,12 @@ async fn aspa_cache_update_revalidates_with_stored_downstream_context() {
         Ipv4Addr::new(1, 0, 0, 4),
         vec![65004, 65003, 65002, 65001],
     );
-    route.aspa_context = rustbgpd_wire::AspaValidationContext {
-        neighbor_asn: Some(65004),
-        local_role: Some(rustbgpd_wire::BgpRole::Customer),
-        first_as_check_exempt: false,
-    };
+    route.aspa_context =
+        crate::route::AspaContextId::intern(rustbgpd_wire::AspaValidationContext {
+            neighbor_asn: Some(65004),
+            local_role: Some(rustbgpd_wire::BgpRole::Customer),
+            first_as_check_exempt: false,
+        });
 
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1649,4 +1651,132 @@ fn received_validation_path_preserves_absent_and_empty_origins() {
         super::validate_route_rpki(&route, &table),
         RpkiValidation::NotFound
     );
+}
+
+/// A GR-retained route keeps the ASPA context of the session that sent it.
+/// The reconnect negotiates a different role, so a context looked up by peer
+/// alone would re-verify the stale route with the new session's direction.
+#[tokio::test]
+async fn aspa_revalidation_keeps_each_route_session_context_across_gr_reconnect() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable};
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_v4 = Ipv4Addr::new(1, 0, 0, 7);
+    let peer = IpAddr::V4(peer_v4);
+    let asns = vec![65004, 65003, 65002, 65001];
+    let old_session = rustbgpd_wire::AspaValidationContext {
+        neighbor_asn: Some(65004),
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+        first_as_check_exempt: false,
+    };
+    let new_session = rustbgpd_wire::AspaValidationContext {
+        local_role: Some(rustbgpd_wire::BgpRole::Peer),
+        ..old_session
+    };
+    let table = Arc::new(AspaTable::new(vec![
+        AspaRecord {
+            customer_asn: 65004,
+            provider_asns: vec![65003],
+        },
+        AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![65002],
+        },
+        AspaRecord {
+            customer_asn: 65002,
+            provider_asns: vec![65001],
+        },
+    ]));
+    let path = AsPath {
+        segments: vec![AsPathSegment::AsSequence(asns.clone())],
+    };
+    let expected_old =
+        rustbgpd_rpki::aspa_verify::verify_detailed(&path, &table, old_session).state;
+    let expected_new =
+        rustbgpd_rpki::aspa_verify::verify_detailed(&path, &table, new_session).state;
+    assert_ne!(expected_old, expected_new, "the two contexts must disagree");
+
+    let routes_received = |announced| RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    };
+    let old_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let new_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24);
+
+    // First session: one route under the old context, then a GR restart.
+    let mut route = make_route_with_as_path(old_prefix, peer_v4, asns.clone());
+    route.aspa_context = crate::route::AspaContextId::intern(old_session);
+    tx.send(routes_received(vec![route])).await.unwrap();
+    tx.send(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    // Second session: a different role, one fresh route, no End-of-RIB yet.
+    let mut route = make_route_with_as_path(new_prefix, peer_v4, asns);
+    route.aspa_context = crate::route::AspaContextId::intern(new_session);
+    tx.send(routes_received(vec![route])).await.unwrap();
+
+    tx.send(RibUpdate::AspaTableUpdate {
+        table,
+        changed_customer_asns: None,
+    })
+    .await
+    .unwrap();
+
+    let routes = query_received_routes(&tx, peer).await;
+    let find = |prefix: Ipv4Prefix| {
+        routes
+            .iter()
+            .find(|route| route.prefix == Prefix::V4(prefix))
+            .expect("route retained")
+    };
+    let old = find(old_prefix);
+    assert!(old.is_stale, "the GR-retained route is kept, not flushed");
+    assert_eq!(old.aspa_state, expected_old);
+    let new = find(new_prefix);
+    assert!(!new.is_stale);
+    assert_eq!(new.aspa_state, expected_new);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// A route whose context did not fit the table keeps its stored verdict
+/// rather than being verified under a guessed context.
+#[test]
+fn aspa_revalidation_keeps_the_verdict_of_an_unresolved_context() {
+    let table = rustbgpd_rpki::AspaTable::new(vec![]);
+    let mut route = make_route_with_as_path(
+        Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        Ipv4Addr::new(1, 0, 0, 8),
+        vec![65004, 65001],
+    );
+    route.aspa_state = rustbgpd_wire::AspaValidation::Invalid;
+    route.aspa_context = crate::route::AspaContextId::UNRESOLVED;
+    let contexts = crate::route::AspaContextId::snapshot();
+    let result = crate::manager::helpers::validate_route_aspa_detailed(&route, &table, &contexts);
+    assert_eq!(result.state, rustbgpd_wire::AspaValidation::Invalid);
+    assert_eq!(result.invalid_hop, None);
+
+    route.aspa_context = crate::route::AspaContextId::DEFAULT;
+    let result = crate::manager::helpers::validate_route_aspa_detailed(&route, &table, &contexts);
+    assert_ne!(result.state, rustbgpd_wire::AspaValidation::Invalid);
 }

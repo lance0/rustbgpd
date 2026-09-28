@@ -2131,6 +2131,8 @@ impl PeerSession {
         // ASN; a configured role selects verification direction, not whether
         // the first-AS precondition applies.
         let aspa_context = self.aspa_validation_context();
+        let aspa_context_id = rustbgpd_rib::route::AspaContextId::intern(aspa_context);
+        let route_received_at = rustbgpd_rib::route::ReceivedAt::from_instant(now);
         // ASPA is an edge-ingress signal. Draft -27 §6.2 says applying it to
         // iBGP is NOT RECOMMENDED, so rustbgpd deliberately presents Unknown
         // to import policy and stores Unknown for every iBGP unicast route.
@@ -2311,7 +2313,7 @@ impl PeerSession {
                             &result.modifications,
                         ),
                         attributes: attrs,
-                        received_at: now,
+                        received_at: route_received_at,
                         origin_type: route_origin,
                         peer_router_id: self
                             .negotiated
@@ -2322,7 +2324,7 @@ impl PeerSession {
                         path_id: entry.path_id,
                         validation_state: rpki_state,
                         aspa_state: body_aspa_state,
-                        aspa_context,
+                        aspa_context: aspa_context_id,
                     })
                 })
                 .collect()
@@ -2918,7 +2920,7 @@ impl PeerSession {
                                     &result.modifications,
                                 ),
                                 attributes: attrs,
-                                received_at: now,
+                                received_at: route_received_at,
                                 origin_type: route_origin,
                                 peer_router_id: self
                                     .negotiated
@@ -2929,7 +2931,7 @@ impl PeerSession {
                                 path_id: entry.path_id,
                                 validation_state: mp_rpki_state,
                                 aspa_state: mp_aspa_state,
-                                aspa_context,
+                                aspa_context: aspa_context_id,
                             });
                         } else {
                             if retention_enabled {

@@ -55,7 +55,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -64,7 +64,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     assert!(!attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))));
@@ -504,7 +504,7 @@ fn ibgp_default_local_pref_when_missing() {
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -513,7 +513,7 @@ fn ibgp_default_local_pref_when_missing() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -535,7 +535,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -544,7 +544,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -583,7 +583,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: source_id,
         is_stale: false,
@@ -592,7 +592,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);

@@ -16,8 +16,7 @@ use rustbgpd_rib::{
 };
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
-    Afi, AspaValidation, AspaValidationContext, Ipv4Prefix, Origin, PathAttribute, Prefix,
-    RpkiValidation, Safi,
+    Afi, AspaValidation, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
 };
 use tokio::sync::{mpsc, oneshot};
 use tonic::Request;
@@ -129,7 +128,7 @@ fn route(index: u8) -> Route {
         link_local_next_hop: None,
         next_hop_scope: None,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: std::time::Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: source,
         is_stale: false,
@@ -138,7 +137,7 @@ fn route(index: u8) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

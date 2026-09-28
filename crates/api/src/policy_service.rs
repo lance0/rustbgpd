@@ -3230,7 +3230,7 @@ policy customer-in(peer_lp: u32) {
             next_hop_scope: None,
             peer: "10.0.0.9".parse().unwrap(),
             attributes: AttrSet::new(Vec::new()),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
@@ -3239,7 +3239,7 @@ policy customer-in(peer_lp: u32) {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
     }
 

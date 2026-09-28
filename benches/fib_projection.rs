@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -66,7 +65,7 @@ fn route(idx: usize, peer_idx: usize) -> Route {
         next_hop_scope: None,
         peer: peer(peer_idx),
         attributes: attrs(peer_idx),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(192, 0, 2, (peer_idx % 250 + 1) as u8),
         is_stale: false,
@@ -75,7 +74,7 @@ fn route(idx: usize, peer_idx: usize) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

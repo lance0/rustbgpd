@@ -2549,7 +2549,7 @@ mod tests {
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             attributes: AttrSet::new(vec![]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
             is_stale: false,
@@ -2558,7 +2558,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
         let candidate = ExactExportCandidate::Unicast {
             route: &route,
@@ -2623,7 +2623,7 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(192, 0, 2, 1)),
                 PathAttribute::LocalPref(100),
             ]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
             is_stale: false,
@@ -2632,7 +2632,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         };
         let wire_bytes = |profile: &SessionExportProfile| {
             encoded(
@@ -2863,7 +2863,7 @@ mod tests {
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             attributes: AttrSet::new(vec![PathAttribute::Origin(rustbgpd_wire::Origin::Igp)]),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
             is_stale: false,
@@ -2872,7 +2872,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
     }
 
@@ -2899,7 +2899,7 @@ mod tests {
                 next_hop_scope: None,
                 peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
                 attributes: Arc::clone(&shared_attributes),
-                received_at: std::time::Instant::now(),
+                received_at: rustbgpd_rib::route::ReceivedAt::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
                 peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
                 is_stale: false,
@@ -2908,7 +2908,7 @@ mod tests {
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 received_as_path: None,
-                aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+                aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
             })
             .collect::<Vec<_>>();
         let candidates = routes
@@ -3055,7 +3055,7 @@ mod tests {
             next_hop_scope: None,
             peer: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
             attributes: AttrSet::new(attributes),
-            received_at: std::time::Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(192, 0, 2, 2),
             is_stale: false,
@@ -3064,7 +3064,7 @@ mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
     }
 

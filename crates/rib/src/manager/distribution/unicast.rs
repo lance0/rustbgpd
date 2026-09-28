@@ -1504,6 +1504,10 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
         let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
+        let aspa_contexts = self
+            .aspa_table
+            .is_some()
+            .then(crate::route::AspaContextId::snapshot);
         let mut affected = HashSet::new();
         let mut removed_stale_counts: HashMap<(Afi, Safi), usize> = HashMap::new();
         let mut replaced = 0;
@@ -1518,8 +1522,8 @@ impl RibManager {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
                 }
-                if let Some(ref table) = self.aspa_table {
-                    route.aspa_state = validate_route_aspa(&route, table);
+                if let (Some(table), Some(contexts)) = (&self.aspa_table, &aspa_contexts) {
+                    route.aspa_state = validate_route_aspa(&route, table, contexts);
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");
                 affected.insert(route.prefix);

@@ -799,7 +799,7 @@ fn make_route(local_pref: u32) -> Route {
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             PathAttribute::LocalPref(local_pref),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -808,7 +808,7 @@ fn make_route(local_pref: u32) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 fn replace_route_attrs(route: &Route, attrs: Vec<PathAttribute>) -> Route {
@@ -830,7 +830,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -839,7 +839,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 fn make_flowspec_route() -> FlowSpecRoute {

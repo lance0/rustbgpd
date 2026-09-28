@@ -7418,7 +7418,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
                 segments: vec![AsPathSegment::AsSequence(vec![65000 + rank; rank as usize])],
             }),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(src)),
         is_stale: false,
@@ -7427,7 +7427,7 @@ fn ranked_rs_route(prefix: Ipv4Prefix, src: Ipv4Addr, rank: u32) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 

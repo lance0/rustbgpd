@@ -326,7 +326,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         attributes: AttrSet::new(attrs.to_vec()),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, peer_idx as u8, 1),
         is_stale: false,
@@ -335,7 +335,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

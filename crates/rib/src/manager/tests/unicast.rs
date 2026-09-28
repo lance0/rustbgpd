@@ -2739,7 +2739,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(next_hop),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: session_router_id(IpAddr::V4(next_hop)),
         is_stale: false,
@@ -2748,7 +2748,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -3057,7 +3057,7 @@ async fn local_route_sent_to_ibgp_peer() {
         next_hop_scope: None,
         peer: LOCAL_PEER,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -3066,7 +3066,7 @@ async fn local_route_sent_to_ibgp_peer() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -3101,7 +3101,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         next_hop_scope: None,
         peer: LOCAL_PEER,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -3110,7 +3110,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -3242,7 +3242,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -3251,7 +3251,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3321,7 +3321,7 @@ async fn withdraw_injected_removes_and_distributes() {
         next_hop_scope: None,
         peer: LOCAL_PEER,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -3330,7 +3330,7 @@ async fn withdraw_injected_removes_and_distributes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -3411,7 +3411,7 @@ async fn distribute_changes_filters_unsendable_families() {
         next_hop_scope: None,
         peer: source,
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
         is_stale: false,
@@ -3420,7 +3420,7 @@ async fn distribute_changes_filters_unsendable_families() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     // Send both IPv4 and IPv6 routes
@@ -3472,7 +3472,7 @@ async fn send_initial_table_filters_unsendable_families() {
         next_hop_scope: None,
         peer: source,
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
         is_stale: false,
@@ -3481,7 +3481,7 @@ async fn send_initial_table_filters_unsendable_families() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
@@ -3558,7 +3558,7 @@ async fn dual_stack_peer_receives_both_families() {
         next_hop_scope: None,
         peer: source,
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
         is_stale: false,
@@ -3567,7 +3567,7 @@ async fn dual_stack_peer_receives_both_families() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     // Pre-populate Loc-RIB
@@ -4012,7 +4012,7 @@ async fn rr_local_route_to_all_ibgp() {
         next_hop_scope: None,
         peer: LOCAL_PEER,
         attributes: AttrSet::new(vec![PathAttribute::Origin(Origin::Igp)]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
         is_stale: false,
@@ -4021,7 +4021,7 @@ async fn rr_local_route_to_all_ibgp() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     let (reply_tx, _) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {

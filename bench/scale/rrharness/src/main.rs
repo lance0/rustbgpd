@@ -30,8 +30,7 @@ use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::fanout_bench_export_encoder;
 use rustbgpd_wire::{
-    Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Origin, PathAttribute, Prefix,
-    RpkiValidation, Safi,
+    Afi, AsPath, AspaValidation, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -54,7 +53,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(src),
         attributes: AttrSet::new(attributes),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: src,
         is_stale: false,
@@ -63,7 +62,7 @@ fn route(prefix: Ipv4Prefix, src: Ipv4Addr, local_pref: u32) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

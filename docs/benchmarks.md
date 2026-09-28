@@ -1099,7 +1099,7 @@ counts. The summary repeats the mode and result beside the row table.
 
 | Type | Size |
 |------|------|
-| `Route` | 136 bytes |
+| `Route` | 112 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 48 bytes |
 | `AsPath` | 24 bytes |
@@ -1130,6 +1130,15 @@ The final 48 bytes of `AdjRibIn` are two inline, allocation-free
 `RpkiValidationCounts` values, one for each unicast family. They keep the
 exact RPKI post-policy BMP counters on the route mutation path instead of
 requiring a periodic route-table scan.
+
+`Route` fell from 136 to 112 bytes when it stopped carrying two per-session
+values inline: the receive time became a 4-byte whole-second monotonic stamp
+(every reader already used whole seconds), and the 12-byte ASPA validation
+context became a 2-byte id into a process-wide table of session contexts.
+Each route keeps the id of the session that sent it, so routes retained
+across a graceful restart are still revalidated with their own session's
+context. Every RIB layer stores full `Route` bodies, so the 24 bytes are
+saved per stored path.
 
 `Route.attributes` is `Arc<AttrSet>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

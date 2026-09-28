@@ -596,7 +596,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         next_hop_scope: None,
         peer: source,
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(source),
         is_stale: false,
@@ -605,7 +605,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,

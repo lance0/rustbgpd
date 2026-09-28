@@ -20,8 +20,8 @@ use rustbgpd_transport::{
     DEFAULT_SLOW_PEER_THRESHOLD_PCT,
 };
 use rustbgpd_wire::{
-    Afi, AsPath, AspaValidation, AspaValidationContext, Ipv4Prefix, Message, Origin, PathAttribute,
-    Prefix, RpkiValidation, Safi,
+    Afi, AsPath, AspaValidation, Ipv4Prefix, Message, Origin, PathAttribute, Prefix,
+    RpkiValidation, Safi,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -122,7 +122,7 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
             PathAttribute::NextHop(source),
             PathAttribute::LocalPref(100),
         ]),
-        received_at: Instant::now(),
+        received_at: rustbgpd_rib::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: source,
         is_stale: false,
@@ -131,7 +131,7 @@ fn route(prefix: Ipv4Prefix, source: Ipv4Addr) -> Route {
         validation_state: RpkiValidation::NotFound,
         aspa_state: AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

@@ -48,7 +48,7 @@ pub(crate) fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(next_hop),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(next_hop)),
         is_stale: false,
@@ -57,7 +57,7 @@ pub(crate) fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -69,7 +69,7 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V6(next_hop),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6(next_hop)),
         is_stale: false,
@@ -78,7 +78,7 @@ pub(crate) fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref:
             }),
             PathAttribute::LocalPref(local_pref),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(peer)),
         is_stale: false,
@@ -113,7 +113,7 @@ pub(crate) fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref:
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -126,7 +126,7 @@ pub(crate) fn make_route_with_path_id(prefix: Prefix, path_id: u32) -> Route {
         next_hop_scope: None,
         peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(1, 1, 1, 1),
         is_stale: false,
@@ -134,7 +134,7 @@ pub(crate) fn make_route_with_path_id(prefix: Prefix, path_id: u32) -> Route {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
         path_id,
     }
 }

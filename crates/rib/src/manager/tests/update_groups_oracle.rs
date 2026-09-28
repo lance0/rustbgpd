@@ -66,7 +66,7 @@ pub(super) fn ibgp_route(
         next_hop_scope: None,
         peer: IpAddr::V4(src),
         attributes: AttrSet::new(attributes),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ibgp,
         peer_router_id: crate::test_support::session_router_id(IpAddr::V4(src)),
         is_stale: false,
@@ -75,7 +75,7 @@ pub(super) fn ibgp_route(
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -3135,7 +3135,7 @@ pub(super) fn rs_route(
         next_hop_scope: None,
         peer: IpAddr::V4(src),
         attributes: AttrSet::new(attributes),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: crate::test_support::session_router_id(IpAddr::V4(src)),
         is_stale: false,
@@ -3144,7 +3144,7 @@ pub(super) fn rs_route(
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 

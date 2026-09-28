@@ -563,7 +563,7 @@ fn make_route(
         next_hop_scope: None,
         peer: peer.peer_addr,
         attributes: Arc::clone(&attributes[source_index]),
-        received_at,
+        received_at: rustbgpd_rib::route::ReceivedAt::from_instant(received_at),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: peer.peer_bgp_id,
         is_stale: false,
@@ -572,7 +572,7 @@ fn make_route(
         validation_state: RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
     }
 }
 

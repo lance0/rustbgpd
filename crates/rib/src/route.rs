@@ -4,8 +4,8 @@
 //! derived from best-path selection.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, RwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use rustbgpd_wire::{
     Afi, AsPath, AspaValidation, AspaValidationContext, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
@@ -15,6 +15,7 @@ use rustbgpd_wire::{
 };
 
 use crate::attr_set::AttrSet;
+use crate::fast_hash::FastMap;
 
 /// Interface scope required to resolve an IPv6 link-local next-hop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,182 @@ pub struct BgpLsRouteKey {
     pub path_id: u32,
 }
 
+/// Process-wide monotonic origin for [`ReceivedAt`] stamps.
+static RECEIVE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// When a [`Route`] was received: whole seconds on the monotonic clock since a
+/// process-wide epoch. Four bytes instead of a 16-byte `Instant`; every reader
+/// consumes the age at whole-second resolution.
+///
+/// Stamps floor to the second, so [`Self::elapsed`] reports at least the true
+/// age and less than one second more. An instant before the epoch stamps as
+/// zero, and stamps saturate after `u32::MAX` seconds (about 136 years) of
+/// uptime. The stamp is monotonic: it carries no wall-clock time, so a wall
+/// clock step neither moves it nor freezes an old offset into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReceivedAt(u32);
+
+impl ReceivedAt {
+    /// Pin the epoch. The daemon calls this at startup so that no instant a
+    /// session captures can predate it; later calls are no-ops.
+    pub fn init_epoch() {
+        LazyLock::force(&RECEIVE_EPOCH);
+    }
+
+    /// Stamp the current time.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::from_instant(Instant::now())
+    }
+
+    /// Stamp a previously captured monotonic instant.
+    #[must_use]
+    pub fn from_instant(at: Instant) -> Self {
+        Self::from_offset(at.saturating_duration_since(*RECEIVE_EPOCH))
+    }
+
+    fn from_offset(since_epoch: Duration) -> Self {
+        Self(u32::try_from(since_epoch.as_secs()).unwrap_or(u32::MAX))
+    }
+
+    fn age_at(self, now_since_epoch: Duration) -> Duration {
+        now_since_epoch.saturating_sub(Duration::from_secs(u64::from(self.0)))
+    }
+
+    /// Time since the route was received, at whole-second fidelity.
+    #[must_use]
+    pub fn elapsed(self) -> Duration {
+        self.age_at(RECEIVE_EPOCH.elapsed())
+    }
+
+    /// Approximate wall-clock receive time, projected back from `wall_now`
+    /// by the monotonic age. It uses the caller's current wall clock, so a
+    /// corrected clock is reflected immediately; it is not an exact UTC
+    /// receipt time. `None` when the projection precedes the platform's
+    /// representable range.
+    #[must_use]
+    pub fn approx_wall_time(self, wall_now: SystemTime) -> Option<SystemTime> {
+        wall_now.checked_sub(self.elapsed())
+    }
+}
+
+/// The interned [`AspaValidationContext`] of the session that received a
+/// [`Route`]. Two bytes instead of the 12-byte context, which is constant per
+/// session: each route keeps the identity of its own session's context, so
+/// routes retained across a reconnect (GR or LLGR stale) are revalidated with
+/// the context they were received under, not the new session's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct AspaContextId(u16);
+
+/// Append-only context table. Contexts are keyed by negotiated neighbor ASN
+/// and configured local role, so the table grows only with distinct
+/// ASN/role pairs seen by the process.
+struct AspaContextTable {
+    ids: FastMap<AspaValidationContext, u16>,
+    contexts: Vec<AspaValidationContext>,
+    /// Shared copy of `contexts` for readers; rebuilt after an insert.
+    snapshot: Option<Arc<[AspaValidationContext]>>,
+}
+
+impl AspaContextTable {
+    fn new() -> Self {
+        let default = AspaValidationContext::default();
+        Self {
+            ids: std::iter::once((default, 0)).collect(),
+            contexts: vec![default],
+            snapshot: None,
+        }
+    }
+
+    // Append-only and never shrinks: the ceiling is 65,535 distinct ASN/role
+    // pairs per process. Reclaiming ids would need per-context refcounts.
+    fn intern(&mut self, context: AspaValidationContext) -> AspaContextId {
+        if let Some(&id) = self.ids.get(&context) {
+            return AspaContextId(id);
+        }
+        let id = match u16::try_from(self.contexts.len()) {
+            Ok(id) if id < AspaContextId::UNRESOLVED.0 => id,
+            _ => return AspaContextId::UNRESOLVED,
+        };
+        self.contexts.push(context);
+        self.ids.insert(context, id);
+        self.snapshot = None;
+        AspaContextId(id)
+    }
+}
+
+static ASPA_CONTEXTS: LazyLock<RwLock<AspaContextTable>> =
+    LazyLock::new(|| RwLock::new(AspaContextTable::new()));
+
+impl AspaContextId {
+    /// The empty context of locally originated and synthetic routes.
+    pub const DEFAULT: Self = Self(0);
+    /// A context that did not fit the table. ASPA revalidation leaves such a
+    /// route's stored verdict unchanged instead of guessing its context.
+    pub const UNRESOLVED: Self = Self(u16::MAX);
+
+    /// Intern `context`, returning its stable id. Returns
+    /// [`Self::UNRESOLVED`] once the table is full.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table lock is poisoned.
+    #[must_use]
+    pub fn intern(context: AspaValidationContext) -> Self {
+        let known = ASPA_CONTEXTS
+            .read()
+            .expect("ASPA context table poisoned")
+            .ids
+            .get(&context)
+            .copied();
+        known.map_or_else(
+            || {
+                ASPA_CONTEXTS
+                    .write()
+                    .expect("ASPA context table poisoned")
+                    .intern(context)
+            },
+            Self,
+        )
+    }
+
+    /// Snapshot of every interned context, indexed by id. Take one per
+    /// revalidation pass or batch rather than locking per route.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table lock is poisoned.
+    #[must_use]
+    pub fn snapshot() -> AspaContexts {
+        if let Some(snapshot) = &ASPA_CONTEXTS
+            .read()
+            .expect("ASPA context table poisoned")
+            .snapshot
+        {
+            return AspaContexts(Arc::clone(snapshot));
+        }
+        let mut table = ASPA_CONTEXTS.write().expect("ASPA context table poisoned");
+        let AspaContextTable {
+            contexts, snapshot, ..
+        } = &mut *table;
+        AspaContexts(Arc::clone(
+            snapshot.get_or_insert_with(|| Arc::from(contexts.as_slice())),
+        ))
+    }
+}
+
+/// Immutable view of the interned ASPA contexts; see [`AspaContextId::snapshot`].
+#[derive(Debug, Clone)]
+pub struct AspaContexts(Arc<[AspaValidationContext]>);
+
+impl AspaContexts {
+    /// The context behind `id`, or `None` for [`AspaContextId::UNRESOLVED`].
+    #[must_use]
+    pub fn get(&self, id: AspaContextId) -> Option<AspaValidationContext> {
+        self.0.get(usize::from(id.0)).copied()
+    }
+}
+
 /// A single route stored in the Adj-RIB-In.
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -117,8 +294,8 @@ pub struct Route {
     /// copy-on-write mutation path (LLGR community injection); it keeps the
     /// cached selection summary in step with the attributes.
     pub attributes: Arc<AttrSet>,
-    /// When this route was received (monotonic clock).
-    pub received_at: Instant,
+    /// When this route was received (whole seconds, monotonic clock).
+    pub received_at: ReceivedAt,
     /// How this route was learned (eBGP, iBGP, or locally originated).
     pub origin_type: RouteOrigin,
     /// BGP router-id of the peer that sent this route (for `ORIGINATOR_ID`).
@@ -140,8 +317,9 @@ pub struct Route {
     /// Selection and export continue to use [`Self::as_path`].
     pub received_as_path: Option<Arc<Option<AsPath>>>,
     /// Relationship context used to recompute `aspa_state` on ASPA cache
-    /// updates. Empty for locally originated or non-BGP synthetic routes.
-    pub aspa_context: AspaValidationContext,
+    /// updates. [`AspaContextId::DEFAULT`] (the empty context) for locally
+    /// originated or non-BGP synthetic routes.
+    pub aspa_context: AspaContextId,
 }
 
 /// One equal-cost next-hop in a multipath/ECMP install candidate.
@@ -1237,6 +1415,120 @@ mod tests {
     };
 
     use super::*;
+
+    /// Both per-copy fields shrank: `aspa_context` from a 12-byte context to
+    /// a 2-byte id, `received_at` from a 16-byte `Instant` to a 4-byte stamp.
+    /// Every RIB layer stores full `Route` bodies, so this is paid per path.
+    #[test]
+    fn route_layout_is_112_bytes() {
+        assert_eq!(size_of::<ReceivedAt>(), 4);
+        assert_eq!(size_of::<AspaContextId>(), 2);
+        assert_eq!(size_of::<Route>(), 112);
+    }
+
+    #[test]
+    fn received_at_floors_to_whole_seconds_and_saturates() {
+        let stamp = |ms: u64| ReceivedAt::from_offset(Duration::from_millis(ms)).0;
+        assert_eq!(stamp(0), 0);
+        assert_eq!(stamp(999), 0);
+        assert_eq!(stamp(1_000), 1);
+        assert_eq!(stamp(1_999), 1);
+        let max = Duration::from_secs(u64::from(u32::MAX));
+        assert_eq!(ReceivedAt::from_offset(max).0, u32::MAX);
+        assert_eq!(
+            ReceivedAt::from_offset(max + Duration::from_secs(1)).0,
+            u32::MAX
+        );
+
+        // Age is measured from the floored stamp: at least the true age,
+        // under one second more, and never negative.
+        let at = ReceivedAt(5);
+        assert_eq!(at.age_at(Duration::from_secs(5)), Duration::ZERO);
+        assert_eq!(
+            at.age_at(Duration::from_millis(5_999)),
+            Duration::from_millis(999)
+        );
+        assert_eq!(at.age_at(Duration::from_secs(4)), Duration::ZERO);
+    }
+
+    #[test]
+    fn received_at_tracks_the_monotonic_clock() {
+        ReceivedAt::init_epoch();
+        let before_epoch = RECEIVE_EPOCH.checked_sub(Duration::from_secs(1));
+        if let Some(before_epoch) = before_epoch {
+            assert_eq!(ReceivedAt::from_instant(before_epoch).0, 0);
+        }
+
+        let at = Instant::now()
+            .checked_sub(Duration::from_millis(1_500))
+            .map_or(*RECEIVE_EPOCH, |at| at.max(*RECEIVE_EPOCH));
+        let stamp = ReceivedAt::from_instant(at);
+        let true_age = at.elapsed();
+        let age = stamp.elapsed();
+        assert!(age >= true_age, "{age:?} < {true_age:?}");
+        assert!(age < at.elapsed() + Duration::from_secs(1));
+    }
+
+    /// The stamp holds no wall-clock time: the operator/MRT projection uses
+    /// the wall clock at read time, so a clock step shows up immediately
+    /// instead of an offset fixed at startup.
+    #[test]
+    fn received_at_wall_projection_follows_the_current_wall_clock() {
+        let stamp = ReceivedAt::now();
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_123);
+        let stepped = wall + Duration::from_secs(3_601);
+        let before = stamp.approx_wall_time(wall).unwrap();
+        let after = stamp.approx_wall_time(stepped).unwrap();
+        let shift = after.duration_since(before).unwrap();
+        assert!(shift <= Duration::from_secs(3_601));
+        assert!(shift > Duration::from_secs(3_599));
+        assert!(before <= wall);
+    }
+
+    #[test]
+    fn aspa_context_ids_are_stable_and_resolve() {
+        let customer = AspaValidationContext {
+            neighbor_asn: Some(4_200_000_101),
+            local_role: Some(rustbgpd_wire::BgpRole::Customer),
+            first_as_check_exempt: false,
+        };
+        let provider = AspaValidationContext {
+            local_role: Some(rustbgpd_wire::BgpRole::Provider),
+            ..customer
+        };
+        let a = AspaContextId::intern(customer);
+        let b = AspaContextId::intern(provider);
+        assert_ne!(a, b);
+        assert_eq!(AspaContextId::intern(customer), a);
+        assert_eq!(
+            AspaContextId::intern(AspaValidationContext::default()),
+            AspaContextId::DEFAULT
+        );
+        let contexts = AspaContextId::snapshot();
+        assert_eq!(contexts.get(a), Some(customer));
+        assert_eq!(contexts.get(b), Some(provider));
+        assert_eq!(
+            contexts.get(AspaContextId::DEFAULT),
+            Some(AspaValidationContext::default())
+        );
+        assert_eq!(contexts.get(AspaContextId::UNRESOLVED), None);
+    }
+
+    #[test]
+    fn aspa_context_table_reports_overflow_as_unresolved() {
+        let mut table = AspaContextTable::new();
+        let ctx = |asn: u32| AspaValidationContext {
+            neighbor_asn: Some(asn),
+            local_role: None,
+            first_as_check_exempt: false,
+        };
+        for asn in 1..u32::from(u16::MAX) {
+            assert_eq!(table.intern(ctx(asn)).0, u16::try_from(asn).unwrap());
+        }
+        assert_eq!(table.intern(ctx(u32::MAX)), AspaContextId::UNRESOLVED);
+        assert_eq!(table.intern(ctx(7)).0, 7, "existing ids still resolve");
+        assert_eq!(table.contexts.len(), usize::from(u16::MAX));
+    }
 
     fn bgpls_route(family: BgpLsFamily, nlri: BgpLsNlri) -> BgpLsRibRoute {
         BgpLsRibRoute {

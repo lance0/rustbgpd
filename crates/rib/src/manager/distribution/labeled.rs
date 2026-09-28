@@ -20,7 +20,7 @@ fn labeled_suppression_probe(route: &crate::route::LabeledRibRoute) -> crate::ro
         next_hop_scope: None,
         peer: route.peer,
         attributes: AttrSet::new(vec![]),
-        received_at: route.received_at,
+        received_at: crate::route::ReceivedAt::from_instant(route.received_at),
         origin_type: route.origin_type,
         peer_router_id: route.peer_router_id,
         is_stale: false,
@@ -29,7 +29,7 @@ fn labeled_suppression_probe(route: &crate::route::LabeledRibRoute) -> crate::ro
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 

@@ -24,7 +24,7 @@ fn make_multipath_route_v6(
             }),
             PathAttribute::LocalPref(local_pref),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(peer)),
         is_stale: false,
@@ -33,7 +33,7 @@ fn make_multipath_route_v6(
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     }
 }
 
@@ -1093,7 +1093,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
             }),
             PathAttribute::LocalPref(local_pref),
         ]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V4(peer_addr)),
         is_stale: false,
@@ -1102,7 +1102,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
 
     tx.send(RibUpdate::RoutesReceived {
@@ -1797,7 +1797,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         next_hop_scope: Some(Box::new(scope.clone())),
         peer: IpAddr::V6("fe80::2".parse().unwrap()),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6("fe80::2".parse().unwrap())),
         is_stale: false,
@@ -1806,7 +1806,7 @@ async fn fib_install_candidates_preserve_link_local_next_hop_scope() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     tx.send(RibUpdate::RoutesReceived {
         session_id: 0,
@@ -1852,7 +1852,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         })),
         peer: IpAddr::V6(peer.parse().unwrap()),
         attributes: AttrSet::new(vec![]),
-        received_at: Instant::now(),
+        received_at: crate::route::ReceivedAt::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: session_router_id(IpAddr::V6(peer.parse().unwrap())),
         is_stale: false,
@@ -1861,7 +1861,7 @@ async fn fib_install_candidates_keep_same_link_local_on_distinct_ifindexes() {
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         received_as_path: None,
-        aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+        aspa_context: crate::route::AspaContextId::DEFAULT,
     };
     for route in [
         make_scoped("eth1", 7, "fe80::2"),

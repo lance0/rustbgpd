@@ -1606,7 +1606,6 @@ pub(super) mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
-    use std::time::Instant;
 
     /// Fake kernel: `installed` holds marker rows (ours or crash
     /// leftovers — the dump cannot tell), `foreign` holds non-marker
@@ -2533,7 +2532,7 @@ pub(super) mod tests {
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::Communities(communities),
             ]),
-            received_at: Instant::now(),
+            received_at: rustbgpd_rib::route::ReceivedAt::now(),
             origin_type,
             peer_router_id: Ipv4Addr::new(203, 0, 113, 1),
             is_stale: false,
@@ -2542,7 +2541,7 @@ pub(super) mod tests {
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             received_as_path: None,
-            aspa_context: rustbgpd_wire::AspaValidationContext::default(),
+            aspa_context: rustbgpd_rib::route::AspaContextId::DEFAULT,
         }
     }
 
