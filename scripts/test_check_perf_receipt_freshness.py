@@ -569,17 +569,28 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                 self.assert_red(error, overrides={path: text(path).replace(fragment, "removed", 1)})
 
     def test_zero_inbound_links_are_advisory_inventory(self) -> None:
-        self.assertEqual(
-            checker.unlinked_receipts(ROOT),
-            [
-                "docs/perf/event-history-producer-2026-07.md",
-                "docs/perf/persisted-config-serialization-2026-08.md",
-                "docs/perf/private-single-best-fanout-2026-07.md",
-                "docs/perf/shared-source-ordering-2026-07.md",
-                "docs/perf/vpn-rib-query-occupancy-method.md",
-            ],
-        )
+        self.assertEqual(checker.unlinked_receipts(ROOT), [])
         self.assertEqual(self.errors(), [])
+
+    def test_reference_style_link_counts_as_inbound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "docs" / "perf").mkdir(parents=True)
+            for name in ("inline", "reference", "footnote", "orphan"):
+                (root / "docs" / "perf" / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+            (root / "docs" / "index.md").write_text(
+                "[inline](perf/inline.md) and [reference][ref] and a note[^perf/footnote.md].\n"
+                "\n"
+                "[ref]: <perf/reference.md> \"Reference title\"\n"
+                "[^perf/footnote.md]: perf/footnote.md\n",
+                encoding="utf-8",
+            )
+            for arguments in (("init", "-q"), ("add", "--all")):
+                subprocess.run(("git", *arguments), cwd=root, check=True)
+            self.assertEqual(
+                checker.unlinked_receipts(root),
+                ["docs/perf/footnote.md", "docs/perf/orphan.md"],
+            )
 
     def test_supersession_links_are_direct_and_non_destructive(self) -> None:
         self.assertIn(
