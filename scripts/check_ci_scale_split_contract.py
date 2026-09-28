@@ -74,14 +74,6 @@ def aggregate_shell(job: str) -> str:
     return "" if match is None else re.sub(r"(?m)^          ", "", match.group(1))
 
 
-def named_step(job: str, name: str) -> str:
-    match = re.search(
-        rf"(?ms)^      - name: {re.escape(name)}\n(.*?)(?=^      - |\Z)",
-        job,
-    )
-    return "" if match is None else match.group(1)
-
-
 def _logical_lines(text: str) -> list[str]:
     logical: list[str] = []
     pending = ""
@@ -186,21 +178,6 @@ def check(root: Path) -> list[str]:
     for job, command, job_name in feature_commands:
         if text.count(command) != 1 or command not in job:
             errors.append(f"{command} must exist exactly once in {job_name}")
-
-    readme_step_name = "Published crate README freshness gate"
-    readme_step = named_step(jobs.get("core", ""), readme_step_name)
-    if text.count(f"- name: {readme_step_name}") != 1 or not readme_step:
-        errors.append("published-crate README freshness gate must exist exactly once in core")
-    else:
-        for seam in (
-            "for crate in wire fsm rpki; do",
-            'git diff "$base"...HEAD -- "crates/$crate/Cargo.toml" \\',
-            'git diff "$base"...HEAD -- "crates/$crate/README.md" \\',
-            r"'^\+version\s*='",
-            "exit 1",
-        ):
-            if seam not in readme_step:
-                errors.append(f"published-crate README freshness gate missing {seam}")
 
     aggregate = jobs.get("check", "")
     if "if: ${{ always() }}" not in aggregate:

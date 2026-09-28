@@ -9,6 +9,41 @@ binary tarballs, and the default (runtime) container image. The
 only with `--workspace` and ship only in the `dev` image target used
 by the interop/soak labs.
 
+## Recipes
+
+The measuring drivers in the table below have a `just` recipe with a
+`bench-` prefix. `just bench-list` prints every Cargo bench target, each
+driver with its recipe, and the drivers that have no recipe and run directly;
+`scripts/check_bench_inventory.py` fails when a driver is in neither list.
+The recipes pass arguments
+and environment knobs through unchanged. The drivers keep their own host
+lock, quiet gates, provenance, and thresholds, and a lock or quiet-gate exit
+75 reaches the caller unchanged. No `gate*` recipe calls a `bench-*` recipe.
+
+| Recipe | Runs |
+|---|---|
+| `just bench <package> <target> [args]` | One Cargo bench target, features from its manifest, pinned to `RUSTBGPD_BENCH_CORE` under the host lock |
+| `just bench-compare <package> <target> <base> <head> [flags]` | `compare-criterion.sh` with `--attempts 4`, `--core $RUSTBGPD_BENCH_CORE`, and `--require-performance` as overridable defaults |
+| `just bench-rib-memory [quick\|full]` | The `memory_profile_high_n` structural profile of this tree, under the host lock |
+| `just bench-compare-rib-memory <base> <head> [flags]` | `compare-rib-memory.sh` |
+| `just bench-compare-route-paging <base> <head> [flags]` | `compare-route-paging.sh` |
+| `just bench-rrharness <mode> [args]` | One `rrharness` run, pinned to `RUSTBGPD_BENCH_CORE` under the host lock |
+| `just bench-compare-rrharness <base> <head> [flags]` | `scale/compare-rrharness.sh` |
+| `just bench-rrtransport-smoke` | The `rrtransport smoke` correctness check (no measurement) |
+| `just bench-rrtransport <output>` | `scale/rrtransport/run-receipt.sh` |
+| `just bench-ixp-matrix [cells]` | `scale/matrix/run-matrix.sh`, after building the daemon and `reloadstall` |
+| `just bench-policy-stats <run-dir>` | `scale/reloadstall/policy_stats_cell.sh`, after the same builds, under the host lock |
+| `just bench-route-server-1000` | `scale/route-server-1000/run-receipt.sh` |
+| `just bench-enhanced-route-refresh` | `scale/enhanced-route-refresh/run-receipt.sh` |
+| `just bench-irr-reload [cells]` | `scale/irrreload/run-irr-reload.sh` (`SMOKE=1` for its pipeline check) |
+| `just bench-vpn-query <output> [--smoke] [--retry]` | `run-vpn-query-campaign.sh`, with `--cpu $RUSTBGPD_BENCH_CORE` unless `--cpu` is given |
+
+`RUSTBGPD_BENCH_CORE` has no default: receipts have pinned cores 2, 5, 8, 15,
+and 63, and the right core depends on the host. `bench` and `bench-rrharness`
+refuse to start without it, and `bench-compare` refuses unless it or `--core`
+is given; `--no-taskset` remains the mechanics-only escape. The route-paging
+and rrharness A/B drivers keep their own `--core` default when it is unset.
+
 ## Pinned-kernel netns calibration
 
 `netns-calibration/` is the offline-verifiable QEMU/KVM boundary for
@@ -227,7 +262,9 @@ There is no CI benchmark lane: the self-hosted runner behind the
 `Criterion Bench Compare` / `Criterion Bench Nightly` workflows was retired
 and both workflows were removed. They were thin wrappers around this script,
 so the recipe they ran is simply the local invocation below. Run it on a
-quiet host.
+quiet host. `just bench-compare rustbgpd-rib rib_ops origin/main HEAD` runs the
+same comparison with its core taken from `RUSTBGPD_BENCH_CORE`; append the
+`--harness-ref` and `--harness-path` flags as needed.
 
 ```bash
 bench/compare-criterion.sh \
