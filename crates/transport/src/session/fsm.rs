@@ -75,6 +75,9 @@ pub(super) enum CollisionHold {
     Released,
     /// An unpromoted candidate that has not yet received the peer's OPEN.
     Armed,
+    /// Claimed for promotion before the peer's OPEN. The OPEN still holds the
+    /// KEEPALIVE until activation, entering [`Self::Claimed`].
+    Reserved,
     /// An unpromoted candidate in `OpenConfirm` waiting for the verdict. Holds
     /// the deferred KEEPALIVE and keepalive-timer actions.
     Waiting(Vec<Action>),
@@ -110,8 +113,12 @@ impl PeerSession {
                     Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
                 true
             }
+            CollisionHold::Armed | CollisionHold::Reserved => {
+                self.collision_hold = CollisionHold::Reserved;
+                true
+            }
             other => {
-                let claimed = matches!(other, CollisionHold::Armed | CollisionHold::Claimed(_));
+                let claimed = matches!(other, CollisionHold::Claimed(_));
                 self.collision_hold = other;
                 claimed
             }
@@ -131,7 +138,12 @@ impl PeerSession {
                 }
             )
         });
-        if !matches!(self.collision_hold, CollisionHold::Armed) || !enters_open_confirm {
+        let reserved = match self.collision_hold {
+            CollisionHold::Armed => false,
+            CollisionHold::Reserved => true,
+            _ => return actions,
+        };
+        if !enters_open_confirm {
             return actions;
         }
         let (deferred, now) = actions.into_iter().partition(|action| {
@@ -141,7 +153,11 @@ impl PeerSession {
             )
         });
         debug!(peer = %self.peer_label, "inbound collision candidate holding KEEPALIVE for verdict");
-        self.collision_hold = CollisionHold::Waiting(deferred);
+        self.collision_hold = if reserved {
+            CollisionHold::Claimed(deferred)
+        } else {
+            CollisionHold::Waiting(deferred)
+        };
         self.collision_verdict_timer =
             Some(Box::pin(tokio::time::sleep(COLLISION_VERDICT_TIMEOUT)));
         now

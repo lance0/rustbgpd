@@ -242,90 +242,169 @@ async fn idle_candidate_refuses_promotion_claim() {
     assert!(rib_rx.try_recv().is_err());
 }
 
+/// A candidate running its real event loop, after our OPEN went out on the
+/// accepted connection. Outbound reconnects dial `redial_to`.
+struct RunningCandidate {
+    commands: mpsc::Sender<PeerCommand>,
+    notify_rx: crate::handle::SessionNotificationReceiver,
+    rib_rx: mpsc::Receiver<RibUpdate>,
+    remote: TcpStream,
+    session: tokio::task::JoinHandle<Result<(), TransportError>>,
+}
+
+impl RunningCandidate {
+    async fn start(redial_to: std::net::SocketAddr) -> Self {
+        let (local, mut remote) = connected_stream_pair().await;
+        let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+        peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+        peer_config.connect_retry_secs = 5;
+        let config = TransportConfig::new(peer_config, redial_to);
+        let metrics = BgpMetrics::new();
+        let (notify_tx, notify_rx) = crate::handle::session_notification_channel(metrics.clone());
+        let (commands, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let mut candidate = PeerSession::new_inbound_with_identity_and_lifecycle(
+            config,
+            metrics,
+            cmd_rx,
+            rib_tx,
+            None,
+            None,
+            local,
+            Some(notify_tx),
+            None,
+            None,
+            None,
+            None,
+            false,
+            SessionIdentity::inbound_candidate(7),
+            None,
+            None,
+            crate::TcpAoRotationGeneration::STARTUP,
+        );
+        let session = tokio::spawn(async move { candidate.run().await });
+        commands.send(PeerCommand::Start).await.unwrap();
+        assert!(matches!(
+            read_single_bgp_message(&mut remote).await,
+            Message::Open(_)
+        ));
+        Self {
+            commands,
+            notify_rx,
+            rib_rx,
+            remote,
+            session,
+        }
+    }
+
+    async fn claim(&self) -> bool {
+        let (reply, claimed) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::ClaimCollisionPromotion { reply })
+            .await
+            .unwrap();
+        claimed.await.unwrap()
+    }
+
+    async fn peer_open(&mut self) {
+        self.remote
+            .write_all(&encoded_peer_open_and_keepalive())
+            .await
+            .unwrap();
+        assert!(matches!(
+            self.notify_rx.recv().await.unwrap(),
+            SessionNotification::OpenReceived { session_id: 7, .. }
+        ));
+    }
+
+    async fn shutdown(self) {
+        self.commands.send(PeerCommand::Shutdown).await.unwrap();
+        self.session.await.unwrap().unwrap();
+    }
+}
+
 /// A candidate that lost its accepted connection keeps its reconnect timer and
 /// dials the peer again. On the new connection it reaches the same FSM and
 /// hold states as a candidate still on its accepted socket, so the claim must
 /// remember the fall to Idle rather than read the current state.
 #[tokio::test(start_paused = true)]
 async fn candidate_redialed_after_idle_refuses_promotion_claim() {
-    let (local, mut remote) = connected_stream_pair().await;
     let redial = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
-    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
-    peer_config.connect_retry_secs = 5;
-    let config = TransportConfig::new(peer_config, redial.local_addr().unwrap());
-    let metrics = BgpMetrics::new();
-    let (notify_tx, mut notify_rx) = crate::handle::session_notification_channel(metrics.clone());
-    let (cmd_tx, cmd_rx) = mpsc::channel(8);
-    let (rib_tx, _rib_rx) = mpsc::channel(64);
-    let mut candidate = PeerSession::new_inbound_with_identity_and_lifecycle(
-        config,
-        metrics,
-        cmd_rx,
-        rib_tx,
-        None,
-        None,
-        local,
-        Some(notify_tx),
-        None,
-        None,
-        None,
-        None,
-        false,
-        SessionIdentity::inbound_candidate(7),
-        None,
-        None,
-        crate::TcpAoRotationGeneration::STARTUP,
-    );
-    let session = tokio::spawn(async move { candidate.run().await });
-    cmd_tx.send(PeerCommand::Start).await.unwrap();
-    assert!(matches!(
-        read_single_bgp_message(&mut remote).await,
-        Message::Open(_)
-    ));
-    remote
-        .write_all(&encoded_peer_open_and_keepalive())
-        .await
-        .unwrap();
-    assert!(matches!(
-        notify_rx.recv().await.unwrap(),
-        SessionNotification::OpenReceived { session_id: 7, .. }
-    ));
+    let mut candidate = RunningCandidate::start(redial.local_addr().unwrap()).await;
+    candidate.peer_open().await;
 
     // The verdict timer closes the accepted connection...
     tokio::time::advance(fsm::COLLISION_VERDICT_TIMEOUT).await;
     assert!(matches!(
-        notify_rx.recv().await.unwrap(),
+        candidate.notify_rx.recv().await.unwrap(),
         SessionNotification::BackToIdle { session_id: 7, .. }
     ));
     // ...and the reconnect timer dials a new one, which sends our OPEN. The
     // peer answers, so the redialed session is held for a verdict exactly as
     // the accepted one was.
     tokio::time::advance(Duration::from_secs(6)).await;
-    let (mut redialed, _) = redial.accept().await.unwrap();
+    let (redialed, _) = redial.accept().await.unwrap();
+    candidate.remote = redialed;
     assert!(matches!(
-        read_single_bgp_message(&mut redialed).await,
+        read_single_bgp_message(&mut candidate.remote).await,
         Message::Open(_)
     ));
-    redialed
-        .write_all(&encoded_peer_open_and_keepalive())
-        .await
-        .unwrap();
-    assert!(matches!(
-        notify_rx.recv().await.unwrap(),
-        SessionNotification::OpenReceived { session_id: 7, .. }
-    ));
+    candidate.peer_open().await;
 
-    let (reply, claimed) = oneshot::channel();
-    cmd_tx
-        .send(PeerCommand::ClaimCollisionPromotion { reply })
-        .await
-        .unwrap();
     assert!(
-        !claimed.await.unwrap(),
+        !candidate.claim().await,
         "a redialed session no longer represents the OPEN that was resolved"
     );
+    candidate.shutdown().await;
+}
 
-    cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
-    session.await.unwrap().unwrap();
+/// A candidate promoted before the peer's OPEN (the primary fell to Idle
+/// first) is released by activation, so its later OPEN runs the normal FSM.
+#[tokio::test(start_paused = true)]
+async fn candidate_promoted_before_open_is_not_held_after_activation() {
+    let mut candidate = RunningCandidate::start("127.0.0.1:1".parse().unwrap()).await;
+    assert!(candidate.claim().await);
+    let (reply, activated) = oneshot::channel();
+    candidate
+        .commands
+        .send(PeerCommand::ActivateMaxPrefixMetrics {
+            notification_idle_failures: 0,
+            reply,
+        })
+        .await
+        .unwrap();
+    activated.await.unwrap();
+
+    candidate.peer_open().await;
+    assert!(matches!(
+        read_single_bgp_message(&mut candidate.remote).await,
+        Message::Keepalive
+    ));
+    assert!(matches!(
+        recv_peer_up_after_export_context(&mut candidate.rib_rx).await,
+        RibUpdate::PeerUp { session_id: 7, .. }
+    ));
+    candidate.shutdown().await;
+}
+
+/// A candidate claimed before the peer's OPEN whose activation is lost: the
+/// OPEN still waits for activation (the old primary may not have quiesced),
+/// but the verdict timer then releases the winner rather than closing it.
+#[tokio::test(start_paused = true)]
+async fn candidate_claimed_before_open_is_released_without_activation() {
+    let mut candidate = RunningCandidate::start("127.0.0.1:1".parse().unwrap()).await;
+    assert!(candidate.claim().await);
+
+    candidate.peer_open().await;
+    tokio::time::advance(fsm::COLLISION_VERDICT_TIMEOUT).await;
+    let message = read_single_bgp_message(&mut candidate.remote).await;
+    assert!(
+        matches!(message, Message::Keepalive),
+        "the claimed winner must not be closed: {message:?}"
+    );
+    assert!(matches!(
+        recv_peer_up_after_export_context(&mut candidate.rib_rx).await,
+        RibUpdate::PeerUp { session_id: 7, .. }
+    ));
+    candidate.shutdown().await;
 }
