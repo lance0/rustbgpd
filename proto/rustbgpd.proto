@@ -3463,7 +3463,7 @@ enum FlowSpecDeleteOutcome {
 
 message ListFlowSpecRequest {
   AddressFamily afi_safi = 1;
-  // Empty selects the existing Loc-RIB view. An IP address selects retained
+  // When both peer selectors are empty, select the Loc-RIB. An IP address here selects retained
   // received candidates from that peer, including infeasible/nonselected rules.
   // "0.0.0.0" selects the locally injected rules: exactly what AddFlowSpec
   // holds, including rules a received candidate currently out-selects
@@ -3471,6 +3471,13 @@ message ListFlowSpecRequest {
   // when receive-side validation is enabled; it is never FEASIBLE or
   // INFEASIBLE. Controllers reconcile against this view.
   string received_peer_address = 2;
+  // Destination peer whose committed post-export-policy Adj-RIB-Out is read.
+  // Mutually exclusive with received_peer_address. Rows retain their SOURCE
+  // peer_address (0.0.0.0 for local injection), not this destination.
+  // Commit means admitted to the outbound channel, not acknowledged by the
+  // peer. A full channel leaves the previous committed rows until dirty resync;
+  // this view does not prove remote acceptance, installation or enforcement.
+  string advertised_peer_address = 3;
 }
 
 // Last completed result, with PENDING used only before a first result exists.
@@ -3495,13 +3502,16 @@ message ReceivedFlowSpecRouteEntry {
 }
 
 message ListFlowSpecResponse {
-  // Populated only for the ordinary selected Loc-RIB view.
+  // Populated for the selected Loc-RIB or requested advertised view.
   repeated FlowSpecRouteEntry routes = 1;
   // Populated only when received_peer_address was supplied.
   repeated ReceivedFlowSpecRouteEntry received_routes = 2;
   // True acknowledges received mode even for an empty table. Clients must
   // check this to avoid treating an older server's selected view as received.
   bool received_view = 3;
+  // True acknowledges advertised mode, including an empty table. Clients must
+  // check this: older servers ignore the selector and return Loc-RIB rows.
+  bool advertised_view = 4;
 }
 
 // ---------------------------------------------------------------------------

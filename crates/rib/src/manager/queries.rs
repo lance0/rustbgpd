@@ -431,6 +431,31 @@ where
 }
 
 impl RibManager {
+    /// Visit cancellation at bounded intervals even when every row is filtered
+    /// out. Only matching committed rows are cloned; no export re-evaluation.
+    pub(super) fn collect_advertised_flowspec(
+        &self,
+        peer: IpAddr,
+        filter: Option<&RibRowFilter<crate::route::FlowSpecRoute>>,
+        mut canceled: impl FnMut() -> bool,
+    ) -> Option<Vec<crate::route::FlowSpecRoute>> {
+        if canceled() {
+            return None;
+        }
+        let mut rows = Vec::new();
+        if let Some(rib) = self.adj_ribs_out.get(&peer) {
+            for (visited, route) in rib.iter_flowspec().enumerate() {
+                if visited != 0 && canceled_at_stride(visited, &mut canceled) {
+                    return None;
+                }
+                if filter.is_none_or(|filter| filter(route)) {
+                    rows.push(route.clone());
+                }
+            }
+        }
+        (!canceled()).then_some(rows)
+    }
+
     /// One bounded chunk of the RFC 9069 Loc-RIB table dump: synthesize
     /// at most [`BMP_DUMP_CHUNK_SIZE`] UPDATE PDUs (unicast bests, then
     /// VPN bests) resuming after `cursor`, and reply with the next

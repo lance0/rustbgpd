@@ -1799,6 +1799,14 @@ enum TopologyAction {
 
 #[derive(Subcommand)]
 enum FlowspecAction {
+    /// Show committed post-export-policy rules toward a destination peer
+    Advertised {
+        /// Destination peer IP address
+        peer: std::net::IpAddr,
+        /// Address family (ipv4_flowspec or ipv6_flowspec)
+        #[arg(short = 'a', long)]
+        family: Option<String>,
+    },
     /// Show retained received candidates, including infeasible and nonselected rules
     Received {
         /// Source peer IP address
@@ -3333,10 +3341,16 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
         ))),
         Command::Flowspec {
             action:
-                Some(FlowspecAction::Received {
-                    family: Some(family),
-                    ..
-                }),
+                Some(
+                    FlowspecAction::Received {
+                        family: Some(family),
+                        ..
+                    }
+                    | FlowspecAction::Advertised {
+                        family: Some(family),
+                        ..
+                    },
+                ),
             ..
         } if parse_family(family).is_none() => Err(CliError::Argument(format!(
             "unknown address family: {family}"
@@ -4872,10 +4886,14 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         Command::Flowspec { action, family } => {
             let family_val = resolve_family(&family)?;
             match action {
-                None => commands::flowspec::list(connection, family_val, None, json).await,
+                None => commands::flowspec::list(connection, family_val, None, None, json).await,
                 Some(FlowspecAction::Received { peer, family }) => {
                     let family = resolve_family(&family)?.or(family_val);
-                    commands::flowspec::list(connection, family, Some(peer), json).await
+                    commands::flowspec::list(connection, family, Some(peer), None, json).await
+                }
+                Some(FlowspecAction::Advertised { peer, family }) => {
+                    let family = resolve_family(&family)?.or(family_val);
+                    commands::flowspec::list(connection, family, None, Some(peer), json).await
                 }
                 Some(FlowspecAction::Add {
                     family: fam,

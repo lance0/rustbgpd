@@ -184,6 +184,14 @@ async fn dirty_resync_retries_flowspec_updates() {
     .await
     .unwrap();
 
+    assert_eq!(query_flowspec_routes(&tx).await.len(), 1);
+    assert!(
+        super::flowspec_advertised::advertised(&tx, target)
+            .await
+            .is_empty(),
+        "a full channel must leave uncommitted rules out of the view"
+    );
+
     // Drain the initial EoR to make room for the timer-driven resync.
     let initial = out_rx.recv().await.unwrap();
     assert_eq!(initial.end_of_rib, ipv4_flowspec_sendable());
@@ -196,6 +204,10 @@ async fn dirty_resync_retries_flowspec_updates() {
     assert_eq!(resync.flowspec_announce.len(), 1);
     assert_eq!(resync.flowspec_announce[0].rule, fs_rule);
     assert!(resync.flowspec_withdraw.is_empty());
+    let rows = super::flowspec_advertised::advertised(&tx, target).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].rule, fs_rule);
+    assert_eq!(rows[0].peer, source);
 
     drop(tx);
     handle.await.unwrap();
@@ -1146,7 +1158,7 @@ fn with_flowspec_communities(mut route: FlowSpecRoute, communities: Vec<u32>) ->
     route
 }
 
-fn flowspec_policy_statement(
+pub(super) fn flowspec_policy_statement(
     marker: u32,
     modifications: rustbgpd_policy::RouteModifications,
 ) -> rustbgpd_policy::PolicyStatement {

@@ -2595,6 +2595,7 @@ mod tests {
         rib.list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
             afi_safi: 0,
             received_peer_address: "0.0.0.0".into(),
+            advertised_peer_address: String::new(),
         }))
         .await
         .unwrap()

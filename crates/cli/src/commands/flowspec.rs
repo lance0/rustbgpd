@@ -118,6 +118,7 @@ pub async fn list(
     connection: Connection,
     family: Option<i32>,
     received_peer: Option<std::net::IpAddr>,
+    advertised_peer: Option<std::net::IpAddr>,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
@@ -125,6 +126,9 @@ pub async fn list(
         "ListFlowSpecRoutes",
         client.list_flow_spec_routes(ListFlowSpecRequest {
             afi_safi: family.unwrap_or(0),
+            advertised_peer_address: advertised_peer
+                .map(|peer| peer.to_string())
+                .unwrap_or_default(),
             received_peer_address: received_peer
                 .map(|peer| peer.to_string())
                 .unwrap_or_default(),
@@ -133,6 +137,12 @@ pub async fn list(
     .await?
     .into_inner();
 
+    if advertised_peer.is_some() && !resp.advertised_view {
+        return Err(tonic::Status::unimplemented(
+            "advertised FlowSpec view requires a newer daemon",
+        )
+        .into());
+    }
     if received_peer.is_some() {
         if !resp.received_view {
             return Err(tonic::Status::unimplemented(

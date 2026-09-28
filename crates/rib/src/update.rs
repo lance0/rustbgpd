@@ -2836,6 +2836,15 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
     },
+    /// Query committed post-export-policy `FlowSpec` rows toward one peer.
+    QueryAdvertisedFlowSpecRoutes {
+        /// Destination peer; returned routes retain their source peer.
+        peer: IpAddr,
+        /// Row filter evaluated before copying, inside the RIB task.
+        filter: Option<RibRowFilter<FlowSpecRoute>>,
+        /// Response channel; abandoning it cancels this diagnostic read.
+        reply: oneshot::Sender<Vec<FlowSpecRoute>>,
+    },
     /// Query retained received `FlowSpec` candidates, including infeasible rows.
     QueryReceivedFlowSpecRoutes {
         /// Exact source peer whose Adj-RIB-In is inspected.
