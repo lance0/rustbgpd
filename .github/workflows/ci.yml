@@ -120,6 +120,10 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
           python3 scripts/check_fuzz_target_inventory.py
+      - name: Prove every benchmark driver is listed by just bench-list
+        run: |
+          python3 -m unittest -v scripts/test_check_bench_inventory.py
+          python3 scripts/check_bench_inventory.py
       # A reintroduced floating toolchain stays invisible until an upstream
       # compiler break takes the scheduled campaign down, and the failure then
       # reads as if it came from this repository.
