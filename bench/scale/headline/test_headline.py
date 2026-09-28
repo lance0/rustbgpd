@@ -235,7 +235,7 @@ class ExtractorFailsClosed(unittest.TestCase):
     def test_renamed_reload_message_fails(self):
         cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
         (cell / "daemon.log").write_text(daemon_log(4, complete="configuration reload finished"))
-        with self.assertRaisesRegex(summarize.ExtractionError, "0 completed reloads, harness measured 4"):
+        with self.assertRaisesRegex(summarize.ExtractionError, "line 6: SIGHUP while the one at line 2 is still pending"):
             summarize.extract(self.tmp)
         (cell / "daemon.log").write_text(daemon_log(3))
         with self.assertRaisesRegex(summarize.ExtractionError, "3 completed reloads, harness measured 4"):
@@ -249,6 +249,20 @@ class ExtractorFailsClosed(unittest.TestCase):
             with self.subTest(drop=drop):
                 (cell / "daemon.log").write_text(daemon_log(4, drop={drop}))
                 with self.assertRaisesRegex(summarize.ExtractionError, f"matrix-a-r1-s2: daemon log {message}"):
+                    summarize.extract(self.tmp)
+
+    def test_reload_events_must_pair(self):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
+        lines = daemon_log(4).splitlines(True)  # line 1 is a session; reload N spans lines 4N-2..4N+1
+        cases = (
+            (lines[:6] + [lines[5]] + lines[6:], "line 7: SIGHUP while the one at line 6 is still pending"),
+            (lines[:5] + lines[6:], "line 8: reload complete with no SIGHUP pending"),
+            (lines[:-1], "line 14: SIGHUP never completed"),
+        )
+        for text, message in cases:
+            with self.subTest(message=message):
+                (cell / "daemon.log").write_text("".join(text))
+                with self.assertRaisesRegex(summarize.ExtractionError, f"^matrix-a-r1-s2: daemon.log {message}"):
                     summarize.extract(self.tmp)
 
     def test_campaign_must_keep_daemon_logs(self):
@@ -360,6 +374,20 @@ class CampaignFailsClosed(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("campaign done rc=1 failed=matrix-a-r1-s2 matrix-a-r1-s3 matrix-b-r1-s2 matrix-b-r1-s3",
                       self.progress())
+
+    def test_used_directory_without_manifest_is_refused(self):
+        self.out.mkdir()
+        (self.out / "progress.txt").write_text("[earlier] campaign start\n")
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not empty and has no campaign manifest", result.stderr)
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), ["progress.txt"])
+
+    def test_empty_directory_is_a_fresh_start(self):
+        self.out.mkdir()
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.out / "manifest.txt").exists())
 
     def test_one_arm_is_refused(self):
         result = self.campaign("a=HEAD", FAKE_CARGO="tree")

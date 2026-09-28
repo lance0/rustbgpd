@@ -26,7 +26,8 @@
 # start: each arm's resolved commits, CELLS, RUNS, OVERLAPS, IRR_CELLS,
 # MATRIX_SCENARIOS, the MATRIX_* shape and SMOKE. A rerun with the same shape
 # resumes: finished legs are skipped and a failed IRR or RR1000 leg is moved
-# aside and run again. A rerun with any other shape is refused, so one output
+# aside and run again. A rerun with any other shape, or a non-empty OUT_DIR
+# without a manifest, is refused before anything is written, so one output
 # directory never mixes legs from two shapes.
 # progress.txt logs every leg boundary with the load average, the swap-in and
 # swap-out counters, and the CPUs the leg may run on; placement.txt records
@@ -164,7 +165,6 @@ if [[ -n ${DRY_RUN:-} ]]; then
     exit 0
 fi
 
-mkdir -p "$OUT/trees"
 for lock in ${HEADLINE_LOCKS:-}; do
     exec {fd}>>"$lock"
     flock -n "$fd" || { echo "lock busy: $lock" >&2; exit 75; }
@@ -174,7 +174,9 @@ if [[ -n ${HEADLINE_MARKER:-} ]]; then
     trap 'rm -f "$HEADLINE_MARKER"' EXIT
 fi
 
-# A resumed campaign must have exactly the shape it started with.
+# OUT_DIR is either fresh (missing or empty) or a campaign whose manifest
+# matches this run's shape exactly; anything else is refused before any file
+# is written, so one directory never mixes legs from two shapes.
 manifest() {
     local arm
     for arm in "${ARMS[@]}"; do echo "arm $arm=${HARNESS_SHA[$arm]}:${DAEMON_SHA[$arm]}"; done
@@ -187,16 +189,25 @@ manifest() {
     echo "matrix_control_secs=$MATRIX_CONTROL_SECS matrix_flapstorm=$MATRIX_FLAPSTORM"
     echo "smoke=${SMOKE:+1}"
 }
-if [[ -e $OUT/manifest.txt ]]; then
+fresh=1
+if [[ -e $OUT ]]; then
+    [[ -d $OUT ]] || { echo "OUT_DIR is not a directory: $OUT" >&2; exit 2; }
+    [[ -z $(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit) ]] || fresh=0
+fi
+if ((!fresh)); then
+    if [[ ! -e $OUT/manifest.txt ]]; then
+        echo "OUT_DIR is not empty and has no campaign manifest; use a fresh OUT_DIR" >&2
+        exit 2
+    fi
     if ! mismatch=$(diff "$OUT/manifest.txt" <(manifest)); then
         echo "OUT_DIR holds a campaign with another shape; use a fresh OUT_DIR (< recorded, > requested):" >&2
         echo "$mismatch" >&2
         exit 2
     fi
-elif [[ -e $OUT/arms.txt ]]; then
-    echo "OUT_DIR holds a campaign without a manifest; use a fresh OUT_DIR" >&2
-    exit 2
-else
+fi
+
+mkdir -p "$OUT/trees"
+if ((fresh)); then
     manifest >"$OUT/manifest.txt"
     for arm in "${ARMS[@]}"; do echo "$arm=${HARNESS_REF[$arm]}:${DAEMON_REF[$arm]}"; done >"$OUT/arms.txt"
 fi

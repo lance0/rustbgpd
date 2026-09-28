@@ -25,7 +25,8 @@ matrix S2 cell and IRR rustbgpd-sighup cell), one set per SIGHUP: SIGHUP
 received to "config source loaded" and to "config reload complete", the
 logged validate_ms, and the RIB transition (cohort_rib_transition_us). A
 daemon log must hold exactly as many completed reloads as the harness
-measured, and every completed reload must carry all four values. A campaign
+measured, SIGHUP and completion must alternate strictly, and every completed
+reload must carry all four values. A campaign
 directory must keep those daemon logs; a receipt bundle
 does not carry them, so it has no daemon rows.
 
@@ -113,10 +114,15 @@ RELOAD_SOURCES = ("'config source loaded'", "'config reload complete'",
                   "cohort_rib_transition_us ('reload generation phase timing')")
 
 
-def daemon_reloads(daemon_log):
-    """[(sighup_to_loaded_ms, sighup_to_complete_ms, validate_ms, rib_transition_ms)] per completed SIGHUP."""
-    reloads, start = [], None
-    for line in read_text(daemon_log).splitlines():
+def daemon_reloads(daemon_log, name):
+    """[(sighup_to_loaded_ms, sighup_to_complete_ms, validate_ms, rib_transition_ms)] per completed SIGHUP.
+
+    SIGHUP and "config reload complete" must alternate strictly: a second
+    SIGHUP before the first completes, a completion with no SIGHUP pending, or
+    a SIGHUP still pending at the end of the log is an error naming NAME and
+    the line, because any of them would shift every later interval."""
+    reloads, start, started_at = [], None, 0
+    for number, line in enumerate(read_text(daemon_log).splitlines(), 1):
         if not any(message in line for message in RELOAD_MESSAGES):
             continue
         try:
@@ -125,9 +131,14 @@ def daemon_reloads(daemon_log):
             continue
         fields = record.get("fields", {})
         message = fields.get("message", "")
+        where = f"{name}: {daemon_log.name} line {number}"
         if message.startswith("SIGHUP received"):
-            start, loaded, validate, rib = log_time(record), None, None, None
+            if start is not None:
+                raise ExtractionError(f"{where}: SIGHUP while the one at line {started_at} is still pending")
+            start, started_at, loaded, validate, rib = log_time(record), number, None, None, None
         elif start is None:
+            if message.startswith("config reload complete"):
+                raise ExtractionError(f"{where}: reload complete with no SIGHUP pending")
             continue
         elif message == "config source loaded":
             loaded, validate = log_time(record), fields.get("validate_ms")
@@ -138,6 +149,8 @@ def daemon_reloads(daemon_log):
                             round((log_time(record) - start) * 1000, 1), validate,
                             round(rib / 1000, 1) if rib is not None else None))
             start = None
+    if start is not None:
+        raise ExtractionError(f"{name}: {daemon_log.name} line {started_at}: SIGHUP never completed")
     return reloads
 
 
@@ -146,7 +159,7 @@ def reload_rows(leg, phase, arm, run, daemon_log, expected, campaign):
         if campaign:
             raise ExtractionError(f"{leg.name}: {daemon_log.name} is missing, so its reload intervals are lost")
         return []
-    reloads = daemon_reloads(daemon_log)
+    reloads = daemon_reloads(daemon_log, leg.name)
     if len(reloads) != expected:
         raise ExtractionError(f"{leg.name}: daemon log has {len(reloads)} completed reloads, harness measured {expected}")
     rows = []
