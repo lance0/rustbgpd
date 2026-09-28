@@ -347,7 +347,16 @@ pub(crate) struct TreatAsWithdrawSummary {
 }
 /// Summarize the announcements a treat-as-withdraw UPDATE carried.
 pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdrawSummary {
-    let mut families = Vec::new();
+    // Per-family counts in first-seen order; the IPv4 body and an IPv4
+    // unicast MP_REACH_NLRI share one label.
+    let mut families: Vec<(String, usize)> = Vec::new();
+    let mut add_family = |label: String, count: usize| {
+        if let Some((_, total)) = families.iter_mut().find(|(seen, _)| *seen == label) {
+            *total += count;
+        } else {
+            families.push((label, count));
+        }
+    };
     let mut next_hops: Vec<String> = Vec::new();
     let mut link_local_next_hop = None;
     let mut prefixes: Vec<String> = parsed
@@ -358,10 +367,7 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
         .collect();
     let mut announced = parsed.announced.len();
     if announced > 0 {
-        families.push(format!(
-            "{}={announced}",
-            log_family_label(Afi::Ipv4, Safi::Unicast)
-        ));
+        add_family(log_family_label(Afi::Ipv4, Safi::Unicast), announced);
         if let Some(next_hop) = parsed.attributes.iter().find_map(|a| match a {
             PathAttribute::NextHop(next_hop) => Some(next_hop.to_string()),
             _ => None,
@@ -378,7 +384,7 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
             continue;
         }
         announced += count;
-        families.push(format!("{}={count}", log_family_label(mp.afi, mp.safi)));
+        add_family(log_family_label(mp.afi, mp.safi), count);
         // FlowSpec carries no next hop (NH-Len 0).
         if mp.safi != Safi::FlowSpec {
             next_hops.push(mp.next_hop.to_string());
@@ -390,7 +396,11 @@ pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdra
     next_hops.dedup();
     TreatAsWithdrawSummary {
         announced,
-        families: families.join(", "),
+        families: families
+            .iter()
+            .map(|(label, count)| format!("{label}={count}"))
+            .collect::<Vec<_>>()
+            .join(", "),
         next_hop: if next_hops.is_empty() {
             "none".to_owned()
         } else {

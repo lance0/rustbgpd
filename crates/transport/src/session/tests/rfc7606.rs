@@ -1562,6 +1562,23 @@ fn treat_as_withdraw_summary_uses_canonical_family_labels() {
     );
 }
 
+/// An IPv4 body announcement and an IPv4-unicast `MP_REACH_NLRI` in one
+/// UPDATE are reported as one family count, not two `ipv4_unicast` entries.
+#[test]
+fn treat_as_withdraw_summary_aggregates_body_and_mp_reach_per_family() {
+    let mut v4_reach = vec![0x80, 14, 0]; // optional flags, type, len (patched)
+    v4_reach.extend([0, 1, 1, 4, 10, 0, 0, 3, 0]); // IPv4 unicast, NH 10.0.0.3, reserved
+    v4_reach.extend([24, 10, 2, 0]); // 10.2.0.0/24
+    v4_reach[2] = u8::try_from(v4_reach.len() - 3).unwrap();
+    let update = rfc7606_update(rfc7606_attr_bytes(&v4_reach), &[v4_prefix(1)]);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    let summary = super::inbound::treat_as_withdraw_summary(&revised.update);
+    assert_eq!(summary.announced, 2);
+    assert_eq!(summary.families, "ipv4_unicast=2");
+    assert_eq!(summary.next_hop, "10.0.0.2, 10.0.0.3");
+    assert_eq!(summary.prefixes, ["203.0.1.0/24", "10.2.0.0/24"]);
+}
+
 /// An UPDATE whose only attributes were discarded as malformed must not be
 /// mistaken for an End-of-RIB marker.
 #[tokio::test]
