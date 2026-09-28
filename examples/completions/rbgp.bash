@@ -511,6 +511,9 @@ _rbgp() {
             rbgp__subcmd__flowspec,add)
                 cmd="rbgp__subcmd__flowspec__subcmd__add"
                 ;;
+            rbgp__subcmd__flowspec,advertised)
+                cmd="rbgp__subcmd__flowspec__subcmd__advertised"
+                ;;
             rbgp__subcmd__flowspec,delete)
                 cmd="rbgp__subcmd__flowspec__subcmd__delete"
                 ;;
@@ -522,6 +525,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__flowspec__subcmd__help,add)
                 cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__add"
+                ;;
+            rbgp__subcmd__flowspec__subcmd__help,advertised)
+                cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__advertised"
                 ;;
             rbgp__subcmd__flowspec__subcmd__help,delete)
                 cmd="rbgp__subcmd__flowspec__subcmd__help__subcmd__delete"
@@ -774,6 +780,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__flowspec,add)
                 cmd="rbgp__subcmd__help__subcmd__flowspec__subcmd__add"
+                ;;
+            rbgp__subcmd__help__subcmd__flowspec,advertised)
+                cmd="rbgp__subcmd__help__subcmd__flowspec__subcmd__advertised"
                 ;;
             rbgp__subcmd__help__subcmd__flowspec,delete)
                 cmd="rbgp__subcmd__help__subcmd__flowspec__subcmd__delete"
@@ -5951,7 +5960,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec)
-            opts="-a -s -j -h --family --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help received add delete help"
+            opts="-a -s -j -h --family --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help advertised received add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6066,6 +6075,60 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__flowspec__subcmd__advertised)
+            opts="-a -s -j -h --family --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --family)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -a)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-ca)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-cert)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tls-server-name)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --json-version)
+                    COMPREPLY=($(compgen -W "1" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__flowspec__subcmd__delete)
             opts="-a -s -j -h --family --match --allow-missing --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --json-version --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -6125,7 +6188,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec__subcmd__help)
-            opts="received add delete help"
+            opts="advertised received add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6139,6 +6202,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__flowspec__subcmd__help__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__flowspec__subcmd__help__subcmd__advertised)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -7263,7 +7340,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__flowspec)
-            opts="received add delete"
+            opts="advertised received add delete"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7277,6 +7354,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__flowspec__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__flowspec__subcmd__advertised)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

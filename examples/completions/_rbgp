@@ -1863,7 +1863,27 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-flowspec-command-$line[1]:"
         case $line[1] in
-            (received)
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--tls-ca=[PEM CA bundle used to verify an HTTPS server (required for HTTPS)]:FILE:_files' \
+'--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
+'--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
+'--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
+'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Destination peer IP address:_default' \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
 '--family=[Address family (ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
@@ -1937,7 +1957,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-flowspec-help-command-$line[1]:"
         case $line[1] in
-            (received)
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4507,7 +4531,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-flowspec-command-$line[1]:"
         case $line[1] in
-            (received)
+            (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5888,6 +5916,7 @@ _rbgp__subcmd__fib-table__subcmd__set_commands() {
 (( $+functions[_rbgp__subcmd__flowspec_commands] )) ||
 _rbgp__subcmd__flowspec_commands() {
     local commands; commands=(
+'advertised:Show committed post-export-policy rules toward a destination peer' \
 'received:Show retained received candidates, including infeasible and nonselected rules' \
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
@@ -5900,6 +5929,11 @@ _rbgp__subcmd__flowspec__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp flowspec add commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__flowspec__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__flowspec__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp flowspec advertised commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__flowspec__subcmd__delete_commands] )) ||
 _rbgp__subcmd__flowspec__subcmd__delete_commands() {
     local commands; commands=()
@@ -5908,6 +5942,7 @@ _rbgp__subcmd__flowspec__subcmd__delete_commands() {
 (( $+functions[_rbgp__subcmd__flowspec__subcmd__help_commands] )) ||
 _rbgp__subcmd__flowspec__subcmd__help_commands() {
     local commands; commands=(
+'advertised:Show committed post-export-policy rules toward a destination peer' \
 'received:Show retained received candidates, including infeasible and nonselected rules' \
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
@@ -5919,6 +5954,11 @@ _rbgp__subcmd__flowspec__subcmd__help_commands() {
 _rbgp__subcmd__flowspec__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp flowspec help add commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__flowspec__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__flowspec__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp flowspec help advertised commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__flowspec__subcmd__help__subcmd__delete_commands] )) ||
 _rbgp__subcmd__flowspec__subcmd__help__subcmd__delete_commands() {
@@ -6359,6 +6399,7 @@ _rbgp__subcmd__help__subcmd__fib-table__subcmd__set_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__flowspec_commands] )) ||
 _rbgp__subcmd__help__subcmd__flowspec_commands() {
     local commands; commands=(
+'advertised:Show committed post-export-policy rules toward a destination peer' \
 'received:Show retained received candidates, including infeasible and nonselected rules' \
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
@@ -6369,6 +6410,11 @@ _rbgp__subcmd__help__subcmd__flowspec_commands() {
 _rbgp__subcmd__help__subcmd__flowspec__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help flowspec add commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__flowspec__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__flowspec__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help flowspec advertised commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__flowspec__subcmd__delete_commands] )) ||
 _rbgp__subcmd__help__subcmd__flowspec__subcmd__delete_commands() {
