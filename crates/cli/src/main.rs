@@ -2904,9 +2904,9 @@ fn cli_command(binary_name: &'static str) -> clap::Command {
     ))
 }
 
-/// Global flags that only some command paths accept, with the paths that
-/// accept them. A listed path covers its descendants. `run` still validates
-/// the flag combination; this table only decides where help shows the flag.
+/// Global flags that only some command paths accept. `Only` paths are exact;
+/// an `Except` path also covers its descendants. `run` still validates the
+/// flag combination; this table only decides where help shows the flag.
 const SCOPED_GLOBALS: &[(&str, ScopedGlobal)] = &[
     ("json_lines", ScopedGlobal::Only(PAGED_RIB_PATHS)),
     ("pager", ScopedGlobal::Only(PAGED_RIB_PATHS)),
@@ -2986,7 +2986,7 @@ fn scope_global_help(command: clap::Command) -> clap::Command {
     }
 
     for (id, _) in SCOPED_GLOBALS {
-        assert!(
+        debug_assert!(
             command
                 .get_arguments()
                 .any(|arg| arg.get_id() == id && arg.is_global_set()),
