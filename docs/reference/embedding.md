@@ -167,7 +167,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.21.2"
+rustbgpd-wire = "0.22.0"
 bytes = "1"
 ```
 
@@ -227,8 +227,8 @@ intentional split (ADR-0005: pure state machine, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.21.2"
-rustbgpd-fsm = "0.8.2"
+rustbgpd-wire = "0.22.0"
+rustbgpd-fsm = "0.9.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -292,8 +292,8 @@ verified published versions in §7.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.3.2"
-rustbgpd-wire = "0.21.2"
+rustbgpd-rpki = "0.4.0"
+rustbgpd-wire = "0.22.0"
 ```
 
 ```rust
@@ -471,7 +471,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    documentation-only patches: the FlowSpec Terminal Action bit meaning and
    the shutdown-communication length cap.
 
-   The prepared `0.22.0` line pairs with FSM `0.9` and RPKI `0.4`. It is
+   The `0.22.0` line pairs with FSM `0.9` and RPKI `0.4`. It is
    breaking: `PathAttribute::MpReachNlri` and `MpUnreachNlri` hold boxed
    payloads (the enum shrinks from 208 to 48 bytes), and the `keepalive`
    module is private. It also names NOTIFICATION code 7
@@ -531,7 +531,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
    `0.21.0` with no direct FSM API or behavior change. `0.8.1` limits
    `NegotiatedSession::negotiated_orf_recv` to the negotiated MultiProtocol
    intersection, and `0.8.2` is documentation-only: the embedding
-   application owns the ranges of its local timer settings. The prepared
+   application owns the ranges of its local timer settings. The
    `0.9.0` line pairs with wire `0.22` and is breaking: the `action`,
    `config`, `event`, `session`, and `state` modules are private (import from
    the crate root), and `Action::RoleMismatchObserved::remote_role` becomes
@@ -567,7 +567,7 @@ boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
      `VrpManager::with_connectivity_observer`, `AspaTable::providers`, and
      `aspa_verify::validation_context`. See the crate's
      [changelog](../../crates/rpki/CHANGELOG.md).
-   - The prepared RPKI `0.4.0` line moves the public wire dependency to
+   - The RPKI `0.4.0` line moves the public wire dependency to
      `0.22`; verifier and RTR method signatures are unchanged.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
@@ -648,9 +648,9 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.21.2` | `0.22.0` |
-| `rustbgpd-fsm` | `0.8.2` | `0.9.0` |
-| `rustbgpd-rpki` | `0.3.2` | `0.4.0` |
+| `rustbgpd-wire` | `0.22.0` | `0.22.0` |
+| `rustbgpd-fsm` | `0.9.0` | `0.9.0` |
+| `rustbgpd-rpki` | `0.4.0` | `0.4.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`

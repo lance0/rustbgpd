@@ -14,11 +14,11 @@ from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 UNRELEASED_SECTION = "Unreleased"
-BASELINE_RELEASE = "v0.72.0"
-BASELINE_COMMIT = "dcbac54420dc92d5b0218916b3568598cd154cd0"
+BASELINE_RELEASE = "v0.73.0"
+BASELINE_COMMIT = "335676078965ae5a7d24273821dab12da79222d2"
 WORKSPACE_RELEASE = "0.73.0"
-TARGET_CHANGELOG_SECTION = "0.73.0"
-BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.72.0.json"
+TARGET_CHANGELOG_SECTION = UNRELEASED_SECTION
+BASELINE = ROOT / "scripts/fixtures/metric-release-notes/v0.73.0.json"
 CHANGELOG = ROOT / "CHANGELOG.md"
 CARGO_MANIFEST = ROOT / "Cargo.toml"
 METRIC_NAME = re.compile(r"[A-Za-z_:][A-Za-z0-9_:]*")

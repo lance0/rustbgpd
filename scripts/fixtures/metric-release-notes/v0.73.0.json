@@ -1,9 +1,10 @@
 {
-  "release": "v0.72.0",
-  "source_commit": "dcbac54420dc92d5b0218916b3568598cd154cd0",
+  "release": "v0.73.0",
+  "source_commit": "335676078965ae5a7d24273821dab12da79222d2",
   "families": [
     "bfd_session_flaps_total",
     "bfd_session_up",
+    "bgp_add_path_receive_limit_attempts_total",
     "bgp_as_path_loop_detected_total",
     "bgp_aspa_records",
     "bgp_bgpls_nlri_discarded_total",
@@ -36,6 +37,7 @@
     "bgp_evpn_nlri_discarded_total",
     "bgp_exact_export_rejections_total",
     "bgp_fib_kernel_failures_total",
+    "bgp_fib_owned_state_persist_failures_total",
     "bgp_fib_routes_installed_total",
     "bgp_fib_routes_rejected_total",
     "bgp_fib_routes_unresolved",
@@ -57,6 +59,7 @@
     "bgp_max_prefix_blocking",
     "bgp_max_prefix_exceeded_total",
     "bgp_max_prefix_headroom",
+    "bgp_max_prefix_latched",
     "bgp_max_prefix_limit",
     "bgp_max_prefix_usage",
     "bgp_max_prefix_warning_total",

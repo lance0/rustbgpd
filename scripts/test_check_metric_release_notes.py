@@ -24,15 +24,8 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
-        self.assertEqual(len(baseline), 219)
-        self.assertEqual(
-            added,
-            {
-                "bgp_add_path_receive_limit_attempts_total",
-                "bgp_fib_owned_state_persist_failures_total",
-                "bgp_max_prefix_latched",
-            },
-        )
+        self.assertEqual(len(baseline), 222)
+        self.assertEqual(added, set())
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
@@ -263,21 +256,21 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
     def test_baseline_metadata_ordering_and_names_fail_closed(self):
         cases = (
             (
-                '{"release":"v0.71.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.72.0","source_commit":"x","families":["bgp_a"]}',
                 "release must be",
             ),
             (
-                '{"release":"v0.72.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.73.0","source_commit":"x","families":["bgp_a"]}',
                 "commit must be",
             ),
             (
-                '{"release":"v0.72.0","source_commit":"'
+                '{"release":"v0.73.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["bgp_b","bgp_a"]}',
                 "sorted and unique",
             ),
             (
-                '{"release":"v0.72.0","source_commit":"'
+                '{"release":"v0.73.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["not a metric"]}',
                 "invalid family name",
