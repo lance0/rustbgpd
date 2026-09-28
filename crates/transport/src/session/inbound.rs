@@ -293,6 +293,105 @@ pub(crate) fn full_update_hex(update: &rustbgpd_wire::UpdateMessage) -> String {
     }
     out
 }
+fn with_path_id(path_id: u32, rendered: String) -> String {
+    if path_id == 0 {
+        rendered
+    } else {
+        format!("{rendered} path-id {path_id}")
+    }
+}
+/// Every announced NLRI one `MP_REACH_NLRI` carries, rendered for logs in
+/// the order [`mp_reach_announced_count`] counts them.
+fn mp_reach_rendered(mp: &rustbgpd_wire::MpReachNlri) -> impl Iterator<Item = String> + '_ {
+    mp.announced
+        .iter()
+        .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+        .chain(mp.flowspec_announced.iter().map(ToString::to_string))
+        .chain(mp.evpn_announced.iter().map(|r| format!("{r:?}")))
+        .chain(mp.bgpls_announced.iter().map(|r| format!("{r:?}")))
+        .chain(
+            mp.vpn_announced
+                .iter()
+                .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+        )
+        .chain(
+            mp.labeled_announced
+                .iter()
+                .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
+        )
+        .chain(mp.rtc_announced.iter().map(ToString::to_string))
+}
+/// Announcements rendered into the treat-as-withdraw warning; the
+/// per-family counts and the RFC 7606 §6 debug dump cover the rest.
+pub(crate) const TREAT_AS_WITHDRAW_PREFIX_SAMPLE: usize = 8;
+/// Operator-facing fields of the treat-as-withdraw warning: what the
+/// malformed UPDATE announced, per family, and with which next hops.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TreatAsWithdrawSummary {
+    /// Announced NLRI across the IPv4 body and every `MP_REACH_NLRI`.
+    pub(crate) announced: usize,
+    /// Nonzero per-family announced counts, e.g. `ipv6_unicast=1`.
+    pub(crate) families: String,
+    /// Next hops of the announcing sections, or `none`.
+    pub(crate) next_hop: String,
+    /// `MP_REACH_NLRI` link-local companion next hop, when carried.
+    pub(crate) link_local_next_hop: Option<std::net::Ipv6Addr>,
+    /// The first [`TREAT_AS_WITHDRAW_PREFIX_SAMPLE`] announcements.
+    pub(crate) prefixes: Vec<String>,
+}
+/// Summarize the announcements a treat-as-withdraw UPDATE carried.
+pub(crate) fn treat_as_withdraw_summary(parsed: &ParsedUpdate) -> TreatAsWithdrawSummary {
+    let mut families = Vec::new();
+    let mut next_hops: Vec<String> = Vec::new();
+    let mut link_local_next_hop = None;
+    let mut prefixes: Vec<String> = parsed
+        .announced
+        .iter()
+        .take(TREAT_AS_WITHDRAW_PREFIX_SAMPLE)
+        .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
+        .collect();
+    let mut announced = parsed.announced.len();
+    if announced > 0 {
+        families.push(format!("ipv4_unicast={announced}"));
+        if let Some(next_hop) = parsed.attributes.iter().find_map(|a| match a {
+            PathAttribute::NextHop(next_hop) => Some(next_hop.to_string()),
+            _ => None,
+        }) {
+            next_hops.push(next_hop);
+        }
+    }
+    for attr in &parsed.attributes {
+        let PathAttribute::MpReachNlri(mp) = attr else {
+            continue;
+        };
+        let count = mp_reach_announced_count(mp);
+        if count == 0 {
+            continue;
+        }
+        announced += count;
+        let family = format!("{:?}_{:?}", mp.afi, mp.safi).to_lowercase();
+        families.push(format!("{family}={count}"));
+        // FlowSpec carries no next hop (NH-Len 0).
+        if mp.safi != Safi::FlowSpec {
+            next_hops.push(mp.next_hop.to_string());
+            link_local_next_hop = link_local_next_hop.or(mp.link_local_next_hop);
+        }
+        let room = TREAT_AS_WITHDRAW_PREFIX_SAMPLE.saturating_sub(prefixes.len());
+        prefixes.extend(mp_reach_rendered(mp).take(room));
+    }
+    next_hops.dedup();
+    TreatAsWithdrawSummary {
+        announced,
+        families: families.join(", "),
+        next_hop: if next_hops.is_empty() {
+            "none".to_owned()
+        } else {
+            next_hops.join(", ")
+        },
+        link_local_next_hop,
+        prefixes,
+    }
+}
 /// Enumerate every NLRI the revised parse recovered from a malformed
 /// UPDATE — body IPv4 and each MP family, announcements and
 /// withdrawals, with Add-Path path IDs where present — per the
@@ -300,13 +399,6 @@ pub(crate) fn full_update_hex(update: &rustbgpd_wire::UpdateMessage) -> String {
 /// the parse already produced: an MP attribute that was itself
 /// malformed is absent here and covered by the full-message hex.
 pub(crate) fn involved_nlri(parsed: &ParsedUpdate) -> String {
-    fn with_path_id(path_id: u32, rendered: String) -> String {
-        if path_id == 0 {
-            rendered
-        } else {
-            format!("{rendered} path-id {path_id}")
-        }
-    }
     fn section(out: &mut String, label: &str, items: &[String]) {
         if items.is_empty() {
             return;
@@ -344,24 +436,7 @@ pub(crate) fn involved_nlri(parsed: &ParsedUpdate) -> String {
                 "announced",
                 mp.afi,
                 mp.safi,
-                mp.announced
-                    .iter()
-                    .map(|e| with_path_id(e.path_id, e.prefix.to_string()))
-                    .chain(mp.flowspec_announced.iter().map(ToString::to_string))
-                    .chain(mp.evpn_announced.iter().map(|r| format!("{r:?}")))
-                    .chain(mp.bgpls_announced.iter().map(|r| format!("{r:?}")))
-                    .chain(
-                        mp.vpn_announced
-                            .iter()
-                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
-                    )
-                    .chain(
-                        mp.labeled_announced
-                            .iter()
-                            .map(|e| with_path_id(e.path_id, format!("{:?}", e.nlri))),
-                    )
-                    .chain(mp.rtc_announced.iter().map(ToString::to_string))
-                    .collect::<Vec<_>>(),
+                mp_reach_rendered(mp).collect::<Vec<_>>(),
             ),
             PathAttribute::MpUnreachNlri(mp) => (
                 "withdrawn",
@@ -1673,6 +1748,7 @@ impl PeerSession {
             }
             warn!(
                 peer = %self.peer_label,
+                attr_type = type_code,
                 subcode = update_err.subcode,
                 disposition = update_err.disposition.as_str(),
                 max_as_path_length = self.config.max_as_path_length,
@@ -1739,9 +1815,14 @@ impl PeerSession {
                 }
                 return;
             }
+            let summary = treat_as_withdraw_summary(&parsed);
             warn!(
                 peer = %self.peer_label,
-                announced = parsed.announced.len(),
+                announced = summary.announced,
+                families = %summary.families,
+                next_hop = %summary.next_hop,
+                link_local_next_hop = ?summary.link_local_next_hop,
+                prefixes = ?summary.prefixes,
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
             record_malformed_update(
