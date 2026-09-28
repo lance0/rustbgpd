@@ -38,8 +38,9 @@ fn stderr_on_pty(args: &[&str], env: &[(&str, &str)]) -> String {
     String::from_utf8_lossy(&output).into_owned()
 }
 
-#[test]
-fn policy_diagnostics_honor_color_switches_on_a_terminal() {
+/// Runs `policy check` (typecheck error) and `policy fmt --check` (syntax
+/// error) with `flag` and `env`, returning each command's stderr.
+fn policy_diagnostics(flag: Option<&str>, env: &[(&str, &str)]) -> Vec<(&'static str, String)> {
     let dir = tempfile::tempdir().unwrap();
     let bad_type = dir.path().join("bad_type.rpol");
     std::fs::write(
@@ -51,25 +52,43 @@ fn policy_diagnostics_honor_color_switches_on_a_terminal() {
     std::fs::write(&bad_syntax, "policy p { term t {").unwrap();
     let check = ["policy", "check", bad_type.to_str().unwrap()];
     let fmt = ["policy", "fmt", "--check", bad_syntax.to_str().unwrap()];
-
-    for (name, args) in [("check", &check[..]), ("fmt", &fmt[..])] {
-        let default = stderr_on_pty(args, &[]);
-        assert!(
-            default.contains('\x1b'),
-            "{name}: a terminal keeps coloured diagnostics: {default:?}"
-        );
-        for (case, flag, env) in [
-            ("--no-color", Some("--no-color"), None),
-            ("NO_COLOR=1", None, Some(("NO_COLOR", "1"))),
-            ("TERM=dumb", None, Some(("TERM", "dumb"))),
-        ] {
+    [("check", &check[..]), ("fmt", &fmt[..])]
+        .into_iter()
+        .map(|(name, args)| {
             let args: Vec<&str> = flag.into_iter().chain(args.iter().copied()).collect();
-            let output = stderr_on_pty(&args, env.as_slice());
-            assert!(
-                !output.contains('\x1b'),
-                "{name} {case}: escape codes in {output:?}"
-            );
-            assert!(output.contains("rror"), "{name} {case}: {output:?}");
-        }
+            (name, stderr_on_pty(&args, env))
+        })
+        .collect()
+}
+
+fn assert_plain(flag: Option<&str>, env: &[(&str, &str)]) {
+    for (name, output) in policy_diagnostics(flag, env) {
+        assert!(
+            !output.contains('\x1b'),
+            "{name} {flag:?} {env:?}: escape codes in {output:?}"
+        );
+        assert!(output.contains("rror"), "{name}: {output:?}");
     }
+}
+
+#[test]
+fn policy_diagnostics_are_coloured_on_a_terminal_by_default() {
+    for (name, output) in policy_diagnostics(None, &[]) {
+        assert!(output.contains('\x1b'), "{name}: {output:?}");
+    }
+}
+
+#[test]
+fn policy_diagnostics_honor_no_color_flag() {
+    assert_plain(Some("--no-color"), &[]);
+}
+
+#[test]
+fn policy_diagnostics_honor_no_color_env() {
+    assert_plain(None, &[("NO_COLOR", "1")]);
+}
+
+#[test]
+fn policy_diagnostics_honor_term_dumb() {
+    assert_plain(None, &[("TERM", "dumb")]);
 }
