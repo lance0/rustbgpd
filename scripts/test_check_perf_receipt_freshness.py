@@ -569,17 +569,57 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                 self.assert_red(error, overrides={path: text(path).replace(fragment, "removed", 1)})
 
     def test_zero_inbound_links_are_advisory_inventory(self) -> None:
-        self.assertEqual(
-            checker.unlinked_receipts(ROOT),
-            [
-                "docs/perf/event-history-producer-2026-07.md",
-                "docs/perf/persisted-config-serialization-2026-08.md",
-                "docs/perf/private-single-best-fanout-2026-07.md",
-                "docs/perf/shared-source-ordering-2026-07.md",
-                "docs/perf/vpn-rib-query-occupancy-method.md",
-            ],
-        )
+        self.assertEqual(checker.unlinked_receipts(ROOT), [])
         self.assertEqual(self.errors(), [])
+
+    def test_reference_style_link_counts_as_inbound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "docs" / "perf").mkdir(parents=True)
+            names = (
+                "inline",
+                "full",
+                "collapsed",
+                "shortcut",
+                "footnote",
+                "unused",
+                "orphan",
+                "first",
+                "duplicate",
+                "inline-text",
+                "image-text",
+            )
+            for name in names:
+                (root / "docs" / "perf" / f"{name}.md").write_text(f"# {name}\n", encoding="utf-8")
+            (root / "docs" / "index.md").write_text(
+                "[inline](perf/inline.md), [full][Full\n  Label], [Collapsed][],\n"
+                "[shortcut], and a note[^perf/footnote.md].\n"
+                "[twice], [inline text](perf/inline.md) and ![image text].\n"
+                "\n"
+                "[full label]: <perf/full.md> \"Reference title\"\n"
+                "[collapsed]: perf/collapsed.md\n"
+                "   [SHORTCUT]: perf/shortcut.md\n"
+                "[unused]: perf/unused.md\n"
+                "[Twice]: perf/first.md\n"
+                "[twice]: perf/duplicate.md\n"
+                "[inline text]: perf/inline-text.md\n"
+                "[image text]: perf/image-text.md\n"
+                "[^perf/footnote.md]: perf/footnote.md\n",
+                encoding="utf-8",
+            )
+            for arguments in (("init", "-q"), ("add", "--all")):
+                subprocess.run(("git", *arguments), cwd=root, check=True)
+            self.assertEqual(
+                checker.unlinked_receipts(root),
+                [
+                    "docs/perf/duplicate.md",
+                    "docs/perf/footnote.md",
+                    "docs/perf/image-text.md",
+                    "docs/perf/inline-text.md",
+                    "docs/perf/orphan.md",
+                    "docs/perf/unused.md",
+                ],
+            )
 
     def test_supersession_links_are_direct_and_non_destructive(self) -> None:
         self.assertIn(

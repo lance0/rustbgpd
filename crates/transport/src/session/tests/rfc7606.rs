@@ -1447,6 +1447,138 @@ async fn rfc7606_semantic_mp_next_hop_error_withdraws_without_reset() {
     );
 }
 
+/// An `MP_REACH`-only UPDATE whose global next hop is link-local (a peer
+/// whose global address is still DAD-tentative) is treated as withdraw. The
+/// warning must count the IPv6 announcement and name the rejected next hop
+/// and prefix, not report `announced=0` from the empty IPv4 body.
+#[tokio::test]
+async fn treat_as_withdraw_summary_counts_mp_reach_and_names_next_hop() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_dual_stack_session(&mut session, false);
+    rfc7606_drain(&mut rib_rx);
+
+    let nlri = [32, 0x20, 0x01, 0x0d, 0xb8];
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&rfc7606_mp_reach(&nlri)),
+            &[],
+        ))
+        .await;
+    rfc7606_drain(&mut rib_rx);
+    let mut mp_reach = rfc7606_mp_reach(&nlri);
+    mp_reach[7..23].copy_from_slice(&"fe80::1".parse::<Ipv6Addr>().unwrap().octets());
+    let update = rfc7606_update(rfc7606_attr_bytes(&mp_reach), &[]);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    assert_eq!(
+        super::inbound::treat_as_withdraw_summary(&revised.update),
+        super::inbound::TreatAsWithdrawSummary {
+            announced: 1,
+            families: "ipv6_unicast=1".into(),
+            next_hop: "fe80::1".into(),
+            link_local_next_hop: None,
+            prefixes: vec!["2001:db8::/32".into()],
+        }
+    );
+
+    // The same UPDATE takes the treat-as-withdraw path for this session.
+    session.process_update(update).await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("treat-as-withdraw must reach the RIB")
+    else {
+        panic!("expected RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(
+        withdrawn,
+        vec![(
+            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+            0
+        )]
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![(
+            "14".into(),
+            "invalid_next_hop".into(),
+            "treat_as_withdraw".into(),
+            1.0
+        )]
+    );
+}
+
+/// The IPv4-body treat-as-withdraw summary keeps its count and bounds the
+/// prefix sample.
+#[test]
+fn treat_as_withdraw_summary_bounds_the_ipv4_body_sample() {
+    let prefixes: Vec<Ipv4Prefix> = (0..10).map(v4_prefix).collect();
+    let update = rfc7606_update(rfc7606_attr_bytes(&[]), &prefixes);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    let summary = super::inbound::treat_as_withdraw_summary(&revised.update);
+    assert_eq!(summary.announced, 10);
+    assert_eq!(summary.families, "ipv4_unicast=10");
+    assert_eq!(summary.next_hop, "10.0.0.2");
+    assert_eq!(summary.link_local_next_hop, None);
+    assert_eq!(
+        summary.prefixes,
+        prefixes[..super::inbound::TREAT_AS_WITHDRAW_PREFIX_SAMPLE]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Non-unicast families use the canonical configuration labels, alongside
+/// the IPv4 body.
+#[test]
+fn treat_as_withdraw_summary_uses_canonical_family_labels() {
+    let mut vpn_reach = vec![0x80, 14, 0]; // optional flags, type, len (patched)
+    vpn_reach.extend([0, 1, 128, 12]); // AFI=IPv4, SAFI=MPLS-VPN, NH-Len=12
+    vpn_reach.extend([0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 2]); // RD 0, next hop 10.0.0.2
+    vpn_reach.push(0); // reserved
+    vpn_reach.push(112); // label (24) + RD (64) + /24
+    vpn_reach.extend([0x00, 0x06, 0x41]); // label 100, bottom of stack
+    vpn_reach.extend([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]); // RD 0:65000:1
+    vpn_reach.extend([10, 1, 0]); // 10.1.0.0/24
+    vpn_reach[2] = u8::try_from(vpn_reach.len() - 3).unwrap();
+    let update = rfc7606_update(rfc7606_attr_bytes(&vpn_reach), &[v4_prefix(1)]);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    let summary = super::inbound::treat_as_withdraw_summary(&revised.update);
+    assert_eq!(summary.announced, 2);
+    assert_eq!(summary.families, "ipv4_unicast=1, l3vpn_ipv4_unicast=1");
+    assert_eq!(summary.next_hop, "10.0.0.2");
+    assert_eq!(summary.prefixes.len(), 2, "{:?}", summary.prefixes);
+    assert!(
+        super::inbound::involved_nlri(&revised.update).contains("l3vpn_ipv4_unicast_announced"),
+        "the debug dump shares the canonical label"
+    );
+}
+
+/// An IPv4 body announcement and an IPv4-unicast `MP_REACH_NLRI` in one
+/// UPDATE are reported as one family count, not two `ipv4_unicast` entries.
+#[test]
+fn treat_as_withdraw_summary_aggregates_body_and_mp_reach_per_family() {
+    let mut v4_reach = vec![0x80, 14, 0]; // optional flags, type, len (patched)
+    v4_reach.extend([0, 1, 1, 4, 10, 0, 0, 3, 0]); // IPv4 unicast, NH 10.0.0.3, reserved
+    v4_reach.extend([24, 10, 2, 0]); // 10.2.0.0/24
+    v4_reach[2] = u8::try_from(v4_reach.len() - 3).unwrap();
+    let update = rfc7606_update(rfc7606_attr_bytes(&v4_reach), &[v4_prefix(1)]);
+    let revised = update.parse_revised(true, false, false, &[]).unwrap();
+    let summary = super::inbound::treat_as_withdraw_summary(&revised.update);
+    assert_eq!(summary.announced, 2);
+    assert_eq!(summary.families, "ipv4_unicast=2");
+    assert_eq!(summary.next_hop, "10.0.0.2, 10.0.0.3");
+    assert_eq!(summary.prefixes, ["203.0.1.0/24", "10.2.0.0/24"]);
+}
+
 /// An UPDATE whose only attributes were discarded as malformed must not be
 /// mistaken for an End-of-RIB marker.
 #[tokio::test]
