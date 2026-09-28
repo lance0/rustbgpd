@@ -104,6 +104,21 @@ ALLOWLIST = {
     "process_threads": "generic raw process thread-count diagnostic",
 }
 
+# Vacuity guard for the extractors, not a census: adding a family needs no
+# edit here. Each sentinel comes from a different extractor (static
+# definitions, the jemalloc collector, both queue-depth collectors,
+# settlement, TLS expiry), and the floor catches one that goes partly blind.
+INVENTORY_FLOOR = 200
+SENTINEL_FAMILIES = frozenset(
+    {
+        "bgp_peer_session_state",
+        "jemalloc_resident_bytes",
+        "bgp_session_notification_outstanding",
+        "bgp_event_outbox_queue_depth",
+        "bgp_runtime_config_settlement_active",
+        "bgp_grpc_tls_certificate_not_after_seconds",
+    }
+)
 REASON_LABELS = "crates/telemetry/src/reason_labels.rs"
 BLACKHOLE = "src/blackhole.rs"
 BLACKHOLE_LIMITS = "src/blackhole/limits.rs"
@@ -808,9 +823,19 @@ def workspace_metric_inventory(
         if name in inventory:
             raise ValueError(f"process family duplicates workspace family {name}")
         inventory[name] = "ordinary"
-    if len(inventory) != 222:
-        raise ValueError(f"emitted metric roster changed: expected 222, got {len(inventory)}")
+    validate_inventory_extraction(inventory)
     return dict(sorted(inventory.items()))
+
+
+def validate_inventory_extraction(inventory: dict[str, str]) -> None:
+    missing = sorted(SENTINEL_FAMILIES - set(inventory))
+    if missing:
+        raise ValueError(f"metric extractor lost sentinel families: {missing}")
+    if len(inventory) < INVENTORY_FLOOR:
+        raise ValueError(
+            f"metric extractor found {len(inventory)} families, "
+            f"below the {INVENTORY_FLOOR} floor"
+        )
 
 
 def normalize_metric(name: str, inventory: dict[str, str]) -> str | None:
