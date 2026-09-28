@@ -25,7 +25,8 @@ matrix S2 cell and IRR rustbgpd-sighup cell), one set per SIGHUP: SIGHUP
 received to "config source loaded" and to "config reload complete", the
 logged validate_ms, and the RIB transition (cohort_rib_transition_us). A
 daemon log must hold exactly as many completed reloads as the harness
-measured. A campaign directory must keep those daemon logs; a receipt bundle
+measured, and every completed reload must carry all four values. A campaign
+directory must keep those daemon logs; a receipt bundle
 does not carry them, so it has no daemon rows.
 
 Writes to DIR (default SOURCE, which must then be a campaign directory;
@@ -104,6 +105,12 @@ def log_time(record):
 
 RELOAD_MESSAGES = ("SIGHUP received", "config source loaded", "reload generation phase timing",
                    "config reload complete")
+RELOAD_METRICS = ("daemon_sighup_to_loaded", "daemon_sighup_to_complete", "daemon_validate",
+                  "daemon_rib_transition")
+# Where each value comes from, for the error that names a missing one.
+RELOAD_SOURCES = ("'config source loaded'", "'config reload complete'",
+                  "validate_ms ('config source loaded')",
+                  "cohort_rib_transition_us ('reload generation phase timing')")
 
 
 def daemon_reloads(daemon_log):
@@ -127,9 +134,9 @@ def daemon_reloads(daemon_log):
         elif message == "reload generation phase timing":
             rib = fields.get("cohort_rib_transition_us")
         elif message.startswith("config reload complete"):
-            reloads.append((round((loaded - start) * 1000, 1) if loaded else None,
+            reloads.append((round((loaded - start) * 1000, 1) if loaded is not None else None,
                             round((log_time(record) - start) * 1000, 1), validate,
-                            round(rib / 1000, 1) if rib else None))
+                            round(rib / 1000, 1) if rib is not None else None))
             start = None
     return reloads
 
@@ -144,10 +151,11 @@ def reload_rows(leg, phase, arm, run, daemon_log, expected, campaign):
         raise ExtractionError(f"{leg.name}: daemon log has {len(reloads)} completed reloads, harness measured {expected}")
     rows = []
     for index, values in enumerate(reloads, 1):
-        for metric, value in zip(("daemon_sighup_to_loaded", "daemon_sighup_to_complete",
-                                  "daemon_validate", "daemon_rib_transition"), values):
-            if value is not None:
-                rows.append([phase, arm, run, metric, index, value, "ms"])
+        missing = [source for source, value in zip(RELOAD_SOURCES, values) if value is None]
+        if missing:
+            raise ExtractionError(f"{leg.name}: daemon log reload {index} lacks {', '.join(missing)}")
+        for metric, value in zip(RELOAD_METRICS, values):
+            rows.append([phase, arm, run, metric, index, value, "ms"])
     return rows
 
 

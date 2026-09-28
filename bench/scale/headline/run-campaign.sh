@@ -4,7 +4,9 @@
 # campaigns, across two or more arms built from this repository. Strictly
 # sequential; the arm order rotates every run.
 #
-# Usage: run-campaign.sh OUT_DIR LABEL=REF [LABEL=REF ...]
+# Usage: run-campaign.sh OUT_DIR LABEL=REF LABEL=REF [LABEL=REF ...]
+#
+# A campaign compares at least two arms.
 #
 #   LABEL=REF          an arm: REF's tree, built and run with its own runners
 #                      and harnesses. LABEL is letters, digits, '.' and '_'.
@@ -20,8 +22,12 @@
 # re-parented before its next IRR root; its tree never changes.
 #
 # Legs land in OUT_DIR as matrix-LABEL-rN-s{2,3}, irr-ovF-LABEL-rN and
-# rr1000-LABEL-cN. A rerun with the same arguments resumes: finished legs are
-# skipped and a failed IRR or RR1000 leg is moved aside and run again.
+# rr1000-LABEL-cN. OUT_DIR/manifest.txt records the campaign's shape on first
+# start: each arm's resolved commits, CELLS, RUNS, OVERLAPS, IRR_CELLS,
+# MATRIX_SCENARIOS, the MATRIX_* shape and SMOKE. A rerun with the same shape
+# resumes: finished legs are skipped and a failed IRR or RR1000 leg is moved
+# aside and run again. A rerun with any other shape is refused, so one output
+# directory never mixes legs from two shapes.
 # progress.txt logs every leg boundary with the load average, the swap-in and
 # swap-out counters, and the CPUs the leg may run on; placement.txt records
 # the campaign's CPU affinity, which every runner, harness and daemon inherits
@@ -62,7 +68,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 OUT_DIR LABEL=REF [LABEL=REF | LABEL=HARNESS_REF:DAEMON_REF ...]" >&2
+    echo "usage: $0 OUT_DIR ARM ARM [ARM ...]  (ARM is LABEL=REF or LABEL=HARNESS_REF:DAEMON_REF)" >&2
     exit 2
 }
 die() {
@@ -71,7 +77,7 @@ die() {
 }
 log() { echo "[$(date -Is)] $*" | tee -a "$OUT/progress.txt"; }
 
-[[ $# -ge 2 ]] || usage
+[[ $# -ge 3 ]] || usage
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 OUT=$(realpath -m "$1")
 shift
@@ -110,7 +116,10 @@ done
 wants() { [[ " ${PHASES[*]} " == *" $1 "* ]]; }
 
 declare -a ARMS=()
-declare -A HARNESS_REF=() DAEMON_REF=()
+declare -A HARNESS_REF=() DAEMON_REF=() HARNESS_SHA=() DAEMON_SHA=()
+resolve() {
+    git -C "$REPO" rev-parse --verify -q "$1^{commit}" || { echo "unknown ref: $1" >&2; exit 2; }
+}
 for spec in "$@"; do
     [[ $spec =~ ^([A-Za-z0-9._]+)=([^:]+)(:(.+))?$ ]] || usage
     label=${BASH_REMATCH[1]}
@@ -118,6 +127,8 @@ for spec in "$@"; do
     ARMS+=("$label")
     HARNESS_REF[$label]=${BASH_REMATCH[2]}
     DAEMON_REF[$label]=${BASH_REMATCH[4]:-${BASH_REMATCH[2]}}
+    HARNESS_SHA[$label]=$(resolve "${HARNESS_REF[$label]}")
+    DAEMON_SHA[$label]=$(resolve "${DAEMON_REF[$label]}")
 done
 is_cross() { [[ ${DAEMON_REF[$1]} != "${HARNESS_REF[$1]}" ]]; }
 
@@ -163,12 +174,31 @@ if [[ -n ${HEADLINE_MARKER:-} ]]; then
     trap 'rm -f "$HEADLINE_MARKER"' EXIT
 fi
 
-# A resumed campaign must describe the same arms.
-arms_now=$(for arm in "${ARMS[@]}"; do echo "$arm=${HARNESS_REF[$arm]}:${DAEMON_REF[$arm]}"; done)
-if [[ -e $OUT/arms.txt ]]; then
-    [[ $(cat "$OUT/arms.txt") == "$arms_now" ]] || { echo "OUT_DIR holds a campaign with other arms" >&2; exit 2; }
+# A resumed campaign must have exactly the shape it started with.
+manifest() {
+    local arm
+    for arm in "${ARMS[@]}"; do echo "arm $arm=${HARNESS_SHA[$arm]}:${DAEMON_SHA[$arm]}"; done
+    echo "cells=${PHASES[*]}"
+    echo "runs=$RUNS"
+    echo "overlaps=${OVERLAP_LIST[*]}"
+    echo "irr_cells=$IRR_CELLS"
+    echo "matrix_scenarios=${SCENARIOS[*]}"
+    echo "matrix_peers=$MATRIX_PEERS matrix_prefixes=$MATRIX_PREFIXES matrix_reloads=$MATRIX_RELOADS"
+    echo "matrix_control_secs=$MATRIX_CONTROL_SECS matrix_flapstorm=$MATRIX_FLAPSTORM"
+    echo "smoke=${SMOKE:+1}"
+}
+if [[ -e $OUT/manifest.txt ]]; then
+    if ! mismatch=$(diff "$OUT/manifest.txt" <(manifest)); then
+        echo "OUT_DIR holds a campaign with another shape; use a fresh OUT_DIR (< recorded, > requested):" >&2
+        echo "$mismatch" >&2
+        exit 2
+    fi
+elif [[ -e $OUT/arms.txt ]]; then
+    echo "OUT_DIR holds a campaign without a manifest; use a fresh OUT_DIR" >&2
+    exit 2
 else
-    echo "$arms_now" >"$OUT/arms.txt"
+    manifest >"$OUT/manifest.txt"
+    for arm in "${ARMS[@]}"; do echo "$arm=${HARNESS_REF[$arm]}:${DAEMON_REF[$arm]}"; done >"$OUT/arms.txt"
 fi
 [[ -z $SMOKE ]] || echo "pipeline check at a reduced shape; not a measurement" >"$OUT/SMOKE"
 cpus() { awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status; }
@@ -187,8 +217,8 @@ build_product() { # TREE LOG
 
 setup_arm() {
     local arm=$1 tree=$OUT/trees/$1 log=$OUT/build-$1.log harness daemon ctl dtree before after
-    harness=$(git -C "$REPO" rev-parse --verify "${HARNESS_REF[$arm]}^{commit}")
-    daemon=$(git -C "$REPO" rev-parse --verify "${DAEMON_REF[$arm]}^{commit}")
+    harness=${HARNESS_SHA[$arm]}
+    daemon=${DAEMON_SHA[$arm]}
     if [[ ! -d $tree ]]; then
         ctl=$(git -C "$REPO" commit-tree "$harness^{tree}" -p "$MAIN" \
             -m "local measurement control: $arm, tree of ${HARNESS_REF[$arm]} (never pushed)")

@@ -116,16 +116,22 @@ class ReceiptReproduction(unittest.TestCase):
         })
 
 
-def daemon_log(reloads, complete="config reload complete (one runtime generation)"):
-    """A daemon JSON log with RELOADS SIGHUP reloads: loaded at +100 ms, complete at +1,199 ms."""
+def daemon_log(reloads, complete="config reload complete (one runtime generation)", drop=()):
+    """A daemon JSON log with RELOADS SIGHUP reloads: loaded at +100 ms, complete at +1,199 ms.
+
+    DROP holds (reload, part) pairs to leave out: part is "loaded", "validate" or "rib"."""
     def record(stamp, message, **fields):
         return json.dumps({"timestamp": f"2026-09-28T01:{stamp}Z", "fields": {"message": message, **fields}}) + "\n"
     lines = [record("00:00.000000", "session established")]
     for minute in range(1, reloads + 1):
-        lines += [record(f"{minute:02d}:00.000000", "SIGHUP received, reloading configuration"),
-                  record(f"{minute:02d}:00.100000", "config source loaded", validate_ms=84),
-                  record(f"{minute:02d}:00.900000", "reload generation phase timing", cohort_rib_transition_us=581000),
-                  record(f"{minute:02d}:01.199000", complete)]
+        lines.append(record(f"{minute:02d}:00.000000", "SIGHUP received, reloading configuration"))
+        if (minute, "loaded") not in drop:
+            validate = {} if (minute, "validate") in drop else {"validate_ms": 84}
+            lines.append(record(f"{minute:02d}:00.100000", "config source loaded", **validate))
+        if (minute, "rib") not in drop:
+            lines.append(record(f"{minute:02d}:00.900000", "reload generation phase timing",
+                                cohort_rib_transition_us=581000))
+        lines.append(record(f"{minute:02d}:01.199000", complete))
     return "".join(lines)
 
 
@@ -235,6 +241,16 @@ class ExtractorFailsClosed(unittest.TestCase):
         with self.assertRaisesRegex(summarize.ExtractionError, "3 completed reloads, harness measured 4"):
             summarize.extract(self.tmp)
 
+    def test_reload_missing_a_field_fails(self):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
+        for drop, message in (((2, "rib"), "reload 2 lacks cohort_rib_transition_us"),
+                              ((3, "validate"), "reload 3 lacks validate_ms"),
+                              ((1, "loaded"), "reload 1 lacks 'config source loaded', validate_ms")):
+            with self.subTest(drop=drop):
+                (cell / "daemon.log").write_text(daemon_log(4, drop={drop}))
+                with self.assertRaisesRegex(summarize.ExtractionError, f"matrix-a-r1-s2: daemon log {message}"):
+                    summarize.extract(self.tmp)
+
     def test_campaign_must_keep_daemon_logs(self):
         matrix_leg(self.tmp, "matrix-a-r1-s2")
         (self.tmp / "arms.txt").write_text("a=HEAD:HEAD\n")
@@ -328,21 +344,28 @@ class CampaignFailsClosed(unittest.TestCase):
         return (self.out / "progress.txt").read_text()
 
     def test_failed_build_exits_nonzero(self):
-        result = self.campaign("a=HEAD", FAKE_CARGO="fail")
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="fail")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("campaign done", self.progress())
         self.assertFalse(list(self.out.glob("matrix-*")))
 
     def test_commit_dependent_daemon_exits_nonzero(self):
-        result = self.campaign("a=HEAD", FAKE_CARGO="commit")
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="commit")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("STOP: a: daemon at HEAD hashes", self.progress())
         self.assertNotIn("campaign done", self.progress())
 
     def test_failed_leg_exits_nonzero(self):
-        result = self.campaign("a=HEAD", FAKE_CARGO="tree", FAKE_MATRIX_FAIL="1")
+        result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree", FAKE_MATRIX_FAIL="1")
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("campaign done rc=1 failed=matrix-a-r1-s2 matrix-a-r1-s3", self.progress())
+        self.assertIn("campaign done rc=1 failed=matrix-a-r1-s2 matrix-a-r1-s3 matrix-b-r1-s2 matrix-b-r1-s3",
+                      self.progress())
+
+    def test_one_arm_is_refused(self):
+        result = self.campaign("a=HEAD", FAKE_CARGO="tree")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("usage:", result.stderr)
+        self.assertFalse(self.out.exists())
 
     def test_two_arms_pass_and_summarize(self):
         result = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
@@ -355,16 +378,32 @@ class CampaignFailsClosed(unittest.TestCase):
         again = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
         self.assertEqual(again.returncode, 0)
         self.assertEqual(self.progress().count("already pass, skip"), 4)
-        # Other arms in the same output directory are refused.
-        self.assertEqual(self.campaign("c=HEAD", "b=HEAD", FAKE_CARGO="tree").returncode, 2)
+        # Any other shape in the same output directory is refused before a leg runs.
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+        self.assertEqual(self.campaign("a=HEAD", f"b={head}", FAKE_CARGO="tree").returncode, 0)
+        for arms, env in ((("c=HEAD", "b=HEAD"), {}), (("a=HEAD", "b=HEAD"), {"RUNS": "2"}),
+                          (("a=HEAD", "b=HEAD"), {"SMOKE": "1"}), (("a=HEAD", "b=HEAD"), {"MATRIX_SCENARIOS": "s2"}),
+                          (("a=HEAD", "b=HEAD"), {"CELLS": "matrix,irr"}), (("a=HEAD", "b=HEAD"), {"MATRIX_PEERS": "20"})):
+            with self.subTest(arms=arms, env=env):
+                refused = self.campaign(*arms, FAKE_CARGO="tree", **env)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn("campaign with another shape", refused.stderr)
+        # A moved ref resolves to another commit, which is another shape too.
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "next"], cwd=self.repo, check=True)
+        moved = self.campaign("a=HEAD", "b=HEAD", FAKE_CARGO="tree")
+        self.assertEqual(moved.returncode, 2)
+        self.assertIn(f"< arm a={head}:{head}", moved.stderr)
+        self.assertEqual(self.progress().count("campaign start"), 3)
 
     def test_dry_run_rotates_arm_order(self):
         result = self.campaign("a=HEAD", "b=HEAD", "c=HEAD", DRY_RUN="1", CELLS="rr", RUNS="3")
         self.assertEqual(result.returncode, 0)
         order = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("rr ")]
         self.assertEqual(order, ["a", "b", "c", "b", "c", "a", "c", "a", "b"])
-        legs = self.campaign("a=HEAD", DRY_RUN="1", MATRIX_SCENARIOS="s2").stdout
-        self.assertEqual([line for line in legs.splitlines() if line.startswith("matrix")], ["matrix a 1 s2"])
+        legs = self.campaign("a=HEAD", "b=HEAD", DRY_RUN="1", MATRIX_SCENARIOS="s2").stdout
+        self.assertEqual([line for line in legs.splitlines() if line.startswith("matrix")],
+                         ["matrix a 1 s2", "matrix b 1 s2"])
         self.assertFalse(self.out.exists())
 
 
