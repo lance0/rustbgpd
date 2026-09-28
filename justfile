@@ -462,19 +462,28 @@ bench-rrtransport *args:
     exec bash bench/scale/rrtransport/run-receipt.sh "$@"
 
 # The daemon is built with the IRR runner's three-package command, so one
-# source gives the same daemon hash under either driver.
+# source gives the same daemon hash under either driver. Both recipes take
+# the host lock before building, so a busy host refuses with 75 before any
+# compile. run-matrix.sh takes the lock itself, and a second open of the same
+# lock file conflicts even within one process tree, so bench-ixp-matrix
+# releases it after the build; policy_stats_cell.sh takes none, so
+# bench-policy-stats keeps holding it.
 
 # Measure IXP reload-stall matrix cells with run-matrix.sh (default: rustbgpd bird openbgpd) after building the daemon and reloadstall; N_PEERS, FLAPSTORM, ARTIFACTS_DIR and the other knobs in its header pass through.
 [positional-arguments]
 bench-ixp-matrix *cells:
     #!/usr/bin/env bash
     set -euo pipefail
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         -p rustbgpd -p rustbgpctl -p rs-config-render
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         --manifest-path bench/scale/reloadstall/Cargo.toml
     # The membership cell needs more descriptors (bench/scale/reloadstall/README.md).
     [[ ${RELOADSTALL_MEMBERSHIP_CHURN:-0} != 1 ]] || ulimit -n 65536
+    flock -u "$RUSTBGPD_HOST_LOCK_FD"
+    exec {RUSTBGPD_HOST_LOCK_FD}>&-
     exec bash bench/scale/matrix/run-matrix.sh "$@"
 
 # Measure the GetPolicyStats reload cell into RUN_DIR, a new directory, under the host lock; PEERS, PREFIXES, RELOADS and the CPU sets in its header pass through.
@@ -482,12 +491,12 @@ bench-ixp-matrix *cells:
 bench-policy-stats run_dir:
     #!/usr/bin/env bash
     set -euo pipefail
+    source tests/soak/host-lock.sh
+    acquire_rustbgpd_host_lock || exit $?
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         -p rustbgpd -p rustbgpctl -p rs-config-render
     env -u CARGO_TARGET_DIR -u RUSTFLAGS cargo build --release --locked \
         --manifest-path bench/scale/reloadstall/Cargo.toml
-    source tests/soak/host-lock.sh
-    acquire_rustbgpd_host_lock || exit $?
     exec bash bench/scale/reloadstall/policy_stats_cell.sh \
         target/release bench/scale/target/release/reloadstall "$1"
 
