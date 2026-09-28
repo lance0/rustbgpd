@@ -2734,4 +2734,68 @@ mod tests {
         drop((svc, rib, rib_tx));
         manager_task.await.unwrap();
     }
+
+    /// With receive-side validation enabled, the reconciliation read reports
+    /// every injected rule as LOCAL, complete and not pending, whatever its
+    /// shape: a rule with no covering unicast route and a rule with no
+    /// destination (both infeasible for a received candidate) are trusted
+    /// local origination.
+    #[tokio::test]
+    async fn flowspec_reconciliation_reports_local_when_validation_enabled() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+        .with_flowspec_validation(65000);
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let rib = crate::rib_service::RibService::new(rib_tx.clone());
+
+        assert_eq!(
+            add_rate(&svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Created
+        );
+        let destinationless = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![proto::FlowSpecComponent {
+                    r#type: 3,
+                    prefix: String::new(),
+                    value: "=17".into(),
+                    offset: 0,
+                }],
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }))
+            .await
+            .expect("add accepted")
+            .into_inner();
+        assert_eq!(
+            destinationless.outcome(),
+            proto::FlowSpecInjectOutcome::Created
+        );
+
+        let local = list_local_flowspec(&rib).await;
+        assert!(local.received_view);
+        assert_eq!(local.received_routes.len(), 2, "{local:?}");
+        for row in &local.received_routes {
+            assert_eq!(
+                row.validation,
+                proto::FlowSpecValidationStatus::Local as i32,
+                "{row:?}"
+            );
+            assert!(row.reason.is_empty(), "{row:?}");
+            assert!(!row.pending, "{row:?}");
+            assert!(row.selected, "{row:?}");
+            assert_eq!(row.route.as_ref().unwrap().peer_address, "0.0.0.0");
+        }
+
+        drop((svc, rib, rib_tx));
+        manager_task.await.unwrap();
+    }
 }
