@@ -66,7 +66,8 @@ v0.61.0 release-tip real-daemon and single-revision absolute baseline:
 2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
 host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24;
 MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25; current
-v0.68.0 cross-stack bgperf2 campaign: 2026-08-30.
+v0.68.0 cross-stack bgperf2 campaign: 2026-08-30; v0.73.0 release-tag bgperf2
+spot-check (rustbgpd only, same host): 2026-09-28.
 
 | Field | Value |
 |-------|-------|
@@ -1566,6 +1567,21 @@ the lowest median convergence time. No CPU or memory ranking is claimed. These
 same-host IPv4 import results
 do not cover policy, reload, churn, restart, or absolute behavior on another
 machine.
+
+*v0.73.0 spot-check (2026-09-28, same host): a single run of the three
+original shapes against an image built with no cache from the `v0.73.0` tag
+(commit `33567607`), with the same BIRD 2.19.2 tester image and GoBGP 4.8.0
+monitor as the campaign above. Convergence was 2 / 2 / 3 s and total time
+8.31 / 8.31 / 12.62 s for 10p × 1k / 2p × 10k / 2p × 100k. Every total is
+0.02–0.07 s above the v0.68.0 cell's four-run range, and the convergence
+seconds are unchanged. Peak container memory was 46.4 / 47.9 / 204.9 MB against
+28–30 / 37–40 / 184–201 MB in the v0.68.0 rows; this single run does not
+attribute that difference. The harness was bgperf2 `642a177`, against
+`d0449574` for the campaign above. The fork has since taken upstream changes,
+including one to the convergence wait, so the totals are not a strict
+like-for-like comparison. Single run, rustbgpd only; the four-daemon medians
+above are unchanged. The rows are retained in the
+[v0.73.0 headline refresh bundle](perf/artifacts/headline-refresh-v0730-2026-09/bgperf2-spot-check.csv).*
 
 ### Historical July results
 

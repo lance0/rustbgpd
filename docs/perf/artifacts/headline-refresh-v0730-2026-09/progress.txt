@@ -1,0 +1,110 @@
+[2026-09-27T22:31:47-04:00] matrix v0730 r1 s2 start load=1.22 2.48 3.41 pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:39:26-04:00] matrix v0730 r1 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:39:27-04:00] matrix v0730 r1 s3 start load=1.14 1.71 2.73 pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:46:45-04:00] matrix v0730 r1 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:46:46-04:00] matrix v0720 r1 s2 start load=1.01 1.30 2.17 pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:54:30-04:00] matrix v0720 r1 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T22:54:30-04:00] matrix v0720 r1 s3 start load=1.05 1.16 1.77 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:01:44-04:00] matrix v0720 r1 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:01:44-04:00] matrix v0680 r1 s2 start load=1.16 1.30 1.64 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:09:23-04:00] matrix v0680 r1 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:09:23-04:00] matrix v0680 r1 s3 start load=1.08 1.38 1.61 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:16:37-04:00] matrix v0680 r1 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:16:37-04:00] matrix v0720 r2 s2 start load=1.04 1.35 1.55 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:24:16-04:00] matrix v0720 r2 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:24:17-04:00] matrix v0720 r2 s3 start load=1.16 1.42 1.55 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:31:30-04:00] matrix v0720 r2 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:31:31-04:00] matrix v0680 r2 s2 start load=1.19 1.32 1.47 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:39:09-04:00] matrix v0680 r2 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:39:10-04:00] matrix v0680 r2 s3 start load=1.92 1.72 1.64 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:46:23-04:00] matrix v0680 r2 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:46:24-04:00] matrix v0730 r2 s2 start load=1.80 1.75 1.71 pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:54:03-04:00] matrix v0730 r2 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-27T23:54:03-04:00] matrix v0730 r2 s3 start load=1.10 1.74 1.83 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:01:22-04:00] matrix v0730 r2 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:01:22-04:00] matrix v0680 r3 s2 start load=1.23 1.41 1.65 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:09:01-04:00] matrix v0680 r3 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:09:01-04:00] matrix v0680 r3 s3 start load=1.11 1.52 1.70 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:16:15-04:00] matrix v0680 r3 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:16:15-04:00] matrix v0730 r3 s2 start load=1.41 1.56 1.68 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:23:54-04:00] matrix v0730 r3 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:23:54-04:00] matrix v0730 r3 s3 start load=1.06 1.37 1.58 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:31:13-04:00] matrix v0730 r3 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:31:14-04:00] matrix v0720 r3 s2 start load=1.47 1.34 1.48 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:38:57-04:00] matrix v0720 r3 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:38:58-04:00] matrix v0720 r3 s3 start load=1.01 1.19 1.36 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:46:12-04:00] matrix v0720 r3 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:46:12-04:00] irr ov=0 v0730 r1 cells=rustbgpd-sighup start load=1.09 1.23 1.34 pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:55:43-04:00] irr ov=0 v0730 r1 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790571343670978984,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T00:55:44-04:00] irr ov=0 v0720 r1 cells=rustbgpd-sighup start load=1.06 1.21 1.33 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:05:51-04:00] irr ov=0 v0720 r1 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790571951469438021,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:05:51-04:00] irr ov=0 v0680 r1 cells=rustbgpd-sighup start load=1.01 1.26 1.39 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:15:49-04:00] irr ov=0 v0680 r1 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790572549779761895,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:15:50-04:00] irr ov=0 v0720 r2 cells=rustbgpd-sighup start load=1.12 1.28 1.41 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:24:10-04:00] irr ov=0 v0720 r2 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790573050468547659,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:24:10-04:00] irr ov=0 v0680 r2 cells=rustbgpd-sighup start load=1.11 1.41 1.47 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:32:21-04:00] irr ov=0 v0680 r2 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790573541135548049,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:32:21-04:00] irr ov=0 v0730 r2 cells=rustbgpd-sighup start load=1.04 1.21 1.36 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:40:41-04:00] irr ov=0 v0730 r2 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790574041514033760,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:40:41-04:00] irr ov=0 v0680 r3 cells=rustbgpd-sighup start load=1.92 1.77 1.58 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:48:52-04:00] irr ov=0 v0680 r3 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790574532258161885,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:48:52-04:00] irr ov=0 v0730 r3 cells=rustbgpd-sighup start load=1.10 1.31 1.43 pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:57:07-04:00] irr ov=0 v0730 r3 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790575027545731901,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T01:57:07-04:00] irr ov=0 v0720 r3 cells=rustbgpd-sighup start load=1.03 1.31 1.43 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:05:28-04:00] irr ov=0 v0720 r3 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790575528198077854,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:05:28-04:00] rr1000 v0730 c1 start load=1.10 1.17 1.30 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:06:11-04:00] rr1000 v0730 c1 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:06:11-04:00] rr1000 v0720 c1 start load=2.42 1.53 1.42 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:06:54-04:00] rr1000 v0720 c1 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:06:55-04:00] rr1000 v0680 c1 start load=2.45 1.66 1.47 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:35-04:00] rr1000 v0680 c1 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:35-04:00] rr1000 v0720 c2 start load=4.56 2.43 1.75 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:43-04:00] rr1000 v0720 c2 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:43-04:00] rr1000 v0680 c2 start load=4.17 2.41 1.75 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:50-04:00] rr1000 v0680 c2 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:51-04:00] rr1000 v0730 c2 start load=3.84 2.40 1.75 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:58-04:00] rr1000 v0730 c2 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:07:59-04:00] rr1000 v0680 c3 start load=4.01 2.46 1.78 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:05-04:00] rr1000 v0680 c3 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:06-04:00] rr1000 v0730 c3 start load=3.70 2.44 1.78 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:14-04:00] rr1000 v0730 c3 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:14-04:00] rr1000 v0720 c3 start load=4.44 2.62 1.84 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:22-04:00] rr1000 v0720 c3 rc=0 completed=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:08:22-04:00] phase all done
+campaign all rc=0
+[2026-09-28T02:08:52-04:00] matrix xh r4 s2 start load=2.91 2.46 1.82 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:17:31-04:00] matrix xh r4 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:17:32-04:00] matrix xh r4 s3 start load=1.02 1.43 1.58 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:24:48-04:00] matrix xh r4 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:24:49-04:00] matrix v0680 r4 s2 start load=1.03 1.27 1.47 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:32:27-04:00] matrix v0680 r4 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:32:28-04:00] matrix v0680 r4 s3 start load=1.05 1.35 1.49 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:39:41-04:00] matrix v0680 r4 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:39:42-04:00] matrix v0680 r5 s2 start load=1.05 1.25 1.41 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:47:20-04:00] matrix v0680 r5 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:47:21-04:00] matrix v0680 r5 s3 start load=1.08 1.23 1.35 pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:54:34-04:00] matrix v0680 r5 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T02:54:35-04:00] matrix xh r5 s2 start load=1.03 1.34 1.41 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:02:15-04:00] matrix xh r5 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:02:15-04:00] matrix xh r5 s3 start load=1.91 1.60 1.51 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:09:31-04:00] matrix xh r5 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:09:32-04:00] matrix xh r6 s2 start load=1.10 1.43 1.50 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:17:12-04:00] matrix xh r6 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:17:12-04:00] matrix xh r6 s3 start load=1.04 1.35 1.48 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:24:29-04:00] matrix xh r6 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:24:29-04:00] matrix v0680 r6 s2 start load=1.22 1.31 1.43 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:32:08-04:00] matrix v0680 r6 s2 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:32:08-04:00] matrix v0680 r6 s3 start load=1.19 1.61 1.63 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:39:22-04:00] matrix v0680 r6 s3 rc=0 status=pass pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:39:22-04:00] phase xh done
+campaign xh rc=0
+[2026-09-28T03:39:28-04:00] irr ov=0 v0730 r4 cells=rustbgpd-sighup start load=1.03 1.23 1.44 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:47:43-04:00] irr ov=0 v0730 r4 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790581663712794650,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:47:44-04:00] irr ov=0 v0720 r4 cells=rustbgpd-sighup start load=1.16 1.22 1.36 pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:55:59-04:00] irr ov=0 v0720 r4 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790582159294894736,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T03:55:59-04:00] irr ov=0 v0720 r5 cells=rustbgpd-sighup start load=1.04 1.24 1.34 pswpin=2424677 pswpout=2447475 
+[2026-09-28T04:04:19-04:00] irr ov=0 v0720 r5 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790582659808779753,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T04:04:20-04:00] irr ov=0 v0730 r5 cells=rustbgpd-sighup start load=1.24 1.31 1.36 pswpin=2424677 pswpout=2447475 
+[2026-09-28T04:12:40-04:00] irr ov=0 v0730 r5 rc=0 completed={"status":"pass","completed_at_epoch_ns":1790583160206595743,"cells":"rustbgpd-sighup"} pswpin=2424677 pswpout=2447475 
+[2026-09-28T04:12:40-04:00] phase irrx done
+campaign irrx rc=0

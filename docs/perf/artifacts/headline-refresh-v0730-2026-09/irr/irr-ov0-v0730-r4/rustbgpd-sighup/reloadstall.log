@@ -1,0 +1,59 @@
+# reloadstall peers=320 changed_peers=320 stable_peers=0 prefixes=183040 per_peer=572 pid=494615
+established 320 at 0.3s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=320,total=183040,per_peer=572,expected=182468,completed=320,min_unique=182468,max_unique=182468
+converged (>= 182468/observer) at 3.0s rss_mib=518
+control_maxgap_ms: p50=18.36 p95=18.66 max=41.97 (n=320)
+control_rss_mib 491
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+dataset-stage generation=b changed=36 total=640
+reload 1 SIGHUP wall_us=1790581262713676 policy=/tmp/irr-rustbgpd-sighup/gen-b.rpol
+reload 1 receiver_barriers_complete awaiting_daemon_settlement
+reload 1 daemon_applied complete_before=0 complete_after=1
+reload 1 completion_s: p50=1.37 p95=1.45 max=1.47 (n=320)
+reload 1 maxgap_ms: p50=542.07 p95=577.73 max=617.53 (n=320)
+reload 1 all_observer_maxgap_ms: p50=542.07 p95=577.73 max=617.53 (n=320)
+reload 1 changed_first_generation_update_ms: p50=1135.63 p95=1170.88 max=1211.33 (n=320)
+reload 1 rss_mib before=501 after=636 comms_sample=[4286056400]
+reload 1 sessions_up 320/320
+reload 1 stable_marker_peers 0/0
+reload 1 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,320,320,0,183040,1.374066,1.449391,1.470307,542.070,577.733,617.527,542.070,577.733,617.527,1135.634,1170.885,1211.328,501,636,0,320,0
+dataset-stage generation=a changed=36 total=640
+reload 2 SIGHUP wall_us=1790581286083918 policy=/tmp/irr-rustbgpd-sighup/gen-a.rpol
+reload 2 daemon_applied complete_before=1 complete_after=2
+reload 2 completion_s: p50=1.32 p95=1.45 max=1.46 (n=320)
+reload 2 maxgap_ms: p50=535.87 p95=777.51 max=812.10 (n=320)
+reload 2 all_observer_maxgap_ms: p50=535.87 p95=777.51 max=812.10 (n=320)
+reload 2 changed_first_generation_update_ms: p50=1141.71 p95=1383.00 max=1416.57 (n=320)
+reload 2 rss_mib before=560 after=664 comms_sample=[4286055400]
+reload 2 sessions_up 320/320
+reload 2 stable_marker_peers 0/0
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,320,320,0,183040,1.322273,1.454692,1.462167,535.874,777.510,812.100,535.874,777.510,812.100,1141.714,1382.997,1416.570,560,664,0,320,0
+dataset-stage generation=b changed=36 total=640
+reload 3 SIGHUP wall_us=1790581308646598 policy=/tmp/irr-rustbgpd-sighup/gen-b.rpol
+reload 3 daemon_applied complete_before=2 complete_after=3
+reload 3 completion_s: p50=1.33 p95=1.47 max=1.47 (n=320)
+reload 3 maxgap_ms: p50=568.88 p95=869.71 max=888.57 (n=320)
+reload 3 all_observer_maxgap_ms: p50=568.88 p95=869.71 max=888.57 (n=320)
+reload 3 changed_first_generation_update_ms: p50=1125.13 p95=1426.17 max=1445.24 (n=320)
+reload 3 rss_mib before=560 after=646 comms_sample=[4286056400]
+reload 3 sessions_up 320/320
+reload 3 stable_marker_peers 0/0
+reload 3 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,320,320,0,183040,1.329714,1.466702,1.474859,568.878,869.706,888.571,568.878,869.706,888.571,1125.133,1426.167,1445.241,560,646,0,320,0
+dataset-stage generation=a changed=36 total=640
+reload 4 SIGHUP wall_us=1790581331297340 policy=/tmp/irr-rustbgpd-sighup/gen-a.rpol
+reload 4 daemon_applied complete_before=3 complete_after=4
+reload 4 completion_s: p50=1.33 p95=1.44 max=1.45 (n=320)
+reload 4 maxgap_ms: p50=603.66 p95=856.11 max=907.43 (n=320)
+reload 4 all_observer_maxgap_ms: p50=603.66 p95=856.11 max=907.43 (n=320)
+reload 4 changed_first_generation_update_ms: p50=1099.38 p95=1352.54 max=1403.98 (n=320)
+reload 4 rss_mib before=565 after=652 comms_sample=[4286055400]
+reload 4 sessions_up 320/320
+reload 4 stable_marker_peers 0/0
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,320,320,0,183040,1.327537,1.438747,1.448107,603.657,856.109,907.429,603.657,856.109,907.429,1099.376,1352.541,1403.984,565,652,0,320,0
+final sessions_up 320/320 parse_errors=0
+done rss_mib=555

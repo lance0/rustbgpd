@@ -1,0 +1,5 @@
+cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+rustbgpd-sighup,1,320,320,0,183040,1.005805,1.085865,1.090103,447.305,499.546,576.656,447.305,499.546,576.656,793.944,846.023,923.816,480,583,0,320,0
+rustbgpd-sighup,2,320,320,0,183040,0.916219,1.026376,1.032378,446.466,635.784,682.952,446.466,635.784,682.952,732.925,922.247,969.669,538,633,0,320,0
+rustbgpd-sighup,3,320,320,0,183040,0.916133,1.023932,1.037929,468.434,708.424,741.742,468.434,708.424,741.742,739.399,979.594,1012.841,539,633,0,320,0
+rustbgpd-sighup,4,320,320,0,183040,0.933822,1.035213,1.043974,458.025,612.922,674.462,458.025,612.922,674.462,755.079,909.484,971.487,540,632,0,320,0

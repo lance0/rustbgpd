@@ -1,0 +1,55 @@
+# reloadstall peers=700 changed_peers=700 stable_peers=0 prefixes=400400 per_peer=572 pid=338605
+established 700 at 0.7s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=700,total=400400,per_peer=572,expected=399828,completed=700,min_unique=399828,max_unique=399828
+converged (>= 399828/observer) at 3.6s rss_mib=424
+control_maxgap_ms: p50=19.17 p95=20.17 max=42.01 (n=700)
+control_rss_mib 366
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1790563676402703 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 1 receiver_barriers_complete awaiting_daemon_settlement
+reload 1 daemon_applied complete_before=0 complete_after=1
+reload 1 completion_s: p50=1.57 p95=1.83 max=1.84 (n=700)
+reload 1 maxgap_ms: p50=466.09 p95=860.05 max=972.50 (n=700)
+reload 1 all_observer_maxgap_ms: p50=466.09 p95=860.05 max=972.50 (n=700)
+reload 1 changed_first_generation_update_ms: p50=1059.74 p95=1456.29 max=1565.59 (n=700)
+reload 1 rss_mib before=394 after=502 comms_sample=[4286056400]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 0/0
+reload 1 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,700,700,0,400400,1.572785,1.832308,1.844995,466.088,860.048,972.502,466.088,860.048,972.502,1059.743,1456.291,1565.591,394,502,0,700,0
+reload 2 SIGHUP wall_us=1790563698938667 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 2 daemon_applied complete_before=1 complete_after=2
+reload 2 completion_s: p50=1.50 p95=1.77 max=1.79 (n=700)
+reload 2 maxgap_ms: p50=571.37 p95=923.02 max=1135.19 (n=700)
+reload 2 all_observer_maxgap_ms: p50=571.37 p95=923.02 max=1135.19 (n=700)
+reload 2 changed_first_generation_update_ms: p50=1077.52 p95=1523.85 max=1735.41 (n=700)
+reload 2 rss_mib before=406 after=484 comms_sample=[4286055400]
+reload 2 sessions_up 700/700
+reload 2 stable_marker_peers 0/0
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,700,700,0,400400,1.495523,1.765181,1.791902,571.370,923.025,1135.187,571.370,923.025,1135.187,1077.518,1523.849,1735.411,406,484,0,700,0
+reload 3 SIGHUP wall_us=1790563720891825 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reload 3 receiver_barriers_complete awaiting_daemon_settlement
+reload 3 daemon_applied complete_before=2 complete_after=3
+reload 3 completion_s: p50=1.44 p95=1.70 max=1.71 (n=700)
+reload 3 maxgap_ms: p50=521.75 p95=1024.89 max=1114.32 (n=700)
+reload 3 all_observer_maxgap_ms: p50=532.97 p95=1024.89 max=1114.32 (n=700)
+reload 3 changed_first_generation_update_ms: p50=1034.30 p95=1614.36 max=1702.30 (n=700)
+reload 3 rss_mib before=398 after=499 comms_sample=[4286056400]
+reload 3 sessions_up 700/700
+reload 3 stable_marker_peers 0/0
+reload 3 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,700,700,0,400400,1.441482,1.697221,1.714437,521.746,1024.894,1114.319,532.973,1024.894,1114.319,1034.303,1614.363,1702.300,398,499,0,700,0
+reload 4 SIGHUP wall_us=1790563743621009 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 4 daemon_applied complete_before=3 complete_after=4
+reload 4 completion_s: p50=1.37 p95=1.66 max=1.68 (n=700)
+reload 4 maxgap_ms: p50=522.89 p95=917.14 max=1073.43 (n=700)
+reload 4 all_observer_maxgap_ms: p50=522.89 p95=917.14 max=1073.43 (n=700)
+reload 4 changed_first_generation_update_ms: p50=1013.46 p95=1473.15 max=1630.78 (n=700)
+reload 4 rss_mib before=408 after=479 comms_sample=[4286055400]
+reload 4 sessions_up 700/700
+reload 4 stable_marker_peers 0/0
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,700,700,0,400400,1.374037,1.659158,1.676206,522.889,917.143,1073.431,522.889,917.143,1073.431,1013.458,1473.149,1630.776,408,479,0,700,0
+done rss_mib=383

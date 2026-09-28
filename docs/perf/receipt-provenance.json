@@ -19,9 +19,9 @@
       "measured_on": "2026-08-30"
     },
     {
-      "path": "docs/perf/headline-refresh-v0720-2026-09.md",
-      "measured_commit": "dcbac54420dc92d5b0218916b3568598cd154cd0",
-      "measured_on": "2026-09-26"
+      "path": "docs/perf/headline-refresh-v0730-2026-09.md",
+      "measured_commit": "335676078965ae5a7d24273821dab12da79222d2",
+      "measured_on": "2026-09-28"
     },
     {
       "path": "docs/perf/high-n-route-server-v0680-2026-08.md",
@@ -118,7 +118,7 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **IRR-scale filter reload**",
-      "receipt": "docs/perf/headline-refresh-v0720-2026-09.md"
+      "receipt": "docs/perf/headline-refresh-v0730-2026-09.md"
     },
     {
       "source": "docs/perf/README.md",
@@ -128,7 +128,7 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **Policy reload at IXP scale**",
-      "receipt": "docs/perf/headline-refresh-v0720-2026-09.md"
+      "receipt": "docs/perf/headline-refresh-v0730-2026-09.md"
     },
     {
       "source": "docs/perf/README.md",
@@ -138,7 +138,7 @@
     {
       "source": "docs/perf/README.md",
       "anchor": "- **Route-reflector scale**",
-      "receipt": "docs/perf/headline-refresh-v0720-2026-09.md"
+      "receipt": "docs/perf/headline-refresh-v0730-2026-09.md"
     },
     {
       "source": "docs/perf/README.md",
