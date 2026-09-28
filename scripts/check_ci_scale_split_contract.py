@@ -24,7 +24,9 @@ WORKFLOWS = tuple(
                  "release-install-contract", "release", "update-group-fault",
                  "public-docs-contract")
 )
-EXPECTED_ROOT_COMMANDS = {
+# Floors, not a census: a new root Cargo command needs only `--locked`, while a
+# removed one (or an extractor that stops seeing a workflow) still fails.
+MIN_ROOT_COMMANDS = {
     WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=2, test=7),
     WORKFLOWS[1]: Counter(test=1),
     WORKFLOWS[2]: Counter(test=6),
@@ -135,10 +137,9 @@ def _check_dependency_commands(root: Path, errors: list[str]) -> None:
                 counts[subcommand] += 1
         root_commands[workflow] = counts
 
-    if root_commands != EXPECTED_ROOT_COMMANDS:
-        errors.append(
-            f"root Cargo command inventory drifted: expected {EXPECTED_ROOT_COMMANDS}, got {root_commands}"
-        )
+    for workflow, floor in MIN_ROOT_COMMANDS.items():
+        if missing := floor - root_commands.get(workflow, Counter()):
+            errors.append(f"{workflow}: root Cargo commands removed: {dict(missing)}")
     if tuple(standalone) != EXPECTED_STANDALONE_COMMANDS:
         errors.append("standalone Cargo command inventory or flags drifted")
 

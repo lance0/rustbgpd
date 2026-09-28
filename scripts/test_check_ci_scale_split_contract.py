@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from scripts import check_ci_scale_split_contract as contract
 from scripts.check_ci_scale_split_contract import (
     RETIRED_PRIVILEGED_WORKFLOW,
     WORKFLOWS,
@@ -138,6 +141,26 @@ class ScaleSplitContractTests(unittest.TestCase):
         for workflow, old, new in cases:
             with self.subTest(workflow=workflow, seam=old):
                 self.mutate(old, new, workflow=workflow)
+
+    def test_added_locked_command_passes_and_blind_extractor_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            target = root / WORKFLOW
+            target.write_text(
+                target.read_text().replace(
+                    "- run: cargo test --locked --workspace",
+                    "- run: cargo test --locked --workspace\n"
+                    "      - run: cargo check --locked -p rustbgpd-api",
+                    1,
+                )
+            )
+            self.assertEqual([], check(root))
+        # A command regex that matches nothing sees no workflow at all.
+        with mock.patch.object(contract, "CARGO_COMMAND", re.compile(r"(?!)")):
+            failures = "\n".join(check(ROOT))
+        self.assertIn("root Cargo commands removed", failures)
+        self.assertIn("standalone Cargo command inventory", failures)
 
     def test_semantic_mutations_fail_closed(self) -> None:
         cases = (

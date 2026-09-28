@@ -28,18 +28,12 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(
-            f"{inventory.EXPECTED_COUNT}-target cargo-fuzz inventory",
-            result.stdout,
-        )
+        count = sum(len(targets) for targets in inventory.EXPECTED_TARGETS.values())
+        self.assertIn(f"{count}-target cargo-fuzz inventory", result.stdout)
 
     def test_repository_inventory_is_exact(self) -> None:
         actual = inventory.repository_inventory()
         self.assertEqual(actual, inventory.EXPECTED_TARGETS)
-        self.assertEqual(
-            sum(len(targets) for targets in actual.values()),
-            inventory.EXPECTED_COUNT,
-        )
         self.assertEqual(
             actual["crates/mrt"],
             ("snapshot_reader_drain", "warm_bundle_manifest"),
@@ -79,6 +73,23 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                         inventory.validate_inventory(
                             inventory.EXPECTED_TARGETS,
                             mutated,
+                            tuple(inventory.EXPECTED_TARGETS),
+                        )
+
+    def test_unrostered_or_repeated_target_is_rejected(self) -> None:
+        # The per-crate roster, not a total count, rejects a new target added
+        # without a roster entry and a target listed twice in one manifest.
+        for crate, targets in inventory.EXPECTED_TARGETS.items():
+            for extra in ("decode_unrostered", targets[0]):
+                with self.subTest(crate=crate, extra=extra):
+                    mutated = exact_inventory()
+                    mutated[crate] = (*targets, extra)
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "targets differ"
+                    ):
+                        inventory.validate_inventory(
+                            mutated,
+                            inventory.EXPECTED_TARGETS,
                             tuple(inventory.EXPECTED_TARGETS),
                         )
 

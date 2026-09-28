@@ -38,7 +38,6 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
         "parse_rd",
     ),
 }
-EXPECTED_COUNT = 23
 WIRE_NIGHTLY_MAX_LENS = {
     "decode_bgpls": 4_096,
     "decode_evpn": 4_096,
@@ -333,11 +332,6 @@ def validate_inventory(
         for crate in expected_crates
         for target in manifest_targets.get(crate, ())
     ]
-    if len(all_manifest_targets) != EXPECTED_COUNT:
-        errors.append(
-            f"expected exactly {EXPECTED_COUNT} manifest targets, "
-            f"got {len(all_manifest_targets)}"
-        )
     if len(all_manifest_targets) != len(set(all_manifest_targets)):
         errors.append("fuzz target names must be globally unique")
 
@@ -730,8 +724,9 @@ def repository_inventory() -> dict[str, tuple[str, ...]]:
 
 
 def main() -> int:
+    count = sum(len(targets) for targets in EXPECTED_TARGETS.values())
     parser = argparse.ArgumentParser(
-        description=(f"Verify the exact {EXPECTED_COUNT}-target cargo-fuzz inventory.")
+        description=f"Verify the exact {count}-target cargo-fuzz inventory."
     )
     parser.add_argument(
         "--print-targets",
@@ -751,7 +746,7 @@ def main() -> int:
             for target in inventory[crate]:
                 print(crate, target)
     else:
-        print(f"fuzz target inventory check passed: exactly {EXPECTED_COUNT} targets")
+        print(f"fuzz target inventory check passed: exactly {count} targets")
     return 0
 
 

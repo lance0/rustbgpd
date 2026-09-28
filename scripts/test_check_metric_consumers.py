@@ -7,6 +7,7 @@ import re
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 PATH = Path(__file__).with_name("check-metric-consumers.py")
@@ -50,36 +51,55 @@ class MetricConsumerContractTests(unittest.TestCase):
             return f"{source}\n{addition}"
         return source.replace(marker, f"\n{addition}{marker}", 1)
 
-    def test_live_inventory_and_consumer_counts_are_exact(self):
+    def test_live_inventory_is_fully_consumed(self):
         self.assertEqual(set(self.sources), set(CHECK.EMITTER_FILES))
-        self.assertEqual(len(self.inventory), 222)
-        self.assertEqual(
-            len(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
-            208,
+        CHECK.validate_inventory_extraction(self.inventory)
+        self.assertLessEqual(
+            set(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
+            set(self.inventory),
         )
-        self.assertEqual(
-            len(CHECK.settlement_metric_inventory(self.sources[CHECK.SETTLEMENT])), 4
+        self.assertLessEqual(
+            set(CHECK.SETTLEMENT_FAMILIES),
+            set(CHECK.settlement_metric_inventory(self.sources[CHECK.SETTLEMENT])),
         )
-        self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
-        self.assertEqual(len(self.dashboard_refs), 98)
-        self.assertEqual(len(self.rule_refs), 49)
-        self.assertEqual(len(self.public_doc_refs), 211)
-        self.assertEqual(len(self.doc_refs), 211)
+        self.assertLessEqual(CHECK.PROCESS_FAMILIES, set(self.inventory))
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
-        self.assertEqual(len(consumers), 216)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
         self.assertEqual(
             set(CHECK.ALLOWLIST), CHECK.PROCESS_FAMILIES - {"process_start_time_seconds"}
         )
         CHECK.validate_coverage(self.inventory, consumers)
 
-    def test_live_main_reports_the_exact_roster(self):
+    def test_blind_or_partial_extraction_fails(self):
+        # An extractor that stops matching loses its sentinel family; one that
+        # drops a slice of the static definitions falls below the floor.
+        for sentinel in sorted(CHECK.SENTINEL_FAMILIES):
+            blinded = {k: v for k, v in self.inventory.items() if k != sentinel}
+            with self.subTest(sentinel=sentinel), self.assertRaisesRegex(
+                ValueError, "lost sentinel families"
+            ):
+                CHECK.validate_inventory_extraction(blinded)
+        partial = {
+            name: kind
+            for index, (name, kind) in enumerate(self.inventory.items())
+            if name in CHECK.SENTINEL_FAMILIES or index % 2
+        }
+        with self.assertRaisesRegex(ValueError, f"below the {CHECK.INVENTORY_FLOOR} floor"):
+            CHECK.validate_inventory_extraction(partial)
+        # The real extractor, blinded by a definition regex that matches
+        # nothing, fails closed on its constructor cross-check.
+        with mock.patch.object(CHECK, "STATIC_DEFINITION", re.compile(r"(?!)")):
+            with self.assertRaises(ValueError):
+                CHECK.workspace_metric_inventory(self.sources)
+
+    def test_live_main_reports_the_roster(self):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn("222 emitted families", stdout.getvalue())
-        self.assertIn("211 normative-doc families", stdout.getvalue())
-        self.assertIn("216 consumed, 6 justified raw diagnostics", stdout.getvalue())
+        self.assertIn(f"{len(self.inventory)} emitted families", stdout.getvalue())
+        self.assertIn(
+            f"{len(CHECK.ALLOWLIST)} justified raw diagnostics", stdout.getvalue()
+        )
 
     def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
         prefix = "bgp_blackhole_discard_"

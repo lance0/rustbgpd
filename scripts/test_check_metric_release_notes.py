@@ -15,18 +15,24 @@ SPEC.loader.exec_module(check)
 
 
 class MetricReleaseNoteContractTests(unittest.TestCase):
-    def test_live_release_delta_is_exact_and_documented(self):
+    def test_live_release_delta_is_documented(self):
         baseline = check.parse_baseline(check.BASELINE.read_text(encoding="utf-8"))
         current = set(check.METRIC_CHECK.workspace_metric_inventory())
         version = check.workspace_version(check.CARGO_MANIFEST.read_bytes())
         check.validate_workspace_release(version)
         section = check.target_notes(check.CHANGELOG.read_text(encoding="utf-8"), check.ROOT)
 
-        added, removed = check.validate_release_notes(baseline, current, section)
-
-        self.assertEqual(len(baseline), 222)
-        self.assertEqual(added, set())
-        self.assertEqual(removed, set())
+        # Every family added or removed since the baseline must be named in the
+        # target notes. The delta itself is not pinned: a new family needs its
+        # note, not an edit here.
+        check.validate_release_notes(baseline, current, section)
+        with self.assertRaisesRegex(ValueError, "added=bgp_undocumented_new_total"):
+            check.validate_release_notes(
+                baseline, current | {"bgp_undocumented_new_total"}, section
+            )
+        dropped = min(baseline & current)
+        with self.assertRaisesRegex(ValueError, f"removed={dropped}"):
+            check.validate_release_notes(baseline, current - {dropped}, section)
 
     def test_consumed_new_family_without_release_note_fails(self):
         baseline = {"bgp_existing_total"}
