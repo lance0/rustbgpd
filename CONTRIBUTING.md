@@ -134,11 +134,10 @@ The recipes intentionally expose their direct commands:
   `just gate-ci-steps`, and `just gate-msrv` in sequence. It takes tens of
   minutes and includes the Criterion smoke, so do not run another gate
   beside it.
-- `just gate-release [--mode release] [--base <commit>] [--heavy]` runs the
+- `just gate-release [--mode release] [--heavy]` runs the
   checks that otherwise first fail on a release commit: the metric
-  release-note contract, the `changelog.d/` fragment assembly, the
-  published-crate README freshness check against the merge base with
-  `origin/main`, and the `CHANGELOG.md` heading of every crate whose manifest
+  release-note contract, the `changelog.d/` fragment assembly, and the
+  `CHANGELOG.md` heading of every crate whose manifest
   is ahead of `docs/reference/published-crate-versions.json`. On a release
   commit, or with `--mode release`, it also requires that no fragment remains,
   dated crate headings, released crate README wording, and the root
@@ -160,11 +159,8 @@ The recipes intentionally expose their direct commands:
   benchmark.
 
 Hosted checks remain authoritative. `just gate-ci` covers the `ci.yml`
-checks that need no privileges or pull-request context; these stay CI-only:
+checks that need no privileges; these stay CI-only:
 
-- the published-crate README freshness check, which diffs against the pull
-  request base (`just gate-release` runs the same comparison against the
-  merge base with `origin/main`);
 - the exact v0.64 migration test, which runs only when
   `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64 binary that CI
   prepares;

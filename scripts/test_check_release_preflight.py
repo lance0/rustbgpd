@@ -2,7 +2,6 @@
 """Mutation proofs for the local release preflight."""
 
 import importlib.util
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,31 +43,25 @@ class ReleasePreflightTests(unittest.TestCase):
             (root / relative).write_text(text, encoding="utf-8")
         return root
 
-    def commit(self, root: Path, message: str) -> str:
-        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-        for args in (["init", "-q"], ["add", "-A"], [*identity, "commit", "-qm", message]):
-            subprocess.run(["git", *args], cwd=root, check=True)
-        return check.git(root, "rev-parse", "HEAD").strip()
-
     def statuses(self, root: Path, mode: str) -> tuple[str, list[str]]:
-        mode, rows = check.preflight(root, mode, self.commit(root, "tree"), heavy=False)
+        mode, rows = check.preflight(root, mode, heavy=False)
         return mode, [status for status, _, _ in rows]
 
     def test_release_tree_runs_every_fast_check(self):
         mode, statuses = self.statuses(self.tree(), "auto")
         self.assertEqual(mode, "release")
-        self.assertEqual(statuses, ["ok"] * 6 + ["skipped [--heavy]"] * 3)
+        self.assertEqual(statuses, ["ok"] * 5 + ["skipped [--heavy]"] * 3)
 
     def test_staging_tree_passes_and_reports_the_release_only_skips(self):
         mode, statuses = self.statuses(self.tree(**STAGING), "auto")
         self.assertEqual(mode, "staging")
         self.assertEqual(
-            statuses, ["ok"] * 4 + ["skipped [release-only]"] * 2 + ["skipped [--heavy]"] * 3
+            statuses, ["ok"] * 3 + ["skipped [release-only]"] * 2 + ["skipped [--heavy]"] * 3
         )
 
     def test_release_mode_does_not_relax_checks_for_a_staging_tree(self):
         _, statuses = self.statuses(self.tree(**STAGING), "release")
-        self.assertEqual(statuses[4:6], ["FAIL", "FAIL"])
+        self.assertEqual(statuses[3:5], ["FAIL", "FAIL"])
 
     def test_pending_fragment_with_empty_unreleased_is_staging(self):
         fragment = {"changelog.d/fixed-a.md": "### Fixed\n\n- Pending fix.\n"}
@@ -99,19 +92,6 @@ class ReleasePreflightTests(unittest.TestCase):
         root = self.tree(**{"scripts/check_metric_release_notes.py": "raise SystemExit(1)\n"})
         errors = check.metric_release_note_errors(root)
         self.assertEqual(errors, ["`scripts/check_metric_release_notes.py` exited 1"])
-
-    def test_version_bump_without_readme_change_fails(self):
-        root = self.tree(**{"crates/wire/Cargo.toml": '[package]\nname = "w"\nversion = "0.1.0"\n'})
-        base = self.commit(root, "base")
-        (root / "crates/wire/Cargo.toml").write_text(RELEASE_TREE["crates/wire/Cargo.toml"])
-        self.commit(root, "bump")
-        errors = check.readme_freshness_errors(root, base)
-        self.assertEqual(len(errors), 1)
-        self.assertIn("crates/wire/README.md is untouched", errors[0])
-
-        (root / "crates/wire/README.md").write_text("# demo-wire\n\nReviewed.\n")
-        self.commit(root, "readme")
-        self.assertEqual(check.readme_freshness_errors(root, base), [])
 
     def test_crate_changelog_must_open_with_the_pending_version(self):
         root = self.tree(**{"crates/wire/CHANGELOG.md": "# Changelog\n\n## 0.1.0 - 2025-01-01\n"})

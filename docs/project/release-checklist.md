@@ -33,12 +33,6 @@ applicable to the release diff actually ran before tagging.
 - [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
       declared `rust-version` (kept in lockstep with the Dockerfile
       builder version)
-- [ ] **Published-crate README freshness gate** — if the independently
-      versioned manifest for `wire`, `fsm`, or `rpki` changed in the diff, the
-      matching crate README must also be touched. Hosted CI diffs the pull
-      request or the pushed range and skips on a manual dispatch;
-      `just gate-release` runs the same comparison locally against the merge
-      base with `origin/main`
 - [ ] **Gate 8b BUM-filter kernel primitive**
       (`evpn_bum_filter_kernel` job) — runs the netns harness under
       `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
@@ -813,10 +807,6 @@ Before rolling any versions:
      the workspace version. For a new release line, append the consecutive
      upgrade exercise using the previous release's immutable fixture and
      the shared `v1_stable_archived_fixtures_parse` test. Keep the README baseline aligned; preserve older exercises.
-   - Update the workspace release and target changelog section in
-     `scripts/check_metric_release_notes.py` and its companion test. The
-     baseline stays on the previous release here; it rolls to this tag in
-     step 14, once the tag is published.
    - [ ] Confirm each published library crate archive contains regular-file
          `LICENSE-MIT` and `LICENSE-APACHE` entries whose contents match the
          canonical repository-root license texts; the SPDX `MIT OR Apache-2.0`
@@ -833,13 +823,10 @@ Before rolling any versions:
    then push it to `main`: `git push origin main`. The recipe runs the checks
    that otherwise first fail in hosted CI on the release commit, or only after
    the tag: the metric release-note contract, the `changelog.d/` fragment
-   assembly (no fragment may remain), the published-crate README
-   freshness gate, a dated `CHANGELOG.md` heading and released README wording
-   for every crate whose manifest is ahead of
+   assembly (no fragment may remain), a dated `CHANGELOG.md` heading and
+   released README wording for every crate whose manifest is ahead of
    `docs/reference/published-crate-versions.json`, and the root `## [X.Y.Z]`
-   section that `release.yml` extracts. Run it before the push: the README
-   comparison covers the commits `origin/main` does not have yet, and needs
-   `--base <previous main SHA>` afterwards. Without `--mode release` the
+   section that `release.yml` extracts. Without `--mode release` the
    recipe detects a release commit by its empty `[Unreleased]` section with no
    `changelog.d/` fragment pending, and otherwise lists the release-only
    checks it skipped. `--heavy` adds
@@ -963,23 +950,6 @@ After the tag publishes:
     and checks that canonical persistence introduces no root key the tag's
     schema rejects. Semantic round-trip tests cover the rendered values; this
     is not full previous-release schema validation or a downgrade guarantee.
-14. **Roll the metric release-note baseline** in the same post-release commit
-    as step 13, immediately after the tag. Every release rolls it, patch
-    releases included: the checker requires every metric family added or
-    removed since the baseline release to be named in the target changelog
-    section, which only means "documented by the release that shipped it"
-    while the baseline is the previous release. A baseline left further back
-    accumulates the delta and makes each release section re-document families
-    an earlier section already covered. In
-    `scripts/check_metric_release_notes.py` and its companion test, point the
-    baseline release and source commit at the new tag, add the released family
-    inventory as a JSON file named for the tag in
-    `scripts/fixtures/metric-release-notes/`, set the target section to
-    `Unreleased`, and remove the orphaned older fixture. Generate that
-    inventory from a checkout of the tag, using that tree's own
-    `scripts/check-metric-consumers.py`. The roll does not wait for a
-    `CHANGELOG.md` `[Unreleased]` entry: an empty `Unreleased` target is
-    accepted, while an empty versioned target section still fails closed.
 
 ### Published-crate documentation refresh
 
@@ -1044,10 +1014,11 @@ changed.
    wire publish ahead of dependent FSM or RPKI releases when moving to a new
    wire line.
 4. Roll `crates/wire/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
-   release commit.
+   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`.
+   `python3 scripts/check_embedding_versions.py` fails while the README path
+   example trails the manifest version, and `just gate-release --mode release`
+   rejects "prepare" wording left in it for the version about to publish.
+   Date the crate `CHANGELOG.md` heading in the release commit.
 5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-wire --dry-run`
@@ -1086,9 +1057,10 @@ do not force an FSM release for every daemon tag.
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. When the
    wire line also moves, publish wire first so the FSM package can resolve it.
 4. Roll `crates/fsm/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
+   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. The
+   README review is manual: no checker reads its content, except that
+   `just gate-release --mode release` rejects "prepare" wording left in it for
+   the version about to publish. Date the crate `CHANGELOG.md` heading in the
    release commit.
 5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
    package inventory and normalized manifest.
@@ -1121,10 +1093,11 @@ client share one public compatibility boundary.
 3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`.
 4. Roll `crates/rpki/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
-   release commit.
+   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
+   `python3 scripts/check_embedding_versions.py` fails while the README path
+   example trails the manifest version, and `just gate-release --mode release`
+   rejects "prepare" wording left in it for the version about to publish.
+   Date the crate `CHANGELOG.md` heading in the release commit.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.

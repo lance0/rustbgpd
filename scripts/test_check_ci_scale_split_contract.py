@@ -166,24 +166,6 @@ class ScaleSplitContractTests(unittest.TestCase):
                 "- run: true",
             ),
             ('RUSTDOCFLAGS: "-D warnings"', 'RUSTDOCFLAGS: ""'),
-            (
-                "- name: Published crate README freshness gate",
-                "- name: Unchecked published crate README",
-            ),
-            (
-                "for crate in wire fsm rpki; do",
-                "for crate in wire rpki; do",
-            ),
-            (
-                'git diff "$base"...HEAD -- "crates/$crate/Cargo.toml"',
-                'git diff "$base"...HEAD -- "crates/$crate/NOTES.toml"',
-            ),
-            (
-                'git diff "$base"...HEAD -- "crates/$crate/README.md"',
-                'git diff "$base"...HEAD -- "crates/$crate/NOTES.md"',
-            ),
-            (r"'^\+version\s*='", r"'^version\s*='"),
-            ("              exit 1", "              true"),
             ("if: ${{ always() }}", "if: ${{ success() }}"),
             (
                 "needs: [core, core_tests, scale_receipts]",

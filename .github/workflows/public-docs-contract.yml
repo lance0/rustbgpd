@@ -31,6 +31,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          # Full history brings the release tags. The metric release-note
+          # check takes its baseline from the newest reachable tag and fails
+          # closed without one.
           fetch-depth: 0
       # These tests run here only because this workflow has no path filter.
       - name: Check this workflow's trigger contract

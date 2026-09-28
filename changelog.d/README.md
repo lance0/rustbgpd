@@ -50,8 +50,11 @@ deletes the consumed files. The published changelog stays an ordinary reviewed
   line that is not a bullet or continuation, an unresolved merge-conflict
   marker, a stray non-`.md` file, and a bullet that already exists in
   `[Unreleased]` or in another fragment.
-- `scripts/check_metric_release_notes.py` reads `[Unreleased]` plus every
-  fragment, so a metric family change is documented in either place.
+- `scripts/check_metric_release_notes.py` compares the emitted metric
+  families with those of the newest release tag and requires each added or
+  removed family to be named in the `CHANGELOG.md` text above that release's
+  section or in a fragment, so a metric family change is documented in either
+  place. It derives the release from git, so a release needs no edit to it.
 - On a release commit `just gate-release --mode release` fails while any
   fragment remains; run the assembler and commit the result before rolling
   the `[Unreleased]` heading. See the

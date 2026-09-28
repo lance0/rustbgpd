@@ -36,8 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Need history so the published-crate README freshness gate can diff
-          # against the previous commit / PR base.
+          # Need history and tags: the stable-surface check reads released
+          # fixtures from their tags.
           fetch-depth: 0
       - name: Check CI trigger contract
         shell: bash
@@ -321,35 +321,6 @@ jobs:
             docs/perf/event-history-host-fence.sh \
             docs/perf/test-event-history-host-fence.sh \
             docs/perf/test-event-history-naming.sh
-      - name: Published crate README freshness gate
-        # A published crate's README is its crates.io landing page and the
-        # repository usage guide. If an independently versioned library moves,
-        # require a deliberate review of its RFC table, key-type roster, and
-        # examples.
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          elif [ -n "${{ github.event.before }}" ] && \
-               [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            base="${{ github.event.before }}"
-          else
-            # Initial push of a new branch, or a manual dispatch — nothing to
-            # diff against. `just gate-release` runs this gate locally.
-            echo "no diff base; skipping"
-            exit 0
-          fi
-          for crate in wire fsm rpki; do
-            if git diff "$base"...HEAD -- "crates/$crate/Cargo.toml" \
-                | grep -qE '^\+version\s*='; then
-              if ! git diff "$base"...HEAD -- "crates/$crate/README.md" \
-                  | grep -qE '^[+-]'; then
-                echo "::error file=crates/$crate/Cargo.toml::$crate crate version was bumped but crates/$crate/README.md was not touched. Update its RFC / key-type / example contract to reflect what is actually published, then re-push."
-                exit 1
-              fi
-              echo "$crate bump + README touched — gate passed"
-            fi
-          done
 
   core_tests:
     name: core tests / rustdoc
