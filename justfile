@@ -317,6 +317,8 @@ bench-list:
       bench-enhanced-route-refresh  bench/scale/enhanced-route-refresh/run-receipt.sh
       bench-irr-reload              bench/scale/irrreload/run-irr-reload.sh
       bench-vpn-query               bench/run-vpn-query-campaign.sh
+      bench-headline                bench/scale/headline/run-campaign.sh (multi-arm headline campaign)
+      bench-headline-summary        bench/scale/headline/summarize.py (extraction only)
       gate-contract                 bench/smoke-benches.sh (smoke only, no measurement)
 
     Drivers without a recipe (run directly; see their headers):
@@ -530,3 +532,17 @@ bench-vpn-query output *args:
         cpu_args=(--cpu "${RUSTBGPD_BENCH_CORE}")
     fi
     exec bash bench/run-vpn-query-campaign.sh "$@" "${cpu_args[@]}" "$output"
+
+# Run the headline campaign (IXP matrix S2 and S3, IRR reload, RR1000) across arms given as LABEL=REF into OUT_DIR, rotating the arm order each run; CELLS, RUNS, SMOKE=1 and DRY_RUN=1 are described in bench/scale/headline/run-campaign.sh.
+[positional-arguments]
+bench-headline out_dir +arms:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec bash bench/scale/headline/run-campaign.sh "$@"
+
+# Re-extract summary.csv, establishment-span.csv and report.md from a headline campaign or receipt bundle without running anything (`--out DIR` for a bundle, `--exclude GLOB` to drop legs).
+[positional-arguments]
+bench-headline-summary source *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 bench/scale/headline/summarize.py "$@"

@@ -129,6 +129,15 @@ driver's flags. The recipes keep each driver's host lock, quiet gate, and
 thresholds. Receipts written before the recipes existed keep their original
 commands as history.
 
+The headline refresh has one command for the whole multi-arm campaign:
+`just bench-headline <out-dir> v0730=v0.73.0 v0720=v0.72.0` builds each arm
+from its own tree, runs the IXP matrix S2 and S3 legs, the IRR reload roots,
+and the RR1000 campaigns with the arm order rotated each run, records the CPU
+placement and swap counters at every leg, and writes `summary.csv` and a
+per-arm table. `just bench-headline-summary` re-extracts those files from a
+campaign directory or a committed bundle without running anything. The
+receipts before 2026-09-28 ran from hand-built drivers.
+
 ## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the
