@@ -2,7 +2,9 @@
 """Tests for the headline campaign driver and its extractor.
 
 The extractor must reproduce the committed headline receipts: every
-summary.csv row, and the medians the receipt tables publish. A finished leg
+summary.csv row, and the medians the receipt tables publish. The daemon
+reload intervals come from daemon logs, which the bundles do not carry, so
+they are checked against a stubbed log. A finished leg
 missing a labelled value must fail extraction instead of dropping a row. The
 campaign must fail closed: a failed build, a daemon whose hash depends on the
 commit, or a failed leg ends with a non-zero exit status.
@@ -80,7 +82,6 @@ class ReceiptReproduction(unittest.TestCase):
             ("rr1000", "wire_vmrss"): {"ctrl": (394878, 0), "cand": (407208, 0)},
         })
 
-    @unittest.skipUnless(V0730.is_dir(), "v0.73.0 headline bundle not in this tree")
     def test_v0730_summary_rows(self):
         names = {"v0730": "v0.73.0", "v0720": "v0.72.0", "v0680": "v0.68.0",
                  "xh": "v0.68.0-daemon/v0.72.0-harness"}
@@ -89,7 +90,6 @@ class ReceiptReproduction(unittest.TestCase):
             self.assertEqual(summary_rows(Path(out) / "summary.csv", names),
                              summary_rows(V0730 / "summary.csv", {}))
 
-    @unittest.skipUnless(V0730.is_dir(), "v0.73.0 headline bundle not in this tree")
     def test_v0730_published_medians(self):
         # The v0.68.0 column is its main-block runs 1-3.
         self.assert_published(medians(V0730, ["matrix-v0680-r[456]-*"]), {
@@ -114,6 +114,19 @@ class ReceiptReproduction(unittest.TestCase):
             ("matrix-s2", "reload_changed_maxgap_p50"): {"v0680": (562, 0), "xh": (666, 0)},
             ("matrix-s3", "flap_reannounce_p50"): {"v0680": (0.37, 2), "xh": (0.37, 2)},
         })
+
+
+def daemon_log(reloads, complete="config reload complete (one runtime generation)"):
+    """A daemon JSON log with RELOADS SIGHUP reloads: loaded at +100 ms, complete at +1,199 ms."""
+    def record(stamp, message, **fields):
+        return json.dumps({"timestamp": f"2026-09-28T01:{stamp}Z", "fields": {"message": message, **fields}}) + "\n"
+    lines = [record("00:00.000000", "session established")]
+    for minute in range(1, reloads + 1):
+        lines += [record(f"{minute:02d}:00.000000", "SIGHUP received, reloading configuration"),
+                  record(f"{minute:02d}:00.100000", "config source loaded", validate_ms=84),
+                  record(f"{minute:02d}:00.900000", "reload generation phase timing", cohort_rib_transition_us=581000),
+                  record(f"{minute:02d}:01.199000", complete)]
+    return "".join(lines)
 
 
 def matrix_leg(root, name, scenario="s2"):
@@ -199,15 +212,44 @@ class ExtractorFailsClosed(unittest.TestCase):
         with self.assertRaisesRegex(summarize.ExtractionError, "matches no leg"):
             summarize.extract(self.tmp)
 
-    def test_establishment_span_from_daemon_log(self):
+    def test_daemon_reload_intervals(self):
         cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
+        (cell / "daemon.log").write_text(daemon_log(4))
+        root = self.tmp / "irr-ov0-a-r1"
+        shutil.copytree(V0720 / "irr" / "irr-ov0-ctrl-r1", root)
+        (root / "rustbgpd-sighup" / "daemon.log").write_text(daemon_log(4))
+        rows, _, _ = summarize.extract(self.tmp)
+        daemon = sorted({(r[0], r[3], r[5]) for r in rows if r[3].startswith("daemon_") and r[3] != "daemon_vmhwm"})
+        expected = [(phase, metric, value) for phase in ("irr-ov0", "matrix-s2") for metric, value in (
+            ("daemon_rib_transition", 581.0), ("daemon_sighup_to_complete", 1199.0),
+            ("daemon_sighup_to_loaded", 100.0), ("daemon_validate", 84))]
+        self.assertEqual(daemon, expected)
+        self.assertEqual(sum(r[3] == "daemon_sighup_to_complete" for r in rows), 8)
+
+    def test_renamed_reload_message_fails(self):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s2")
+        (cell / "daemon.log").write_text(daemon_log(4, complete="configuration reload finished"))
+        with self.assertRaisesRegex(summarize.ExtractionError, "0 completed reloads, harness measured 4"):
+            summarize.extract(self.tmp)
+        (cell / "daemon.log").write_text(daemon_log(3))
+        with self.assertRaisesRegex(summarize.ExtractionError, "3 completed reloads, harness measured 4"):
+            summarize.extract(self.tmp)
+
+    def test_campaign_must_keep_daemon_logs(self):
+        matrix_leg(self.tmp, "matrix-a-r1-s2")
+        (self.tmp / "arms.txt").write_text("a=HEAD:HEAD\n")
+        with self.assertRaisesRegex(summarize.ExtractionError, "daemon.log is missing"):
+            summarize.extract(self.tmp)
+
+    def test_establishment_span_from_daemon_log(self):
+        cell = matrix_leg(self.tmp, "matrix-a-r1-s3", "s3")
         log = cell / "reloadstall.log"
         log.write_text(log.read_text().replace("established 700 at", "established 3 at"))
         stamps = ["2026-09-28T01:00:00.100Z", "2026-09-28T01:00:00.400Z", "2026-09-28T01:00:00.900Z"]
         (cell / "daemon.log").write_text("".join(
             json.dumps({"timestamp": t, "fields": {"message": "session established"}}) + "\n" for t in stamps))
         _, spans, _ = summarize.extract(self.tmp)
-        self.assertEqual(spans, [["a", "1", "s2", 3, 3, "0.800"]])
+        self.assertEqual(spans, [["a", "1", "s3", 3, 3, "0.800"]])
 
     def test_bundle_needs_out(self):
         self.assertEqual(quiet_main([str(V0720)]), 2)
@@ -238,6 +280,7 @@ mkdir -p "$ARTIFACTS_DIR/rustbgpd"
 if [[ -n ${FAKE_MATRIX_FAIL:-} ]]; then echo "fail rc=1" >"$ARTIFACTS_DIR/rustbgpd/status"; exit 0; fi
 scenario=s2; [[ -z $FLAPSTORM ]] || scenario=s3
 cp -r "$FIXTURES/matrix-ctrl-r1-$scenario/." "$ARTIFACTS_DIR/rustbgpd/"
+cp "$DAEMON_LOGS/daemon-$scenario.log" "$ARTIFACTS_DIR/rustbgpd/daemon.log"
 """
 
 
@@ -271,7 +314,10 @@ class CampaignFailsClosed(unittest.TestCase):
         (bin_dir / "cargo").chmod(0o755)
         self.repo = repo
         self.out = self.tmp / "campaign"
+        (self.tmp / "daemon-s2.log").write_text(daemon_log(4))
+        (self.tmp / "daemon-s3.log").write_text(daemon_log(0))
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "FIXTURES": str(V0720 / "matrix"),
+                    "DAEMON_LOGS": str(self.tmp),
                     "CELLS": "matrix", "RUNS": "1"}
 
     def campaign(self, *arms, **env):

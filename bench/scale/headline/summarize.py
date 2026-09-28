@@ -20,12 +20,21 @@ CSV rows. A finished leg that lacks a labelled value it must carry is an
 error, not an empty cell: a renamed label would otherwise drop a whole row
 from the receipt table without notice.
 
+The daemon's own reload intervals come from its JSON log (daemon.log in each
+matrix S2 cell and IRR rustbgpd-sighup cell), one set per SIGHUP: SIGHUP
+received to "config source loaded" and to "config reload complete", the
+logged validate_ms, and the RIB transition (cohort_rib_transition_us). A
+daemon log must hold exactly as many completed reloads as the harness
+measured. A campaign directory must keep those daemon logs; a receipt bundle
+does not carry them, so it has no daemon rows.
+
 Writes to DIR (default SOURCE, which must then be a campaign directory;
-a bundle needs --out so a committed receipt is never rewritten): summary.csv, one row per run, round and
-metric; establishment-span.csv, the first-to-Nth `session established` span
-from each matrix leg's daemon log, when the daemon logs are present; and
-report.md, the per-arm range, median and count for every metric. S1 values
-are read from the convergence phase of the S2 and S3 legs.
+a bundle needs --out so a committed receipt is never rewritten): summary.csv,
+one row per run, round and metric; establishment-span.csv, the first-to-Nth
+`session established` span from each matrix leg's daemon log, when the
+daemon logs are present; and report.md, the per-arm range, median and count
+for every metric. S1 values are read from the convergence phase of the S2
+and S3 legs.
 """
 
 import argparse
@@ -89,7 +98,60 @@ def rss_column(path):
     return [int(row["total_rss_kib"]) for row in csv.DictReader(path.read_text().splitlines())]
 
 
-def matrix_rows(source, exclusions):
+def log_time(record):
+    return datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00")).timestamp()
+
+
+RELOAD_MESSAGES = ("SIGHUP received", "config source loaded", "reload generation phase timing",
+                   "config reload complete")
+
+
+def daemon_reloads(daemon_log):
+    """[(sighup_to_loaded_ms, sighup_to_complete_ms, validate_ms, rib_transition_ms)] per completed SIGHUP."""
+    reloads, start = [], None
+    for line in read_text(daemon_log).splitlines():
+        if not any(message in line for message in RELOAD_MESSAGES):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        fields = record.get("fields", {})
+        message = fields.get("message", "")
+        if message.startswith("SIGHUP received"):
+            start, loaded, validate, rib = log_time(record), None, None, None
+        elif start is None:
+            continue
+        elif message == "config source loaded":
+            loaded, validate = log_time(record), fields.get("validate_ms")
+        elif message == "reload generation phase timing":
+            rib = fields.get("cohort_rib_transition_us")
+        elif message.startswith("config reload complete"):
+            reloads.append((round((loaded - start) * 1000, 1) if loaded else None,
+                            round((log_time(record) - start) * 1000, 1), validate,
+                            round(rib / 1000, 1) if rib else None))
+            start = None
+    return reloads
+
+
+def reload_rows(leg, phase, arm, run, daemon_log, expected, campaign):
+    if not daemon_log.exists():
+        if campaign:
+            raise ExtractionError(f"{leg.name}: {daemon_log.name} is missing, so its reload intervals are lost")
+        return []
+    reloads = daemon_reloads(daemon_log)
+    if len(reloads) != expected:
+        raise ExtractionError(f"{leg.name}: daemon log has {len(reloads)} completed reloads, harness measured {expected}")
+    rows = []
+    for index, values in enumerate(reloads, 1):
+        for metric, value in zip(("daemon_sighup_to_loaded", "daemon_sighup_to_complete",
+                                  "daemon_validate", "daemon_rib_transition"), values):
+            if value is not None:
+                rows.append([phase, arm, run, metric, index, value, "ms"])
+    return rows
+
+
+def matrix_rows(source, exclusions, campaign):
     rows, spans = [], []
     for leg, (arm, run, scenario) in legs(source, "matrix", MATRIX, exclusions):
         cell = leg / "rustbgpd" if (leg / "rustbgpd").is_dir() else leg
@@ -108,6 +170,8 @@ def matrix_rows(source, exclusions):
                 rows.append([phase, arm, run, metric, index, value, unit])
         if scenario == "s2" and counts["reload_completion_p50"] != counts["reload_changed_maxgap_p50"]:
             raise ExtractionError(f"{leg.name}: reload completion and maxgap line counts differ")
+        if scenario == "s2":
+            rows += reload_rows(leg, phase, arm, run, cell / "daemon.log", counts["reload_completion_p50"], campaign)
         flap_counts = {counts[m] for m, *_ in MATRIX_LINES if m.startswith("flap_")}
         if scenario == "s3" and len(flap_counts) != 1:
             raise ExtractionError(f"{leg.name}: flap metric line counts differ")
@@ -133,14 +197,13 @@ def establishment_span(daemon_log, peers):
     stamps = []
     for line in read_text(daemon_log).splitlines():
         if '"session established"' in line:
-            stamp = json.loads(line)["timestamp"].replace("Z", "+00:00")
-            stamps.append(datetime.fromisoformat(stamp).timestamp())
+            stamps.append(log_time(json.loads(line)))
     stamps.sort()
     span = f"{stamps[peers - 1] - stamps[0]:.3f}" if len(stamps) >= peers else ""
     return len(stamps), peers, span
 
 
-def irr_rows(source, exclusions):
+def irr_rows(source, exclusions, campaign):
     rows = []
     for leg, (overlap, arm, run) in legs(source, "irr", IRR, exclusions):
         completed = leg / "COMPLETED"
@@ -153,6 +216,7 @@ def irr_rows(source, exclusions):
         for row in sighup:
             rows.append([phase, arm, run, "completion_p50", row["reload"], row["completion_p50_s"], "s"])
             rows.append([phase, arm, run, "changed_maxgap_p50", row["reload"], row["changed_maxgap_p50_ms"], "ms"])
+        rows += reload_rows(leg, phase, arm, run, leg / "rustbgpd-sighup" / "daemon.log", len(sighup), campaign)
         rss = leg / "rustbgpd-sighup" / "rss.csv"
         if rss.exists():
             rows.append([phase, arm, run, "peak_rss_sample", "", max(rss_column(rss)), "KiB"])
@@ -185,8 +249,9 @@ def extract(source, excludes=()):
     lines = read_text(listed).splitlines() if listed.exists() else []
     globs = [entry for line in lines if (entry := line.split("#", 1)[0].strip())] + list(excludes)
     exclusions = (globs, [])
-    matrix, spans = matrix_rows(source, exclusions)
-    rows = matrix + irr_rows(source, exclusions) + rr_rows(source, exclusions)
+    campaign = (source / "arms.txt").exists()
+    matrix, spans = matrix_rows(source, exclusions, campaign)
+    rows = matrix + irr_rows(source, exclusions, campaign) + rr_rows(source, exclusions)
     for glob in globs:
         if not any(fnmatch.fnmatch(name, glob) for name in exclusions[1]):
             raise ExtractionError(f"exclusion '{glob}' matches no leg")

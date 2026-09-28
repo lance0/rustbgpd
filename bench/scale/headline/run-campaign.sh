@@ -27,7 +27,10 @@
 # the campaign's CPU affinity, which every runner, harness and daemon inherits
 # (none of the runners sets its own). The campaign ends by writing
 # summary.csv, establishment-span.csv and report.md with summarize.py, and
-# exits non-zero if any setup step, leg or the extraction failed. To drop a
+# exits non-zero if any setup step, leg or the extraction failed. Each leg
+# keeps the daemon.log its runner wrote: the daemon's own reload intervals in
+# summary.csv are read from them, and summarize.py refuses a campaign
+# directory whose finished S2 or IRR leg has lost its log. To drop a
 # leg another workload disturbed, list its ID in OUT_DIR/EXCLUDED
 # and rerun `just bench-headline-summary OUT_DIR`; report.md names every
 # excluded leg.
