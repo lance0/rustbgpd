@@ -51,10 +51,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -70,10 +68,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -96,11 +92,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -118,10 +111,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -144,10 +135,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -164,10 +153,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -184,10 +171,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -204,10 +189,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -223,10 +206,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -247,10 +228,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -267,10 +246,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -287,11 +264,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -373,11 +347,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: Source (static or dynamic), MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -416,7 +388,6 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
 '--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
 '(--no-per-client-best --no-route-server-client)--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon]' \
@@ -426,9 +397,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
 '(--no-add-path)--add-path-send[Enable Add-Path send]' \
 '--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -444,10 +414,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -463,10 +431,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -483,10 +449,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -503,10 +467,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -524,10 +486,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -543,10 +503,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -562,10 +520,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -638,11 +594,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: Source (static or dynamic), MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -681,7 +635,6 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--no-route-server-client)--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
 '--no-route-server-client[Explicitly disable inherited transparent route-server client mode]' \
 '(--no-per-client-best --no-route-server-client)--per-client-best[RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon]' \
@@ -691,9 +644,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
 '(--no-add-path)--add-path-send[Enable Add-Path send]' \
 '--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -709,10 +661,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -728,10 +678,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -748,10 +696,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -768,10 +714,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -789,10 +733,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -808,10 +750,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -827,10 +767,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -902,10 +840,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -929,10 +865,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -977,10 +911,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1004,10 +936,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1026,10 +956,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1046,10 +974,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1065,10 +991,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1172,10 +1096,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1352,10 +1274,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1379,10 +1299,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1403,10 +1321,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1427,10 +1343,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1450,10 +1364,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1473,10 +1385,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1494,10 +1404,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1522,10 +1430,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1543,10 +1449,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1631,10 +1535,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1658,10 +1560,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1677,10 +1577,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1728,10 +1626,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1746,11 +1642,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1783,11 +1676,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1802,11 +1692,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1836,11 +1723,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1860,11 +1744,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1967,10 +1848,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -1996,10 +1875,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2020,10 +1897,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2042,11 +1917,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--allow-missing[Succeed and report "not present" when no injected rule matches]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2102,10 +1975,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2133,10 +2004,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2157,10 +2026,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2177,10 +2044,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2210,10 +2075,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2234,10 +2097,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2258,10 +2119,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2282,10 +2141,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2305,10 +2162,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2329,10 +2184,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2404,11 +2257,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2430,11 +2281,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2458,11 +2307,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2482,10 +2329,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2505,10 +2350,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2527,10 +2370,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2548,10 +2389,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2567,10 +2406,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2586,10 +2423,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2613,10 +2448,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2633,10 +2466,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2653,10 +2484,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2709,10 +2538,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2728,10 +2555,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2747,10 +2572,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2766,10 +2589,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2785,10 +2606,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2805,10 +2624,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -2981,11 +2798,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3007,12 +2821,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--limit)--all[Return the daemon'\''s full retained route-event window (route history only)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3044,11 +2855,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3067,12 +2875,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--limit)--all[Return the daemon'\''s full retained session event window]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3091,12 +2896,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--limit)--all[Return the daemon'\''s full retained policy event window]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3117,12 +2919,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--limit)--all[Return the daemon'\''s full retained EVPN event window]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3178,11 +2977,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--liveness[Check only authenticated gRPC responsiveness, without actor readiness or topology]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3200,11 +2997,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3219,11 +3013,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3240,12 +3031,10 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '-y[Skip the confirmation prompt (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3260,11 +3049,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3282,14 +3068,12 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--neighbor)--all[Toggle every currently-managed peer]' \
 '--clear[Clear instead of enabling]' \
 '-y[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for an all-peers change (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3306,11 +3090,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3326,10 +3107,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3353,10 +3132,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3375,13 +3152,10 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--list-deps[Print the resolved import graph — each module'\''s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)]' \
 '--coverage[Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3397,12 +3171,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--check[Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3427,11 +3198,9 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--limit)--all[Evaluate every route in the snapshot (the default)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3448,10 +3217,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3469,10 +3236,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3489,10 +3254,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3509,10 +3272,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3538,10 +3299,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3559,13 +3318,11 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3584,13 +3341,11 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3609,13 +3364,11 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3633,13 +3386,11 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '(--neighbor)--global[Change the global chain, used by every neighbor without its own chain]' \
 '-y[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
 '--yes[Skip the confirmation prompt for a global change (asked only on a terminal)]' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3702,10 +3453,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3724,10 +3473,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3748,10 +3495,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3863,10 +3608,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3890,10 +3633,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3909,10 +3650,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3930,10 +3669,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -3950,10 +3687,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4010,10 +3745,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4037,10 +3770,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4056,10 +3787,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4077,10 +3806,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4097,10 +3824,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4118,10 +3843,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4138,10 +3861,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4206,10 +3927,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4233,10 +3952,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4256,10 +3973,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4276,10 +3991,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4332,10 +4045,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4359,10 +4070,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4387,10 +4096,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4407,10 +4114,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4462,11 +4167,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
@@ -4482,11 +4184,8 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-cert=[PEM client certificate chain for mTLS (requires --tls-key)]:FILE:_files' \
 '--tls-key=[PEM client private key for mTLS (requires --tls-cert)]:FILE:_files' \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
-'--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
-'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'(--json-lines)-j[Output in JSON format]' \
-'(--json-lines)--json[Output in JSON format]' \
-'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \

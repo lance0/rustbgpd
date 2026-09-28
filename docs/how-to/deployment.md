@@ -159,7 +159,8 @@ binaries themselves (`rbgp man`, `rustbgpd --man`,
 regenerate them. Bash and Zsh complete flags at every command level. Fish
 completes flags only for top-level commands and their direct subcommands;
 for deeper commands such as `rbgp policy chain set-import`, it completes the
-subcommand name but not its flags.
+subcommand name but not its flags. All three shells offer `--json-lines`,
+`--pager`, and `--json-version` only on command paths where those flags apply.
 
 To pin to a specific tag for reproducibility, swap `latest` for the
 version, e.g. `releases/download/v0.45.0/${TARBALL}`. SHA-256
