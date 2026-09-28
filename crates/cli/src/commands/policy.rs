@@ -140,6 +140,17 @@ struct JsonChains {
     export_policy_names: Vec<String>,
 }
 
+/// Whether diagnostics on stderr may carry ANSI colour. The policy renderers
+/// take a plain bool, so ask the same owo-colors decision every other
+/// coloured CLI output uses: stderr is a terminal, `NO_COLOR` is unset,
+/// `TERM` is not `dumb`, and `--no-color` has not set the global override.
+fn stderr_color() -> bool {
+    use owo_colors::{OwoColorize, Stream};
+    " ".if_supports_color(Stream::Stderr, |s| s.red())
+        .to_string()
+        != " "
+}
+
 /// `rbgp policy check <file.rpol>` — run the `.rpol` frontend
 /// in-process (import resolution, parse, typecheck, in-language
 /// tests); no daemon. `roots` are extra `import` resolution roots
@@ -194,7 +205,6 @@ fn check_local_with_writer(
     json: bool,
     stdout: &mut dyn std::io::Write,
 ) -> i32 {
-    use std::io::IsTerminal;
     use std::path::PathBuf;
 
     use rustbgpd_policy::rpol::{DEFAULT_MAX_GRAPH_BYTES, LoadError, RpolFile};
@@ -217,8 +227,7 @@ fn check_local_with_writer(
         }
         Err(error @ LoadError::Compile { .. }) => {
             if !json {
-                let color = std::io::stderr().is_terminal();
-                eprint!("{}", error.render(color));
+                eprint!("{}", error.render(stderr_color()));
             }
             let messages = error
                 .diagnostics()
@@ -608,7 +617,7 @@ fn write_formatted_stdout(writer: &mut dyn std::io::Write, formatted: &str) -> i
 /// `--check` found differences or any file was unreadable/unformattable
 /// (syntax errors — broken files are refused, never rewritten).
 pub fn fmt_local(files: &[String], check: bool) -> i32 {
-    use std::io::{IsTerminal, Read};
+    use std::io::Read;
 
     use rustbgpd_policy::rpol::{FmtError, format_rpol};
 
@@ -639,8 +648,7 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
         let formatted = match format_rpol(&source) {
             Ok(formatted) => formatted,
             Err(FmtError::Syntax(diags)) => {
-                let color = std::io::stderr().is_terminal();
-                eprint!("{}", diags.render(name, &source, color));
+                eprint!("{}", diags.render(name, &source, stderr_color()));
                 eprintln!(
                     "{name}: not formatted ({} syntax error{} — see `rbgp policy check`)",
                     diags.len(),
