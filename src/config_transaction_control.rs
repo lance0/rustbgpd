@@ -1603,7 +1603,7 @@ impl ConfigTransactionController {
             "No config snapshots recorded yet.\n".to_string()
         } else {
             format!(
-                "{} config history row(s) retained; index 0 is newest. Recorded v2 rows can be restored with RollbackConfigTransaction (rbgp config rollback N); metadata-only and unreadable rows are rollback-ineligible.\n",
+                "{} config history row(s) retained; index 0 is newest. Recorded v2 rows can be restored with `rbgp config rollback N`; metadata-only and unreadable rows are rollback-ineligible.\n",
                 proto_entries.len()
             )
         };

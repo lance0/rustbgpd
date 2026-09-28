@@ -93,6 +93,35 @@ fn snake_case_value(value: &str) -> Result<String, std::convert::Infallible> {
     Ok(value.replace('-', "_"))
 }
 
+/// `--type` event filters: normalizes like `snake_case_value` and lists the
+/// scope's accepted names for help and completions. Validation stays in the
+/// command, so an unknown type keeps its argument-error exit code.
+#[derive(Clone)]
+struct EventTypeValues(commands::watch::EventTypeScope);
+
+impl clap::builder::TypedValueParser for EventTypeValues {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        clap::builder::StringValueParser::new()
+            .parse_ref(command, arg, value)
+            .map(|value| value.replace('-', "_"))
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            self.0.names().map(clap::builder::PossibleValue::new),
+        ))
+    }
+}
+
 /// The inverse of `snake_case_value` for the few older kebab-case values.
 fn kebab_case_value(value: &str) -> Result<String, std::convert::Infallible> {
     Ok(value.replace('_', "-"))
@@ -263,8 +292,8 @@ struct Cli {
 
     /// Disable colored output
     ///
-    /// The `NO_COLOR` environment variable is handled at runtime so its
-    /// presence disables color without requiring a boolean value.
+    /// Setting the `NO_COLOR` environment variable to any value also
+    /// disables color.
     #[arg(long, global = true)]
     no_color: bool,
 
@@ -281,7 +310,7 @@ enum Command {
     /// Show daemon global configuration
     Global,
 
-    /// Runtime config diagnostics
+    /// Plan, apply, confirm, roll back, and inspect runtime configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -316,7 +345,7 @@ enum Command {
         compare: Option<String>,
     },
 
-    /// Inspect single-hop and multihop BFD sessions (ADR-0067)
+    /// Inspect single-hop and multihop BFD sessions
     Bfd {
         #[command(subcommand)]
         action: Option<BfdAction>,
@@ -360,9 +389,9 @@ enum Command {
 
         /// Scope --explain to a specific peer's Add-Path send view.
         /// When set, candidates are filtered by the peer's export
-        /// policy + sendable families and the top
-        /// `add_path_send_max` are tagged with their advertised
-        /// rank. Omit for the global Loc-RIB view.
+        /// policy + sendable families, and the paths within the peer's
+        /// Add-Path send limit are tagged with their advertised rank.
+        /// Omit for the global Loc-RIB view.
         #[arg(long, requires = "explain")]
         explain_peer: Option<String>,
 
@@ -428,7 +457,7 @@ enum Command {
         family: Option<String>,
     },
 
-    /// Manage EVPN routes (list, add, delete — RFC 7432)
+    /// List, explain, inject, and withdraw EVPN routes; inspect VTEP state
     Evpn {
         #[command(subcommand)]
         action: Option<EvpnAction>,
@@ -594,7 +623,7 @@ enum Command {
     /// Manage policy definitions and import/export chains
     ///
     /// Manages named `[[policy_definitions]]` entries and the global /
-    /// per-neighbor import/export chains. Backed by PolicyService.
+    /// per-neighbor import/export chains.
     Policy {
         #[command(subcommand)]
         action: PolicyAction,
@@ -603,7 +632,7 @@ enum Command {
     /// Manage named neighbor sets used by policy
     ///
     /// Manages named `[[neighbor_sets]]` entries used by policy
-    /// `match_neighbor_set`. Backed by PolicyService.
+    /// `match_neighbor_set`.
     NeighborSet {
         #[command(subcommand)]
         action: NeighborSetAction,
@@ -612,7 +641,7 @@ enum Command {
     /// Manage peer groups and neighbor membership
     ///
     /// Manages named `[[peer_groups]]` entries and binds/unbinds
-    /// neighbors to them. Backed by PeerGroupService.
+    /// neighbors to them.
     PeerGroup {
         #[command(subcommand)]
         action: PeerGroupAction,
@@ -621,7 +650,7 @@ enum Command {
     /// Manage dynamic-neighbor prefix ranges
     ///
     /// Manages `[[dynamic_neighbors]]` prefix ranges that auto-accept
-    /// inbound peers into a peer group. Backed by NeighborService.
+    /// inbound peers into a peer group.
     DynamicNeighbor {
         #[command(subcommand)]
         action: DynamicNeighborAction,
@@ -629,7 +658,7 @@ enum Command {
 
     /// Manage general unicast FIB export tables at runtime
     ///
-    /// Manages `[[fib_tables]]` (ADR-0061 general unicast FIB export).
+    /// Manages `[[fib_tables]]` general unicast FIB export tables.
     /// Hot-applies through the FIB reconciler and persists to the config.
     FibTable {
         #[command(subcommand)]
@@ -909,7 +938,7 @@ enum PolicyAction {
     /// Dry-run a candidate `.rpol` policy against the live RIB
     ///
     /// The file compiles server-side and evaluates read-only over a
-    /// route snapshot (ADR-0096) — counts, per-term hit counters, and
+    /// route snapshot — counts, per-term hit counters, and
     /// before/after attribute diffs. No route state or session is
     /// touched. Exit codes: 0 ran, 1 compile diagnostics.
     Test {
@@ -953,7 +982,7 @@ enum PolicyAction {
     Set {
         /// Policy name
         name: String,
-        /// JSON file containing the PolicyDefinition shape
+        /// JSON file containing the policy definition
         #[arg(long, value_name = "PATH")]
         from_file: String,
     },
@@ -970,7 +999,7 @@ enum PolicyAction {
     /// Show live per-term policy hit counters
     ///
     /// Reports how many routes matched each term of the installed
-    /// import/export chains since chain install (ADR-0096). Counters
+    /// import/export chains since chain install. Counters
     /// reset when a chain is replaced (policy reload / hot-apply), and
     /// export counters also when a session re-registers; import chains
     /// report their install generation and export chains their
@@ -987,7 +1016,7 @@ enum PolicyAction {
     /// Explain the policy decision for a prefix on a neighbor
     ///
     /// `--direction import` explains why a prefix was permitted /
-    /// denied / withdrawn, or not-seen / evicted / stale (ADR-0073).
+    /// denied / withdrawn, or not-seen / evicted / stale.
     /// Reads the per-session decision cache; requires
     /// `[policy.explain].enabled` on the daemon (errors distinctly
     /// when the cache is disabled or the neighbor has no live session
@@ -1093,15 +1122,23 @@ enum NeighborSetAction {
     /// List configured neighbor sets
     List,
     /// Show one neighbor set by name
-    Get { name: String },
+    Get {
+        /// Neighbor-set name
+        name: String,
+    },
     /// Set (create or replace) a neighbor set from a JSON file
     Set {
+        /// Neighbor-set name
         name: String,
+        /// JSON file containing the neighbor-set definition
         #[arg(long, value_name = "PATH")]
         from_file: String,
     },
     /// Delete a neighbor set
-    Delete { name: String },
+    Delete {
+        /// Neighbor-set name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1109,15 +1146,23 @@ enum PeerGroupAction {
     /// List configured peer groups
     List,
     /// Show one peer group by name
-    Get { name: String },
+    Get {
+        /// Peer-group name
+        name: String,
+    },
     /// Set (create or replace) a peer group from a JSON file
     Set {
+        /// Peer-group name
         name: String,
+        /// JSON file containing the peer-group definition
         #[arg(long, value_name = "PATH")]
         from_file: String,
     },
     /// Delete a peer group
-    Delete { name: String },
+    Delete {
+        /// Peer-group name
+        name: String,
+    },
     /// Bind a neighbor to a peer group
     Attach {
         /// Neighbor address
@@ -1479,6 +1524,7 @@ enum BfdAction {
 enum RpkiAction {
     /// Look up one customer's merged ASPA provider set
     Aspa {
+        /// Customer AS number whose ASPA provider set to show
         #[arg(value_parser = clap::value_parser!(u32).range(1..))]
         customer_asn: u32,
     },
@@ -1633,7 +1679,7 @@ enum RibAction {
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
-    /// Show ADR-0061 general FIB route install status
+    /// Show general unicast FIB route install status
     Fib {
         /// FIB table-name filter
         #[arg(long)]
@@ -1809,14 +1855,12 @@ enum EventsAction {
         #[arg(long)]
         prefix: Option<String>,
 
-        /// Event type filter: added, withdrawn, best_changed,
-        /// state_changed, established, lost, peer_enabled, peer_disabled,
-        /// notification_sent, notification_received, policy_changed,
-        /// dataplane_status_changed, dataplane_route_installed,
-        /// dataplane_route_withdrawn, dataplane_route_failed, evpn_added,
-        /// evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down,
-        /// bfd_state_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::All)
+        )]
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
@@ -1828,12 +1872,12 @@ enum EventsAction {
         #[arg(long, default_value_t = 0)]
         backfill: u32,
 
-        /// ADR-0072 durable cursor: replay committed events with
+        /// Durable cursor: replay committed events with
         /// `event_id > N` from the daemon's local event outbox,
         /// then tail the live stream. `0` replays everything
-        /// retained. Survives daemon restart. Returns
-        /// `FAILED_PRECONDITION` when the daemon was started with
-        /// `[event_history].enabled = false` or EHM is unavailable.
+        /// retained. Survives daemon restart. Fails when the daemon
+        /// was started with `[event_history].enabled = false` or its
+        /// event history is unavailable.
         #[arg(long, value_name = "EVENT_ID")]
         from_event_id: Option<u64>,
     },
@@ -1848,9 +1892,12 @@ enum EventsAction {
         )]
         address: Option<String>,
 
-        /// Session event type filter: state_changed, established, lost,
-        /// peer_enabled, peer_disabled
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Session event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Session)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent session events to return (default 100)
@@ -1872,8 +1919,12 @@ enum EventsAction {
         )]
         address: Option<String>,
 
-        /// Policy event type filter: policy_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Policy event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Policy)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent policy events to return (default 100)
@@ -1903,8 +1954,12 @@ enum EventsAction {
         #[arg(long)]
         rd: Option<String>,
 
-        /// EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// EVPN event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Evpn)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent EVPN events to return (default 100)
@@ -1995,8 +2050,10 @@ enum EvpnAction {
     },
     /// Inject a Type 3 IMET route.
     AddImet {
+        /// Route Distinguisher, "asn:value" / "ip:value".
         #[arg(long)]
         rd: String,
+        /// Ethernet-tag identifying the EVI (default 0).
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// Originator IP (required for Type 3).
@@ -2005,13 +2062,16 @@ enum EvpnAction {
         /// VTEP loopback IP (next-hop).
         #[arg(long)]
         next_hop: String,
+        /// Optional route targets, each "asn:value".
         #[arg(long, value_delimiter = ',')]
         rt: Vec<String>,
+        /// Disable the RFC 8365 VXLAN encapsulation ext community.
         #[arg(long)]
         no_vxlan_encap: bool,
     },
     /// Inject a Type 5 IP Prefix route.
     AddIpPrefix {
+        /// Route Distinguisher, "asn:value" / "ip:value".
         #[arg(long)]
         rd: String,
         /// Ethernet Tag ID. Must be 0 for supported Type 5 injection.
@@ -2032,26 +2092,34 @@ enum EvpnAction {
         /// Router MAC extended community value. Required unless --no-vxlan-encap is set.
         #[arg(long)]
         router_mac: Option<String>,
+        /// Optional route targets, each "asn:value".
         #[arg(long, value_delimiter = ',')]
         rt: Vec<String>,
+        /// Disable the RFC 8365 VXLAN encapsulation ext community.
         #[arg(long)]
         no_vxlan_encap: bool,
     },
     /// Withdraw a Type 2 MAC/IP route by its key fields.
     DeleteMacIp {
+        /// Route Distinguisher, "asn:value" / "ip:value".
         #[arg(long)]
         rd: String,
+        /// Ethernet-tag identifying the EVI (default 0).
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
+        /// MAC address "aa:bb:cc:dd:ee:ff".
         #[arg(long)]
         mac: String,
+        /// Host IP (omit for the MAC-only route).
         #[arg(long)]
         ip: Option<String>,
     },
     /// Withdraw a Type 3 IMET route by its key fields.
     DeleteImet {
+        /// Route Distinguisher, "asn:value" / "ip:value".
         #[arg(long)]
         rd: String,
+        /// Ethernet-tag identifying the EVI (default 0).
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
         /// Originator IP.
@@ -2060,6 +2128,7 @@ enum EvpnAction {
     },
     /// Withdraw a Type 5 IP Prefix route by its key fields.
     DeleteIpPrefix {
+        /// Route Distinguisher, "asn:value" / "ip:value".
         #[arg(long)]
         rd: String,
         /// Ethernet Tag ID. Must be 0 for Type 5 withdrawal.
@@ -2085,20 +2154,20 @@ enum EvpnAction {
         #[command(subcommand)]
         action: EsAction,
     },
-    /// Show the committed ADR-0063 EVPN runtime generation.
+    /// Show the committed EVPN runtime generation.
     Runtime,
     /// List local EVPN instances configured on this VTEP
     ///
     /// Empty when the daemon is acting purely as an EVPN route
     /// reflector.
     Instances,
-    /// List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP).
+    /// List rustbgpd-owned FDB nexthop groups (aliasing ECMP).
     Nexthops,
-    /// List managed EVPN netdev ownership/status rows (ADR-0091).
+    /// List managed EVPN netdev ownership/status rows.
     ManagedNetdevs,
     /// List configured IP-VRFs and their readiness verdict
     ///
-    /// Lists IP-VRFs (Gate 9, ADR-0058) with the readiness verdict
+    /// Lists IP-VRFs with the readiness verdict
     /// from the most recent reconcile pass.
     Vrfs {
         /// Operator-facing IP-VRF name. When provided, fetch just
@@ -2129,10 +2198,13 @@ enum EvpnExplainSelector {
     MacIp {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Tag ID (default 0)
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
+        /// MAC address, e.g. "aa:bb:cc:dd:ee:ff"
         #[arg(long, value_parser = commands::evpn::parse_mac)]
         mac: String,
+        /// Host IP; omit for the MAC-only key
         #[arg(long)]
         ip: Option<std::net::IpAddr>,
     },
@@ -2140,8 +2212,10 @@ enum EvpnExplainSelector {
     Imet {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Tag ID (default 0)
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
+        /// Originating router IP
         #[arg(long)]
         originator_ip: std::net::IpAddr,
     },
@@ -2149,8 +2223,10 @@ enum EvpnExplainSelector {
     Es {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Segment Identifier: 10 colon-separated hex octets
         #[arg(long, value_parser = commands::evpn::parse_esi)]
         esi: String,
+        /// Originating router IP
         #[arg(long)]
         originator_ip: std::net::IpAddr,
     },
@@ -2158,8 +2234,10 @@ enum EvpnExplainSelector {
     IpPrefix {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Tag ID (default 0)
         #[arg(long, default_value_t = 0)]
         ethernet_tag: u32,
+        /// Canonical IP prefix, e.g. "10.0.0.0/24"
         #[arg(long, value_parser = commands::evpn::parse_exact_prefix)]
         prefix: String,
     },
@@ -2167,6 +2245,7 @@ enum EvpnExplainSelector {
     EadPerEs {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Segment Identifier: 10 colon-separated hex octets
         #[arg(long, value_parser = commands::evpn::parse_esi)]
         esi: String,
     },
@@ -2174,8 +2253,10 @@ enum EvpnExplainSelector {
     EadPerEvi {
         #[command(flatten)]
         common: EvpnExplainArgs,
+        /// Ethernet Segment Identifier: 10 colon-separated hex octets
         #[arg(long, value_parser = commands::evpn::parse_esi)]
         esi: String,
+        /// Ethernet Tag ID (below 4294967295, which is reserved for per-ES routes)
         #[arg(long, value_parser = clap::value_parser!(u32).range(..i64::from(u32::MAX)))]
         ethernet_tag: u32,
     },
@@ -2818,7 +2899,106 @@ fn invoked_binary_name() -> &'static str {
 }
 
 fn cli_command(binary_name: &'static str) -> clap::Command {
-    group_root_help(Cli::command().name(binary_name).bin_name(binary_name))
+    group_root_help(scope_global_help(
+        Cli::command().name(binary_name).bin_name(binary_name),
+    ))
+}
+
+/// Global flags that only some command paths accept. `Only` paths are exact;
+/// an `Except` path also covers its descendants. `run` still validates the
+/// flag combination; this table only decides where help shows the flag.
+const SCOPED_GLOBALS: &[(&str, ScopedGlobal)] = &[
+    ("json_lines", ScopedGlobal::Only(PAGED_RIB_PATHS)),
+    ("pager", ScopedGlobal::Only(PAGED_RIB_PATHS)),
+    (
+        "json_version",
+        ScopedGlobal::Except(&[
+            "completions",
+            "config diff",
+            "config import",
+            "diff",
+            "doctor",
+            "events",
+            "man",
+            "metrics",
+            "mrt-dump",
+            "policy check",
+            "policy fmt",
+            "top",
+            "watch",
+        ]),
+    ),
+];
+
+const PAGED_RIB_PATHS: &[&str] = &["rib", "rib received", "rib advertised"];
+
+enum ScopedGlobal {
+    Only(&'static [&'static str]),
+    Except(&'static [&'static str]),
+}
+
+impl ScopedGlobal {
+    fn shown_on(&self, path: &str) -> bool {
+        match self {
+            // Exact: `rib` accepts the flag, `rib blackholes` does not.
+            Self::Only(paths) => paths.contains(&path),
+            Self::Except(paths) => !paths.iter().any(|excluded| {
+                path.strip_prefix(excluded)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            }),
+        }
+    }
+}
+
+/// Display only: subcommand help lists the global flags under their own
+/// heading, after the command's own options, and hides the scoped ones on
+/// paths that reject them. Each subcommand gets a copy of every still-global
+/// root argument (what Clap's propagation would add), so parsing, value
+/// propagation, and flag positions are unchanged.
+fn scope_global_help(command: clap::Command) -> clap::Command {
+    fn visit(mut command: clap::Command, path: &str, globals: &[clap::Arg]) -> clap::Command {
+        let names: Vec<String> = command
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_owned())
+            .collect();
+        for name in names {
+            let sub_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path} {name}")
+            };
+            command = command.mut_subcommand(&name, |mut sub| {
+                for arg in globals {
+                    let shown = SCOPED_GLOBALS
+                        .iter()
+                        .find(|(id, _)| arg.get_id() == id)
+                        .is_none_or(|(_, scope)| scope.shown_on(&sub_path));
+                    sub = sub.arg(
+                        arg.clone()
+                            .help_heading("Global options")
+                            .hide(arg.is_hide_set() || !shown),
+                    );
+                }
+                visit(sub, &sub_path, globals)
+            });
+        }
+        command
+    }
+
+    for (id, _) in SCOPED_GLOBALS {
+        debug_assert!(
+            command
+                .get_arguments()
+                .any(|arg| arg.get_id() == id && arg.is_global_set()),
+            "scoped global {id} is a global root argument"
+        );
+    }
+    let globals: Vec<_> = command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .cloned()
+        .collect();
+    visit(command, "", &globals)
 }
 
 // Presentation only: command paths, aliases, and parser order stay in Clap.
@@ -5213,6 +5393,251 @@ mod tests {
         }
     }
 
+    /// Visits every command in the built tree except Clap's generated
+    /// `help` subcommands, with its space-separated path.
+    fn for_each_command(f: &mut dyn FnMut(&str, &clap::Command)) {
+        fn visit(command: &clap::Command, path: &str, f: &mut dyn FnMut(&str, &clap::Command)) {
+            f(path, command);
+            for sub in command
+                .get_subcommands()
+                .filter(|sub| sub.get_name() != "help")
+            {
+                let sub_path = format!("{path} {}", sub.get_name());
+                visit(sub, sub_path.trim_start(), f);
+            }
+        }
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        visit(&command, "", f);
+    }
+
+    #[test]
+    fn every_visible_argument_has_help() {
+        let mut missing = Vec::new();
+        for_each_command(&mut |path, command| {
+            for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+                let help = arg
+                    .get_help()
+                    .or_else(|| arg.get_long_help())
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                if help.trim().is_empty() {
+                    missing.push(format!("rbgp {path} {}", arg.get_id()));
+                }
+            }
+        });
+        assert!(
+            missing.is_empty(),
+            "arguments without help text:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    #[test]
+    fn help_text_uses_operator_terms() {
+        const GRPC_STATUS_CODES: &[&str] = &[
+            "CANCELLED",
+            "UNKNOWN",
+            "INVALID_ARGUMENT",
+            "DEADLINE_EXCEEDED",
+            "NOT_FOUND",
+            "ALREADY_EXISTS",
+            "PERMISSION_DENIED",
+            "RESOURCE_EXHAUSTED",
+            "FAILED_PRECONDITION",
+            "ABORTED",
+            "OUT_OF_RANGE",
+            "UNIMPLEMENTED",
+            "INTERNAL",
+            "UNAVAILABLE",
+            "DATA_LOSS",
+            "UNAUTHENTICATED",
+        ];
+        let mut findings = Vec::new();
+        for_each_command(&mut |path, command| {
+            let mut command = command.clone();
+            for help in [command.render_help(), command.render_long_help()] {
+                let help = help.to_string();
+                for word in
+                    help.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                {
+                    let service = word.len() > "Service".len()
+                        && word.ends_with("Service")
+                        && word.starts_with(|c: char| c.is_ascii_uppercase());
+                    if word.starts_with("ADR-") || service || GRPC_STATUS_CODES.contains(&word) {
+                        findings.push(format!("rbgp {path}: {word}"));
+                    }
+                }
+            }
+        });
+        findings.sort();
+        findings.dedup();
+        assert!(
+            findings.is_empty(),
+            "help names internal records, services, or status codes:\n{}",
+            findings.join("\n")
+        );
+    }
+
+    #[test]
+    fn subcommand_help_lists_global_options_last() {
+        let globals: Vec<String> = Cli::command()
+            .get_arguments()
+            .filter(|arg| arg.is_global_set())
+            .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
+            .collect();
+        let mut checked = 0;
+        for_each_command(&mut |path, command| {
+            if path.is_empty() {
+                return;
+            }
+            let help = command.clone().render_long_help().to_string();
+            let (own, global) = help
+                .split_once("\nGlobal options:\n")
+                .unwrap_or_else(|| panic!("rbgp {path} --help has no Global options block"));
+            assert!(!global.contains("\nGlobal options:\n"), "rbgp {path}");
+            let option_lines = |text: &str| -> Vec<String> {
+                text.lines()
+                    .filter_map(|line| line.trim_start().strip_prefix('-'))
+                    .filter_map(|line| {
+                        line.split([',', ' ', '='])
+                            .map(|part| part.trim_start_matches('-'))
+                            .find(|part| part.len() > 1)
+                            .map(|long| format!("--{long}"))
+                    })
+                    .collect()
+            };
+            for flag in option_lines(own) {
+                assert!(
+                    !globals.contains(&flag),
+                    "rbgp {path}: {flag} before Global options"
+                );
+            }
+            for flag in option_lines(global.split("\n\nExamples:").next().unwrap()) {
+                assert!(
+                    globals.contains(&flag),
+                    "rbgp {path}: {flag} under Global options"
+                );
+            }
+            checked += 1;
+        });
+        assert!(checked > 100, "only {checked} subcommands checked");
+    }
+
+    #[test]
+    fn scoped_globals_are_shown_where_run_accepts_them() {
+        // Every path that parses without arguments, plus the ones below
+        // that need an argument to reach their command.
+        let mut invocations = Vec::new();
+        for_each_command(&mut |path, _| {
+            if !path.is_empty() {
+                invocations.push(path.to_owned());
+            }
+        });
+        invocations.extend(
+            [
+                "config diff c.toml",
+                "config import c.conf",
+                "config plan c.toml",
+                "diff advertised --against s.ndjson",
+                "policy check p.rpol",
+                "policy fmt p.rpol",
+                "policy get p",
+                "rib received 192.0.2.1",
+                "rib advertised 192.0.2.1",
+                "completions bash",
+            ]
+            .map(str::to_owned),
+        );
+        let command = cli_command(BINARY_NAME);
+        let mut built = command.clone();
+        built.build();
+        let shown = |path: &str, id: &str| {
+            path.split(' ')
+                .fold(&built, |command, name| {
+                    command.find_subcommand(name).unwrap()
+                })
+                .get_arguments()
+                .any(|arg| arg.get_id() == id && !arg.is_hide_set())
+        };
+        let mut checked = 0;
+        for invocation in &invocations {
+            let parse = |globals: &[&str]| {
+                let args = ["rbgp"]
+                    .into_iter()
+                    .chain(globals.iter().copied())
+                    .chain(invocation.split(' '));
+                let matches = command.clone().try_get_matches_from(args).ok()?;
+                let mut path = Vec::new();
+                let mut current = &matches;
+                while let Some((name, sub)) = current.subcommand() {
+                    path.push(name.to_owned());
+                    current = sub;
+                }
+                Some((Cli::from_arg_matches(&matches).ok()?, path.join(" ")))
+            };
+            let Some((cli, path)) = parse(&["--json", "--json-version", "1"]) else {
+                continue;
+            };
+            checked += 1;
+            assert_eq!(
+                validate_json_version(&cli).is_ok(),
+                shown(&path, "json_version"),
+                "--json-version on rbgp {invocation}"
+            );
+            let (cli, _) = parse(&[]).unwrap();
+            assert_eq!(
+                pager_supported(&cli.command),
+                shown(&path, "pager"),
+                "--pager on rbgp {invocation}"
+            );
+            let (cli, _) = parse(&["--json-lines"]).unwrap();
+            assert_eq!(
+                validate_json_lines(&cli).is_ok(),
+                shown(&path, "json_lines"),
+                "--json-lines on rbgp {invocation}"
+            );
+        }
+        assert!(checked >= 60, "only {checked} invocations parsed");
+    }
+
+    #[test]
+    fn event_type_filters_list_every_accepted_type() {
+        use commands::watch::EventTypeScope;
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        for (path, scope) in [
+            ("events watch", EventTypeScope::All),
+            ("events sessions", EventTypeScope::Session),
+            ("events policy", EventTypeScope::Policy),
+            ("events evpn", EventTypeScope::Evpn),
+        ] {
+            let sub = path.split(' ').fold(&command, |command, name| {
+                command.find_subcommand(name).unwrap()
+            });
+            let help = sub.clone().render_long_help().to_string();
+            let values = help
+                .split_once("--type <EVENT_TYPES>")
+                .and_then(|(_, rest)| rest.split_once("[possible values: "))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .unwrap_or_else(|| panic!("rbgp {path} --help lists no --type values"))
+                .0;
+            let listed: Vec<_> = values.split(", ").collect();
+            assert_eq!(listed, scope.names().collect::<Vec<_>>(), "rbgp {path}");
+        }
+        let watch_names: Vec<_> = EventTypeScope::All.names().collect();
+        assert!(watch_names.contains(&"policy_filtered"));
+        assert!(watch_names.contains(&"otc_route_blocked"));
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
+            let generated = String::from_utf8(generated).unwrap();
+            for name in &watch_names {
+                assert!(generated.contains(name), "{shell} completion lacks {name}");
+            }
+        }
+    }
+
     #[test]
     fn test_rbgp_command_renders_rbgp_usage() {
         let mut command = cli_command(BINARY_NAME);
@@ -5293,7 +5718,7 @@ mod tests {
 
     #[test]
     fn root_help_groups_preserve_subcommands_and_completions() {
-        let mut native = Cli::command();
+        let mut native = scope_global_help(Cli::command());
         native.build();
         let mut grouped = cli_command(BINARY_NAME);
         grouped.build();

@@ -10332,7 +10332,14 @@ async fn history_lists_entries_newest_first_with_summaries() {
     assert!(
         response
             .human_text
-            .contains("Recorded v2 rows can be restored"),
+            .contains("Recorded v2 rows can be restored with `rbgp config rollback N`"),
+        "{}",
+        response.human_text
+    );
+    // Operators read this through `rbgp config history`; RPC names are not
+    // actionable there.
+    assert!(
+        !response.human_text.contains("RollbackConfigTransaction"),
         "{}",
         response.human_text
     );

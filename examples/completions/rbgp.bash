@@ -3296,7 +3296,7 @@ _rbgp() {
                     return 0
                     ;;
                 --type)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "evpn_added evpn_withdrawn evpn_best_changed" -- "${cur}"))
                     return 0
                     ;;
                 --limit)
@@ -3446,7 +3446,7 @@ _rbgp() {
                     return 0
                     ;;
                 --type)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "policy_changed" -- "${cur}"))
                     return 0
                     ;;
                 --limit)
@@ -3512,7 +3512,7 @@ _rbgp() {
                     return 0
                     ;;
                 --type)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "state_changed established lost peer_added peer_removed peer_enabled peer_disabled max_prefix_warning" -- "${cur}"))
                     return 0
                     ;;
                 --limit)
@@ -3594,7 +3594,7 @@ _rbgp() {
                     return 0
                     ;;
                 --type)
-                    COMPREPLY=($(compgen -f "${cur}"))
+                    COMPREPLY=($(compgen -W "added withdrawn best_changed policy_filtered state_changed established lost peer_added peer_removed peer_enabled peer_disabled max_prefix_warning notification_sent notification_received policy_changed otc_route_blocked dataplane_status_changed dataplane_route_installed dataplane_route_withdrawn dataplane_route_failed evpn_added evpn_withdrawn evpn_best_changed bfd_up bfd_down bfd_state_changed stream_lagged" -- "${cur}"))
                     return 0
                     ;;
                 --backfill)
