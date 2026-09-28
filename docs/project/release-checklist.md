@@ -1014,10 +1014,11 @@ changed.
    wire publish ahead of dependent FSM or RPKI releases when moving to a new
    wire line.
 4. Roll `crates/wire/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
-   release commit.
+   add a `rustbgpd-wire` entry in the repository-level `CHANGELOG.md`.
+   `python3 scripts/check_embedding_versions.py` fails while the README path
+   example trails the manifest version, and `just gate-release --mode release`
+   rejects "prepare" wording left in it for the version about to publish.
+   Date the crate `CHANGELOG.md` heading in the release commit.
 5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-wire --dry-run`
@@ -1056,9 +1057,10 @@ do not force an FSM release for every daemon tag.
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. When the
    wire line also moves, publish wire first so the FSM package can resolve it.
 4. Roll `crates/fsm/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
+   add a `rustbgpd-fsm` entry in the repository-level `CHANGELOG.md`. The
+   README review is manual: no checker reads its content, except that
+   `just gate-release --mode release` rejects "prepare" wording left in it for
+   the version about to publish. Date the crate `CHANGELOG.md` heading in the
    release commit.
 5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
    package inventory and normalized manifest.
@@ -1091,10 +1093,11 @@ client share one public compatibility boundary.
 3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
    dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`.
 4. Roll `crates/rpki/CHANGELOG.md`, review and update the crate README, and
-   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`. Hosted
-   CI rejects a version bump of a published crate whose README has no diff in
-   the same pull request or push. Date the crate `CHANGELOG.md` heading in the
-   release commit.
+   add a `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
+   `python3 scripts/check_embedding_versions.py` fails while the README path
+   example trails the manifest version, and `just gate-release --mode release`
+   rejects "prepare" wording left in it for the version about to publish.
+   Date the crate `CHANGELOG.md` heading in the release commit.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.
