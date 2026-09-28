@@ -629,6 +629,224 @@ log_format = "json"
     actor.await.unwrap();
 }
 
+/// Both internal planners are reads. Cancellation must release the actor
+/// during RIB queue admission as well as after the snapshot request is sent.
+#[tokio::test]
+async fn canceled_preloaded_plans_release_actor_during_rib_admission_and_reply() {
+    for accepted in [false, true] {
+        for full_queue in [false, true] {
+            let config = load_test_config(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+"#,
+            );
+            let (tx, rx) = mpsc::channel(8);
+            let (internal_tx, internal_rx) = mpsc::channel(1);
+            let (rib_tx, mut rib_rx) = mpsc::channel(1);
+            let (filler_reply, _filler_receiver) = oneshot::channel();
+            if full_queue {
+                rib_tx
+                    .send(RibUpdate::QueryUpdateGroupSnapshot {
+                        reply: filler_reply,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let manager = PeerManager::new_with_config(
+                rx,
+                internal_rx,
+                65001,
+                Ipv4Addr::new(10, 0, 0, 1),
+                None,
+                None,
+                BgpMetrics::new(),
+                rib_tx,
+                None,
+                None,
+                config.clone(),
+            );
+            let actor = tokio::spawn(manager.run());
+            let (reply, receiver) = oneshot::channel();
+            let command = if accepted {
+                InternalCommand::PlanAcceptedTransactionConfig {
+                    snapshot: crate::config::AcceptedConfigSnapshot::from_config_for_test(config),
+                    expected_runtime_snapshot_token: None,
+                    read_coordinator: None,
+                    reply,
+                }
+            } else {
+                InternalCommand::PlanTransactionConfig {
+                    candidate: Box::new(config),
+                    expected_runtime_snapshot_token: None,
+                    reply,
+                }
+            };
+            internal_tx.send(command).await.unwrap();
+            // With capacity one, reserving the next slot establishes that
+            // the actor consumed this plan before its receiver is dropped.
+            drop(internal_tx.reserve().await.unwrap());
+            let snapshot_reply = if full_queue {
+                None
+            } else {
+                let RibUpdate::QueryUpdateGroupSnapshot { reply } = rib_rx.recv().await.unwrap()
+                else {
+                    panic!("preloaded plan did not request a RIB snapshot");
+                };
+                Some(reply)
+            };
+            drop(receiver);
+            if let Some(mut reply) = snapshot_reply {
+                tokio::time::timeout(Duration::from_secs(1), reply.closed())
+                    .await
+                    .expect("abandoned preloaded plan retained its snapshot receiver");
+            }
+            let (reply, receiver) = oneshot::channel();
+            tx.send(PeerManagerCommand::ListPolicies { reply })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), receiver)
+                .await
+                .expect("abandoned preloaded plan blocked later actor commands")
+                .unwrap();
+            tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+            actor.await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor fixture establishes staged refusal, compensation, retry, and closed admission"
+)]
+async fn rollback_preview_rejects_staged_fib_baseline_then_retries_after_compensation() {
+    let mut config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+"#,
+    );
+    config.fib_tables = vec![crate::test_support::basic_fib_table("main", 1001)];
+    let snapshot = crate::config::AcceptedConfigSnapshot::from_config_for_test(config.clone());
+    let coordinator = rustbgpd_api::server::RuntimeConfigCoordinator::new();
+    let (tx, rx) = mpsc::channel(8);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        config.clone(),
+    );
+    let actor = tokio::spawn(manager.run());
+    // FIB CRUD stages current_config before persistence without setting
+    // config_snapshot_staged. The coordinator still owns this intermediate state.
+    let mutation = coordinator.acquire().await.unwrap();
+    let (reply, receiver) = oneshot::channel();
+    tx.send(PeerManagerCommand::StageFibTables {
+        tables: Vec::new(),
+        reply,
+    })
+    .await
+    .unwrap();
+    receiver.await.unwrap().unwrap();
+    let (reply, receiver) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::PlanAcceptedTransactionConfig {
+            snapshot: snapshot.clone(),
+            expected_runtime_snapshot_token: None,
+            read_coordinator: Some(coordinator.clone()),
+            reply,
+        })
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(1), receiver)
+        .await
+        .expect("busy preview must fail without waiting for its mutation owner")
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        RuntimeConfigTransactionPlanError::Unavailable(_)
+    ));
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    // Model persistence failure restoring the prior snapshot before releasing
+    // ownership. A later preview must compare with that committed baseline.
+    let (ack, receiver) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::ReplaceConfigSnapshot {
+            config: Box::new(config),
+            ack: Some(ack),
+        })
+        .await
+        .unwrap();
+    receiver.await.unwrap();
+    drop(mutation);
+    let (reply, receiver) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::PlanAcceptedTransactionConfig {
+            snapshot: snapshot.clone(),
+            expected_runtime_snapshot_token: None,
+            read_coordinator: Some(coordinator.clone()),
+            reply,
+        })
+        .await
+        .unwrap();
+    let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+        panic!("retry must enter pure planning");
+    };
+    let permit = coordinator
+        .try_acquire()
+        .expect("preview must release coordinator before RIB wait");
+    drop(permit);
+    reply
+        .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+        .unwrap();
+    let plan = receiver.await.unwrap().unwrap().plan;
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
+    );
+    coordinator.close();
+    let (reply, receiver) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::PlanAcceptedTransactionConfig {
+            snapshot,
+            expected_runtime_snapshot_token: None,
+            read_coordinator: Some(coordinator),
+            reply,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        receiver.await.unwrap(),
+        Err(RuntimeConfigTransactionPlanError::Unavailable(_))
+    ));
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+}
+
 #[tokio::test]
 async fn validation_policy_posture_uses_installed_static_and_dynamic_truth() {
     use rustbgpd_api::peer_types::ValidationPolicyDisposition;

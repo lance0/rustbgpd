@@ -97,6 +97,10 @@ pub(crate) struct MockState {
     pub(crate) config_snapshot_read_stall: AtomicBool,
     pub(crate) config_history_calls: AtomicUsize,
     pub(crate) config_rollback_calls: AtomicUsize,
+    pub(crate) last_config_rollback_preview:
+        Mutex<Option<server_proto::PreviewConfigRollbackRequest>>,
+    pub(crate) config_rollback_preview_error: Mutex<Option<(Code, String)>>,
+    pub(crate) config_rollback_preview_response: Mutex<server_proto::ConfigTransactionPlanResponse>,
     pub(crate) config_rollback_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_config_rollback: Mutex<Option<server_proto::RollbackConfigTransactionRequest>>,
     pub(crate) config_effective_calls: AtomicUsize,
@@ -819,6 +823,29 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                 }),
                 human_text: "No confirmed config transaction is pending.\n".to_string(),
             },
+        ))
+    }
+
+    async fn preview_config_rollback(
+        &self,
+        request: Request<server_proto::PreviewConfigRollbackRequest>,
+    ) -> Result<Response<server_proto::ConfigTransactionPlanResponse>, Status> {
+        *self.state.last_config_rollback_preview.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self
+            .state
+            .config_rollback_preview_error
+            .lock()
+            .await
+            .clone()
+        {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state
+                .config_rollback_preview_response
+                .lock()
+                .await
+                .clone(),
         ))
     }
 

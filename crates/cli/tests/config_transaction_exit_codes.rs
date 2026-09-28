@@ -82,6 +82,160 @@ async fn plan_exits_zero_noop_two_committable_three_rejected() {
     }
 }
 
+fn assert_preview_did_not_mutate(server: &test_support::MockServerHandle) {
+    for calls in [
+        &server.state.config_apply_calls,
+        &server.state.config_stream_apply_calls,
+        &server.state.config_rollback_calls,
+        &server.state.config_confirm_calls,
+        &server.state.config_abort_calls,
+    ] {
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn history_preview_prints_redacted_plan_and_exits_zero_two_or_three() {
+    for (status, code, label) in [
+        (Status::Noop, 0, "noop"),
+        (Status::Committable, 2, "committable"),
+        (Status::Rejected, 3, "rejected"),
+    ] {
+        let server = test_support::spawn_mock_server(None).await;
+        let human_text = "Retained configuration: authentication changed (redacted).\n";
+        *server.state.config_rollback_preview_response.lock().await =
+            proto::ConfigTransactionPlanResponse {
+                status: status as i32,
+                runtime_snapshot_token: "kv1:preview:1".into(),
+                supported_sections: vec!["[[neighbors]]".into()],
+                human_text: human_text.into(),
+                ..Default::default()
+            };
+        let output = run(
+            &server.addr,
+            &["--json", "config", "diff", "--history", "2"],
+        )
+        .await;
+        assert_json_status(&output, code, label);
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::json!({
+                "status": label,
+                "runtime_snapshot_token": "kv1:preview:1",
+                "diff": null,
+                "supported_sections": ["[[neighbors]]"],
+                "unsupported_sections": [],
+                "restart_required_sections": [],
+                "human_text": human_text,
+                "update_group_impact": null,
+                "plan_token": null,
+            })
+        );
+        let output = run(&server.addr, &["config", "diff", "--history", "2"]).await;
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.starts_with(human_text), "{stdout}");
+        assert!(stdout.contains(&format!("Status: {label}")), "{stdout}");
+        assert!(stdout.contains("kv1:preview:1"), "{stdout}");
+        assert!(stdout.contains("[[neighbors]]"), "{stdout}");
+        assert_eq!(
+            server
+                .state
+                .last_config_rollback_preview
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .index,
+            2
+        );
+        assert_eq!(server.state.config_diff_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+        assert_preview_did_not_mutate(&server);
+    }
+}
+
+#[tokio::test]
+async fn history_preview_errors_never_fall_back_to_mutation() {
+    for (code, message, prefix) in [
+        (
+            tonic::Code::Unimplemented,
+            "",
+            "not supported by this daemon",
+        ),
+        (
+            tonic::Code::Unavailable,
+            "runtime config is changing; retry the rollback preview",
+            "retry the rollback preview",
+        ),
+        (
+            tonic::Code::FailedPrecondition,
+            "history row is metadata-only",
+            "precondition failed",
+        ),
+        (
+            tonic::Code::FailedPrecondition,
+            "history payload is unreadable",
+            "precondition failed",
+        ),
+        (
+            tonic::Code::FailedPrecondition,
+            "config history has no retained row 2",
+            "precondition failed",
+        ),
+    ] {
+        let server = test_support::spawn_mock_server(None).await;
+        *server.state.config_rollback_preview_error.lock().await = Some((code, message.into()));
+        for args in [
+            vec!["config", "diff", "--history", "2"],
+            vec!["--json", "config", "diff", "--history", "2"],
+        ] {
+            let output = run(&server.addr, &args).await;
+            assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+            assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(stderr.contains(prefix), "{stderr}");
+            assert!(stderr.contains(message), "{stderr}");
+        }
+        assert!(
+            server
+                .state
+                .last_config_rollback_preview
+                .lock()
+                .await
+                .is_some()
+        );
+        assert_eq!(server.state.config_plan_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(server.state.config_diff_calls.load(Ordering::SeqCst), 0);
+        assert_preview_did_not_mutate(&server);
+    }
+}
+
+#[tokio::test]
+async fn history_preview_unknown_status_fails_closed() {
+    let server = test_support::spawn_mock_server(None).await;
+    for status in [Status::Unspecified as i32, 999] {
+        server
+            .state
+            .config_rollback_preview_response
+            .lock()
+            .await
+            .status = status;
+        let output = run(
+            &server.addr,
+            &["--json", "config", "diff", "--history", "1"],
+        )
+        .await;
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("invalid config transaction status")
+        );
+        assert_preview_did_not_mutate(&server);
+    }
+}
+
 async fn apply(addr: &str, path: &str, plan_token: Option<&str>) -> Output {
     let mut args = vec![
         "--json",

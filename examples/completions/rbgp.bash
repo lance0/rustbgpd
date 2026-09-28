@@ -1764,7 +1764,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__config__subcmd__diff)
-            opts="-s -j -h --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
+            opts="-s -j -h --history --addr --token-file --tls-ca --tls-cert --tls-key --tls-server-name --json --no-color --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1778,6 +1778,10 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                --history)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

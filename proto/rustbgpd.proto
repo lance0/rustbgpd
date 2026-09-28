@@ -164,6 +164,12 @@ service ConfigService {
   // source identity, but do not archive those external bytes.
   rpc ListConfigHistory(ListConfigHistoryRequest) returns (ListConfigHistoryResponse);
 
+  // Read-only, redacted rollback plan for a retained history row. Resolves and
+  // verifies the same payload and external-source provenance as rollback, but
+  // never applies, persists, or opens a confirmation window. This as-of plan
+  // does not reserve the numeric index for a subsequent rollback. Outside v1.
+  rpc PreviewConfigRollback(PreviewConfigRollbackRequest) returns (ConfigTransactionPlanResponse);
+
   // Roll back to a provenance-verified v2 row (index >= 1). The daemon
   // resolves it server-side and routes it through the exact same transaction
   // executor as ApplyConfigTransaction — same plan/impact classification,
@@ -173,6 +179,12 @@ service ConfigService {
 }
 
 message ListConfigHistoryRequest {}
+
+message PreviewConfigRollbackRequest {
+  // Must be >= 1, like RollbackConfigTransaction. Missing, unreadable and
+  // metadata-only rows fail; they never produce an empty successful plan.
+  uint32 index = 1;
+}
 
 enum ConfigHistoryProvenanceStatus {
   CONFIG_HISTORY_PROVENANCE_STATUS_UNSPECIFIED = 0;

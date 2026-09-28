@@ -1453,6 +1453,11 @@ fn transaction_plan_errors_map_without_string_matching() {
             if message.contains("expected old, current new")
     ));
 
+    assert!(matches!(
+        plan_error_to_status(RuntimeConfigTransactionPlanError::Unavailable("retry preview".into())),
+        ConfigTransactionApplyError::Unavailable(message) if message == "retry preview"
+    ));
+
     let invalid = plan_error_to_status(RuntimeConfigTransactionPlanError::InvalidCandidate(
         "bad toml".to_string(),
     ));
@@ -4077,6 +4082,7 @@ families = ["ipv4_unicast"]
                     candidate,
                     expected_runtime_snapshot_token,
                     reply,
+                    ..
                 } => {
                     let candidate_toml = crate::config::persisted_config_document(&candidate)
                         .expect("v3 FIB fake planner candidate must serialize");
@@ -4093,6 +4099,7 @@ families = ["ipv4_unicast"]
                     snapshot,
                     expected_runtime_snapshot_token,
                     reply,
+                    ..
                 } => {
                     let candidate_toml =
                         crate::config::persisted_config_document(snapshot.config_ref())
@@ -9986,7 +9993,7 @@ async fn preloaded_plan_waits_for_public_barrier_and_carries_same_arc() {
     let planned_snapshot = snapshot.clone();
     let task = tokio::spawn(async move {
         controller
-            .plan_preloaded_snapshot(planned_snapshot, Some("expected-token".to_string()))
+            .plan_preloaded_snapshot(planned_snapshot, Some("expected-token".to_string()), None)
             .await
     });
 
@@ -10012,6 +10019,7 @@ async fn preloaded_plan_waits_for_public_barrier_and_carries_same_arc() {
         snapshot: received,
         expected_runtime_snapshot_token,
         reply,
+        ..
     } = command
     else {
         panic!("private lane must receive a preloaded plan command");
@@ -10099,6 +10107,208 @@ fn record_v2_history(dir: &std::path::Path, toml: &str) -> Arc<AcceptedConfigSna
     );
     crate::config_history::record_accepted(dir, &snapshot).unwrap();
     snapshot
+}
+
+/// The preview must not enter the apply path, append history, or create
+/// confirmation authority even when the retained plan is committable.
+#[tokio::test]
+async fn rollback_preview_is_read_only_and_matches_rollback_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = base_toml("");
+    let current = dynamic_candidate_toml();
+    record_v2_history(dir.path(), &previous);
+    record_v2_history(dir.path(), &current);
+    let journal = dir.path().join("confirm.json");
+    let (controller, runtime, ack_task) =
+        rollback_controller(dir.path(), Some(journal.clone()), current.clone());
+    let history = controller.history().unwrap();
+    let runtime_file = std::fs::read(dir.path().join("runtime.toml")).unwrap();
+    let result = controller.preview_rollback(1).await.unwrap();
+    assert_eq!(result.status, RuntimeConfigTransactionStatus::Committable);
+    assert_eq!(result.supported_sections, vec!["[[dynamic_neighbors]]"]);
+    assert_snapshot_matches_config(&runtime.lock().await, &current);
+    assert_eq!(
+        std::fs::read(dir.path().join("runtime.toml")).unwrap(),
+        runtime_file
+    );
+    assert_eq!(controller.history().unwrap(), history);
+    assert!(!journal.exists());
+    assert!(controller.state.lock().await.pending.is_none());
+    let rollback = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rollback.status,
+        proto::ConfigTransactionPlanStatus::Committable as i32
+    );
+    assert_eq!(rollback.committed_sections, result.supported_sections);
+    assert_snapshot_matches_config(&runtime.lock().await, &previous);
+    ack_task.abort();
+}
+
+#[tokio::test]
+async fn rollback_preview_rejects_invalid_missing_and_corrupt_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    record_v2_history(dir.path(), &base_toml(""));
+    let current = dynamic_candidate_toml();
+    record_v2_history(dir.path(), &current);
+    let (controller, runtime, ack_task) = rollback_controller(dir.path(), None, current.clone());
+    assert!(matches!(
+        controller.preview_rollback(0).await,
+        Err(ConfigTransactionApplyError::InvalidArgument(_))
+    ));
+    assert!(matches!(controller.preview_rollback(9).await,
+        Err(ConfigTransactionApplyError::FailedPrecondition(message)) if message.contains("out of range")));
+    let previous = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("v2-00000000000000000001-")
+        })
+        .unwrap()
+        .path();
+    std::fs::write(&previous, "corrupt private payload").unwrap();
+    let error = controller.preview_rollback(1).await.unwrap_err();
+    assert!(
+        matches!(error, ConfigTransactionApplyError::FailedPrecondition(ref message)
+        if message == "cannot roll back an unreadable config history entry")
+    );
+    std::fs::remove_file(previous).unwrap();
+    assert!(matches!(controller.preview_rollback(1).await,
+        Err(ConfigTransactionApplyError::FailedPrecondition(message)) if message.contains("out of range")));
+    assert_snapshot_matches_config(&runtime.lock().await, &current);
+    ack_task.abort();
+}
+
+#[tokio::test]
+async fn rollback_preview_rejects_changed_external_source_like_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("policy.rpol");
+    let config_path = dir.path().join("prior.toml");
+    std::fs::write(&source, "policy p { term rest { accept } }\n").unwrap();
+    std::fs::write(
+        &config_path,
+        base_toml(&format!(
+            "[policy]\nrpol_files = [{:?}]\n",
+            source.display().to_string()
+        )),
+    )
+    .unwrap();
+    let prior = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+    crate::config_history::record_accepted(dir.path(), &prior).unwrap();
+    let current = dynamic_candidate_toml();
+    record_v2_history(dir.path(), &current);
+    let (controller, runtime, ack_task) = rollback_controller(dir.path(), None, current.clone());
+    std::fs::write(&source, "policy p { term rest { reject } }\n").unwrap();
+    let preview_error = controller.preview_rollback(1).await.unwrap_err();
+    let rollback_error = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(preview_error.to_string(), rollback_error.to_string());
+    assert!(
+        matches!(preview_error, ConfigTransactionApplyError::FailedPrecondition(message)
+        if message.contains("external source is missing, unreadable, or changed"))
+    );
+    assert_snapshot_matches_config(&runtime.lock().await, &current);
+    ack_task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn rollback_preview_releases_coordinator_before_planning_and_on_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    record_v2_history(dir.path(), &base_toml(""));
+    let current = dynamic_candidate_toml();
+    record_v2_history(dir.path(), &current);
+    let path = dir.path().join("runtime.toml");
+    std::fs::write(&path, &current).unwrap();
+    let accepted = Arc::new(AcceptedConfigSnapshot::load(&path, None).unwrap());
+    let (_accepted_tx, accepted_rx) = watch::channel(accepted.clone());
+    let (peer_tx, mut peer_rx) = mpsc::channel(1);
+    let (internal_tx, mut internal_rx) = mpsc::channel(1);
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            config_history_dir: Some(dir.path().to_path_buf()),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx);
+    let history = controller.history().unwrap();
+    let preview = controller.clone();
+    let task = tokio::spawn(async move { preview.preview_rollback(1).await });
+    let Some(PeerManagerCommand::RuntimeConfigSnapshot { reply }) = peer_rx.recv().await else {
+        panic!("preview must enter public planning barrier");
+    };
+    let permit = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        controller.deps.lock.acquire(),
+    )
+    .await
+    .expect("stalled public barrier must not hold coordinator")
+    .unwrap();
+    drop(permit);
+    reply
+        .send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+            toml: accepted.normalized_toml().to_string(),
+            rpol_files: Vec::new(),
+            rpol: accepted.config_ref().policy.rpol.clone(),
+        }))
+        .unwrap();
+    let Some(InternalCommand::PlanAcceptedTransactionConfig {
+        mut reply,
+        read_coordinator: Some(read_coordinator),
+        ..
+    }) = internal_rx.recv().await
+    else {
+        panic!("preview must use the existing preloaded planner");
+    };
+    let permit = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        controller.deps.lock.acquire(),
+    )
+    .await
+    .expect("stalled planner must not hold coordinator")
+    .unwrap();
+    assert!(
+        read_coordinator.try_acquire().is_none(),
+        "preview must carry the same mutation coordinator"
+    );
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    reply.closed().await;
+    assert!(matches!(
+        config_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(controller.history().unwrap(), history);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), current);
+    drop(permit);
+    let permit = controller.deps.lock.acquire().await.unwrap();
+    let error = controller.preview_rollback(1).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ConfigTransactionApplyError::DeadlineExceeded(_)
+    ));
+    drop(permit);
+    assert!(matches!(
+        peer_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 /// Red proof: removing the v2 preloaded planning lane or changing index
@@ -10564,6 +10774,11 @@ async fn metadata_history_rollback_refuses_before_payload_planning_or_confirm_au
         rows
     };
     let initial_roster = roster();
+    let error = controller.preview_rollback(1).await.unwrap_err();
+    assert!(
+        matches!(error, ConfigTransactionApplyError::FailedPrecondition(message)
+        if message.contains("metadata-only"))
+    );
     let list = controller.history().unwrap();
     assert_eq!(
         list.entries[1].provenance_status,

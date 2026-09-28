@@ -36,10 +36,10 @@ use rustbgpd_api::runtime_config_settlement::{
 };
 use rustbgpd_api::server::{
     CONFIG_PERSIST_RESERVE_TIMEOUT, ConfigHistoryListFn, ConfigMutationGateFn, ConfigRollbackFn,
-    ConfigTransactionAbortFn, ConfigTransactionApplyContext, ConfigTransactionApplyError,
-    ConfigTransactionApplyFn, ConfigTransactionConfirmFn, ConfigTransactionStatusFn,
-    GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome, RuntimeConfigCoordinatorClosed,
-    RuntimeConfigCoordinatorPermit,
+    ConfigRollbackPreviewFn, ConfigTransactionAbortFn, ConfigTransactionApplyContext,
+    ConfigTransactionApplyError, ConfigTransactionApplyFn, ConfigTransactionConfirmFn,
+    ConfigTransactionStatusFn, GnmiSetCommitAction, GnmiSetError, GnmiSetFn, GnmiSetOutcome,
+    RuntimeConfigCoordinatorClosed, RuntimeConfigCoordinatorPermit,
 };
 use rustbgpd_api::{MAX_CONFIRM_ID_CHARS, MAX_CONFIRM_TIMEOUT_SECONDS};
 use rustbgpd_telemetry::BgpMetrics;
@@ -478,6 +478,7 @@ impl ConfigTransactionController {
         &self,
         snapshot: Arc<AcceptedConfigSnapshot>,
         expected_runtime_snapshot_token: Option<String>,
+        read_coordinator: Option<rustbgpd_api::server::RuntimeConfigCoordinator>,
     ) -> Result<PlannedTransactionConfig, ConfigTransactionApplyError> {
         let (barrier_tx, barrier_rx) = oneshot::channel();
         self.deps
@@ -504,6 +505,7 @@ impl ConfigTransactionController {
         tx.send(InternalCommand::PlanAcceptedTransactionConfig {
             snapshot,
             expected_runtime_snapshot_token,
+            read_coordinator,
             reply: reply_tx,
         })
         .await
@@ -523,37 +525,17 @@ impl ConfigTransactionController {
     async fn prepare_rollback_payload(
         &self,
         payload: crate::config_history::RollbackPayload,
-        request: &proto::RollbackConfigTransactionRequest,
-    ) -> Result<(String, Option<PlannedTransactionConfig>), ConfigTransactionApplyError> {
+        config_path: &std::path::Path,
+        expected_runtime_snapshot_token: String,
+        read_coordinator: Option<rustbgpd_api::server::RuntimeConfigCoordinator>,
+    ) -> Result<(String, PlannedTransactionConfig), ConfigTransactionApplyError> {
         match payload {
             crate::config_history::RollbackPayload::V2 {
                 normalized_toml,
                 manifest,
                 source_sha256,
             } => {
-                if !request.confirm_id.is_empty() {
-                    validate_confirm_id(&request.confirm_id)?;
-                    if request.confirm_timeout_seconds > 0 {
-                        validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
-                    }
-                }
-                let accepted = self.accepted_rx.as_ref().ok_or_else(|| {
-                    ConfigTransactionApplyError::Unavailable(
-                        "accepted-config authority unavailable".to_string(),
-                    )
-                })?;
-                let config_path = accepted
-                    .borrow()
-                    .config_ref()
-                    .file_path
-                    .clone()
-                    .ok_or_else(|| {
-                        ConfigTransactionApplyError::FailedPrecondition(
-                            "cannot restore external provenance without a daemon config path"
-                                .to_string(),
-                        )
-                    })?;
-                let snapshot = AcceptedConfigSnapshot::load_retained(&normalized_toml, &config_path)
+                let snapshot = AcceptedConfigSnapshot::load_retained(&normalized_toml, config_path)
                     .map_err(|_| {
                         ConfigTransactionApplyError::FailedPrecondition(
                             "cannot restore retained external-source snapshot: a declared external source is missing, unreadable, or changed"
@@ -575,10 +557,11 @@ impl ConfigTransactionController {
                 let plan = self
                     .plan_preloaded_snapshot(
                         snapshot.clone(),
-                        Some(request.expected_runtime_snapshot_token.clone()),
+                        Some(expected_runtime_snapshot_token),
+                        read_coordinator,
                     )
                     .await?;
-                Ok((normalized_toml, Some(plan)))
+                Ok((normalized_toml, plan))
             }
         }
     }
@@ -713,6 +696,15 @@ impl ConfigTransactionController {
         Arc::new(move |_request| {
             let controller = controller.clone();
             Box::pin(async move { controller.history() })
+        })
+    }
+
+    #[must_use]
+    pub fn rollback_preview_fn(&self) -> ConfigRollbackPreviewFn {
+        let controller = self.clone();
+        Arc::new(move |request| {
+            let controller = controller.clone();
+            Box::pin(async move { controller.preview_rollback(request.index).await })
         })
     }
 
@@ -1650,77 +1642,161 @@ impl ConfigTransactionController {
             "config rollback rejected: daemon is shutting down",
             "config rollback task did not complete",
             move |controller, operation| async move {
-            let self_ = controller;
-            let progress = RuntimeConfigMutationProgress(operation);
-            // Resolve the entry under the coordinator lock so a concurrent
-            // commit cannot shift indexes between resolution and apply.
-            let dir = self_.history_dir()?;
-            let index = usize::try_from(request.index).unwrap_or(usize::MAX);
-            let entries = crate::config_history::list_mixed(dir).map_err(|_| {
-                ConfigTransactionApplyError::FailedPrecondition(
-                    "cannot roll back: config history storage is unavailable or unsafe".to_string(),
-                )
-            })?;
-            let Some(entry) = entries.get(index) else {
-                let noun = if entries.len() == 1 {
-                    "entry"
+                let self_ = controller;
+                let progress = RuntimeConfigMutationProgress(operation);
+                // Resolve the entry under the coordinator lock so a concurrent
+                // commit cannot shift indexes between resolution and apply.
+                let index = request.index;
+                let (entry, payload) = self_.rollback_payload(index)?;
+                if !request.confirm_id.is_empty() {
+                    validate_confirm_id(&request.confirm_id)?;
+                    if request.confirm_timeout_seconds > 0 {
+                        validate_confirm_timeout_seconds(request.confirm_timeout_seconds)?;
+                    }
+                }
+                let config_path = self_.rollback_config_path()?;
+                let (candidate_toml, preloaded) = self_
+                    .prepare_rollback_payload(
+                        payload,
+                        &config_path,
+                        request.expected_runtime_snapshot_token.clone(),
+                        None,
+                    )
+                    .await?;
+                let client_request_id = if request.client_request_id.is_empty() {
+                    format!("config-rollback:{index}")
                 } else {
-                    "entries"
+                    request.client_request_id
                 };
-                return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
-                    "cannot roll back: config history has {} retained {noun}; index {index} is out of range",
-                    entries.len(),
-                )));
-            };
-            if entry.status == crate::config_history::HistoryStatus::Unreadable {
-                return Err(ConfigTransactionApplyError::FailedPrecondition(
-                    "cannot roll back an unreadable config history entry".to_string(),
-                ));
-            }
-            if entry.status == crate::config_history::HistoryStatus::MetadataOnly {
-                return Err(ConfigTransactionApplyError::FailedPrecondition(
-                    "cannot roll back: selected config-history row is metadata-only because its normalized TOML exceeded the history payload limit".to_string(),
-                ));
-            }
-            let payload = crate::config_history::read_mixed_rollback(dir, entry).map_err(|_| {
-                ConfigTransactionApplyError::FailedPrecondition(
-                    "cannot roll back: config history entry became unavailable or unsafe"
-                        .to_string(),
-                )
-            })?;
-            let (candidate_toml, preloaded) =
-                self_.prepare_rollback_payload(payload, &request).await?;
-            let client_request_id = if request.client_request_id.is_empty() {
-                format!("config-rollback:{index}")
-            } else {
-                request.client_request_id
-            };
-            let apply_request = proto::ApplyConfigTransactionRequest {
-                candidate_toml,
-                expected_runtime_snapshot_token: request.expected_runtime_snapshot_token,
-                client_request_id,
-                comment: request.comment,
-                confirm_id: request.confirm_id,
-                confirm_timeout_seconds: request.confirm_timeout_seconds,
-            };
-            let mut response = self_
-                .apply_prepared_rollback(apply_request, preloaded, &progress)
-                .await?;
-            // Name the restored entry only when something actually committed;
-            // a noop ("already running that config") or rejected plan keeps
-            // the executor's own receipt text.
-            if response.status == proto::ConfigTransactionPlanStatus::Committable as i32 {
-                let _ = writeln!(
-                    response.human_text,
-                    "Rolled back to applied config {index} (recorded {}, sha256 {}).",
-                    entry.timestamp_unix_seconds,
-                    entry.sha256.as_deref().unwrap_or("unavailable")
-                );
-            }
-            Ok(response)
+                let apply_request = proto::ApplyConfigTransactionRequest {
+                    candidate_toml,
+                    expected_runtime_snapshot_token: request.expected_runtime_snapshot_token,
+                    client_request_id,
+                    comment: request.comment,
+                    confirm_id: request.confirm_id,
+                    confirm_timeout_seconds: request.confirm_timeout_seconds,
+                };
+                let mut response = self_
+                    .apply_prepared_rollback(apply_request, Some(preloaded), &progress)
+                    .await?;
+                // Name the restored entry only when something actually committed;
+                // a noop ("already running that config") or rejected plan keeps
+                // the executor's own receipt text.
+                if response.status == proto::ConfigTransactionPlanStatus::Committable as i32 {
+                    let _ = writeln!(
+                        response.human_text,
+                        "Rolled back to applied config {index} (recorded {}, sha256 {}).",
+                        entry.timestamp_unix_seconds,
+                        entry.sha256.as_deref().unwrap_or("unavailable")
+                    );
+                }
+                Ok(response)
             },
         )
         .await
+    }
+
+    fn rollback_payload(
+        &self,
+        index: u32,
+    ) -> Result<
+        (
+            crate::config_history::MixedHistoryEntry,
+            crate::config_history::RollbackPayload,
+        ),
+        ConfigTransactionApplyError,
+    > {
+        let dir = self.history_dir()?;
+        let index = usize::try_from(index).unwrap_or(usize::MAX);
+        let entries = crate::config_history::list_mixed(dir).map_err(|_| {
+            ConfigTransactionApplyError::FailedPrecondition(
+                "cannot roll back: config history storage is unavailable or unsafe".to_string(),
+            )
+        })?;
+        let Some(entry) = entries.get(index) else {
+            let noun = if entries.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            return Err(ConfigTransactionApplyError::FailedPrecondition(format!(
+                "cannot roll back: config history has {} retained {noun}; index {index} is out of range",
+                entries.len(),
+            )));
+        };
+        if entry.status == crate::config_history::HistoryStatus::Unreadable {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(
+                "cannot roll back an unreadable config history entry".to_string(),
+            ));
+        }
+        if entry.status == crate::config_history::HistoryStatus::MetadataOnly {
+            return Err(ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot roll back: selected config-history row is metadata-only because its normalized TOML exceeded the history payload limit".to_string(),
+                ));
+        }
+        let payload = crate::config_history::read_mixed_rollback(dir, entry).map_err(|_| {
+            ConfigTransactionApplyError::FailedPrecondition(
+                "cannot roll back: config history entry became unavailable or unsafe".to_string(),
+            )
+        })?;
+        Ok((entry.clone(), payload))
+    }
+
+    fn rollback_config_path(&self) -> Result<std::path::PathBuf, ConfigTransactionApplyError> {
+        let accepted = self.accepted_rx.as_ref().ok_or_else(|| {
+            ConfigTransactionApplyError::Unavailable(
+                "accepted-config authority unavailable".to_string(),
+            )
+        })?;
+        let config_path = accepted
+            .borrow()
+            .config_ref()
+            .file_path
+            .clone()
+            .ok_or_else(|| {
+                ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot restore external provenance without a daemon config path".to_string(),
+                )
+            })?;
+        Ok(config_path)
+    }
+
+    async fn preview_rollback(
+        &self,
+        index: u32,
+    ) -> Result<rustbgpd_api::peer_types::RuntimeConfigTransactionPlan, ConfigTransactionApplyError>
+    {
+        if index == 0 {
+            return Err(ConfigTransactionApplyError::InvalidArgument(
+                "rollback preview index must be >= 1".into(),
+            ));
+        }
+        let (payload, config_path) = {
+            let _permit = tokio::time::timeout(
+                CONFIG_TRANSACTION_COORDINATOR_ACQUIRE_TIMEOUT,
+                self.deps.lock.acquire(),
+            )
+            .await
+            .map_err(|_| {
+                ConfigTransactionApplyError::DeadlineExceeded(
+                    "rollback preview timed out waiting for the runtime config coordinator".into(),
+                )
+            })??;
+            // Pin the numeric index to an owned, size-bounded retained payload.
+            // Release mutation admission before source loading or actor waits;
+            // planning then has the same as-of semantics as ordinary Plan.
+            let (_, payload) = self.rollback_payload(index)?;
+            (payload, self.rollback_config_path()?)
+        };
+        let (_, prepared) = self
+            .prepare_rollback_payload(
+                payload,
+                &config_path,
+                String::new(),
+                Some(self.deps.lock.clone()),
+            )
+            .await?;
+        Ok(prepared.plan)
     }
 
     fn history_dir(&self) -> Result<&std::path::Path, ConfigTransactionApplyError> {
@@ -1972,7 +2048,7 @@ impl ConfigTransactionController {
         };
         let prior = &pending.prior_snapshot;
         let plan = self
-            .plan_preloaded_snapshot(Arc::clone(prior), None)
+            .plan_preloaded_snapshot(Arc::clone(prior), None, None)
             .await?;
         let peer_mgr_internal_tx = self.peer_mgr_internal_tx.as_ref().ok_or_else(|| {
             ConfigTransactionApplyError::Unavailable(
@@ -4240,6 +4316,9 @@ fn plan_error_to_status(error: RuntimeConfigTransactionPlanError) -> ConfigTrans
         }
         RuntimeConfigTransactionPlanError::InvalidCandidate(message) => {
             ConfigTransactionApplyError::InvalidArgument(message)
+        }
+        RuntimeConfigTransactionPlanError::Unavailable(message) => {
+            ConfigTransactionApplyError::Unavailable(message)
         }
         RuntimeConfigTransactionPlanError::Internal(message) => {
             ConfigTransactionApplyError::Internal(message)

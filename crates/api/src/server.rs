@@ -200,6 +200,22 @@ impl RuntimeConfigCoordinator {
             .map_err(|_| RuntimeConfigCoordinatorClosed)
     }
 
+    /// Acquire ownership immediately, or return `None` when busy or closed.
+    /// Read-only actor handlers use this to reject unsettled config baselines
+    /// without waiting for an owner that may need the same actor to finish.
+    #[must_use]
+    pub fn try_acquire(&self) -> Option<RuntimeConfigCoordinatorPermit> {
+        self.0
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| RuntimeConfigCoordinatorPermit {
+                permit: Some(permit),
+                coordinator: self.clone(),
+            })
+    }
+
     /// Permanently reject queued and future acquisitions.
     pub fn close(&self) {
         self.0.semaphore.close();
@@ -712,6 +728,24 @@ pub type ConfigHistoryListFuture = Pin<
 pub type ConfigHistoryListFn = Arc<
     dyn Fn(crate::proto::ListConfigHistoryRequest) -> ConfigHistoryListFuture
         + Send
+        + Sync
+        + 'static,
+>;
+
+/// Read-only daemon-owned rollback preview, projected to a redacted wire plan.
+pub type ConfigRollbackPreviewFn = Arc<
+    dyn Fn(
+            crate::proto::PreviewConfigRollbackRequest,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::peer_types::RuntimeConfigTransactionPlan,
+                            ConfigTransactionApplyError,
+                        >,
+                    > + Send,
+            >,
+        > + Send
         + Sync
         + 'static,
 >;
@@ -1247,6 +1281,8 @@ pub struct ServeConfig {
     /// Daemon hook for rolling back to a retained applied config through the
     /// transaction executor. `None` fails closed with `FAILED_PRECONDITION`.
     pub config_rollback: Option<ConfigRollbackFn>,
+    /// Daemon hook for read-only retained rollback plans.
+    pub config_rollback_preview: Option<ConfigRollbackPreviewFn>,
     /// Descriptor-pinned runtime-state authority used only for temporary
     /// streamed config-plan ingress. `None` keeps that RPC fail-closed.
     pub stream_plan_runtime_state_directory: Option<Arc<std::fs::File>>,
@@ -1781,6 +1817,7 @@ async fn run_listener(
     let config_transaction_status = config.config_transaction_status;
     let config_history_list = config.config_history_list;
     let config_rollback = config.config_rollback;
+    let config_rollback_preview = config.config_rollback_preview;
     let config_mutation_gate = config.config_mutation_gate;
     let runtime_config_lock = config.runtime_config_lock;
     let runtime_config_settlement = config.runtime_config_settlement;
@@ -1854,6 +1891,7 @@ async fn run_listener(
                 config_transaction_status,
                 config_history_list,
                 config_rollback,
+                config_rollback_preview,
                 config_mutation_gate,
                 runtime_config_lock,
                 runtime_config_settlement,
@@ -1924,6 +1962,7 @@ async fn run_listener(
                 config_transaction_status,
                 config_history_list,
                 config_rollback,
+                config_rollback_preview,
                 config_mutation_gate,
                 runtime_config_lock,
                 runtime_config_settlement,
@@ -2001,6 +2040,7 @@ async fn run_tcp_listener(
     config_transaction_status: Option<ConfigTransactionStatusFn>,
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
+    config_rollback_preview: Option<ConfigRollbackPreviewFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: RuntimeConfigCoordinator,
     runtime_config_settlement: RuntimeConfigSettlementWatchdog,
@@ -2189,6 +2229,7 @@ async fn run_tcp_listener(
                 config_history_list.clone(),
                 config_rollback.clone(),
             )
+            .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));
@@ -2315,6 +2356,7 @@ async fn run_uds_listener(
     config_transaction_status: Option<ConfigTransactionStatusFn>,
     config_history_list: Option<ConfigHistoryListFn>,
     config_rollback: Option<ConfigRollbackFn>,
+    config_rollback_preview: Option<ConfigRollbackPreviewFn>,
     config_mutation_gate: Option<ConfigMutationGateFn>,
     runtime_config_lock: RuntimeConfigCoordinator,
     runtime_config_settlement: RuntimeConfigSettlementWatchdog,
@@ -2460,6 +2502,7 @@ async fn run_uds_listener(
                 config_history_list.clone(),
                 config_rollback.clone(),
             )
+            .with_rollback_preview(config_rollback_preview.clone())
             .with_stream_plan(stream_plan, stream_authenticated_transport),
         interceptor.clone(),
     ));

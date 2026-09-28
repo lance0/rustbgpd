@@ -189,6 +189,11 @@ pub(crate) fn list_config_history_summary() -> GrpcRequestSummary {
     GrpcRequestSummary::new("request=empty")
 }
 
+/// Rollback previews contain only a numeric history index, never secret bytes.
+pub(crate) fn preview_config_rollback_summary(index: u32) -> GrpcRequestSummary {
+    GrpcRequestSummary::new(format!("index={index}"))
+}
+
 /// Summary for `RollbackConfigTransaction`. The rollback candidate is
 /// resolved server-side from retained history, so unlike apply there is no
 /// candidate TOML to redact; the comment can carry sensitive context and is

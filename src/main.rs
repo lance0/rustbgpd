@@ -5654,6 +5654,7 @@ async fn run<T>(
         config_transaction_status: Some(config_transaction_controller.status_fn()),
         config_history_list: Some(config_transaction_controller.history_fn()),
         config_rollback: Some(config_transaction_controller.rollback_fn()),
+        config_rollback_preview: Some(config_transaction_controller.rollback_preview_fn()),
         stream_plan_runtime_state_directory: stream_plan_runtime_state_authority(
             runtime_state_directory.as_deref(),
         ),

@@ -1003,6 +1003,7 @@ export_policy_chain = ["dataset-export"]
         .send(InternalCommand::PlanAcceptedTransactionConfig {
             snapshot: accepted.clone(),
             expected_runtime_snapshot_token: None,
+            read_coordinator: None,
             reply: reply_tx,
         })
         .await
