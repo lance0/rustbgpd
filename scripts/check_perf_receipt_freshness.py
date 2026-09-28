@@ -39,9 +39,10 @@ SEMVER_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 # A CommonMark link reference definition, ``[label]: target``; footnotes excluded.
 REFERENCE_DEFINITION = re.compile(r"(?m)^ {0,3}\[(?!\^)([^\]]+)\]:[ \t]*<?([^\s>]+)>?")
-# Any bracketed label not opening a definition: the label of a full
-# ``[text][label]``, collapsed ``[label][]`` or shortcut ``[label]`` reference.
-REFERENCE_USE = re.compile(r"\[([^\]]+)\](?!:)")
+# Any bracketed label that neither opens a definition nor an inline link and
+# is not image text: the label of a full ``[text][label]``, collapsed
+# ``[label][]`` or shortcut ``[label]`` reference.
+REFERENCE_USE = re.compile(r"(?<!!)\[([^\]]+)\](?![:(])")
 
 
 def reference_label(value: str) -> str:
@@ -52,10 +53,12 @@ def reference_label(value: str) -> str:
 def markdown_link_targets(text: str) -> list[str]:
     """Inline link targets plus reference definitions whose label is used."""
     used = {reference_label(label) for label in REFERENCE_USE.findall(text)}
+    definitions: dict[str, str] = {}
+    for label, target in REFERENCE_DEFINITION.findall(text):
+        # CommonMark: the first definition of a label wins.
+        definitions.setdefault(reference_label(label), target)
     return MARKDOWN_LINK.findall(text) + [
-        target
-        for label, target in REFERENCE_DEFINITION.findall(text)
-        if reference_label(label) in used
+        target for label, target in definitions.items() if label in used
     ]
 
 
