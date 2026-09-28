@@ -1695,7 +1695,33 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l neighbor -l peer -d 'Neighbor address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s a -l family -d 'Address family filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l prefix -d 'Exact prefix filter, e.g. 203.0.113.0/24' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l type -d 'Event type filter: added, withdrawn, best_changed, state_changed, established, lost, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l type -d 'Event type filter (comma-separated)' -r -f -a "added\t''
+withdrawn\t''
+best_changed\t''
+policy_filtered\t''
+state_changed\t''
+established\t''
+lost\t''
+peer_added\t''
+peer_removed\t''
+peer_enabled\t''
+peer_disabled\t''
+max_prefix_warning\t''
+notification_sent\t''
+notification_received\t''
+policy_changed\t''
+otc_route_blocked\t''
+dataplane_status_changed\t''
+dataplane_route_installed\t''
+dataplane_route_withdrawn\t''
+dataplane_route_failed\t''
+evpn_added\t''
+evpn_withdrawn\t''
+evpn_best_changed\t''
+bfd_up\t''
+bfd_down\t''
+bfd_state_changed\t''
+stream_lagged\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l backfill -d 'Print recent route history before tailing the live stream. Applies only to route-capable event streams. Mutually exclusive with `--from-event-id`; `--backfill` replays the daemon\'s process-local route ring (resets on restart), while `--from-event-id` replays the durable event outbox (survives restart)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l from-event-id -d 'Durable cursor: replay committed events with `event_id > N` from the daemon\'s local event outbox, then tail the live stream. `0` replays everything retained. Survives daemon restart. Fails when the daemon was started with `[event_history].enabled = false` or its event history is unavailable' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
@@ -1713,7 +1739,14 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l neighbor -l peer -d 'Neighbor address filter' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l type -d 'Session event type filter: state_changed, established, lost, peer_enabled, peer_disabled' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l type -d 'Session event type filter (comma-separated)' -r -f -a "state_changed\t''
+established\t''
+lost\t''
+peer_added\t''
+peer_removed\t''
+peer_enabled\t''
+peer_disabled\t''
+max_prefix_warning\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l limit -d 'Maximum recent session events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1731,7 +1764,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l neighbor -l peer -d 'Neighbor address filter. Only peer-scoped policy events match' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l type -d 'Policy event type filter: policy_changed' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l type -d 'Policy event type filter (comma-separated)' -r -f -a "policy_changed\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l limit -d 'Maximum recent policy events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1751,7 +1784,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l neighbor -l peer -d 'Neighbor address filter. Matches current and previous best-path peer' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l route-type -d 'EVPN route type filter (1..=5)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l rd -d 'Route Distinguisher filter, e.g. "65000:100"' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l type -d 'EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l type -d 'EVPN event type filter (comma-separated)' -r -f -a "evpn_added\t''
+evpn_withdrawn\t''
+evpn_best_changed\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l limit -d 'Maximum recent EVPN events to return (default 100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r

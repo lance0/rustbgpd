@@ -93,6 +93,35 @@ fn snake_case_value(value: &str) -> Result<String, std::convert::Infallible> {
     Ok(value.replace('-', "_"))
 }
 
+/// `--type` event filters: normalizes like `snake_case_value` and lists the
+/// scope's accepted names for help and completions. Validation stays in the
+/// command, so an unknown type keeps its argument-error exit code.
+#[derive(Clone)]
+struct EventTypeValues(commands::watch::EventTypeScope);
+
+impl clap::builder::TypedValueParser for EventTypeValues {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<String, clap::Error> {
+        clap::builder::StringValueParser::new()
+            .parse_ref(command, arg, value)
+            .map(|value| value.replace('-', "_"))
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            self.0.names().map(clap::builder::PossibleValue::new),
+        ))
+    }
+}
+
 /// The inverse of `snake_case_value` for the few older kebab-case values.
 fn kebab_case_value(value: &str) -> Result<String, std::convert::Infallible> {
     Ok(value.replace('_', "-"))
@@ -1826,14 +1855,12 @@ enum EventsAction {
         #[arg(long)]
         prefix: Option<String>,
 
-        /// Event type filter: added, withdrawn, best_changed,
-        /// state_changed, established, lost, peer_enabled, peer_disabled,
-        /// notification_sent, notification_received, policy_changed,
-        /// dataplane_status_changed, dataplane_route_installed,
-        /// dataplane_route_withdrawn, dataplane_route_failed, evpn_added,
-        /// evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down,
-        /// bfd_state_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::All)
+        )]
         event_types: Vec<String>,
 
         /// Print recent route history before tailing the live stream.
@@ -1865,9 +1892,12 @@ enum EventsAction {
         )]
         address: Option<String>,
 
-        /// Session event type filter: state_changed, established, lost,
-        /// peer_enabled, peer_disabled
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Session event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Session)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent session events to return (default 100)
@@ -1889,8 +1919,12 @@ enum EventsAction {
         )]
         address: Option<String>,
 
-        /// Policy event type filter: policy_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// Policy event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Policy)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent policy events to return (default 100)
@@ -1920,8 +1954,12 @@ enum EventsAction {
         #[arg(long)]
         rd: Option<String>,
 
-        /// EVPN event type filter: evpn_added, evpn_withdrawn, evpn_best_changed
-        #[arg(long = "type", value_delimiter = ',', value_parser = snake_case_value)]
+        /// EVPN event type filter (comma-separated)
+        #[arg(
+            long = "type",
+            value_delimiter = ',',
+            value_parser = EventTypeValues(commands::watch::EventTypeScope::Evpn)
+        )]
         event_types: Vec<String>,
 
         /// Maximum recent EVPN events to return (default 100)
@@ -5561,6 +5599,43 @@ mod tests {
             );
         }
         assert!(checked >= 60, "only {checked} invocations parsed");
+    }
+
+    #[test]
+    fn event_type_filters_list_every_accepted_type() {
+        use commands::watch::EventTypeScope;
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        for (path, scope) in [
+            ("events watch", EventTypeScope::All),
+            ("events sessions", EventTypeScope::Session),
+            ("events policy", EventTypeScope::Policy),
+            ("events evpn", EventTypeScope::Evpn),
+        ] {
+            let sub = path.split(' ').fold(&command, |command, name| {
+                command.find_subcommand(name).unwrap()
+            });
+            let help = sub.clone().render_long_help().to_string();
+            let values = help
+                .split_once("--type <EVENT_TYPES>")
+                .and_then(|(_, rest)| rest.split_once("[possible values: "))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .unwrap_or_else(|| panic!("rbgp {path} --help lists no --type values"))
+                .0;
+            let listed: Vec<_> = values.split(", ").collect();
+            assert_eq!(listed, scope.names().collect::<Vec<_>>(), "rbgp {path}");
+        }
+        let watch_names: Vec<_> = EventTypeScope::All.names().collect();
+        assert!(watch_names.contains(&"policy_filtered"));
+        assert!(watch_names.contains(&"otc_route_blocked"));
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut generated = Vec::new();
+            generate_completions(shell, BINARY_NAME, &mut generated).unwrap();
+            let generated = String::from_utf8(generated).unwrap();
+            for name in &watch_names {
+                assert!(generated.contains(name), "{shell} completion lacks {name}");
+            }
+        }
     }
 
     #[test]

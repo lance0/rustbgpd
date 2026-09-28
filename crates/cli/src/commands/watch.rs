@@ -166,48 +166,118 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "otc_route_blocked" => Ok(BgpEventType::OtcRouteBlocked as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_added, peer_removed, peer_enabled, peer_disabled, max_prefix_warning, notification_sent, notification_received, policy_changed, otc_route_blocked, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected {}",
+            EventTypeScope::All.expected()
         ))),
+    }
+}
+
+/// Canonical `--type` spelling of every event type `parse_bgp_event_type`
+/// accepts. Help, completions, and error messages derive from this list.
+const BGP_EVENT_TYPE_NAMES: &[&str] = &[
+    "added",
+    "withdrawn",
+    "best_changed",
+    "policy_filtered",
+    "state_changed",
+    "established",
+    "lost",
+    "peer_added",
+    "peer_removed",
+    "peer_enabled",
+    "peer_disabled",
+    "max_prefix_warning",
+    "notification_sent",
+    "notification_received",
+    "policy_changed",
+    "otc_route_blocked",
+    "dataplane_status_changed",
+    "dataplane_route_installed",
+    "dataplane_route_withdrawn",
+    "dataplane_route_failed",
+    "evpn_added",
+    "evpn_withdrawn",
+    "evpn_best_changed",
+    "bfd_up",
+    "bfd_down",
+    "bfd_state_changed",
+    "stream_lagged",
+];
+
+/// The event types one `--type` filter accepts.
+#[derive(Clone, Copy)]
+pub(crate) enum EventTypeScope {
+    All,
+    Session,
+    Policy,
+    Evpn,
+}
+
+impl EventTypeScope {
+    fn accepts(self, event_type: BgpEventType) -> bool {
+        match self {
+            Self::All => true,
+            Self::Session => matches!(
+                event_type,
+                BgpEventType::SessionStateChanged
+                    | BgpEventType::SessionEstablished
+                    | BgpEventType::SessionLost
+                    | BgpEventType::PeerEnabled
+                    | BgpEventType::PeerDisabled
+                    | BgpEventType::PeerAdded
+                    | BgpEventType::PeerRemoved
+                    | BgpEventType::MaxPrefixWarning
+            ),
+            Self::Policy => event_type == BgpEventType::PolicyChanged,
+            Self::Evpn => matches!(
+                event_type,
+                BgpEventType::EvpnRouteAdded
+                    | BgpEventType::EvpnRouteWithdrawn
+                    | BgpEventType::EvpnRouteBestChanged
+            ),
+        }
+    }
+
+    /// Canonical names this scope accepts, in help order.
+    pub(crate) fn names(self) -> impl Iterator<Item = &'static str> {
+        BGP_EVENT_TYPE_NAMES.iter().copied().filter(move |name| {
+            parse_bgp_event_type(name)
+                .ok()
+                .and_then(|value| BgpEventType::try_from(value).ok())
+                .is_some_and(|event_type| self.accepts(event_type))
+        })
+    }
+
+    fn expected(self) -> String {
+        let names: Vec<_> = self.names().collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{}, or {last}", rest.join(", ")),
+            _ => names.join(""),
+        }
+    }
+
+    fn parse(self, s: &str, label: &str) -> Result<i32, CliError> {
+        let event_type = parse_bgp_event_type(s)?;
+        match BgpEventType::try_from(event_type) {
+            Ok(accepted) if self.accepts(accepted) => Ok(event_type),
+            _ => Err(CliError::Argument(format!(
+                "unsupported {label} event type {s:?}; expected {}",
+                self.expected()
+            ))),
+        }
     }
 }
 
 fn parse_session_bgp_event_type(s: &str) -> Result<i32, CliError> {
-    let event_type = parse_bgp_event_type(s)?;
-    match BgpEventType::try_from(event_type) {
-        Ok(BgpEventType::SessionStateChanged)
-        | Ok(BgpEventType::SessionEstablished)
-        | Ok(BgpEventType::SessionLost)
-        | Ok(BgpEventType::PeerEnabled)
-        | Ok(BgpEventType::PeerDisabled)
-        | Ok(BgpEventType::PeerAdded)
-        | Ok(BgpEventType::PeerRemoved)
-        | Ok(BgpEventType::MaxPrefixWarning) => Ok(event_type),
-        _ => Err(CliError::Argument(format!(
-            "unsupported session event type {s:?}; expected state_changed, established, lost, peer_added, peer_removed, peer_enabled, peer_disabled, or max_prefix_warning"
-        ))),
-    }
+    EventTypeScope::Session.parse(s, "session")
 }
 
 fn parse_policy_bgp_event_type(s: &str) -> Result<i32, CliError> {
-    let event_type = parse_bgp_event_type(s)?;
-    match BgpEventType::try_from(event_type) {
-        Ok(BgpEventType::PolicyChanged) => Ok(event_type),
-        _ => Err(CliError::Argument(format!(
-            "unsupported policy event type {s:?}; expected policy_changed"
-        ))),
-    }
+    EventTypeScope::Policy.parse(s, "policy")
 }
 
 fn parse_evpn_bgp_event_type(s: &str) -> Result<i32, CliError> {
-    let event_type = parse_bgp_event_type(s)?;
-    match BgpEventType::try_from(event_type) {
-        Ok(BgpEventType::EvpnRouteAdded)
-        | Ok(BgpEventType::EvpnRouteWithdrawn)
-        | Ok(BgpEventType::EvpnRouteBestChanged) => Ok(event_type),
-        _ => Err(CliError::Argument(format!(
-            "unsupported EVPN event type {s:?}; expected evpn_added, evpn_withdrawn, or evpn_best_changed"
-        ))),
-    }
+    EventTypeScope::Evpn.parse(s, "EVPN")
 }
 
 fn parse_event_category(s: &str) -> Result<i32, CliError> {
@@ -2949,6 +3019,48 @@ mod tests {
             BgpEventType::RoutePolicyFiltered as i32
         );
         assert!(parse_bgp_event_type("not_an_event").is_err());
+    }
+
+    #[test]
+    fn event_type_names_cover_every_event_type_once() {
+        let mut named: Vec<i32> = BGP_EVENT_TYPE_NAMES
+            .iter()
+            .map(|name| {
+                parse_bgp_event_type(name)
+                    .unwrap_or_else(|_| panic!("listed event type {name} does not parse"))
+            })
+            .collect();
+        named.sort_unstable();
+        let variants: Vec<i32> = (0..=i32::from(u8::MAX))
+            .filter(|value| {
+                BgpEventType::try_from(*value)
+                    .is_ok_and(|event_type| event_type != BgpEventType::Unspecified)
+            })
+            .collect();
+        assert_eq!(named, variants, "one canonical --type name per event type");
+    }
+
+    #[test]
+    fn scoped_event_type_errors_list_the_scope() {
+        let error = parse_session_bgp_event_type("added")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "expected state_changed, established, lost, peer_added, peer_removed, \
+                 peer_enabled, peer_disabled, or max_prefix_warning"
+            ),
+            "{error}"
+        );
+        let error = parse_policy_bgp_event_type("added")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with("expected policy_changed"), "{error}");
+        let error = parse_bgp_event_type("nope").unwrap_err().to_string();
+        assert!(
+            error.contains("policy_filtered") && error.ends_with(", or stream_lagged"),
+            "{error}"
+        );
     }
 
     #[test]
