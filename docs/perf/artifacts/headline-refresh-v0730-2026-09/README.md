@@ -95,6 +95,8 @@ them affected the evidence, for the reasons given after the list.
    - **Unaffected.** The main-table v0.68.0 values use runs 1–3 only, and no
      other published value involves the leg.
 
+Python files received lint-only edits for publication (ruff); behaviour unchanged.
+
 **Why the evidence is unaffected:**
 
 - **The tag checkouts existed during the run.** Before `build.sh` ran, they

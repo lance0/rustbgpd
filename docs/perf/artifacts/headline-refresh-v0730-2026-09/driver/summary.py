@@ -16,7 +16,7 @@ for d in dirs(f"{src}/matrix-*"):
     if not os.path.exists(f"{c}/status") or open(f"{c}/status").read().strip() != "pass":
         continue
     log = open(f"{c}/reloadstall.log").read()
-    def put(metric, pat, unit):
+    def put(metric, pat, unit, log=log, sc=sc, arm=arm, run=run):
         for i, v in enumerate(re.findall(pat, log, re.M), 1):
             out.writerow([f"matrix-{sc}", NAME[arm], run, metric, i, v, unit])
     put("established", r"^established \d+ at ([\d.]+)s", "s")

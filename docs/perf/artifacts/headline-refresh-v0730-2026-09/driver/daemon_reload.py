@@ -4,7 +4,7 @@
 """daemon_reload.py <campaign> <out.csv>: per-reload intervals from the daemon's
 own JSON log: SIGHUP received -> config source loaded, -> config reload complete,
 plus the logged validate_ms and cohort_rib_transition_us fields."""
-import csv, glob, json, os, re, sys
+import csv, glob, json, re, sys
 from datetime import datetime
 NAME = {"v0730": "v0.73.0", "v0720": "v0.72.0", "v0680": "v0.68.0", "xh": "v0.68.0-daemon/v0.72.0-harness"}
 w = csv.writer(open(sys.argv[2], "w"))
