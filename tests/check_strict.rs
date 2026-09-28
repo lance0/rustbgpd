@@ -293,6 +293,26 @@ fn check_strict_exits_zero_on_a_clean_config() {
 }
 
 #[test]
+fn check_unknown_policy_field_points_to_rpol_and_still_rejects_config() {
+    let config = format!(
+        "{CLEAN}\n[[policy.definitions.from-peer.statements]]\n\
+         action = \"permit\"\nmatch_family = \"ipv6.unicast\"\n"
+    );
+    for args in [&["--check"][..], &["--check", "--strict"][..]] {
+        let (code, stdout, stderr) = run(&config, args);
+        assert_eq!(code, Some(1), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(stderr.contains("unknown field `match_family`"), "{stderr}");
+        assert!(stderr.contains("TOML policy"), "{stderr}");
+        assert!(stderr.contains("use .rpol"), "{stderr}");
+        assert!(
+            stderr.contains("docs/reference/rpol-language.md"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn legacy_omission_advisory_obeys_check_and_strict_exit_contract() {
     let config = legacy_omission(CLEAN);
     let (code, stdout, stderr) = run(&config, &["--check"]);

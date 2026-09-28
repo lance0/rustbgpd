@@ -37,7 +37,8 @@
     "crates/cli/README.md": ["crates/cli/src/main.rs"],
     "docs/how-to/evpn-vtep-troubleshooting.md": ["tests/evpn_instances_binary.rs"],
     "docs/reference/configuration.md": ["src/config/tests/examples.rs", "src/config/tests/grpc_security.rs"],
-    "docs/reference/reload-matrix.md": ["src/config/tests/examples.rs"]
+    "docs/reference/reload-matrix.md": ["src/config/tests/examples.rs"],
+    "docs/reference/rpol-language.md": ["src/config/diagnostic.rs", "tests/check_strict.rs"]
   },
   "all_markdown": []
 }
