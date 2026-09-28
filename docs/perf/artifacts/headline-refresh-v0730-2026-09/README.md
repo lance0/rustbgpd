@@ -77,6 +77,23 @@ them affected the evidence, for the reasons given after the list.
 5. **`tagcheck.sh` does not fail when a build fails.** It prints each rebuild's
    exit code into its output line, and the trailing `tee` masks the loop's
    status.
+6. **`report.py` does not apply the contaminated-leg exclusion,** and it
+   pools v0.68.0's main-block and cross-harness runs.
+   - **How the leg was removed.** The published values came from a separate
+     inline filter that split the blocks (runs 1–3 and 4–6) and dropped
+     `matrix-v0680-r6-s2` by hand:
+     `if r['arm'] == 'v0.68.0' and run == 6 and r['phase'] == 'matrix-s2': continue`.
+   - **What the leg recorded.** It converged in 3.6 s, and its reload p50s
+     were 1.32 / 1.48 / 1.40 / 1.31 s, inside v0.68.0's main-block range of
+     1.20–1.52 s.
+   - **What including it would change.** The cross-harness column's range and
+     median would move, with no reading changed:
+     - S2 completion from 1.19–1.44 s to 1.19–1.48 s, median 1.33 s in both;
+     - stall median from 562 to 554 ms;
+     - daemon SIGHUP-to-complete from 901–995 ms (median 943) to
+       901–1,093 ms (median 956).
+   - **Unaffected.** The main-table v0.68.0 values use runs 1–3 only, and no
+     other published value involves the leg.
 
 **Why the evidence is unaffected:**
 
