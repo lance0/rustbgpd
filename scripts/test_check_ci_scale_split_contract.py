@@ -26,7 +26,7 @@ WORKFLOW = ".github/workflows/ci.yml"
 
 class ScaleSplitContractTests(unittest.TestCase):
     def copy_workflows(self, root: Path) -> None:
-        for workflow in {*WORKFLOWS, "Cargo.toml", *(name for name, _ in contract.MSRV_PINS)}:
+        for workflow in {*WORKFLOWS, "Cargo.toml", *(pin[0] for pin in contract.MSRV_PINS)}:
             target = root / workflow
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / workflow, target)
@@ -63,15 +63,15 @@ class ScaleSplitContractTests(unittest.TestCase):
             manifest.write_text(manifest.read_text().replace(f'rust-version = "{msrv}"', 'rust-version = "9.99"'))
             failures = check(root)
             self.assertEqual(len(contract.MSRV_PINS), len(failures), failures)
-            for name, _ in contract.MSRV_PINS:
+            for name, *_ in contract.MSRV_PINS:
                 self.assertTrue(any(failure.startswith(f"{name}: MSRV pin") for failure in failures))
-            for name in {name for name, _ in contract.MSRV_PINS}:
+            for name in {pin[0] for pin in contract.MSRV_PINS}:
                 path = root / name
                 path.write_text(path.read_text().replace(msrv, "9.99"))
             self.assertEqual([], check(root))
 
     def test_each_msrv_pin_is_required_and_checked_independently(self) -> None:
-        for name, pattern in contract.MSRV_PINS:
+        for name, _, _, pattern in contract.MSRV_PINS:
             for replacement in ["9.99", ""]:
                 with self.subTest(file=name, pattern=pattern, replacement=replacement):
                     with tempfile.TemporaryDirectory() as temporary:
@@ -82,6 +82,38 @@ class ScaleSplitContractTests(unittest.TestCase):
                         match = re.search(pattern, text)
                         self.assertIsNotNone(match)
                         path.write_text(text[:match.start(1)] + replacement + text[match.end(1):])
+                        self.assertTrue(any(failure.startswith(f"{name}: MSRV pin") for failure in check(root)))
+
+    def test_nearby_keys_cannot_replace_action_inputs(self) -> None:
+        for name, job, action, pattern in contract.MSRV_PINS:
+            if not action:
+                continue
+            for destination in ["env", "other-action", "other-job"]:
+                with self.subTest(file=name, action=action, destination=destination):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        self.copy_workflows(root)
+                        path = root / name
+                        text = path.read_text()
+                        body = _jobs(text)[job]
+                        match = re.search(pattern, body)
+                        self.assertIsNotNone(match)
+                        pin = match.group(0).rstrip()
+                        if action == "dtolnay/rust-toolchain":
+                            changed = body.replace(f"        with:\n{pin}\n", "", 1)
+                        else:
+                            changed = body.replace(pin + "\n", "", 1)
+                        self.assertNotEqual(body, changed)
+                        moved = {
+                            "env": f"      - run: true\n        env:\n{pin}\n",
+                            "other-action": f"      - uses: example/irrelevant@v1\n        with:\n{pin}\n",
+                            "other-job": f"  unrelated:\n    steps:\n      - uses: {action}@v1\n        with:\n{pin}\n",
+                        }[destination]
+                        if destination == "other-job":
+                            text = text.replace(body, changed, 1) + "\n" + moved
+                        else:
+                            text = text.replace(body, changed + moved + "\n", 1)
+                        path.write_text(text)
                         self.assertTrue(any(failure.startswith(f"{name}: MSRV pin") for failure in check(root)))
 
     def test_gate_msrv_uses_the_installed_toolchain_name(self) -> None:
