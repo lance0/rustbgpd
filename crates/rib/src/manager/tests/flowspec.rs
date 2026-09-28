@@ -1598,3 +1598,106 @@ async fn flowspec_policy_modifications_suppress_and_recover_without_next_hop() {
     drop(tx);
     handle.await.unwrap();
 }
+
+async fn inject_local_flowspec(
+    tx: &mpsc::Sender<RibUpdate>,
+    route: FlowSpecRoute,
+) -> crate::update::FlowSpecInjectOutcome {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectFlowSpec {
+        route,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap()
+}
+
+fn local_flowspec_route(communities: Vec<u32>) -> FlowSpecRoute {
+    let mut route =
+        with_flowspec_communities(make_flowspec_route(Ipv4Addr::UNSPECIFIED), communities);
+    route.peer = LOCAL_PEER;
+    route.origin_type = crate::route::RouteOrigin::Local;
+    route.peer_router_id = Ipv4Addr::UNSPECIFIED;
+    route
+}
+
+/// Local injection outcomes come from the local Adj-RIB-In and match what
+/// reaches the wire: an identical re-add is `Unchanged` and sends nothing, a
+/// payload change is `Replaced` and re-announces, and while a received rule
+/// out-selects the local one, a local change is still `Replaced` even though
+/// Loc-RIB and the wire do not move.
+///
+/// Break-to-red: deciding the outcome from Loc-RIB instead of the local
+/// Adj-RIB-In reports the masked identical re-add as `Replaced`; comparing
+/// `received_at` reports every identical re-add as `Replaced`.
+#[tokio::test]
+async fn local_flowspec_inject_outcome_tracks_local_adj_rib_in() {
+    use crate::update::FlowSpecInjectOutcome;
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 51));
+    let mut out_rx = flowspec_export_peer_up(&tx, target, true, true, None).await;
+
+    let first = local_flowspec_route(vec![(65000 << 16) | 1]);
+    let key = first.selection_key();
+    assert_eq!(
+        inject_local_flowspec(&tx, first.clone()).await,
+        FlowSpecInjectOutcome::Created
+    );
+    let update = out_rx.try_recv().expect("created rule announces");
+    assert_eq!(update.flowspec_announce.len(), 1);
+    assert_eq!(update.flowspec_announce[0].selection_key(), key);
+
+    let mut again = first.clone();
+    again.received_at = Instant::now();
+    assert_eq!(
+        inject_local_flowspec(&tx, again).await,
+        FlowSpecInjectOutcome::Unchanged
+    );
+    assert!(out_rx.try_recv().is_err(), "identical re-add stays silent");
+
+    let changed = local_flowspec_route(vec![(65000 << 16) | 2]);
+    assert_eq!(
+        inject_local_flowspec(&tx, changed.clone()).await,
+        FlowSpecInjectOutcome::Replaced
+    );
+    let update = out_rx.try_recv().expect("replacement re-announces");
+    assert_eq!(update.flowspec_announce.len(), 1);
+    assert_eq!(
+        update.flowspec_announce[0].communities(),
+        changed.communities()
+    );
+
+    // A received rule with the same key and a higher LOCAL_PREF wins.
+    let source = Ipv4Addr::new(198, 51, 100, 51);
+    let mut received = make_flowspec_route(source);
+    received.attributes.push(PathAttribute::LocalPref(200));
+    replace_flowspec_routes(&tx, IpAddr::V4(source), vec![received]).await;
+    let update = out_rx.try_recv().expect("received rule takes over");
+    assert_eq!(update.flowspec_announce.len(), 1);
+    assert_eq!(update.flowspec_announce[0].peer, IpAddr::V4(source));
+
+    let masked = local_flowspec_route(vec![(65000 << 16) | 3]);
+    assert_eq!(
+        inject_local_flowspec(&tx, masked.clone()).await,
+        FlowSpecInjectOutcome::Replaced
+    );
+    assert!(
+        out_rx.try_recv().is_err(),
+        "masked replacement stays silent"
+    );
+    assert_eq!(
+        inject_local_flowspec(&tx, masked).await,
+        FlowSpecInjectOutcome::Unchanged
+    );
+    assert!(out_rx.try_recv().is_err());
+    let best = query_flowspec_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].peer, IpAddr::V4(source));
+
+    drop(tx);
+    handle.await.unwrap();
+}

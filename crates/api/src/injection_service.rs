@@ -8,7 +8,10 @@ use tonic::{Request, Response, Status};
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::AttrSet;
-use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, RibCommandError, RibUpdate, Route, RouteOrigin};
+use rustbgpd_rib::{
+    EvpnRibRoute, FlowSpecInjectOutcome, FlowSpecRoute, RibCommandError, RibUpdate, Route,
+    RouteOrigin,
+};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
     EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, ExtendedCommunity,
@@ -416,12 +419,19 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        reply_rx
+        let outcome = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("FlowSpec inject failed", error))?;
+        let outcome = match outcome {
+            FlowSpecInjectOutcome::Created => proto::FlowSpecInjectOutcome::Created,
+            FlowSpecInjectOutcome::Replaced => proto::FlowSpecInjectOutcome::Replaced,
+            FlowSpecInjectOutcome::Unchanged => proto::FlowSpecInjectOutcome::Unchanged,
+        };
 
-        Ok(Response::new(proto::AddFlowSpecResponse {}))
+        Ok(Response::new(proto::AddFlowSpecResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn delete_flow_spec(
@@ -444,17 +454,26 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         self.rib_tx
             .send(RibUpdate::WithdrawFlowSpec {
                 key: rustbgpd_rib::FlowSpecKey { afi, rule },
+                allow_missing: req.allow_missing,
                 reply: reply_tx,
             })
             .await
             .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
-        reply_rx
+        let deleted = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|error| map_rib_command_error("FlowSpec withdraw failed", error))?;
 
-        Ok(Response::new(proto::DeleteFlowSpecResponse {}))
+        let outcome = if deleted {
+            proto::FlowSpecDeleteOutcome::Deleted
+        } else {
+            proto::FlowSpecDeleteOutcome::NotPresent
+        };
+
+        Ok(Response::new(proto::DeleteFlowSpecResponse {
+            outcome: outcome as i32,
+        }))
     }
 
     async fn add_evpn_route(
@@ -1392,6 +1411,7 @@ mod tests {
             .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: vec![oversized_flowspec_component()],
+                allow_missing: false,
             }))
             .await
             .unwrap_err();
@@ -1564,6 +1584,7 @@ mod tests {
             .delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
                 afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
                 components: Vec::new(),
+                allow_missing: false,
             }))
             .await
             .unwrap_err();
@@ -2504,5 +2525,277 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    fn flowspec_rate(rate: f32) -> proto::FlowSpecAction {
+        proto::FlowSpecAction {
+            action: Some(proto::flow_spec_action::Action::TrafficRate(
+                proto::FlowSpecTrafficRate { rate },
+            )),
+        }
+    }
+
+    fn flowspec_rule_components() -> Vec<proto::FlowSpecComponent> {
+        vec![
+            proto::FlowSpecComponent {
+                r#type: 1,
+                prefix: "203.0.113.0/24".into(),
+                value: String::new(),
+                offset: 0,
+            },
+            proto::FlowSpecComponent {
+                r#type: 4,
+                prefix: String::new(),
+                value: "=80".into(),
+                offset: 0,
+            },
+        ]
+    }
+
+    async fn add_rate(svc: &InjectionService, rate: f32) -> proto::FlowSpecInjectOutcome {
+        let response = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: flowspec_rule_components(),
+                actions: vec![flowspec_rate(rate)],
+                communities: vec![],
+                extended_communities: vec![],
+            }))
+            .await
+            .expect("add accepted")
+            .into_inner();
+        response.outcome()
+    }
+
+    async fn delete_rule(
+        svc: &InjectionService,
+        allow_missing: bool,
+    ) -> Result<proto::DeleteFlowSpecResponse, Status> {
+        svc.delete_flow_spec(Request::new(proto::DeleteFlowSpecRequest {
+            afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+            components: flowspec_rule_components(),
+            allow_missing,
+        }))
+        .await
+        .map(Response::into_inner)
+    }
+
+    fn rate_ec(rate: f32) -> Vec<ExtendedCommunity> {
+        vec![
+            flowspec_action_to_ec(&flowspec_rate(rate))
+                .unwrap()
+                .unwrap(),
+        ]
+    }
+
+    async fn list_local_flowspec(
+        rib: &crate::rib_service::RibService,
+    ) -> proto::ListFlowSpecResponse {
+        use proto::rib_service_server::RibService as _;
+        rib.list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest {
+            afi_safi: 0,
+            received_peer_address: "0.0.0.0".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    /// Delete present, missing by default, missing with `allow_missing`, and
+    /// present with `allow_missing`; leaves no local rule behind.
+    async fn assert_delete_outcomes(svc: &InjectionService) {
+        assert_eq!(
+            delete_rule(svc, false).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            delete_rule(svc, false).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            delete_rule(svc, true).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::NotPresent
+        );
+        assert_eq!(
+            add_rate(svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Created
+        );
+        assert_eq!(
+            delete_rule(svc, true).await.unwrap().outcome(),
+            proto::FlowSpecDeleteOutcome::Deleted
+        );
+    }
+
+    /// The controller contract against a real RIB: add reports created /
+    /// replaced / unchanged from the local Adj-RIB-In, a received rule that
+    /// out-selects the local one does not mask a real replacement, the
+    /// 0.0.0.0 received view lists exactly the injected rules, and a missing
+    /// delete is `NOT_FOUND` unless `allow_missing` is set.
+    #[tokio::test]
+    async fn flowspec_injection_reports_local_outcomes_and_reconciles() {
+        use proto::rib_service_server::RibService as _;
+
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let rib = crate::rib_service::RibService::new(rib_tx.clone());
+
+        assert_eq!(
+            add_rate(&svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Created
+        );
+        assert_eq!(
+            add_rate(&svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Unchanged
+        );
+        assert_eq!(
+            add_rate(&svc, 1000.0).await,
+            proto::FlowSpecInjectOutcome::Replaced
+        );
+
+        // A received rule with the same key and a higher LOCAL_PREF now owns
+        // Loc-RIB, so a local replacement no longer changes selection.
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let components = parse_flowspec_components(&flowspec_rule_components(), Afi::Ipv4)
+            .expect("valid test rule");
+        rib_tx
+            .send(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer: source,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![FlowSpecRoute {
+                    rule: FlowSpecRule { components },
+                    afi: Afi::Ipv4,
+                    peer: source,
+                    attributes: vec![
+                        PathAttribute::Origin(Origin::Igp),
+                        PathAttribute::AsPath(AsPath { segments: vec![] }),
+                        PathAttribute::LocalPref(200),
+                        PathAttribute::ExtendedCommunities(rate_ec(5000.0)),
+                    ],
+                    received_at: std::time::Instant::now(),
+                    origin_type: RouteOrigin::Ibgp,
+                    peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+                    is_stale: false,
+                    is_llgr_stale: false,
+                    path_id: 0,
+                }],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+                validated_with: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            add_rate(&svc, 2000.0).await,
+            proto::FlowSpecInjectOutcome::Replaced
+        );
+        assert_eq!(
+            add_rate(&svc, 2000.0).await,
+            proto::FlowSpecInjectOutcome::Unchanged
+        );
+
+        let selected = rib
+            .list_flow_spec_routes(Request::new(proto::ListFlowSpecRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(selected.routes.len(), 1);
+        assert_eq!(selected.routes[0].peer_address, source.to_string());
+        assert_eq!(selected.routes[0].actions, vec![flowspec_rate(5000.0)]);
+
+        let local = list_local_flowspec(&rib).await;
+        assert!(local.received_view);
+        assert_eq!(local.received_routes.len(), 1, "{local:?}");
+        let row = &local.received_routes[0];
+        assert!(!row.selected, "the received rule out-selects the local one");
+        let route = row.route.as_ref().unwrap();
+        assert_eq!(route.peer_address, "0.0.0.0");
+        assert_eq!(route.actions, vec![flowspec_rate(2000.0)]);
+        assert_eq!(
+            row.validation,
+            proto::FlowSpecValidationStatus::Disabled as i32
+        );
+
+        assert_delete_outcomes(&svc).await;
+        let local = list_local_flowspec(&rib).await;
+        assert!(local.received_view);
+        assert!(local.received_routes.is_empty());
+
+        drop((svc, rib, rib_tx));
+        manager_task.await.unwrap();
+    }
+
+    /// With receive-side validation enabled, the reconciliation read reports
+    /// every injected rule as LOCAL, complete and not pending, whatever its
+    /// shape: a rule with no covering unicast route and a rule with no
+    /// destination (both infeasible for a received candidate) are trusted
+    /// local origination.
+    #[tokio::test]
+    async fn flowspec_reconciliation_reports_local_when_validation_enabled() {
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(
+            rib_rx,
+            mpsc::channel(1).1,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        )
+        .with_flowspec_validation(65000);
+        let manager_task = tokio::spawn(manager.run());
+        let svc = InjectionService::new(rib_tx.clone(), AccessMode::ReadWrite);
+        let rib = crate::rib_service::RibService::new(rib_tx.clone());
+
+        assert_eq!(
+            add_rate(&svc, 0.0).await,
+            proto::FlowSpecInjectOutcome::Created
+        );
+        let destinationless = svc
+            .add_flow_spec(Request::new(proto::AddFlowSpecRequest {
+                afi_safi: proto::AddressFamily::Ipv4Flowspec as i32,
+                components: vec![proto::FlowSpecComponent {
+                    r#type: 3,
+                    prefix: String::new(),
+                    value: "=17".into(),
+                    offset: 0,
+                }],
+                actions: vec![flowspec_rate(0.0)],
+                communities: vec![],
+                extended_communities: vec![],
+            }))
+            .await
+            .expect("add accepted")
+            .into_inner();
+        assert_eq!(
+            destinationless.outcome(),
+            proto::FlowSpecInjectOutcome::Created
+        );
+
+        let local = list_local_flowspec(&rib).await;
+        assert!(local.received_view);
+        assert_eq!(local.received_routes.len(), 2, "{local:?}");
+        for row in &local.received_routes {
+            assert_eq!(
+                row.validation,
+                proto::FlowSpecValidationStatus::Local as i32,
+                "{row:?}"
+            );
+            assert!(row.reason.is_empty(), "{row:?}");
+            assert!(!row.pending, "{row:?}");
+            assert!(row.selected, "{row:?}");
+            assert_eq!(row.route.as_ref().unwrap().peer_address, "0.0.0.0");
+        }
+
+        drop((svc, rib, rib_tx));
+        manager_task.await.unwrap();
     }
 }

@@ -2043,6 +2043,7 @@ _arguments "${_arguments_options[@]}" : \
 '--tls-server-name=[Server certificate name to verify instead of the HTTPS address host]:NAME:_default' \
 '--json-version=[Wrap supported JSON documents in a versioned envelope (requires --json)]:MAJOR:(1)' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--allow-missing[Succeed and report "not present" when no injected rule matches]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \

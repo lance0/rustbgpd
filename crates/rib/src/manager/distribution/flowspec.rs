@@ -6,6 +6,7 @@ use super::{
 };
 use crate::attr_set::AttrSet;
 use crate::route::{FlowSpecKey, FlowSpecRouteKey};
+use crate::update::FlowSpecInjectOutcome;
 
 impl RibManager {
     pub(super) fn process_flowspec_withdraw_chunk(
@@ -125,25 +126,44 @@ impl RibManager {
     pub(in crate::manager) fn handle_inject_flowspec(
         &mut self,
         route: crate::route::FlowSpecRoute,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        reply: tokio::sync::oneshot::Sender<Result<FlowSpecInjectOutcome, RibCommandError>>,
     ) {
         let key = route.selection_key();
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
             .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        // Decide from the local Adj-RIB-In, not Loc-RIB: a received rule
+        // that out-selects the local one leaves Loc-RIB unchanged even when
+        // the local payload really was replaced. `received_at` is excluded,
+        // matching the Loc-RIB change test, so an identical re-add distributes
+        // nothing.
+        let outcome = match rib.get_flowspec(&route.key()) {
+            None => FlowSpecInjectOutcome::Created,
+            Some(old)
+                if old.attributes == route.attributes
+                    && old.origin_type == route.origin_type
+                    && old.peer_router_id == route.peer_router_id
+                    && old.is_stale == route.is_stale
+                    && old.is_llgr_stale == route.is_llgr_stale =>
+            {
+                FlowSpecInjectOutcome::Unchanged
+            }
+            Some(_) => FlowSpecInjectOutcome::Replaced,
+        };
         rib.insert_flowspec(route);
-        debug!(afi = ?key.afi, rule = %key.rule, "injected local FlowSpec route");
+        debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
         self.recompute_and_distribute_flowspec(&fs_affected);
-        let _ = reply.send(Ok(()));
+        let _ = reply.send(Ok(outcome));
     }
 
     pub(in crate::manager) fn handle_withdraw_flowspec(
         &mut self,
         key: FlowSpecKey,
-        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+        allow_missing: bool,
+        reply: tokio::sync::oneshot::Sender<Result<bool, RibCommandError>>,
     ) {
         let rib = self
             .ribs
@@ -159,7 +179,9 @@ impl RibManager {
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);
             self.recompute_and_distribute_flowspec(&fs_affected);
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(true));
+        } else if allow_missing {
+            let _ = reply.send(Ok(false));
         } else {
             let _ = reply.send(Err(RibCommandError::not_found(format!(
                 "FlowSpec {:?} rule {} not found",

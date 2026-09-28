@@ -1949,7 +1949,9 @@ The ordinary `ListFlowSpecRoutes` response remains the selected Loc-RIB view
 in `routes`. Set `received_peer_address` to an IP address to inspect that
 peer's retained, post-import-policy candidates instead, including nonselected
 and infeasible rules. `afi_safi` narrows either view. Invalid peer addresses
-are rejected before the query reaches the RIB.
+are rejected before the query reaches the RIB. The address `0.0.0.0` selects
+the rules injected through `InjectionService`; see the
+[FlowSpec injection contract](#flowspec-injection-contract).
 
 Received mode returns `received_routes` and sets `received_view: true`, even
 when empty; ordinary mode leaves both unset. An empty received view for an
@@ -2647,10 +2649,84 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/DeleteFlowSpec
 ```
 
-FlowSpec component lists must be non-empty, in ascending type-code order,
-and limited to the supported RFC 8955 / RFC 8956 unicast component set.
-Each injected or withdrawn rule must also encode to at most 4095 NLRI
-payload bytes; larger rules are rejected with `InvalidArgument`.
+FlowSpec component lists must be non-empty, in strictly ascending type-code
+order with no type repeated, and limited to the supported RFC 8955 /
+RFC 8956 unicast component set. The daemon does not reorder components; an
+out-of-order or repeated type is rejected with `INVALID_ARGUMENT`. Each
+injected or withdrawn rule must also encode to at most 4095 NLRI payload
+bytes; larger rules are rejected with `INVALID_ARGUMENT`.
+
+#### FlowSpec injection contract
+
+A local rule is identified by `(afi_safi, components)`. `AddFlowSpec` is an
+upsert on that key, so a controller can re-announce its whole rule set on
+every reconcile pass:
+
+| `AddFlowSpecResponse.outcome` | Meaning |
+|---|---|
+| `FLOW_SPEC_INJECT_OUTCOME_CREATED` | No local rule had this key. |
+| `FLOW_SPEC_INJECT_OUTCOME_REPLACED` | A local rule with this key had different actions or communities; the new payload replaced it. |
+| `FLOW_SPEC_INJECT_OUTCOME_UNCHANGED` | An identical local rule already existed. Nothing is redistributed. |
+| `FLOW_SPEC_INJECT_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+The outcome compares the new rule with the previous *local* rule only. A
+received rule with the same key does not affect it, even when that received
+rule is the selected one: replacing an out-selected local rule still reports
+`REPLACED`, although nothing changes on the wire.
+
+`OK` confirms that the rule was accepted into the local Adj-RIB-In (peer
+`0.0.0.0`). Selection and outbound distribution normally run in the same RIB
+turn, before the reply, but are deferred while Graceful Restart selection
+deferral is active for the family. `OK` does not mean that a peer received or
+installed the rule, and a received rule with the same key can out-select it.
+Injected rules are process-local: after a daemon restart, the controller must
+inject them again.
+
+`DeleteFlowSpec` removes only a rule added through `AddFlowSpec`; it never
+removes a received rule. A key with no local rule returns `NOT_FOUND` by
+default. Set `allow_missing: true` to get `OK` with outcome `NOT_PRESENT`
+instead, so a reconciling controller can treat "already gone" as drift rather
+than a failure. The same selection and distribution timing as `AddFlowSpec`
+applies to a successful delete.
+
+| `DeleteFlowSpecResponse.outcome` | Meaning |
+|---|---|
+| `FLOW_SPEC_DELETE_OUTCOME_DELETED` | A local rule with this key was removed from the local Adj-RIB-In. |
+| `FLOW_SPEC_DELETE_OUTCOME_NOT_PRESENT` | No local rule had this key; returned only with `allow_missing`. |
+| `FLOW_SPEC_DELETE_OUTCOME_UNSPECIFIED` | The daemon predates the field. |
+
+A daemon that predates these fields ignores `allow_missing`: a missing rule
+returns `NOT_FOUND`, and a present rule is deleted with outcome
+`UNSPECIFIED`. Because such a daemon returns `OK` only after removing a rule,
+`UNSPECIFIED` on success means the rule was deleted; it never means the rule
+was absent.
+
+To list exactly the injected rules, call `RibService.ListFlowSpecRoutes`
+with `received_peer_address: "0.0.0.0"`. The received view returns every
+local rule, including one a received rule currently out-selects
+(`selected: false`), with `route.peer_address` set to `0.0.0.0`. Validation
+reads `disabled` by default and `local` when `[flowspec] validation` is
+enabled; local rules never report `feasible` or `infeasible`.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"received_peer_address": "0.0.0.0"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
+```
+
+`rbgp flowspec add` prints the outcome, for example `FlowSpec rule added
+(unchanged)`, and its `--json` result carries `outcome` (`created`,
+`replaced`, `unchanged`, or `unknown` for an older daemon).
+`rbgp flowspec delete` reports the delete outcome the same way: its `--json`
+result carries `outcome` (`deleted`, `not_present`, or `unknown` for an older
+daemon). With `--allow-missing`, a missing rule prints `FlowSpec rule not
+present` and exits 0; without the flag a missing rule is still an error. An
+older daemon's success prints `FlowSpec rule deleted (the daemon did not
+report an outcome)`.
+`rbgp flowspec received 0.0.0.0` shows the injected rules.
+
+These RPCs remain outside the v1 inventory
+([stability](stability.md)); the contract above describes current behavior.
 
 ### Inject an EVPN Type 2 (MAC/IP) route
 

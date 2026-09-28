@@ -1143,6 +1143,19 @@ pub struct ExportPolicyTermHits {
     pub terms: Vec<rustbgpd_policy::TermHitRow>,
 }
 
+/// Outcome of a local `FlowSpec` injection, decided against the local
+/// Adj-RIB-In rather than Loc-RIB, so a received rule that out-selects the
+/// local one cannot mask a real replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowSpecInjectOutcome {
+    /// No local rule had this `(afi, rule)` key.
+    Created,
+    /// A local rule with this key existed with a different payload.
+    Replaced,
+    /// An identical local rule existed; nothing changed.
+    Unchanged,
+}
+
 /// Typed error for API-visible RIB command replies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RibCommandError {
@@ -2784,15 +2797,17 @@ pub enum RibUpdate {
     InjectFlowSpec {
         /// The `FlowSpec` route to inject.
         route: FlowSpecRoute,
-        /// Completion reply.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Completion reply, carrying the local Adj-RIB-In outcome.
+        reply: oneshot::Sender<Result<FlowSpecInjectOutcome, RibCommandError>>,
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {
         /// Family-complete `FlowSpec` identity to withdraw.
         key: crate::route::FlowSpecKey,
-        /// Completion reply.
-        reply: oneshot::Sender<Result<(), RibCommandError>>,
+        /// Reply `Ok(false)` instead of `NotFound` when no local rule matches.
+        allow_missing: bool,
+        /// Completion reply: `true` when a local rule was removed.
+        reply: oneshot::Sender<Result<bool, RibCommandError>>,
     },
     /// Inject a locally-originated EVPN route (RFC 7432).
     ///

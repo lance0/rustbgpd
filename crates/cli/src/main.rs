@@ -1827,6 +1827,9 @@ enum FlowspecAction {
         /// Match components identifying the rule
         #[arg(long = "match", value_delimiter = ' ')]
         components: Vec<String>,
+        /// Succeed and report "not present" when no injected rule matches
+        #[arg(long)]
+        allow_missing: bool,
     },
 }
 
@@ -4887,11 +4890,13 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 Some(FlowspecAction::Delete {
                     family: fam,
                     components,
+                    allow_missing,
                 }) => {
                     let f = parse_family(&fam).ok_or_else(|| {
                         CliError::Argument(format!("unknown address family: {fam}"))
                     })?;
-                    commands::flowspec::delete(connection, f, &components, json).await
+                    commands::flowspec::delete(connection, f, &components, allow_missing, json)
+                        .await
                 }
             }
         }
