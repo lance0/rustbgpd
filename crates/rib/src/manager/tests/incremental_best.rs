@@ -3,8 +3,9 @@
 //!
 //! Random operation sequences — announces (incl. same-peer attr changes,
 //! Add-Path ties, refresh-style replays), withdrawals, session teardown,
-//! GR stale marking, LLGR promotion, and `EoR` sweeps/clears — are applied
-//! through the same seams production uses. After every step:
+//! GR stale marking, LLGR promotion, and `EoR` sweeps/clears — use production
+//! announce, withdraw, teardown, and `EoR` paths. Stale marking and LLGR
+//! promotion still mutate the Adj-RIB-In directly. After every step:
 //!
 //! 1. the Loc-RIB best for every prefix must be IDENTICAL to a
 //!    from-scratch full-scan recompute over every peer's Adj-RIB-In (the
@@ -361,8 +362,7 @@ enum Op {
     Announce { peer: u8, routes: Vec<(u8, u8, u8)> },
     /// Real withdraw path → `recompute_best_after_withdraw`.
     Withdraw { peer: u8, keys: Vec<(u8, u8)> },
-    /// Session teardown seam: Adj-RIB-In dropped whole, then a full
-    /// recompute of its prefixes (`clear_peer_adj_rib_in` shape).
+    /// Production `PeerDown` teardown, without a registered session.
     SessionDown { peer: u8 },
     /// RFC 4724 GR entry seam: mark the family stale (consecutive-restart
     /// re-mark deletes already-stale routes), then recompute.
@@ -370,8 +370,7 @@ enum Op {
     /// RFC 9494 promotion seam: GR-stale → LLGR-stale with in-place
     /// `LLGR_STALE` community injection, then recompute.
     PromoteLlgr { peer: u8 },
-    /// `EoR` seam: sweep still-stale + still-LLGR-stale routes, clear flags
-    /// on the retained ones, then recompute retained ∪ swept.
+    /// Production End-of-RIB sweep for the GR family.
     EorClear { peer: u8 },
 }
 
@@ -428,17 +427,26 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
             drain_route_chunks(manager);
         }
         Op::SessionDown { peer } => {
-            if let Some(rib) = manager.ribs.remove(&peer_addr(*peer)) {
-                manager.unicast_prefix_peers.retire_peer(peer_addr(*peer));
-                let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
-                manager.recompute_best(&affected);
-            }
+            let peer = peer_addr(*peer);
+            manager.handle_update(RibUpdate::PeerDown {
+                peer,
+                session_id: 0,
+            });
+            assert!(
+                !manager.ribs.contains_key(&peer),
+                "PeerDown retained {peer}'s routes"
+            );
         }
         Op::MarkStale { peer } => {
             if let Some(rib) = manager.ribs.get_mut(&peer_addr(*peer)) {
                 let mut affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
                 affected.extend(rib.mark_stale(FAMILY));
                 manager.recompute_best(&affected);
+                manager
+                    .gr_peers
+                    .entry(peer_addr(*peer))
+                    .or_default()
+                    .insert(FAMILY);
             }
         }
         Op::PromoteLlgr { peer } => {
@@ -451,13 +459,23 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
             }
         }
         Op::EorClear { peer } => {
-            if let Some(rib) = manager.ribs.get_mut(&peer_addr(*peer)) {
-                let mut swept = rib.sweep_stale_family(FAMILY);
-                swept.extend(rib.sweep_llgr_stale_family(FAMILY));
-                rib.clear_stale(FAMILY);
-                let mut affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
-                affected.extend(swept);
-                manager.recompute_best(&affected);
+            let peer = peer_addr(*peer);
+            let stale: Vec<_> = manager
+                .ribs
+                .get(&peer)
+                .into_iter()
+                .flat_map(AdjRibIn::iter)
+                .filter(|route| route.is_stale || route.is_llgr_stale)
+                .map(|route| (route.prefix, route.path_id))
+                .collect();
+            manager.handle_end_of_rib(peer, FAMILY.0, FAMILY.1);
+            if let Some(rib) = manager.ribs.get(&peer) {
+                for (prefix, path_id) in stale {
+                    assert!(
+                        rib.get(&prefix, path_id).is_none(),
+                        "End-of-RIB retained stale route {prefix} path {path_id} from {peer}"
+                    );
+                }
             }
         }
     }
@@ -523,6 +541,60 @@ fn check_invariants(manager: &RibManager, step: usize) {
             ),
         }
     }
+}
+
+#[test]
+fn lifecycle_ops_remove_stale_routes_and_restore_fallback() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let received_at = Instant::now();
+    let ops = [
+        Op::Announce {
+            peer: 1,
+            routes: vec![(1, 0, 0)],
+        },
+        Op::Announce {
+            peer: 0,
+            routes: vec![(0, 0, 0), (1, 0, 1)],
+        },
+        Op::MarkStale { peer: 0 },
+        Op::Announce {
+            peer: 0,
+            routes: vec![(1, 0, 1)],
+        },
+        Op::EorClear { peer: 0 },
+    ];
+    for (step, op) in ops.iter().enumerate() {
+        apply(&mut manager, op, received_at);
+        check_invariants(&manager, step);
+    }
+    assert!(manager.ribs[&peer_addr(0)].get(&prefix_of(0), 0).is_none());
+    assert!(manager.ribs[&peer_addr(0)].get(&prefix_of(1), 0).is_some());
+    assert_eq!(
+        manager.loc_rib.get(&prefix_of(1)).unwrap().peer,
+        peer_addr(0)
+    );
+
+    apply(&mut manager, &Op::SessionDown { peer: 0 }, received_at);
+    check_invariants(&manager, ops.len());
+    assert_eq!(
+        manager.loc_rib.get(&prefix_of(1)).unwrap().peer,
+        peer_addr(1)
+    );
+
+    apply(
+        &mut manager,
+        &Op::Announce {
+            peer: 0,
+            routes: vec![(2, 0, 0)],
+        },
+        received_at,
+    );
+    apply(&mut manager, &Op::MarkStale { peer: 0 }, received_at);
+    apply(&mut manager, &Op::PromoteLlgr { peer: 0 }, received_at);
+    apply(&mut manager, &Op::EorClear { peer: 0 }, received_at);
+    assert!(manager.ribs[&peer_addr(0)].get(&prefix_of(2), 0).is_none());
+    assert!(manager.loc_rib.get(&prefix_of(2)).is_none());
 }
 
 proptest! {
