@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -50,6 +51,29 @@ CARGO_COMMAND = re.compile(r"(?<![\w-])cargo(?:\s+\+\S+)?\s+(build|check|test|cl
 LOCKED_TOKEN = re.compile(r"(?<!\S)--locked(?=\s|$)")
 ARG_SEPARATOR = re.compile(r"(?<!\S)--(?=\s|$)")
 MANIFEST_PATH = re.compile(r"(?<!\S)--manifest-path(?:=|\s+)([^\s;|&)]+)")
+MSRV_PINS = (
+    ("Dockerfile", r"(?m)^FROM rust:([^\s-]+)-"),
+    ("crates/evpn-linux/tests/docker/Dockerfile", r"(?m)^FROM rust:([^\s-]+)-"),
+    (".github/workflows/release.yml", r"(?m)^\s+container: rust:([^\s-]+)-"),
+    (".github/workflows/kernel-dataplane.yml", r'(?m)^\s+toolchain: "([0-9.]+)"\s*$'),
+    (".github/workflows/ci.yml", r'(?m)^\s+toolchain: "([0-9.]+)"\s*$'),
+    (".github/workflows/ci.yml", r"(?m)^\s+key: msrv-([^\s]+)\s*$"),
+)
+
+
+def _check_msrv_pins(root: Path, errors: list[str]) -> None:
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    msrv = manifest.get("workspace", {}).get("package", {}).get("rust-version")
+    if not isinstance(msrv, str) or not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", msrv):
+        errors.append("Cargo.toml: expected one numeric workspace.package.rust-version")
+        return
+    for filename, pattern in MSRV_PINS:
+        text = (root / filename).read_text()
+        if filename == ".github/workflows/ci.yml":
+            text = _jobs(text).get("msrv", "")
+        pins = re.findall(pattern, text)
+        if pins != [msrv]:
+            errors.append(f"{filename}: MSRV pin {pins!r} must match Cargo.toml rust-version {msrv!r}")
 
 
 def _jobs(text: str) -> dict[str, str]:
@@ -145,6 +169,7 @@ def check(root: Path) -> list[str]:
             f"retired workflow must stay absent: {RETIRED_PRIVILEGED_WORKFLOW}"
         )
     _check_dependency_commands(root, errors)
+    _check_msrv_pins(root, errors)
     if set(jobs) != ROSTER:
         errors.append("exact CI job roster drifted")
 

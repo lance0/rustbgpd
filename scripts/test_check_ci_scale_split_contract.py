@@ -5,6 +5,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -24,7 +26,7 @@ WORKFLOW = ".github/workflows/ci.yml"
 
 class ScaleSplitContractTests(unittest.TestCase):
     def copy_workflows(self, root: Path) -> None:
-        for workflow in WORKFLOWS:
+        for workflow in {*WORKFLOWS, "Cargo.toml", *(name for name, _ in contract.MSRV_PINS)}:
             target = root / workflow
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / workflow, target)
@@ -51,6 +53,74 @@ class ScaleSplitContractTests(unittest.TestCase):
 
     def test_live_contract(self) -> None:
         self.assertEqual([], check(ROOT))
+
+    def test_msrv_bump_names_every_stale_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.copy_workflows(root)
+            manifest = root / "Cargo.toml"
+            msrv = tomllib.loads(manifest.read_text())["workspace"]["package"]["rust-version"]
+            manifest.write_text(manifest.read_text().replace(f'rust-version = "{msrv}"', 'rust-version = "9.99"'))
+            failures = check(root)
+            self.assertEqual(len(contract.MSRV_PINS), len(failures), failures)
+            for name, _ in contract.MSRV_PINS:
+                self.assertTrue(any(failure.startswith(f"{name}: MSRV pin") for failure in failures))
+            for name in {name for name, _ in contract.MSRV_PINS}:
+                path = root / name
+                path.write_text(path.read_text().replace(msrv, "9.99"))
+            self.assertEqual([], check(root))
+
+    def test_each_msrv_pin_is_required_and_checked_independently(self) -> None:
+        for name, pattern in contract.MSRV_PINS:
+            for replacement in ["9.99", ""]:
+                with self.subTest(file=name, pattern=pattern, replacement=replacement):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        self.copy_workflows(root)
+                        path = root / name
+                        text = path.read_text()
+                        match = re.search(pattern, text)
+                        self.assertIsNotNone(match)
+                        path.write_text(text[:match.start(1)] + replacement + text[match.end(1):])
+                        self.assertTrue(any(failure.startswith(f"{name}: MSRV pin") for failure in check(root)))
+
+    def test_gate_msrv_uses_the_installed_toolchain_name(self) -> None:
+        recipe = (ROOT / "justfile").read_text().split("gate-msrv:\n", 1)[1].split("\n#", 1)[0]
+        recipe = textwrap.dedent(recipe)
+        cases = (
+            ("1.95", "1.95-x86_64-unknown-linux-gnu (default)\n", "1.95-x86_64-unknown-linux-gnu"),
+            ("1.95", "1.95.0-x86_64-unknown-linux-gnu\n", "1.95.0-x86_64-unknown-linux-gnu"),
+            ("1.95", "1.95.1-x86_64-unknown-linux-gnu\n", "1.95.1-x86_64-unknown-linux-gnu"),
+            ("1.95.1", "1.95.0-x86_64-unknown-linux-gnu\n1.95.1-x86_64-unknown-linux-gnu\n", "1.95.1-x86_64-unknown-linux-gnu"),
+            ("1.95", "1.950.0-x86_64-unknown-linux-gnu\nnightly-x86_64-unknown-linux-gnu\n", None),
+            ("1.95.1", "1.95.0-x86_64-unknown-linux-gnu\n", None),
+        )
+        for msrv, installed, expected in cases:
+            with self.subTest(msrv=msrv, installed=installed):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    (root / "Cargo.toml").write_text(f'[workspace.package]\nrust-version = "{msrv}"\n')
+                    (root / "scripts").mkdir()
+                    (root / "scripts/build-lock.sh").write_text('exec "$@"\n')
+                    for name, body in {
+                        "rustup": 'printf "%s" "$MSRV_INSTALLED"',
+                        "cargo": 'printf "%s\\n" "$@" > "$MSRV_CAPTURE"',
+                    }.items():
+                        executable = root / name
+                        executable.write_text(f"#!/bin/sh\n{body}\n")
+                        executable.chmod(0o755)
+                    capture = root / "invocation"
+                    result = subprocess.run(
+                        ["bash", "-c", recipe], cwd=root, capture_output=True, text=True,
+                        env=os.environ | {"PATH": f"{root}:{os.environ['PATH']}", "MSRV_INSTALLED": installed, "MSRV_CAPTURE": str(capture)},
+                    )
+                    if expected is None:
+                        self.assertEqual(127, result.returncode, result.stderr)
+                        self.assertFalse(capture.exists())
+                        self.assertIn(f"rustup toolchain install {msrv}", result.stderr)
+                    else:
+                        self.assertEqual(0, result.returncode, result.stderr)
+                        self.assertEqual([f"+{expected}", "check", "--locked", "--workspace", "--all-targets"], capture.read_text().splitlines())
 
     def test_retired_privileged_workflow_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
