@@ -118,7 +118,14 @@ impl fmt::Display for PeerShutdownError {
     }
 }
 
-impl std::error::Error for PeerShutdownError {}
+impl std::error::Error for PeerShutdownError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Join(error) => Some(error),
+            Self::TimedOut { .. } => None,
+        }
+    }
+}
 
 /// Role of a session relative to the `PeerManager` entry that owns it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2669,6 +2676,30 @@ mod tests {
     use std::future::{Future, poll_fn};
     use std::sync::Barrier;
     use std::task::Poll;
+
+    #[tokio::test]
+    async fn peer_shutdown_error_preserves_join_source() {
+        use std::error::Error;
+
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let join_error = task.await.expect_err("aborted task");
+        let expected_display = format!("session task join error: {join_error}");
+        let error = PeerShutdownError::Join(join_error);
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<JoinError>())
+            .expect("underlying task error remains accessible");
+        assert!(source.is_cancelled());
+        assert_eq!(error.to_string(), expected_display);
+
+        let timeout = PeerShutdownError::TimedOut {
+            operation: "shutdown",
+            deadline: Duration::from_millis(500),
+        };
+        assert!(timeout.source().is_none());
+        assert_eq!(timeout.to_string(), "shutdown timed out after 500ms");
+    }
 
     fn import_counter_descriptor(generation: u64) -> Arc<InstalledImportPolicy> {
         Arc::new(InstalledImportPolicy::new(
