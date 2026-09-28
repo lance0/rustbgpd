@@ -2748,6 +2748,72 @@ fn bench_queued_announce_fanout(c: &mut Criterion) {
     group.finish();
 }
 
+/// Each of `GROUP_JOINERS` RR clients of one converged update group sends an
+/// IPv4 unicast ROUTE-REFRESH, answered back to back through the production
+/// dispatch. Timed as the sum of the responses; fixture construction, the
+/// joins and receipt checks stay outside.
+fn bench_route_refresh_group_member(c: &mut Criterion) {
+    let mut group = c.benchmark_group("route_refresh_group_member");
+    group.sample_size(10);
+    for sources in [1u8, 8] {
+        let routes = 65_536;
+        group.bench_function(
+            BenchmarkId::new(format!("{sources}_sources"), routes),
+            |bench| {
+                bench.iter_custom(|iterations| {
+                    let mut accumulated = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let mut manager = build_group_join(sources, routes);
+                        let mut receivers: Vec<_> = (1..=GROUP_JOINERS)
+                            .map(|index| {
+                                let (sender, mut receiver) = mpsc::channel(2);
+                                manager.bench_join_route_reflector_peer(
+                                    index,
+                                    sender,
+                                    fanout_bench_export_encoder(),
+                                );
+                                assert_eq!(
+                                    receiver.try_recv().expect("joiner dump").announce.len(),
+                                    routes
+                                );
+                                receiver.try_recv().expect("joiner EoR");
+                                (index, receiver)
+                            })
+                            .collect();
+                        // Every refreshed member must take the grouped refresh
+                        // arm; an ungrouped member would time the full walk.
+                        let receipt = manager.bench_adj_rib_out_fanout_receipt();
+                        assert_eq!(receipt.update_groups, 1, "one converged group");
+                        assert_eq!(receipt.grouped_peers, 1 + GROUP_JOINERS);
+                        assert_eq!(
+                            receipt.ungrouped_peers, 0,
+                            "no refreshed member is ungrouped"
+                        );
+                        for (index, _) in &receivers {
+                            let started = Instant::now();
+                            manager.bench_route_refresh_joined_peer(*index);
+                            accumulated += started.elapsed();
+                        }
+                        for (_, receiver) in &mut receivers {
+                            let response = receiver.try_recv().expect("refresh response");
+                            assert_eq!(response.announce.len(), routes);
+                            assert_eq!(response.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+                            assert_eq!(response.refresh_markers.len(), 2, "BoRR and EoRR");
+                        }
+                        assert_eq!(
+                            manager.bench_adj_rib_out_fanout_receipt().update_groups,
+                            1,
+                            "refreshing members stay in the founder's group"
+                        );
+                    }
+                    accumulated
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_fanout,
@@ -2760,6 +2826,7 @@ criterion_group!(
     bench_grouped_policy_denial_fanout,
     bench_initial_table_peer_join,
     bench_initial_table_group_join,
+    bench_route_refresh_group_member,
     bench_add_path_export_staging,
     bench_policy_regroup_resync,
     bench_ixp_policy_regroup_resync,
