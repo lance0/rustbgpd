@@ -1016,6 +1016,9 @@ async fn production_collision_promotion_transfers_capacity_after_primary_termina
     let candidate_task = tokio::spawn(async move {
         while let Some(command) = candidate_rx.recv().await {
             match command {
+                PeerCommand::ClaimCollisionPromotion { reply } => {
+                    let _ = reply.send(true);
+                }
                 PeerCommand::ActivateMaxPrefixMetrics { reply, .. } => {
                     if !candidate_terminated.load(Ordering::SeqCst) {
                         candidate_early.store(true, Ordering::SeqCst);
@@ -2103,6 +2106,157 @@ async fn stale_open_received_after_verdict_timeout_does_not_promote_candidate() 
         managed.pending_inbound.is_none(),
         "the dead candidate is dropped"
     );
+    assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
+}
+
+/// The drain before promotion is not an ownership fence: a candidate whose
+/// verdict timer fires after the drain, but before promotion commits, is Idle
+/// by the time it would become primary. The interleaving is fixed by holding
+/// back its `BackToIdle` until after the manager has handled the OPEN, which is
+/// what the drain sees when the timer fires just after it. The candidate's
+/// claim reply must keep the primary in place.
+async fn candidate_idle_after_drain_keeps_primary(local_id: Ipv4Addr, primary_state: SessionState) {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        local_id,
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, primary_state, None, primary.clone()),
+        false,
+    );
+    let mut client = accept_real_candidate(&mut mgr, peer_addr).await;
+    let mut buf = BytesMut::with_capacity(4096);
+    let open_received = candidate_open_exchange(&mut mgr, &mut client, &mut buf).await;
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    loop {
+        if let Message::Notification(notification) = read_bgp_message(&mut client, &mut buf).await {
+            assert_eq!(
+                notification.code,
+                rustbgpd_wire::notification::NotificationCode::HoldTimerExpired
+            );
+            break;
+        }
+    }
+    // Everything the candidate queued arrives after the manager's drain.
+    let mut late = Vec::new();
+    while let Ok(notification) = mgr.session_notify_rx.try_recv() {
+        late.push(notification);
+    }
+    assert!(
+        late.iter()
+            .any(|n| matches!(n, SessionNotification::BackToIdle { session_id: 2, .. })),
+        "the candidate fell to Idle before promotion: {late:?}"
+    );
+
+    mgr.handle_session_notification(open_received).await;
+    for notification in late {
+        mgr.handle_session_notification(notification).await;
+    }
+
+    assert_eq!(
+        primary.shutdown.load(Ordering::SeqCst),
+        0,
+        "the primary must not be retired for a candidate that is already Idle"
+    );
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(
+        managed.pending_inbound.is_none(),
+        "the Idle candidate is dropped"
+    );
+    assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
+}
+
+/// Remote wins against a primary in `OpenConfirm`.
+#[tokio::test]
+async fn candidate_idle_after_drain_does_not_replace_open_confirm_primary() {
+    candidate_idle_after_drain_keeps_primary(Ipv4Addr::new(10, 0, 0, 1), SessionState::OpenConfirm)
+        .await;
+}
+
+/// The no-primary-connection rule against a primary in `Active`.
+#[tokio::test]
+async fn candidate_idle_after_drain_does_not_replace_active_primary() {
+    candidate_idle_after_drain_keeps_primary(Ipv4Addr::new(10, 255, 0, 1), SessionState::Active)
+        .await;
+}
+
+/// A candidate whose task exits before answering the claim (its reply is
+/// dropped) is not promoted: the primary is neither dumped nor shut down.
+#[tokio::test]
+async fn candidate_dropping_claim_reply_keeps_primary() {
+    use rustbgpd_transport::PeerCommand;
+
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let _ = mgr.allocate_session_id();
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        peer_addr,
+        65002,
+        fake_peer_handle(peer_addr, SessionState::OpenConfirm, None, primary.clone()),
+        false,
+    );
+    let (candidate_tx, mut candidate_rx) = mpsc::channel::<PeerCommand>(8);
+    let claims = Arc::new(AtomicU32::new(0));
+    let candidate_claims = claims.clone();
+    let candidate_task = tokio::spawn(async move {
+        while let Some(command) = candidate_rx.recv().await {
+            if let PeerCommand::ClaimCollisionPromotion { reply } = command {
+                candidate_claims.fetch_add(1, Ordering::SeqCst);
+                drop(reply);
+                break;
+            }
+        }
+        Ok(())
+    });
+    attach_test_pending_inbound(
+        &mut mgr,
+        peer_addr,
+        PeerHandle::from_parts(candidate_tx, candidate_task),
+        2,
+    );
+    queue_candidate_open(&mgr, 2, peer_addr);
+
+    mgr.drain_ready_session_notifications(None).await;
+
+    assert_eq!(
+        claims.load(Ordering::SeqCst),
+        1,
+        "promotion asked the candidate"
+    );
+    assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+    assert_eq!(primary.shutdown.load(Ordering::SeqCst), 0);
+    let managed = &mgr.peers[&key(peer_addr)];
+    assert!(managed.pending_inbound.is_none());
     assert_eq!(managed.session_id(), 1, "the primary keeps ownership");
 }
 

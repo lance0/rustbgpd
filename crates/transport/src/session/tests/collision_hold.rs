@@ -193,3 +193,51 @@ async fn collision_candidate_without_verdict_falls_to_idle() {
     cmd_tx.send(PeerCommand::Shutdown).await.unwrap();
     session.await.unwrap().unwrap();
 }
+
+async fn claim(candidate: &mut PeerSession) -> bool {
+    let (reply, claimed) = oneshot::channel();
+    assert_eq!(
+        candidate
+            .handle_command(PeerCommand::ClaimCollisionPromotion { reply })
+            .await,
+        ControlFlow::Continue(())
+    );
+    claimed.await.unwrap()
+}
+
+/// The claim reserves the candidate while the manager retires the primary:
+/// the KEEPALIVE stays held until activation, and the verdict timer no longer
+/// closes it.
+#[tokio::test]
+async fn claimed_candidate_holds_until_activation_and_is_not_closed_by_verdict_timer() {
+    let (mut candidate, mut rib_rx, mut remote) = candidate_waiting_for_verdict().await;
+    assert!(claim(&mut candidate).await);
+    assert!(candidate.collision_verdict_pending(), "still holding");
+    assert_eq!(candidate.fsm.state(), SessionState::OpenConfirm);
+    assert!(rib_rx.try_recv().is_err());
+
+    // Activation never arrives: the timer releases the winner, not closes it.
+    assert!(candidate.collision_verdict_timer.is_some());
+    candidate.expire_collision_verdict_wait().await;
+    assert!(matches!(
+        read_single_bgp_message(&mut remote).await,
+        Message::Keepalive
+    ));
+    assert_eq!(candidate.fsm.state(), SessionState::Established);
+    assert!(!candidate.collision_verdict_pending());
+    assert!(matches!(
+        recv_peer_up_after_export_context(&mut rib_rx).await,
+        RibUpdate::PeerUp { session_id: 2, .. }
+    ));
+}
+
+/// A candidate that already fell to Idle refuses the claim, so the manager
+/// keeps its primary.
+#[tokio::test]
+async fn idle_candidate_refuses_promotion_claim() {
+    let (mut candidate, mut rib_rx, _remote) = candidate_waiting_for_verdict().await;
+    candidate.expire_collision_verdict_wait().await;
+    assert_eq!(candidate.fsm.state(), SessionState::Idle);
+    assert!(!claim(&mut candidate).await);
+    assert!(rib_rx.try_recv().is_err());
+}
