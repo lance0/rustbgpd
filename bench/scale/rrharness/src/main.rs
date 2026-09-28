@@ -75,10 +75,15 @@ fn flood_prefix(offset: u64) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
 }
 
+/// Distinct /24 for a churn prefix index. Indexes below 61,440 keep their
+/// original `172.16.0.0/12`-rooted prefixes; larger ones continue into the
+/// following first octets (room for about 5.1M prefixes).
 fn churn_prefix(i: u64) -> Ipv4Prefix {
-    let b = 16 + u8::try_from(i >> 8).expect("churn prefix space exhausted");
+    let block = i >> 8;
+    let a = 172 + u8::try_from(block / 240).expect("churn prefix space exhausted");
+    let b = 16 + u8::try_from(block % 240).unwrap();
     let c = u8::try_from(i & 0xff).unwrap();
-    Ipv4Prefix::new(Ipv4Addr::new(172, b, c, 0), 24)
+    Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24)
 }
 
 fn client_addr(i: u32) -> IpAddr {
@@ -795,6 +800,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn churn_prefixes_stay_distinct_past_the_old_ceiling() {
+        let v4 = |a, b, c| Ipv4Prefix::new(Ipv4Addr::new(a, b, c, 0), 24);
+        assert_eq!(churn_prefix(0), v4(172, 16, 0));
+        assert_eq!(churn_prefix(61_439), v4(172, 255, 255));
+        assert_eq!(churn_prefix(61_440), v4(173, 16, 0));
+        let prefixes: std::collections::HashSet<_> = (0..1_000_000).map(churn_prefix).collect();
+        assert_eq!(prefixes.len(), 1_000_000);
+    }
 
     fn stat(comm: &str, utime: &str, stime: &str) -> String {
         format!("42 ({comm}) S 1 2 3 4 5 6 7 8 9 10 {utime} {stime} 16 17 18 19 20 21")
