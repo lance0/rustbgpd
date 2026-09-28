@@ -3,20 +3,25 @@
 //!
 //! Random operation sequences — announces (incl. same-peer attr changes,
 //! Add-Path ties, refresh-style replays), withdrawals, session teardown,
-//! GR stale marking, LLGR promotion, and `EoR` sweeps/clears — use production
-//! announce, withdraw, teardown, and `EoR` paths. Stale marking and LLGR
-//! promotion still mutate the Adj-RIB-In directly. After every step:
+//! GR stale marking, LLGR promotion, `EoR` sweeps/clears, peer registration,
+//! route refresh, ORF pushes, and outbound channel pressure — use production
+//! announce, withdraw, teardown, refresh, ORF, and `EoR` paths. Stale marking
+//! and LLGR promotion still mutate the Adj-RIB-In directly. After every step:
 //!
 //! 1. the Loc-RIB best for every prefix must be IDENTICAL to a
 //!    from-scratch full-scan recompute over every peer's Adj-RIB-In (the
 //!    pre-index reference semantics), and
 //! 2. the reverse index must satisfy its never-under-count contract:
 //!    every (prefix, peer) pair present in an Adj-RIB-In is indexed
-//!    (over-counting is allowed — stale entries are pruned lazily).
+//!    (over-counting is allowed — stale entries are pruned lazily), and
+//! 3. the three reachable peer-keyed refresh/ORF maps have no empty values.
+//!    GR/LLGR and live-session maps intentionally permit empty values;
+//!    VPN/RTC extra-withdraw residue is outside this unicast generator.
 
 use std::time::Instant;
 
 use proptest::prelude::*;
+use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfMatch, WhenToRefresh};
 
 use super::*;
 use crate::attr_set::AttrSet;
@@ -359,19 +364,48 @@ enum Op {
     /// `recompute_best_after_announce`. Re-announcing an existing
     /// (prefix, `path_id`) with a new variant is the same-peer attr-change /
     /// refresh-replay case.
-    Announce { peer: u8, routes: Vec<(u8, u8, u8)> },
+    Announce {
+        peer: u8,
+        routes: Vec<(u8, u8, u8)>,
+    },
     /// Real withdraw path → `recompute_best_after_withdraw`.
-    Withdraw { peer: u8, keys: Vec<(u8, u8)> },
-    /// Production `PeerDown` teardown, without a registered session.
-    SessionDown { peer: u8 },
+    Withdraw {
+        peer: u8,
+        keys: Vec<(u8, u8)>,
+    },
+    /// Production `PeerDown` teardown, registered or not.
+    SessionDown {
+        peer: u8,
+    },
     /// RFC 4724 GR entry seam: mark the family stale (consecutive-restart
     /// re-mark deletes already-stale routes), then recompute.
-    MarkStale { peer: u8 },
+    MarkStale {
+        peer: u8,
+    },
     /// RFC 9494 promotion seam: GR-stale → LLGR-stale with in-place
     /// `LLGR_STALE` community injection, then recompute.
-    PromoteLlgr { peer: u8 },
+    PromoteLlgr {
+        peer: u8,
+    },
     /// Production End-of-RIB sweep for the GR family.
-    EorClear { peer: u8 },
+    EorClear {
+        peer: u8,
+    },
+    PeerUp {
+        peer: u8,
+        orf: bool,
+    },
+    PlainRefresh {
+        peer: u8,
+    },
+    OrfPush {
+        peer: u8,
+        kind: u8,
+    },
+    FullChannel {
+        peer: u8,
+        full: bool,
+    },
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -385,10 +419,46 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => (0..PEERS).prop_map(|peer| Op::MarkStale { peer }),
         1 => (0..PEERS).prop_map(|peer| Op::PromoteLlgr { peer }),
         1 => (0..PEERS).prop_map(|peer| Op::EorClear { peer }),
+        2 => (0..PEERS, any::<bool>()).prop_map(|(peer, orf)| Op::PeerUp { peer, orf }),
+        2 => (0..PEERS).prop_map(|peer| Op::PlainRefresh { peer }),
+        2 => (0..PEERS, 0u8..3).prop_map(|(peer, kind)| Op::OrfPush { peer, kind }),
+        1 => (0..PEERS, any::<bool>()).prop_map(|(peer, full)| Op::FullChannel { peer, full }),
     ]
 }
 
-fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
+struct Channels {
+    receivers: [Option<mpsc::Receiver<crate::update::OutboundRouteUpdate>>; PEERS as usize],
+    permits: [Vec<mpsc::OwnedPermit<crate::update::OutboundRouteUpdate>>; PEERS as usize],
+    full: [bool; PEERS as usize],
+    orf: [bool; PEERS as usize],
+}
+
+impl Channels {
+    fn new() -> Self {
+        Self {
+            receivers: std::array::from_fn(|_| None),
+            permits: std::array::from_fn(|_| Vec::new()),
+            full: [false; PEERS as usize],
+            orf: [false; PEERS as usize],
+        }
+    }
+
+    fn drain_open(&mut self) {
+        for (index, receiver) in self.receivers.iter_mut().enumerate() {
+            if !self.full[index]
+                && let Some(receiver) = receiver
+            {
+                while receiver.try_recv().is_ok() {}
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one dispatcher keeps generated lifecycle operations and their postconditions together"
+)]
+fn apply(manager: &mut RibManager, channels: &mut Channels, op: &Op, received_at: Instant) {
     match op {
         Op::Announce { peer, routes } => {
             let announced = routes
@@ -427,15 +497,36 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
             drain_route_chunks(manager);
         }
         Op::SessionDown { peer } => {
+            let index = usize::from(*peer);
             let peer = peer_addr(*peer);
             manager.handle_update(RibUpdate::PeerDown {
                 peer,
                 session_id: 0,
             });
+            channels.permits[index].clear();
+            channels.receivers[index] = None;
+            channels.full[index] = false;
+            channels.orf[index] = false;
             assert!(
                 !manager.ribs.contains_key(&peer),
                 "PeerDown retained {peer}'s routes"
             );
+            for (name, present) in [
+                (
+                    "pending_refresh",
+                    manager.pending_refresh.contains_key(&peer),
+                ),
+                (
+                    "peer_orf_pending",
+                    manager.peer_orf_pending.contains_key(&peer),
+                ),
+                (
+                    "peer_orf_filters",
+                    manager.peer_orf_filters.contains_key(&peer),
+                ),
+            ] {
+                assert!(!present, "PeerDown retained {name} for {peer}");
+            }
         }
         Op::MarkStale { peer } => {
             if let Some(rib) = manager.ribs.get_mut(&peer_addr(*peer)) {
@@ -478,7 +569,96 @@ fn apply(manager: &mut RibManager, op: &Op, received_at: Instant) {
                 }
             }
         }
+        Op::PeerUp { peer, orf } => {
+            let address = peer_addr(*peer);
+            if manager.outbound_peers.contains_key(&address) {
+                return;
+            }
+            let (outbound_tx, outbound_rx) = mpsc::channel(8);
+            manager.handle_update(RibUpdate::PeerUp {
+                per_client_best: false,
+                interpret_rfc1997: true,
+                session_id: 0,
+                peer: address,
+                peer_asn: 65000,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                outbound_tx,
+                export_policy: None,
+                sendable_families: vec![FAMILY],
+                is_ebgp: true,
+                route_reflector_client: false,
+                orr_vantage: None,
+                add_path_send_families: vec![],
+                add_path_send_max: 0,
+                negotiated_orf_recv: if *orf { vec![FAMILY] } else { vec![] },
+                negotiated_llgr_families: vec![],
+            });
+            channels.receivers[usize::from(*peer)] = Some(outbound_rx);
+            channels.orf[usize::from(*peer)] = *orf;
+        }
+        Op::PlainRefresh { peer } => {
+            let address = peer_addr(*peer);
+            if manager.outbound_peers.contains_key(&address) {
+                manager.handle_update(RibUpdate::RouteRefreshRequest {
+                    queued: Arc::default(),
+                    peer: address,
+                    session_id: 0,
+                    afi: FAMILY.0,
+                    safi: FAMILY.1,
+                });
+            }
+        }
+        Op::OrfPush { peer, kind } => {
+            let address = peer_addr(*peer);
+            if channels.orf[usize::from(*peer)] {
+                let entries = match kind {
+                    0 => vec![],
+                    1 => vec![AddressPrefixOrf {
+                        action: OrfAction::Add,
+                        match_: OrfMatch::Permit,
+                        sequence: 10,
+                        min_len: 8,
+                        max_len: 32,
+                        prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+                    }],
+                    _ => vec![AddressPrefixOrf {
+                        action: OrfAction::RemoveAll,
+                        match_: OrfMatch::Permit,
+                        sequence: 0,
+                        min_len: 0,
+                        max_len: 0,
+                        prefix: None,
+                    }],
+                };
+                let (reply, mut response) = oneshot::channel();
+                manager.handle_update(RibUpdate::PeerOrfUpdate {
+                    peer: address,
+                    session_id: 0,
+                    afi: FAMILY.0,
+                    safi: FAMILY.1,
+                    when: WhenToRefresh::Defer,
+                    entries,
+                    reply,
+                });
+                assert!(response.try_recv().unwrap().is_ok());
+            }
+        }
+        Op::FullChannel { peer, full } => {
+            let index = usize::from(*peer);
+            let Some(sender) = manager.outbound_peers.get(&peer_addr(*peer)) else {
+                return;
+            };
+            channels.full[index] = *full;
+            if *full {
+                while let Ok(permit) = sender.clone().try_reserve_owned() {
+                    channels.permits[index].push(permit);
+                }
+            } else {
+                channels.permits[index].clear();
+            }
+        }
     }
+    channels.drain_open();
 }
 
 /// Payload-identity comparison mirroring everything `LocRib::recompute`'s
@@ -501,6 +681,31 @@ fn same_route(a: &Route, b: &Route) -> bool {
 }
 
 fn check_invariants(manager: &RibManager, step: usize) {
+    // Key presence is meaningful for these collections. GR/LLGR and live
+    // sessions deliberately use empty values during their own transitions.
+    for peer in (0..PEERS).map(peer_addr) {
+        assert!(
+            manager
+                .pending_refresh
+                .get(&peer)
+                .is_none_or(|families| !families.is_empty()),
+            "step {step}: empty pending_refresh for {peer}"
+        );
+        assert!(
+            manager
+                .peer_orf_pending
+                .get(&peer)
+                .is_none_or(|families| !families.is_empty()),
+            "step {step}: empty peer_orf_pending for {peer}"
+        );
+        assert!(
+            manager
+                .peer_orf_filters
+                .get(&peer)
+                .is_none_or(|families| !families.is_empty()),
+            "step {step}: empty peer_orf_filters for {peer}"
+        );
+    }
     // Index contract: never under-count. Every (prefix, peer) actually
     // present in an Adj-RIB-In must be indexed.
     for (peer, rib) in &manager.ribs {
@@ -548,6 +753,7 @@ fn lifecycle_ops_remove_stale_routes_and_restore_fallback() {
     let (_tx, rx) = mpsc::channel(8);
     let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let received_at = Instant::now();
+    let mut channels = Channels::new();
     let ops = [
         Op::Announce {
             peer: 1,
@@ -565,7 +771,7 @@ fn lifecycle_ops_remove_stale_routes_and_restore_fallback() {
         Op::EorClear { peer: 0 },
     ];
     for (step, op) in ops.iter().enumerate() {
-        apply(&mut manager, op, received_at);
+        apply(&mut manager, &mut channels, op, received_at);
         check_invariants(&manager, step);
     }
     assert!(manager.ribs[&peer_addr(0)].get(&prefix_of(0), 0).is_none());
@@ -575,7 +781,12 @@ fn lifecycle_ops_remove_stale_routes_and_restore_fallback() {
         peer_addr(0)
     );
 
-    apply(&mut manager, &Op::SessionDown { peer: 0 }, received_at);
+    apply(
+        &mut manager,
+        &mut channels,
+        &Op::SessionDown { peer: 0 },
+        received_at,
+    );
     check_invariants(&manager, ops.len());
     assert_eq!(
         manager.loc_rib.get(&prefix_of(1)).unwrap().peer,
@@ -584,17 +795,84 @@ fn lifecycle_ops_remove_stale_routes_and_restore_fallback() {
 
     apply(
         &mut manager,
+        &mut channels,
         &Op::Announce {
             peer: 0,
             routes: vec![(2, 0, 0)],
         },
         received_at,
     );
-    apply(&mut manager, &Op::MarkStale { peer: 0 }, received_at);
-    apply(&mut manager, &Op::PromoteLlgr { peer: 0 }, received_at);
-    apply(&mut manager, &Op::EorClear { peer: 0 }, received_at);
+    apply(
+        &mut manager,
+        &mut channels,
+        &Op::MarkStale { peer: 0 },
+        received_at,
+    );
+    apply(
+        &mut manager,
+        &mut channels,
+        &Op::PromoteLlgr { peer: 0 },
+        received_at,
+    );
+    apply(
+        &mut manager,
+        &mut channels,
+        &Op::EorClear { peer: 0 },
+        received_at,
+    );
     assert!(manager.ribs[&peer_addr(0)].get(&prefix_of(2), 0).is_none());
     assert!(manager.loc_rib.get(&prefix_of(2)).is_none());
+}
+
+#[test]
+fn refresh_orf_and_full_channel_leave_no_peer_map_residue() {
+    let (_tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let mut channels = Channels::new();
+    let received_at = Instant::now();
+    for (step, op) in [
+        Op::PeerUp {
+            peer: 0,
+            orf: false,
+        },
+        Op::PlainRefresh { peer: 0 },
+        Op::SessionDown { peer: 0 },
+        Op::PeerUp { peer: 1, orf: true },
+        Op::OrfPush { peer: 1, kind: 2 },
+        Op::FullChannel {
+            peer: 1,
+            full: true,
+        },
+        Op::Announce {
+            peer: 2,
+            routes: vec![(0, 0, 0)],
+        },
+        Op::FullChannel {
+            peer: 1,
+            full: false,
+        },
+        Op::SessionDown { peer: 1 },
+    ]
+    .iter()
+    .enumerate()
+    {
+        apply(&mut manager, &mut channels, op, received_at);
+        if step == 1 {
+            assert!(!manager.pending_refresh.contains_key(&peer_addr(0)));
+        }
+        if step == 4 {
+            assert!(!manager.peer_orf_filters.contains_key(&peer_addr(1)));
+            assert!(!manager.peer_orf_pending.contains_key(&peer_addr(1)));
+        }
+        if step == 6 {
+            assert!(manager.dirty_peers.contains(&peer_addr(1)));
+        }
+        if step == 7 {
+            manager.resync_dirty_peers_bounded();
+            assert!(!manager.dirty_peers.contains(&peer_addr(1)));
+        }
+        check_invariants(&manager, step);
+    }
 }
 
 proptest! {
@@ -610,8 +888,9 @@ proptest! {
         let (_tx, rx) = mpsc::channel(8);
         let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
         let received_at = Instant::now();
+        let mut channels = Channels::new();
         for (step, op) in ops.iter().enumerate() {
-            apply(&mut manager, op, received_at);
+            apply(&mut manager, &mut channels, op, received_at);
             check_invariants(&manager, step);
         }
     }
