@@ -96,9 +96,13 @@ class MetricConsumerContractTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn(f"{len(self.inventory)} emitted families", stdout.getvalue())
+        consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
+        output = stdout.getvalue()
+        self.assertIn(f"{len(self.inventory)} emitted families", output)
+        self.assertIn(f"{len(self.doc_refs)} normative-doc families", output)
         self.assertIn(
-            f"{len(CHECK.ALLOWLIST)} justified raw diagnostics", stdout.getvalue()
+            f"{len(consumers)} consumed, {len(CHECK.ALLOWLIST)} justified raw diagnostics",
+            output,
         )
 
     def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
