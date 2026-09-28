@@ -1622,6 +1622,61 @@ fn local_flowspec_route(communities: Vec<u32>) -> FlowSpecRoute {
     route
 }
 
+#[tokio::test]
+async fn local_flowspec_gauge_tracks_injected_intent() {
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let first = local_flowspec_route(vec![]);
+    let mut second = first.clone();
+    second.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+        rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+    )];
+
+    // A received route wins for the first rule. Local intent must still count.
+    let source = Ipv4Addr::new(198, 51, 100, 51);
+    let mut received = make_flowspec_route(source);
+    received.attributes.push(PathAttribute::LocalPref(200));
+    let peer = IpAddr::V4(source);
+    manager
+        .ribs
+        .entry(peer)
+        .or_insert_with(|| AdjRibIn::new(peer))
+        .insert_flowspec(received);
+
+    for (route, expected) in [(first.clone(), 1), (second.clone(), 2), (first.clone(), 2)] {
+        let (reply, response) = oneshot::channel();
+        manager.handle_inject_flowspec(route, reply);
+        response.await.unwrap().unwrap();
+        assert_flowspec_gauge(&manager, LOCAL_PEER, expected);
+    }
+    assert_eq!(
+        manager
+            .loc_rib
+            .get_flowspec(&first.selection_key())
+            .unwrap()
+            .peer,
+        peer
+    );
+
+    for (key, expected) in [(first.selection_key(), 1), (second.selection_key(), 0)] {
+        let (reply, response) = oneshot::channel();
+        manager.handle_withdraw_flowspec(key, false, reply);
+        assert!(response.await.unwrap().unwrap());
+        assert_flowspec_gauge(&manager, LOCAL_PEER, expected);
+    }
+    for allow_missing in [true, false] {
+        let (reply, response) = oneshot::channel();
+        manager.handle_withdraw_flowspec(first.selection_key(), allow_missing, reply);
+        let outcome = response.await.unwrap();
+        if allow_missing {
+            assert!(!outcome.unwrap());
+        } else {
+            assert!(outcome.is_err());
+        }
+        assert_flowspec_gauge(&manager, LOCAL_PEER, 0);
+    }
+}
+
 /// Local injection outcomes come from the local Adj-RIB-In and match what
 /// reaches the wire: an identical re-add is `Unchanged` and sends nothing, a
 /// payload change is `Replaced` and re-announces, and while a received rule

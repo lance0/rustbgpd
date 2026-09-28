@@ -152,6 +152,11 @@ impl RibManager {
             Some(_) => FlowSpecInjectOutcome::Replaced,
         };
         rib.insert_flowspec(route);
+        self.metrics.set_rib_prefixes(
+            &LOCAL_PEER.to_string(),
+            "flowspec",
+            gauge_val(rib.flowspec_len()),
+        );
         debug!(afi = ?key.afi, rule = %key.rule, ?outcome, "injected local FlowSpec route");
         let mut fs_affected = HashSet::new();
         fs_affected.insert(key);
@@ -174,7 +179,13 @@ impl RibManager {
             rule: key.rule.clone(),
             path_id: 0,
         };
-        if rib.withdraw_flowspec(&route_key) {
+        let removed = rib.withdraw_flowspec(&route_key);
+        self.metrics.set_rib_prefixes(
+            &LOCAL_PEER.to_string(),
+            "flowspec",
+            gauge_val(rib.flowspec_len()),
+        );
+        if removed {
             debug!(afi = ?key.afi, rule = %key.rule, "withdrawn injected FlowSpec route");
             let mut fs_affected = HashSet::new();
             fs_affected.insert(key);
