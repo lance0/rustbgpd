@@ -112,8 +112,9 @@ cross-daemon ranking. Every receipt is indexed in
 
 ## Running a measurement
 
-Every benchmark driver behind these receipts has a `just bench-*` recipe;
-`just bench-list` prints them with the script each one runs. A new receipt
+The benchmark drivers behind these receipts have `just bench-*` recipes;
+`just bench-list` prints them with the script each one runs, and lists the
+few drivers without a recipe, which run directly. A new receipt
 cites the recipe invocation, for example
 `just bench-compare rustbgpd-rib rib_ops <base> <head>` or
 `N_PEERS=700 just bench-ixp-matrix rustbgpd`, instead of reconstructing the

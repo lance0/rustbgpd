@@ -76,6 +76,8 @@ check-fast:
     python3 -m unittest -v scripts/test_check_sighup_architecture.py
     python3 scripts/check_sighup_architecture.py
     python3 scripts/reflow-release-notes.py --selftest
+    python3 -m unittest -v scripts/test_check_bench_inventory.py
+    python3 scripts/check_bench_inventory.py
 
 # Check the slower repository contracts: public tracker ids, documentation paths, and metric consumers (minutes, no compilation).
 check-contracts:
@@ -320,6 +322,7 @@ bench-list:
     Drivers without a recipe (run directly; see their headers):
       bench/scale/irrreload/run-bmp-buffer-receipt.sh
       bench/scale/irrreload/run-memory-attribution.sh
+      bench/scale/reloadstall/failover_cell.sh
       bench/netns-calibration/run-vm.sh
       bench/evpn-load/fanout.py
       bench/run-fib-kernel-dump.py

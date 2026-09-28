@@ -11,9 +11,11 @@ by the interop/soak labs.
 
 ## Recipes
 
-Each measuring driver in this directory and under `scale/` has a `just`
-recipe with a `bench-` prefix, and `just bench-list` prints every Cargo bench
-target and driver with the recipe that runs it. The recipes pass arguments
+The measuring drivers in the table below have a `just` recipe with a
+`bench-` prefix. `just bench-list` prints every Cargo bench target, each
+driver with its recipe, and the drivers that have no recipe and run directly;
+`scripts/check_bench_inventory.py` fails when a driver is in neither list.
+The recipes pass arguments
 and environment knobs through unchanged. The drivers keep their own host
 lock, quiet gates, provenance, and thresholds, and a lock or quiet-gate exit
 75 reaches the caller unchanged. No `gate*` recipe calls a `bench-*` recipe.
